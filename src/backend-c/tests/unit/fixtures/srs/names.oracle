@@ -1,0 +1,14 @@
+# sing-box 1.14.3 rule-set match -f binary names.srs <name>
+exact.test 1
+a.exact.test 0
+a.example 1
+example.com 1
+a.example.com 1
+sub.example.org 0
+a.sub.example.org 1
+tracker 1
+mytrackers.io 1
+ads12.example.net 1
+ads.example.net 0
+Mixed.Case.Org 0
+mixed.case.org 0

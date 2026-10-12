@@ -36,7 +36,7 @@ tests/
 
 ## Commands
 
-Host libraries: libyaml, PCRE2, libmnl, cJSON, libcurl.
+Host libraries: libyaml, PCRE2, libmnl, cJSON, libcurl, zlib.
 
 ```sh
 make                          # build/host/fircd, firc-configtool, firc-dnstool

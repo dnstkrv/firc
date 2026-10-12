@@ -47,7 +47,7 @@ static void encode_name(char *dst, size_t cap, const char *name)
     static const char hx[] = "0123456789ABCDEF";
     size_t o = 0;
     for (const unsigned char *p = (const unsigned char *)name; *p != 0; p++) {
-        bool esc = *p == '%' || *p == ':' || *p == '#';
+        bool esc = *p == '%' || *p == ':' || *p == '#' || *p < 0x20 || *p == 0x7f;
         size_t need = esc ? 3 : 1;
         if (o + need >= cap) {
             break;

@@ -1,6 +1,8 @@
 #include "greatest.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libmnl/libmnl.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -9,7 +11,9 @@
 
 #include "firc/log.h"
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #include "firc/loop.h"
 #include "firc/netlink_watcher.h"
@@ -63,6 +67,30 @@ TEST only_default_routes_of_a_forwarding_type_name_an_interface(void) {
                    one_oif(route_msg(buf, RTM_NEWADDR, 0, RTN_UNICAST, RTPROT_BOOT, 7)), "%d");
     ASSERT_EQ_FMTm("a default with no device names none", 0,
                    one_oif(route_msg(buf, RTM_NEWROUTE, 0, RTN_UNICAST, RTPROT_BOOT, 0)), "%d");
+    PASS();
+}
+
+static struct nlmsghdr *addr_msg(uint8_t *buf, uint16_t type, int family, uint32_t ifindex)
+{
+    memset(buf, 0, 256);
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf);
+    nlh->nlmsg_type = type;
+    struct ifaddrmsg *ifa = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifa));
+    ifa->ifa_family = (uint8_t)family;
+    ifa->ifa_index = ifindex;
+    return nlh;
+}
+
+/* Catches: an address going away not re-reading its interface, so a lost IPv6 address keeps its v6 route. */
+TEST an_address_added_or_removed_names_its_interface(void) {
+    uint8_t buf[256];
+    ASSERT_EQ_FMT(5, firc_nl_watcher_addr_ifindex(addr_msg(buf, RTM_NEWADDR, AF_INET6, 5)), "%d");
+    ASSERT_EQ_FMT(5, firc_nl_watcher_addr_ifindex(addr_msg(buf, RTM_DELADDR, AF_INET6, 5)), "%d");
+    ASSERT_EQ_FMT(0, firc_nl_watcher_addr_ifindex(route_msg(buf, RTM_NEWROUTE, 0, RTN_UNICAST, RTPROT_BOOT, 5)), "%d");
+    memset(buf, 0xff, sizeof(buf));
+    struct nlmsghdr *bare = mnl_nlmsg_put_header(buf);
+    bare->nlmsg_type = RTM_DELADDR;
+    ASSERT_EQ_FMTm("a message too short for its header names nothing", 0, firc_nl_watcher_addr_ifindex(bare), "%d");
     PASS();
 }
 
@@ -236,11 +264,260 @@ TEST a_lost_message_tells_the_listener_and_reading_goes_on(void) {
     PASS();
 }
 
+typedef struct {
+    firc_loop_t *loop;
+    firc_nl_watcher_t *w;
+    int lost;
+    int fd_while_refused;
+    struct rlimit saved;
+    int64_t at[8];
+    int64_t failed_at;
+} reopen_t;
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void lost_then_stop(void *ud) {
+    reopen_t *t = ud;
+    if (t->lost < 8) { t->at[t->lost] = mono_ms(); }
+    t->lost++;
+    firc_loop_stop(t->loop);
+}
+
+static void lift_the_limit(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    reopen_t *t = ud;
+    t->fd_while_refused = firc_nl_watcher_fd(t->w);
+    setrlimit(RLIMIT_NOFILE, &t->saved);
+}
+
+static void give_up(firc_loop_t *loop, void *ud) {
+    (void)ud;
+    firc_loop_stop(loop);
+}
+
+static int open_fds(void) {
+    DIR *d = opendir("/proc/self/fd");
+    if (d == NULL) { return -1; }
+    int n = 0;
+    while (readdir(d) != NULL) { n++; }
+    closedir(d);
+    return n;
+}
+
+static int lowest_free_fd(void) {
+    int fd = 0;
+    while (fcntl(fd, F_GETFD) != -1) { fd++; }
+    return fd;
+}
+
+/* Catches: a dead watcher socket left registered and deaf, retried at a fixed pace, warned at every try, left open, or reopened without the state re-read. */
+TEST a_dead_socket_is_reopened_until_it_works_and_the_listener_told(void) {
+    reopen_t t;
+    memset(&t, 0, sizeof(t));
+    t.fd_while_refused = -2;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&t.loop));
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(t.loop, NULL, NULL, NULL, NULL, lost_then_stop, &t, &t.w));
+    int fds_before = open_fds();
+
+    char logpath[] = "/tmp/firc_watcher_log_XXXXXX";
+    int logfd = mkstemp(logpath);
+    ASSERT(logfd >= 0);
+    unlink(logpath);
+    firc_log_level_t level = firc_log_level();
+    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_fd(logfd);
+    int64_t failed_at = mono_ms();
+    ASSERT_FALSEm("a socket that is no use any more", firc_nl_watcher_handle_recv_error(t.w, EBADF));
+    ASSERT_EQ_FMTm("closed, not left registered", -1, firc_nl_watcher_fd(t.w), "%d");
+    ASSERT_EQ_FMTm("and nobody told yet", 0, t.lost, "%d");
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 1600, 0, lift_the_limit, &t, NULL));
+    int guard = 0;
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 5000, 0, give_up, &t, &guard));
+    ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &t.saved));
+    struct rlimit tight = t.saved;
+    tight.rlim_cur = (rlim_t)lowest_free_fd();
+    ASSERT_EQ(0, setrlimit(RLIMIT_NOFILE, &tight));
+
+    ASSERT_EQ(FIRC_OK, firc_loop_run(t.loop));
+    setrlimit(RLIMIT_NOFILE, &t.saved);
+    firc_log_set_fd(2);
+    firc_log_set_level(level);
+    firc_loop_del_timer(t.loop, guard);
+    char logbuf[4096] = {0};
+    ssize_t got = pread(logfd, logbuf, sizeof(logbuf) - 1, 0);
+    close(logfd);
+    ASSERT(got > 0);
+    int warned = 0;
+    for (const char *p = logbuf; (p = strstr(p, "still not reopened")) != NULL; p++) { warned++; }
+    ASSERT_EQ_FMTm("four refused tries, one warning", 1, warned, "%d");
+    ASSERT_EQ_FMTm("the first reopens were refused", -1, t.fd_while_refused, "%d");
+    ASSERT_EQ_FMTm("a later one worked and the listener re-read the state", 1, t.lost, "%d");
+    ASSERTm("tries at 0.1, 0.3, 0.7, 1.5 s, so the one that works is at 3.1 s", t.at[0] - failed_at >= 3000);
+    int fd = firc_nl_watcher_fd(t.w);
+    ASSERT(fd >= 0);
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    socklen_t len = sizeof(sa);
+    ASSERT_EQ(0, getsockname(fd, (struct sockaddr *)&sa, &len));
+    ASSERT_EQ_FMTm("the same groups joined", (unsigned)(RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR |
+                                                       RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE),
+                   sa.nl_groups, "%u");
+    ASSERT_EQ_FMTm("the old socket is not kept open beside the new one", fds_before, open_fds(), "%d");
+    ASSERT_EQ_FMTm("the new socket is read by the loop", FIRC_OK, firc_loop_del_fd(t.loop, fd), "%d");
+    firc_nl_watcher_destroy(t.w);
+    firc_loop_destroy(t.loop);
+    PASS();
+}
+
+/* Catches: a reopen still pending when the watcher is destroyed, run on freed memory. */
+TEST a_destroyed_watcher_reopens_nothing(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    int fds_before = open_fds();
+    int lost = 0;
+    firc_nl_watcher_t *w = NULL;
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(loop, NULL, NULL, NULL, NULL, count_lost, &lost, &w));
+    ASSERT_FALSE(firc_nl_watcher_handle_recv_error(w, EBADF));
+    firc_nl_watcher_destroy(w);
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(loop, 300, 0, give_up, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(loop));
+    ASSERT_EQ_FMT(0, lost, "%d");
+    ASSERT_EQ_FMTm("nothing of the watcher is left open", fds_before, open_fds(), "%d");
+    firc_loop_destroy(loop);
+    PASS();
+}
+
+/* Catches: the reopen wait not doubling, not capped, or growing past five seconds. */
+TEST the_reopen_wait_doubles_up_to_five_seconds(void) {
+    const uint32_t want[] = {100, 200, 400, 800, 1600, 3200, 5000, 5000};
+    for (unsigned i = 0; i < 8; i++) {
+        ASSERT_EQ_FMT(want[i], firc_nl_watcher_reopen_delay_ms(i + 1), "%u");
+    }
+    ASSERT_EQ_FMT(5000u, firc_nl_watcher_reopen_delay_ms(1000), "%u");
+    PASS();
+}
+
+static void fail_again_or_stop(void *ud) {
+    reopen_t *t = ud;
+    if (t->lost < 8) { t->at[t->lost] = mono_ms(); }
+    t->lost++;
+    if (t->lost < 2) {
+        (void)firc_nl_watcher_handle_recv_error(t->w, EBADF);
+    } else {
+        firc_loop_stop(t->loop);
+    }
+}
+
+/* Catches: the wait reset by a reopen alone, so a socket that dies at once is retried every 100 ms for ever. */
+TEST a_socket_failing_again_before_it_reads_waits_longer(void) {
+    reopen_t t;
+    memset(&t, 0, sizeof(t));
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&t.loop));
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(t.loop, NULL, NULL, NULL, NULL, fail_again_or_stop, &t, &t.w));
+    ASSERT_FALSE(firc_nl_watcher_handle_recv_error(t.w, EBADF));
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 5000, 0, give_up, &t, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(t.loop));
+    ASSERT_EQ_FMT(2, t.lost, "%d");
+    ASSERTm("the second reopen waited 200 ms", t.at[1] - t.at[0] >= 190);
+    firc_nl_watcher_destroy(t.w);
+    firc_loop_destroy(t.loop);
+    PASS();
+}
+
+static bool poke_watcher(int fd) {
+    struct sockaddr_nl me;
+    memset(&me, 0, sizeof(me));
+    socklen_t len = sizeof(me);
+    if (getsockname(fd, (struct sockaddr *)&me, &len) != 0) { return false; }
+    int s = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (s < 0) { return false; }
+    struct sockaddr_nl to;
+    memset(&to, 0, sizeof(to));
+    to.nl_family = AF_NETLINK;
+    to.nl_pid = me.nl_pid;
+    struct nlmsghdr h;
+    memset(&h, 0, sizeof(h));
+    h.nlmsg_len = sizeof(h);
+    h.nlmsg_type = NLMSG_NOOP;
+    bool sent = sendto(s, &h, sizeof(h), 0, (struct sockaddr *)&to, sizeof(to)) == (ssize_t)sizeof(h);
+    close(s);
+    return sent;
+}
+
+static bool can_poke(void) {
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (fd < 0) { return false; }
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    bool ok = bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0 && poke_watcher(fd);
+    close(fd);
+    return ok;
+}
+
+static void fail_after_the_read(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    reopen_t *t = ud;
+    t->failed_at = mono_ms();
+    (void)firc_nl_watcher_handle_recv_error(t->w, EBADF);
+}
+
+static void fail_thrice_then_read(void *ud) {
+    reopen_t *t = ud;
+    if (t->lost < 8) { t->at[t->lost] = mono_ms(); }
+    t->lost++;
+    if (t->lost < 3) {
+        (void)firc_nl_watcher_handle_recv_error(t->w, EBADF);
+    } else if (t->lost == 3) {
+        (void)poke_watcher(firc_nl_watcher_fd(t->w));
+        (void)firc_loop_add_timer(t->loop, 50, 0, fail_after_the_read, t, NULL);
+    } else {
+        firc_loop_stop(t->loop);
+    }
+}
+
+/* Catches: a socket that read again still waited on as if it never had. */
+TEST a_read_on_the_reopened_socket_resets_the_wait(void) {
+    if (!can_poke()) { SKIPm("a netlink unicast needs CAP_NET_ADMIN; the gates run this in a user namespace"); }
+    reopen_t t;
+    memset(&t, 0, sizeof(t));
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&t.loop));
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(t.loop, NULL, NULL, NULL, NULL, fail_thrice_then_read, &t, &t.w));
+    ASSERT_FALSE(firc_nl_watcher_handle_recv_error(t.w, EBADF));
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 5000, 0, give_up, &t, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(t.loop));
+    ASSERT_EQ_FMT(4, t.lost, "%d");
+    ASSERTm("100 ms after a read, not 800", t.at[3] - t.failed_at < 500);
+    firc_nl_watcher_destroy(t.w);
+    firc_loop_destroy(t.loop);
+    PASS();
+}
+
+/* Catches: a failure reported while a reopen already waits arming a second timer. */
+TEST a_second_failure_while_a_reopen_waits_adds_nothing(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_nl_watcher_t *w = NULL;
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(loop, NULL, NULL, NULL, NULL, NULL, NULL, &w));
+    ASSERT_FALSE(firc_nl_watcher_handle_recv_error(w, EBADF));
+    int fds = open_fds();
+    ASSERT_FALSE(firc_nl_watcher_handle_recv_error(w, EBADF));
+    ASSERT_EQ_FMT(fds, open_fds(), "%d");
+    firc_nl_watcher_destroy(w);
+    firc_loop_destroy(loop);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(a_default_route_names_its_interface);
+    RUN_TEST(an_address_added_or_removed_names_its_interface);
     RUN_TEST(a_route_of_firc_s_own_names_nothing);
     RUN_TEST(only_default_routes_of_a_forwarding_type_name_an_interface);
     RUN_TEST(a_multipath_default_names_every_one_of_its_legs);
@@ -251,5 +528,11 @@ int main(int argc, char **argv) {
     RUN_TEST(the_watcher_listens_for_route_changes_as_well_as_links_and_addresses);
     RUN_TEST(an_overrun_buffer_means_lost_state_not_a_dead_socket);
     RUN_TEST(a_lost_message_tells_the_listener_and_reading_goes_on);
+    RUN_TEST(a_dead_socket_is_reopened_until_it_works_and_the_listener_told);
+    RUN_TEST(a_destroyed_watcher_reopens_nothing);
+    RUN_TEST(the_reopen_wait_doubles_up_to_five_seconds);
+    RUN_TEST(a_socket_failing_again_before_it_reads_waits_longer);
+    RUN_TEST(a_read_on_the_reopened_socket_resets_the_wait);
+    RUN_TEST(a_second_failure_while_a_reopen_waits_adds_nothing);
     GREATEST_MAIN_END();
 }

@@ -14,7 +14,8 @@ struct firc_dns_pipeline {
     firc_fakeip_t *pool; /* borrowed, nullable */
     uint32_t clamp_secs;
     uint32_t unmatched_ttl_secs;
-    bool v6_unroutable;
+    firc_dns_v6_fn v6_fn;
+    void *v6_ud;
     firc_devsel_policy_fn policy_fn;
     firc_devsel_device_fn device_fn;
     void *policy_ud;
@@ -68,9 +69,10 @@ void firc_dns_pipeline_set_pool(firc_dns_pipeline_t *p, firc_fakeip_t *pool, uin
     p->clamp_secs = clamp_secs;
 }
 
-void firc_dns_pipeline_set_v6_routable(firc_dns_pipeline_t *p, bool routable)
+void firc_dns_pipeline_set_v6_fn(firc_dns_pipeline_t *p, firc_dns_v6_fn fn, void *ud)
 {
-    p->v6_unroutable = !routable;
+    p->v6_fn = fn;
+    p->v6_ud = ud;
 }
 
 void firc_dns_pipeline_set_unmatched_ttl(firc_dns_pipeline_t *p, uint32_t secs)
@@ -261,7 +263,7 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     /* Set whatever happens to the answer below: the pool has already changed. */
     if (pool_changed != NULL) { *pool_changed = firc_fakeip_gen(p->pool) != gen_before; }
 
-    if (p->v6_unroutable) {
+    if (p->v6_fn != NULL && !p->v6_fn(p->v6_ud, owner->id)) {
         had6 = false;
         (void)firc_dns_msg_strip_aaaa(msg);
     }

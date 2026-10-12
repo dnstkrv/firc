@@ -405,6 +405,36 @@ static int do_barrier(const char *fam_text) {
     return 0;
 }
 
+static int do_egress(const char *fam_text, const char *iface) {
+    firc_log_set_fd(STDERR_FILENO);
+    bool v6 = strcmp(fam_text, "v6") == 0;
+    if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
+    firc_xt_t *xt = firc_xt_real_new(v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4);
+    if (xt == NULL) {
+        perror("x_tables raw socket");
+        return 3;
+    }
+    firc_ipt_t *ipt = firc_ipt_new(xt, "FIRC_");
+    if (ipt == NULL) { return 3; }
+    firc_ip_t base;
+    uint8_t len = 0;
+    uint32_t mark = 0;
+    if (!firc_ip_parse_cidr(v6 ? "fd37:9a00::/48" : "198.18.0.0/15", &base, &len) || !firc_mark_for_field(1, &mark)) {
+        return 3;
+    }
+    firc_err_t err = firc_xt_probe(xt);
+    if (err == FIRC_OK) { err = firc_netfilter_register_base_chains(v6 ? NULL : ipt, v6 ? ipt : NULL); }
+    if (err == FIRC_OK) { err = firc_ipset_to_link_build_rules(ipt, "FIRC_g1", iface, mark, 1, NULL, NULL); }
+    if (err == FIRC_OK) { err = firc_pool_reject_build_rules(ipt, "FIRC_", &base, len); }
+    if (err == FIRC_OK) { err = firc_ipt_commit(ipt); }
+    firc_ipt_free(ipt);
+    if (err != FIRC_OK) {
+        fprintf(stderr, "egress: %s\n", firc_err_str(err));
+        return 5;
+    }
+    return 0;
+}
+
 static int do_xtdump(const char *table, const char *fam_text) {
     bool v6 = strcmp(fam_text, "v6") == 0;
     if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
@@ -445,6 +475,7 @@ int main(int argc, char **argv)
         return do_send(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : NULL);
     }
     if (argc == 3 && strcmp(argv[1], "barrier") == 0) { return do_barrier(argv[2]); }
+    if (argc == 4 && strcmp(argv[1], "egress") == 0) { return do_egress(argv[2], argv[3]); }
     if ((argc == 4 || argc == 5) && strcmp(argv[1], "serve") == 0) {
         return do_serve(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
     }
@@ -453,7 +484,7 @@ int main(int argc, char **argv)
     if (argc == 4 && strcmp(argv[1], "xtparse") == 0) { return do_xtparse(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtnat") == 0) { return do_xtnat(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtdump") == 0) { return do_xtdump(argv[2], argv[3]); }
-    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> [source port] | barrier v4|v6 | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
+    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> [source port] | barrier v4|v6 | egress v4|v6 <iface> | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
                     "devchain <field> [...] | xtparse <file> v4|v6 | xtnat write|output|sweep|probe v4|v6 | xtdump <table> v4|v6\n", argv[0]);
     return 64;
 }

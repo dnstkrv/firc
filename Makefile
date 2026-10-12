@@ -74,7 +74,7 @@ CROSS_COMPILE ?=
 SYSROOT ?=
 
 # Entware's cJSON package is named `cJSON`, not `libcjson`.
-DEPS_IPK := libatomic, libyaml, libpcre2, libmnl, libcurl, ca-bundle
+DEPS_IPK := libatomic, libyaml, libpcre2, libmnl, libcurl, zlib, ca-bundle
 
 BACKEND_DEPENDENCIES :=
 BACKEND_SOURCES := $(shell find ./src/backend-c/src ./src/backend-c/include ./src/tunvless/src ./src/tunvless/build -type f \( -name '*.c' -o -name '*.h' -o -name '*.sh' -o -name Makefile \) 2>/dev/null)

@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain": ["exact.test", "a.example", "Mixed.Case.Org"],
+      "domain_suffix": ["example.com", ".sub.example.org", "кц.рф"],
+      "domain_keyword": ["tracker", "bad*star"],
+      "domain_regex": ["^ads[0-9]+\\.example\\.net$"]
+    },
+    {"ip_cidr": ["10.0.0.0/8", "192.168.1.1", "10.20.30.40/16", "2001:db8::/32", "::ffff:1.2.3.4/128", "172.16.0.0/13", "172.24.0.0/13"]},
+    {"network": "udp", "ip_cidr": ["203.0.113.0/24"], "port_range": ["50000:50099", "19200:19400"]},
+    {"ip_cidr": ["198.51.100.7"], "port": [53, 853]},
+    {"network": "tcp", "domain": ["constrained.example"]},
+    {"process_name": ["curl"], "domain": ["process.example"]},
+    {"source_ip_cidr": ["192.168.0.0/16"], "domain": ["source.example"]},
+    {"query_type": ["A"], "domain": ["query.example"]},
+    {"domain": ["inverted.example"], "invert": true},
+    {"type": "logical", "mode": "and", "rules": [{"domain": ["logic.example"]}, {"port": 443}]},
+    {"network": "udp"},
+    {"domain": ["after.example"], "port": [0]}
+  ]
+}

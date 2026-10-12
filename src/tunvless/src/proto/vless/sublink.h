@@ -29,6 +29,7 @@ void sl_set_pct(char *dst, size_t n, const char *src, size_t len);
 void sl_utf8_trim_tail(char *s);
 /* Node name: percent-decoded and cut to the buffer without broken characters. */
 void sl_set_name(char *dst, size_t n, const char *src);
+size_t sl_unescape(const char *p, int yaml, char out[4], size_t *olen);
 /* Port from a string of digits: 1..65535, else 0. */
 uint16_t sl_port_of(const char *s);
 /* UUID (16 bytes) from 32 hex digits, hyphens optional. 0 — parsed, -1 — not a UUID. Unlike

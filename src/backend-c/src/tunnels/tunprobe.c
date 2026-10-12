@@ -34,7 +34,7 @@ struct firc_tunprobe {
 
 int64_t firc_tunprobe_deadline_ms(size_t n)
 {
-    return ((int64_t)n * 3 + 5) * 1000;
+    return ((int64_t)n * 6 + 5) * 1000;
 }
 
 static void close_in(firc_tunprobe_t *p)

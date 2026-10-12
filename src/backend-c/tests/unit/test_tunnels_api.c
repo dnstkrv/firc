@@ -1,5 +1,6 @@
 #define _GNU_SOURCE /* NOLINT(bugprone-reserved-identifier) */
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -178,7 +179,7 @@ static void write_counter(hx_t *h, const char *dev, const char *which, unsigned 
 static void add_group(hx_t *h, const char *name, const char *iface)
 {
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->enable = false;
     (void)firc_strset(&g->name, name);
     (void)firc_strset(&g->iface, iface);

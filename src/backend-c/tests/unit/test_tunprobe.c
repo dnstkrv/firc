@@ -321,12 +321,20 @@ TEST the_child_gets_only_fds_0_to_2(void)
     PASS();
 }
 
-/* catches: a deadline that does not grow with the number of links */
-TEST the_deadline_is_three_seconds_a_link_plus_five(void)
+TEST the_deadline_is_six_seconds_a_link_plus_five(void)
 {
-    ASSERT_EQ(8000, firc_tunprobe_deadline_ms(1));
-    ASSERT_EQ(17000, firc_tunprobe_deadline_ms(4));
-    ASSERT_EQ(773000, firc_tunprobe_deadline_ms(256));
+    ASSERT_EQ(11000, firc_tunprobe_deadline_ms(1));
+    ASSERT_EQ(29000, firc_tunprobe_deadline_ms(4));
+    ASSERT_EQ(1541000, firc_tunprobe_deadline_ms(256));
+    PASS();
+}
+
+TEST nodes_answering_only_on_the_short_hello_retry_finish_before_the_deadline(void)
+{
+    for (size_t n = 1; n <= 256; n++) {
+        int64_t both_tries = (int64_t)n * 2 * 3000;
+        ASSERT(firc_tunprobe_deadline_ms(n) > both_tries);
+    }
     PASS();
 }
 
@@ -340,7 +348,8 @@ SUITE(tunprobe)
     RUN_TEST(a_hung_child_is_killed_at_the_deadline);
     RUN_TEST(a_cancel_kills_the_child_and_never_answers);
     RUN_TEST(the_child_gets_only_fds_0_to_2);
-    RUN_TEST(the_deadline_is_three_seconds_a_link_plus_five);
+    RUN_TEST(the_deadline_is_six_seconds_a_link_plus_five);
+    RUN_TEST(nodes_answering_only_on_the_short_hello_retry_finish_before_the_deadline);
 }
 
 GREATEST_MAIN_DEFS();

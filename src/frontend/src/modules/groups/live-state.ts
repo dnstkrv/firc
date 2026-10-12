@@ -1,4 +1,9 @@
-export type LiveReason = "disabled" | "not-enabled" | "no-interface" | "not-written";
+export type LiveReason =
+  | "disabled"
+  | "not-enabled"
+  | "no-interface"
+  | "tunnel-down"
+  | "not-written";
 
 /* `liveReason` rides only with `live: false`. */
 export type GroupLive = { live: boolean; liveReason?: LiveReason };
@@ -14,12 +19,19 @@ export type LiveKind =
   | "live"
   | "not-enabled"
   | "no-interface"
+  | "tunnel-down"
   | "not-written"
   | "disabled"
   | "unsaved"
   | "no-answer";
 
-const REASONS: readonly string[] = ["disabled", "not-enabled", "no-interface", "not-written"];
+const REASONS: readonly string[] = [
+  "disabled",
+  "not-enabled",
+  "no-interface",
+  "tunnel-down",
+  "not-written",
+];
 
 export function liveKind(
   group: { enable: boolean },
@@ -39,6 +51,7 @@ export type LiveIcon =
   | "CircleCheck"
   | "CircleX"
   | "Unplug"
+  | "ServerOff"
   | "RefreshCw"
   | "PowerOff"
   | "CircleDashed"
@@ -48,6 +61,7 @@ export const LIVE_LOOK: Record<LiveKind, { icon: LiveIcon; color: string }> = {
   live: { icon: "CircleCheck", color: "var(--green)" },
   "not-enabled": { icon: "CircleX", color: "var(--red)" },
   "no-interface": { icon: "Unplug", color: "var(--orange)" },
+  "tunnel-down": { icon: "ServerOff", color: "var(--orange)" },
   "not-written": { icon: "RefreshCw", color: "var(--orange)" },
   disabled: { icon: "PowerOff", color: "var(--text-2)" },
   unsaved: { icon: "CircleDashed", color: "var(--text-2)" },
@@ -109,6 +123,21 @@ export function liveTooltip(
             t(
               "The group will start working by itself when {iface} comes up. Or choose another interface for it.",
             ),
+          ),
+        ],
+        footer: true,
+      };
+    case "tunnel-down":
+      return {
+        title: iface(t("Tunnel {iface} has no working node")),
+        lines: [
+          iface(
+            t(
+              "No node of tunnel {iface} answers right now, or the tunnel is off or restarting, so the group's sites do not open.",
+            ),
+          ),
+          t(
+            "The group starts working by itself once a node answers. The tunnel's nodes are on the Tunnels tab.",
           ),
         ],
         footer: true,

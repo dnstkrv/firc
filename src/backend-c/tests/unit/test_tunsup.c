@@ -37,6 +37,8 @@ typedef struct {
     firc_loop_t *loop;
     int backoffs[64];
     int n_backoffs;
+    int want_backoffs;
+    int want_starts;
     char starting[8][16];
     int n_starting;
     int ticks;
@@ -287,8 +289,44 @@ static void rec_open(rec_t *r)
 
 static void run_ms(rec_t *r, uint64_t ms)
 {
-    firc_loop_add_timer(r->loop, ms, 0, stop_cb, NULL, NULL);
+    int id = 0;
+    firc_loop_add_timer(r->loop, ms, 0, stop_cb, NULL, &id);
     firc_loop_run(r->loop);
+    firc_loop_del_timer(r->loop, id);
+}
+
+static void enough_backoffs_cb(firc_loop_t *loop, void *ud)
+{
+    if (((rec_t *)ud)->n_backoffs >= ((rec_t *)ud)->want_backoffs) {
+        firc_loop_stop(loop);
+    }
+}
+
+static void run_until_backoffs(rec_t *r, int n, uint64_t deadline_ms)
+{
+    r->want_backoffs = n;
+    int id = 0;
+    firc_loop_add_timer(r->loop, 10, 10, enough_backoffs_cb, r, &id);
+    run_ms(r, deadline_ms);
+    firc_loop_del_timer(r->loop, id);
+}
+
+static void enough_starts_cb(firc_loop_t *loop, void *ud)
+{
+    char buf[512];
+    read_file(g_starts, buf, sizeof buf);
+    if (count_starts(buf, "tunvless0") >= ((rec_t *)ud)->want_starts) {
+        firc_loop_stop(loop);
+    }
+}
+
+static void run_until_starts(rec_t *r, int n, uint64_t deadline_ms)
+{
+    r->want_starts = n;
+    int id = 0;
+    firc_loop_add_timer(r->loop, 10, 10, enough_starts_cb, r, &id);
+    run_ms(r, deadline_ms);
+    firc_loop_del_timer(r->loop, id);
 }
 
 static void rec_close(rec_t *r)
@@ -539,14 +577,11 @@ TEST backoff_doubles_up_to_sixty(void)
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 10);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
-    run_ms(&r, 2200);
-    ASSERT(r.n_backoffs >= 7);
-    const int want[] = {3, 6, 12, 24, 48, 60, 60};
-    for (int i = 0; i < 7; i++) {
+    run_until_backoffs(&r, 8, 10000);
+    ASSERT(r.n_backoffs >= 8);
+    const int want[] = {3, 6, 12, 24, 48, 60, 60, 60};
+    for (int i = 0; i < 8; i++) {
         ASSERT_EQ(want[i], r.backoffs[i]);
-    }
-    for (int i = 7; i < r.n_backoffs; i++) {
-        ASSERT_EQ(60, r.backoffs[i]);
     }
     rec_close(&r);
     ASSERT(no_children());
@@ -567,7 +602,7 @@ TEST backoff_resets_after_stable_run(void)
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 10);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
-    run_ms(&r, 1600);
+    run_until_backoffs(&r, 3, 10000);
     unsetenv("FAKE_RESET");
     ASSERT(r.n_backoffs >= 3);
     ASSERT_EQ(3, r.backoffs[0]);
@@ -1480,7 +1515,8 @@ TEST a_node_table_past_its_cap_restarts_instead(void)
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
     r.next = &g_set2;
     firc_loop_add_timer(r.loop, 300, 0, apply_cb, &r, NULL);
-    run_ms(&r, 900);
+    run_until_starts(&r, 2, 10000);
+    run_ms(&r, 300);
     char buf[512];
     read_file(g_starts, buf, sizeof buf);
     ASSERT_EQ(2, count_starts(buf, "tunvless0"));

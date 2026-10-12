@@ -700,11 +700,17 @@ TEST an_https_question_for_a_matched_name_is_emptied(void) {
     PASS();
 }
 
+static bool no_group_routes_v6(void *ud, firc_id_t group_id) {
+    (void)ud;
+    (void)group_id;
+    return false;
+}
+
 /* Catches: a fake v6 address issued by a daemon without ip6tables, instead of NODATA. */
 TEST no_fake_v6_where_v6_cannot_be_routed(void) {
     rw_fixture_t f;
     rw_up(&f, 64);
-    firc_dns_pipeline_set_v6_routable(f.p, false);
+    firc_dns_pipeline_set_v6_fn(f.p, no_group_routes_v6, NULL);
     firc_dns_msg_t *msg = chain_answer();
     msg->answers = realloc(msg->answers, 3 * sizeof(*msg->answers));
     msg->answers[2] = msg->answers[1];
@@ -803,7 +809,7 @@ TEST a_group_applies_only_to_the_devices_it_names(void) {
 TEST an_aaaa_question_where_v6_cannot_be_routed_is_nodata_not_dropped(void) {
     rw_fixture_t f;
     rw_up(&f, 64);
-    firc_dns_pipeline_set_v6_routable(f.p, false);
+    firc_dns_pipeline_set_v6_fn(f.p, no_group_routes_v6, NULL);
     firc_dns_msg_t *msg = chain_answer();
     msg->questions[0].qtype = FIRC_DNS_TYPE_AAAA;
     msg->answers[1].rtype = FIRC_DNS_TYPE_AAAA;
@@ -816,6 +822,57 @@ TEST an_aaaa_question_where_v6_cannot_be_routed_is_nodata_not_dropped(void) {
     ASSERT_EQ_FMTm("NODATA", (size_t)0, msg->n_answers, "%zu");
     ASSERTm("the name was issued its addresses: the kernel has a chunk to learn", changed);
     firc_dns_msg_free(msg);
+    rw_down(&f);
+    PASS();
+}
+
+static bool only_group_1_routes_v6(void *ud, firc_id_t group_id) {
+    (*(int *)ud)++;
+    return group_id.b[0] == 1;
+}
+
+static firc_dns_msg_t *aaaa_answer(const char *domain) {
+    uint8_t buf[512];
+    const char *q[] = {"shop", domain, "com"};
+    size_t len = build_response(buf, q, 3, NULL, 0);
+    firc_dns_msg_t *msg = NULL;
+    if (firc_dns_msg_parse(buf, len, &msg) != FIRC_OK) { abort(); }
+    msg->questions[0].qtype = FIRC_DNS_TYPE_AAAA;
+    msg->answers[0].rtype = FIRC_DNS_TYPE_AAAA;
+    free(msg->answers[0].rdata);
+    msg->answers[0].rdata = malloc(16);
+    memset(msg->answers[0].rdata, 0x26, 16);
+    msg->answers[0].rdata_len = 16;
+    return msg;
+}
+
+/* Catches: the v6 gate asked about another group than the owner, ignored, or applied to every group. */
+TEST an_owner_whose_table_routes_no_v6_answers_nodata_and_its_neighbour_a_fake(void) {
+    firc_config_t cfg = make_cfg();
+    add_group(&cfg, 1, "dual", FIRC_RULE_NAMESPACE, "dual.com");
+    add_group(&cfg, 2, "v4only", FIRC_RULE_NAMESPACE, "v4only.com");
+    rw_fixture_t f;
+    rw_up_cfg(&f, cfg, 64);
+    int asked = 0;
+    firc_dns_pipeline_set_v6_fn(f.p, only_group_1_routes_v6, &asked);
+
+    firc_dns_msg_t *dual = aaaa_answer("dual");
+    ASSERT_EQ((int)FIRC_DNS_HOLD, (int)firc_dns_pipeline_handle_message(f.p, dual, 1000, NULL, NULL));
+    ASSERT_EQ_FMT((size_t)1, dual->n_answers, "%zu");
+    ASSERT_EQ(FIRC_DNS_TYPE_AAAA, dual->answers[0].rtype);
+    ASSERT_EQ_FMT((size_t)16, (size_t)dual->answers[0].rdata_len, "%zu");
+    const uint8_t pool6[3] = {0xfd, 0x37, 0x9a};
+    ASSERTm("the pool's v6 address, not the real one", memcmp(pool6, dual->answers[0].rdata, 3) == 0);
+
+    firc_dns_msg_t *v4only = aaaa_answer("v4only");
+    bool changed = false;
+    ASSERT_EQ((int)FIRC_DNS_REWRITTEN, (int)firc_dns_pipeline_handle_message(f.p, v4only, 1000, NULL, &changed));
+    ASSERT_EQ_FMTm("NODATA", (size_t)0, v4only->n_answers, "%zu");
+    ASSERTm("still issued: the pool holds both families", changed);
+    ASSERT_EQ_FMTm("asked once per answer", 2, asked, "%d");
+
+    firc_dns_msg_free(dual);
+    firc_dns_msg_free(v4only);
     rw_down(&f);
     PASS();
 }
@@ -1813,6 +1870,7 @@ int main(int argc, char **argv)
     RUN_TEST(an_https_question_for_a_matched_name_is_emptied);
     RUN_TEST(no_fake_v6_where_v6_cannot_be_routed);
     RUN_TEST(an_aaaa_question_where_v6_cannot_be_routed_is_nodata_not_dropped);
+    RUN_TEST(an_owner_whose_table_routes_no_v6_answers_nodata_and_its_neighbour_a_fake);
     RUN_TEST(the_chains_real_address_is_recorded_and_a_change_asks_for_a_commit);
     RUN_TEST(a_rule_on_the_queried_name_fires_through_a_chain);
     RUN_TEST(an_upstream_that_fails_intermittently_is_not_an_outage);

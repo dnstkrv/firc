@@ -58,11 +58,34 @@ bool firc_id_equal(firc_id_t a, firc_id_t b)
     return memcmp(a.b, b.b, 4) == 0;
 }
 
-firc_id_t firc_id_random(void)
+firc_err_t firc_id_random(firc_id_t *out)
 {
     firc_id_t id = {{0, 0, 0, 0}};
-    firc_random_bytes(id.b, sizeof(id.b));
-    return id;
+    while (firc_id_is_zero(id)) {
+        firc_err_t err = firc_random_bytes(id.b, sizeof(id.b));
+        if (err != FIRC_OK) { return err; }
+    }
+    *out = id;
+    return FIRC_OK;
+}
+
+firc_err_t firc_id_pool_next(firc_id_pool_t *pool, firc_id_t *out)
+{
+    for (;;) {
+        if (pool->at + sizeof(out->b) > pool->len) {
+            firc_err_t err = firc_random_bytes(pool->bytes, sizeof(pool->bytes));
+            if (err != FIRC_OK) { return err; }
+            pool->at = 0;
+            pool->len = sizeof(pool->bytes);
+        }
+        firc_id_t id;
+        memcpy(id.b, pool->bytes + pool->at, sizeof(id.b));
+        pool->at += sizeof(id.b);
+        if (!firc_id_is_zero(id)) {
+            *out = id;
+            return FIRC_OK;
+        }
+    }
 }
 
 static uint32_t id_word(firc_id_t id)

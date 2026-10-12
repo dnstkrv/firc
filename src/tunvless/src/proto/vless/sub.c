@@ -137,10 +137,18 @@ static int sj_str(struct sj *j, char *buf, size_t n) {
     if (*j->p != '"') return -1;
     j->p++;
     size_t i = 0;
+    int full = 0;
     while (*j->p && *j->p != '"') {
-        if (*j->p == '\\' && j->p[1]) j->p++;
-        if (i + 1 < n) buf[i++] = *j->p;
-        j->p++;
+        char o[4] = { *j->p, 0, 0, 0 };
+        size_t ol = 1;
+        if (*j->p == '\\' && j->p[1]) j->p += 1 + sl_unescape(j->p + 1, 0, o, &ol);
+        else j->p++;
+        if (full || i + ol >= n) {
+            full = 1;
+            continue;
+        }
+        memcpy(buf + i, o, ol);
+        i += ol;
     }
     if (*j->p != '"') return -1;
     j->p++;
@@ -855,10 +863,18 @@ static const char *y_scalar(const char *p, const char *end, int flow, char *out,
     while (p < end && (*p == '&' || *p == '!')) { while (p < end && *p != ' ' && *p != '\t') p++; while (p < end && (*p == ' ' || *p == '\t')) p++; }
     if (p < end && (*p == '"' || *p == '\'')) {
         char q = *p++;
+        int full = 0;
         while (p < end && *p != q) {
-            if (q == '"' && *p == '\\' && p + 1 < end) p++;
+            char e[4] = { *p, 0, 0, 0 };
+            size_t el = 1;
+            if (q == '"' && *p == '\\' && p + 1 < end) p += sl_unescape(p + 1, 1, e, &el);
             else if (q == '\'' && *p == '\'' && p + 1 < end && p[1] == '\'') p++;
-            if (o + 1 < cap) out[o++] = *p;
+            if (!full && o + el < cap) {
+                memcpy(out + o, e, el);
+                o += el;
+            } else {
+                full = 1;
+            }
             p++;
         }
         if (p < end) p++;

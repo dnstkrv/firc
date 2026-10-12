@@ -6,7 +6,9 @@
 #include "firc/ruleset.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1626,6 +1628,120 @@ TEST a_delete_whose_teardown_failed_answers_200(void) {
     PASS();
 }
 
+static struct rlimit g_saved_nofile;
+
+static bool no_more_fds(void) {
+    if (getrlimit(RLIMIT_NOFILE, &g_saved_nofile) != 0) { return false; }
+    int probe = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (probe < 0) { return false; }
+    close(probe);
+    struct rlimit low = {(rlim_t)probe, g_saved_nofile.rlim_max};
+    if (setrlimit(RLIMIT_NOFILE, &low) != 0) { return false; }
+    int again = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (again >= 0) { close(again); }
+    return again < 0;
+}
+
+static int request_without_fds(const char *method, const char *path, const char *body) {
+    int fd = connect_tcp(TEST_PORT);
+    if (fd < 0) { return -1; }
+    char req[2048];
+    snprintf(req, sizeof(req), "%s %s HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\nConnection: close\r\n", method,
+             path, strlen(body));
+    if (send(fd, req, strlen(req), 0) <= 0) {
+        close(fd);
+        return -1;
+    }
+    struct timespec ts = {0, 100000000};
+    nanosleep(&ts, NULL);
+    if (!no_more_fds()) {
+        setrlimit(RLIMIT_NOFILE, &g_saved_nofile);
+        close(fd);
+        return -1;
+    }
+    snprintf(req, sizeof(req), "\r\n%s", body);
+    ssize_t sent = send(fd, req, strlen(req), 0);
+    char resp[4096];
+    ssize_t got = sent > 0 ? recv_response(fd, resp, sizeof(resp)) : -1;
+    setrlimit(RLIMIT_NOFILE, &g_saved_nofile);
+    close(fd);
+    return got > 0 ? status_code_of(resp) : -1;
+}
+
+/* Catches: a new group or rule given the zero id when no random bytes can be read, or answered 400. */
+TEST an_id_that_cannot_be_drawn_answers_500(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":\"eth0\"}", &out));
+    char path[96];
+    snprintf(path, sizeof(path), "/api/v1/groups/%s/rules", jstr(out, "id"));
+    char group_path[96];
+    snprintf(group_path, sizeof(group_path), "/api/v1/groups/%s", jstr(out, "id"));
+    cJSON_Delete(out);
+    const char *rule = "{\"type\":\"domain\",\"rule\":\"a.example\",\"enable\":true}";
+    ASSERT_EQm("POST group", 500, request_without_fds("POST", "/api/v1/groups", "{\"name\":\"h\",\"interface\":\"eth0\"}"));
+    ASSERT_EQm("PUT groups", 500,
+               request_without_fds("PUT", "/api/v1/groups", "{\"groups\":[{\"name\":\"h\",\"interface\":\"eth0\"}]}"));
+    ASSERT_EQm("POST rule", 500, request_without_fds("POST", path, rule));
+    ASSERT_EQm("PUT rules", 500, request_without_fds("PUT", path, "{\"rules\":[{\"type\":\"domain\",\"rule\":\"a.example\"}]}"));
+    ASSERT_EQm("PUT group with a new rule", 500,
+               request_without_fds("PUT", group_path, "{\"name\":\"g\",\"rules\":[{\"type\":\"domain\",\"rule\":\"b.example\"}]}"));
+    ASSERT_EQ(200, do_request("GET", group_path, NULL, &out));
+    ASSERT_EQ(0, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(out, "rules")));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups", NULL, &out));
+    ASSERT_EQ(1, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(out, "groups")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a ?save=true whose write failed answered 200, or the change it carried not applied. */
+TEST a_save_that_cannot_be_written_answers_500(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    h->ctx.config_path = "/nonexistent-firc-dir/firc.conf";
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":\"eth0\"}", &out));
+    char group[96], rules_base[96], rules[112];
+    snprintf(group, sizeof(group), "/api/v1/groups/%s?save=true", jstr(out, "id"));
+    snprintf(rules_base, sizeof(rules_base), "/api/v1/groups/%s/rules", jstr(out, "id"));
+    snprintf(rules, sizeof(rules), "%s?save=true", rules_base);
+    cJSON_Delete(out);
+    const char *rule = "{\"type\":\"domain\",\"rule\":\"a.example\",\"enable\":true}";
+
+    ASSERT_EQm("POST rule", 500, do_request("POST", rules, rule, &out));
+    ASSERT(strstr(jstr(out, "error"), "not saved") != NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", rules_base, NULL, &out));
+    cJSON *list = cJSON_GetObjectItemCaseSensitive(out, "rules");
+    ASSERTm("the rule is applied all the same", cJSON_GetArraySize(list) == 1);
+    char one[160];
+    snprintf(one, sizeof(one), "%s/%s?save=true", rules_base, jstr(cJSON_GetArrayItem(list, 0), "id"));
+    cJSON_Delete(out);
+
+    ASSERT_EQm("PUT rule", 500, do_request("PUT", one, rule, NULL));
+    ASSERT_EQm("DELETE rule", 500, do_request("DELETE", one, NULL, NULL));
+    ASSERT_EQm("PUT rules", 500, do_request("PUT", rules, "{\"rules\":[]}", NULL));
+    ASSERT_EQm("PUT group", 500, do_request("PUT", group, "{\"name\":\"g2\",\"interface\":\"eth0\"}", NULL));
+    ASSERT_EQm("POST group", 500,
+               do_request("POST", "/api/v1/groups?save=true", "{\"name\":\"h\",\"interface\":\"eth0\"}", NULL));
+    ASSERT_EQm("DELETE group", 500, do_request("DELETE", group, NULL, NULL));
+    ASSERT_EQm("PUT groups", 500,
+               do_request("PUT", "/api/v1/groups?save=true", "{\"groups\":[{\"name\":\"k\",\"interface\":\"eth0\"}]}", &out));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups", NULL, &out));
+    cJSON *groups = cJSON_GetObjectItemCaseSensitive(out, "groups");
+    ASSERT_EQ(1, cJSON_GetArraySize(groups));
+    ASSERT_STR_EQ("k", jstr(cJSON_GetArrayItem(groups, 0), "name"));
+    cJSON_Delete(out);
+    ASSERT_EQm("no save asked, nothing to fail", 200,
+               do_request("PUT", "/api/v1/groups", "{\"groups\":[]}", NULL));
+    harness_stop(h);
+    PASS();
+}
+
 /* Stops a harness a failed assertion left running, or its port stays bound for later tests. */
 static void stop_live_harness(void *ud) {
     (void)ud;
@@ -1682,5 +1798,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_save_whose_second_group_fails_answers_200_group_by_group);
     RUN_TEST(a_post_that_cannot_come_up_answers_500_naming_the_step);
     RUN_TEST(a_delete_whose_teardown_failed_answers_200);
+    RUN_TEST(an_id_that_cannot_be_drawn_answers_500);
+    RUN_TEST(a_save_that_cannot_be_written_answers_500);
     GREATEST_MAIN_END();
 }

@@ -1112,6 +1112,108 @@ TEST push_doubles_its_room_and_keeps_the_duplicate_scan(void)
     PASS();
 }
 
+static int rule_index(firc_fake_ipt_t *f, const char *table, const char *chain, const char *const *want, size_t n_want)
+{
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    if (!firc_fake_ipt_get_rules(f, table, chain, &rules, &n)) { return -1; }
+    for (size_t i = 0; i < n; i++) {
+        if (rules[i]->n_parts != n_want) { continue; }
+        size_t j = 0;
+        while (j < n_want && strcmp(rules[i]->parts[j], want[j]) == 0) { j++; }
+        if (j == n_want) { return (int)i; }
+    }
+    return -1;
+}
+
+static size_t rules_in(firc_fake_ipt_t *f, const char *table, const char *chain)
+{
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    return firc_fake_ipt_get_rules(f, table, chain, &rules, &n) ? n : 0;
+}
+
+static const char *k_unmarked_return[] = {"-m", "mark", "--mark", "0x0/0x40000000", "-j", "RETURN"};
+
+/* Catches: no guard, a guard on the field alone, without --ctdir or ! -i, conntrack read before the mark, no early return for unmarked traffic, one family only, or jumped behind the firmware's accept. */
+TEST a_group_drops_its_marked_flow_leaving_by_another_interface(void)
+{
+    static const firc_ipt_proto_t fams[] = {FIRC_IPT_PROTO_IPV4, FIRC_IPT_PROTO_IPV6};
+    for (size_t k = 0; k < 2; k++) {
+        firc_fake_ipt_t *f = firc_fake_ipt_new(fams[k]);
+        static const char *accept[] = {"-o", "ppp0", "-j", "ACCEPT"};
+        const char *const *seed[] = {accept};
+        const size_t lens[] = {4};
+        ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(f, "filter", "FORWARD", seed, lens, 1));
+        firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
+        firc_netfilter_register_base_chains(k == 0 ? ipt : NULL, k == 0 ? NULL : ipt);
+        uint32_t mark = 0;
+        ASSERT(firc_mark_for_field(1, &mark));
+        ASSERT_EQ(FIRC_OK, firc_ipset_to_link_build_rules(ipt, "FIRC_g1", "nwg0", mark, 1, NULL, NULL));
+        ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
+
+        static const char *guard[] = {"!", "-i", "nwg0", "!", "-o", "nwg0", "-m", "mark", "--mark", "0x40010000/0x40ff0000",
+                                      "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "DROP"};
+        ASSERT_EQ_FMT((size_t)2, rules_in(f, "filter", "FIRC_EGRESS"), "%zu");
+        ASSERT_EQ(0, rule_index(f, "filter", "FIRC_EGRESS", k_unmarked_return, 6));
+        ASSERT_EQ(1, rule_index(f, "filter", "FIRC_EGRESS", guard, 16));
+        static const char *jump[] = {"-j", "FIRC_EGRESS"};
+        int at = rule_index(f, "filter", "FORWARD", jump, 2);
+        ASSERT(at >= 0);
+        ASSERT_LT(at, rule_index(f, "filter", "FORWARD", accept, 4));
+        firc_ipt_free(ipt);
+    }
+    PASS();
+}
+
+/* Catches: a blackhole group without a guard, or one that lets a marked flow out by an interface named blackhole. */
+TEST a_blackhole_group_drops_its_marked_flow_by_every_interface(void)
+{
+    firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    uint32_t mark = 0;
+    ASSERT(firc_mark_for_field(3, &mark));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_build_rules(ipt, "FIRC_bh", "blackhole", mark, 3, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
+    static const char *guard[] = {"-m", "mark", "--mark", "0x40030000/0x40ff0000", "-m", "conntrack", "--ctdir",
+                                  "ORIGINAL", "-j", "DROP"};
+    ASSERT_EQ_FMT((size_t)2, rules_in(f, "filter", "FIRC_EGRESS"), "%zu");
+    ASSERT_EQ(1, rule_index(f, "filter", "FIRC_EGRESS", guard, 10));
+    firc_ipt_free(ipt);
+    PASS();
+}
+
+/* Catches: each group opening the dispatch chain anew (only the last group's guard survives), a second early return, or a jump per group. */
+TEST every_group_shares_one_dispatch_chain_and_one_jump(void)
+{
+    firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    uint32_t m1 = 0, m2 = 0;
+    ASSERT(firc_mark_for_field(1, &m1) && firc_mark_for_field(2, &m2));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_build_rules(ipt, "FIRC_g1", "nwg0", m1, 1, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_build_rules(ipt, "FIRC_g2", "nwg1", m2, 2, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
+    static const char *g1[] = {"!", "-i", "nwg0", "!", "-o", "nwg0", "-m", "mark", "--mark", "0x40010000/0x40ff0000",
+                               "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "DROP"};
+    static const char *g2[] = {"!", "-i", "nwg1", "!", "-o", "nwg1", "-m", "mark", "--mark", "0x40020000/0x40ff0000",
+                               "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "DROP"};
+    ASSERT_EQ_FMT((size_t)3, rules_in(f, "filter", "FIRC_EGRESS"), "%zu");
+    ASSERT_EQ(0, rule_index(f, "filter", "FIRC_EGRESS", k_unmarked_return, 6));
+    ASSERT_EQ(1, rule_index(f, "filter", "FIRC_EGRESS", g1, 16));
+    ASSERT_EQ(2, rule_index(f, "filter", "FIRC_EGRESS", g2, 16));
+    firc_ipt_rule_t *const *fwd = NULL;
+    size_t n = 0, jumps = 0;
+    ASSERT(firc_fake_ipt_get_rules(f, "filter", "FORWARD", &fwd, &n));
+    for (size_t i = 0; i < n; i++) {
+        if (fwd[i]->n_parts == 2 && strcmp(fwd[i]->parts[1], "FIRC_EGRESS") == 0) { jumps++; }
+    }
+    ASSERT_EQ_FMT((size_t)1, jumps, "%zu");
+    firc_ipt_free(ipt);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -1120,6 +1222,9 @@ int main(int argc, char **argv)
     RUN_TEST(the_mark_is_written_masked);
     RUN_TEST(the_masquerade_matches_the_mark_and_the_interface);
     RUN_TEST(a_blackhole_group_gets_no_masquerade);
+    RUN_TEST(a_group_drops_its_marked_flow_leaving_by_another_interface);
+    RUN_TEST(a_blackhole_group_drops_its_marked_flow_by_every_interface);
+    RUN_TEST(every_group_shares_one_dispatch_chain_and_one_jump);
     RUN_TEST(the_connmark_rule_keenetic_needs_is_still_emitted);
     RUN_TEST(every_chunk_a_group_holds_becomes_a_rule);
     RUN_TEST(the_v6_table_gets_the_same_rules_with_v6_chunks);

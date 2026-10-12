@@ -34,12 +34,16 @@ typedef struct firc_sub_parse_stats {
     const char *why;
 } firc_sub_parse_stats_t;
 
-/* Like firc_sub_parse_rules_progress, plus sing-box stats; list starting with '{' is read as a rule-set. */
-firc_err_t firc_sub_parse_rules_stats(const char *list, firc_sub_rules_t *out, firc_sub_parse_stats_t *st,
-                                      firc_sub_parse_progress_fn progress, void *ud);
+/* Like firc_sub_parse_rules_progress over len bytes, plus sing-box stats; a sing-box rule-set, source or
+   compiled, is read as one. */
+firc_err_t firc_sub_parse_rules_stats(const char *list, size_t len, firc_sub_rules_t *out,
+                                      firc_sub_parse_stats_t *st, firc_sub_parse_progress_fn progress, void *ud);
+
+/* True when body is a compiled sing-box rule-set (.srs): binary, so a NUL in it is no reason to refuse it. */
+bool firc_sub_body_is_srs(const char *body, size_t len);
 
 /* Parses list, then carries id/enable/type from existing for rules with identical text. */
-firc_err_t firc_sub_refresh_rules(const char *list, const firc_sub_rules_t *existing,
+firc_err_t firc_sub_refresh_rules(const char *list, size_t len, const firc_sub_rules_t *existing,
                                   firc_sub_rules_t *out);
 
 /* Like firc_sub_refresh_rules split out for pre-parsed rs; rs is mutated even on error, caller still owns it. */

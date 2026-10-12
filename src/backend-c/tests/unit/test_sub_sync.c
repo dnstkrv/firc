@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -297,7 +298,7 @@ static firc_sub_event_t *event_new(firc_sub_event_kind_t kind, firc_id_t id, uin
 static firc_sub_event_t *parsed_event(firc_id_t id, uint64_t seq, const char *rule) {
     firc_sub_event_t *ev = event_new(FIRC_SUB_EV_RESULT, id, seq);
     ev->result = FIRC_SUB_RESULT_PARSED;
-    firc_sub_rules_push(&ev->rules, rule, "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, rule, "namespace", true, test_random_id());
     return ev;
 }
 
@@ -326,7 +327,7 @@ static void apply_result_fn(harness_t *h, void *arg) {
 /* An enabled group on eth0 with a list at `path` (NULL: no url). */
 static firc_group_t *make_list_group(const char *path) {
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     firc_strset(&g->name, "");
     firc_strset(&g->iface, "eth0");
     g->list = firc_group_list_new();
@@ -562,7 +563,7 @@ TEST unknown_id_is_noent(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
     bool changed = false;
-    firc_id_t bogus = firc_id_random();
+    firc_id_t bogus = test_random_id();
     ASSERT_EQ(FIRC_ERR_NOENT, firc_app_sync_list_now(h->app, bogus, 1000, NULL, &changed));
     ASSERT_FALSE(changed);
 
@@ -778,7 +779,7 @@ TEST due_lists_are_fetched_and_others_skipped(void) {
     firc_group_t *not_due = make_list_group("/b");
     not_due->list->interval = 3600;
     not_due->list->last_check = (uint32_t)(base - 50);
-    firc_sub_rules_push(&not_due->list->rules, "already.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&not_due->list->rules, "already.example", "namespace", true, test_random_id());
     ASSERT_EQ(FIRC_OK, add_list_group(h->app, not_due));
     firc_id_t not_due_id = not_due->id;
 
@@ -1250,7 +1251,7 @@ static void put_rules_then_unchanged_fn(harness_t *h, void *arg) {
     firc_sub_rules_free(&l->rules);
     firc_sub_rules_init(&l->rules);
     n->replace_err = firc_sub_rules_push(&l->rules, "custom.example", "namespace", true,
-                                         firc_id_random());
+                                         test_random_id());
     l->has_body_hash = false;
     memset(l->body_hash, 0, sizeof(l->body_hash));
 

@@ -29,8 +29,9 @@
 #define XT_IPT_F_GOTO 0x02u
 #define XT_IP6T_F_PROTO 0x01u
 #define XT_IP6T_F_GOTO 0x04u
-#define XT_IPT_INV_DSTIP 0x08u
-#define XT_IP6T_INV_DSTIP 0x02u
+#define XT_INV_VIA_IN 0x01u
+#define XT_INV_VIA_OUT 0x02u
+#define XT_INV_DSTIP 0x10u
 
 #define XT_NAT_MAP_IPS 0x1u
 #define XT_NAT_PROTO_SPECIFIED 0x2u

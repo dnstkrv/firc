@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain": ["exact.test", "a.example"],
+      "domain_suffix": ["example.com", ".sub.example.org"],
+      "domain_keyword": ["tracker"],
+      "domain_regex": ["^ads[0-9]+\\.example\\.net$"]
+    }
+  ]
+}

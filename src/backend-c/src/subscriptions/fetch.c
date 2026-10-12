@@ -11,6 +11,7 @@
 #include <curl/curl.h>
 
 #include "firc/log.h"
+#include "firc/subparse.h"
 #include "firc/version.h"
 
 static firc_sub_setsockopt_fn g_setsockopt = setsockopt;
@@ -268,7 +269,7 @@ static firc_err_t fetch(const char *url, uint32_t mark, char **out_body, size_t 
             }
         }
         /* a NUL in the body would be invisible to the const-char* parser and silently truncate what gets saved */
-        if (memchr(buf.data, '\0', buf.len) != NULL) {
+        if (!firc_sub_body_is_srs(buf.data, buf.len) && memchr(buf.data, '\0', buf.len) != NULL) {
             char shown[160];
             firc_sub_url_redact(current, shown, sizeof shown);
             FIRC_WARN("the list at %s holds a NUL byte and is not text; refused rather "

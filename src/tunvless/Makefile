@@ -80,7 +80,7 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch
 CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch
 
 test: unit-test crypto-test
@@ -111,6 +111,10 @@ WS_SRC := src/proto/transport/trws.c src/proto/transport/trupgrade.c src/proto/t
 $(T)/wsmatch: tests/wsmatch.c tests/trvenc-stub.c $(WS_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/wsmatch.c tests/trvenc-stub.c $(WS_SRC) -lpthread
+
+$(T)/pqfallbackmatch: tests/pqfallbackmatch.c src/proto/transport/trsec.c $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/pqfallbackmatch.c src/proto/transport/trsec.c
 
 $(T)/b3match: tests/b3match.c src/lib/blake3.h
 	@mkdir -p $(T)

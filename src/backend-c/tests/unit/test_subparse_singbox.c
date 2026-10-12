@@ -16,7 +16,7 @@ static got_t parse(const char *body) {
     got_t g;
     memset(&g, 0, sizeof(g));
     firc_sub_rules_init(&g.rs);
-    g.err = firc_sub_parse_rules_stats(body, &g.rs, &g.st, NULL, NULL);
+    g.err = firc_sub_parse_rules_stats(body, strlen(body), &g.rs, &g.st, NULL, NULL);
     return g;
 }
 
@@ -223,7 +223,7 @@ TEST a_json_parse_reports_progress_and_can_be_stopped(void) {
     firc_sub_rules_init(&rs);
     firc_sub_parse_stats_t st;
     int calls = 0;
-    ASSERT_EQ(FIRC_ERR_CANCELED, firc_sub_parse_rules_stats(body, &rs, &st, stop_at_first, &calls));
+    ASSERT_EQ(FIRC_ERR_CANCELED, firc_sub_parse_rules_stats(body, strlen(body), &rs, &st, stop_at_first, &calls));
     ASSERT_EQ(1, calls);
     ASSERT_EQ_FMT((size_t)0, rs.n, "%zu");
     free(body);

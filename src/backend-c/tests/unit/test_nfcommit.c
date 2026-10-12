@@ -29,6 +29,7 @@ typedef struct {
     int seq_at;
     int gate_at;
     firc_cancel_t *cancel;
+    struct timespec started_at[32];
 } probe_t;
 
 static void probe_init(probe_t *p) {
@@ -47,6 +48,7 @@ static firc_err_t probe_rebuild(void *ud, firc_cancel_t *cancel, bool full) {
 
     pthread_mutex_lock(&p->mu);
     int ordinal = ++p->started;
+    if (ordinal < 32) { clock_gettime(CLOCK_MONOTONIC, &p->started_at[ordinal]); }
     p->cancel = cancel;
     if (full) { p->full_passes++; } else { p->partial_passes++; }
     bool block = p->block;
@@ -122,10 +124,18 @@ static firc_nfcommit_t *start_committer(probe_t *p) {
     return c;
 }
 
-static long elapsed_ms(const struct timespec *t0) {
-    struct timespec t1;
-    clock_gettime(CLOCK_MONOTONIC, &t1);
+static long started_after_ms(probe_t *p, int ordinal, const struct timespec *t0) {
+    pthread_mutex_lock(&p->mu);
+    struct timespec t1 = p->started_at[ordinal];
+    pthread_mutex_unlock(&p->mu);
     return (long)(t1.tv_sec - t0->tv_sec) * 1000L + (t1.tv_nsec - t0->tv_nsec) / 1000000L;
+}
+
+static struct timespec start_of(probe_t *p, int ordinal) {
+    pthread_mutex_lock(&p->mu);
+    struct timespec t = p->started_at[ordinal];
+    pthread_mutex_unlock(&p->mu);
+    return t;
 }
 
 static firc_nfcommit_t *start_settling(probe_t *p, unsigned long_ms, unsigned addr_ms) {
@@ -157,7 +167,7 @@ TEST an_address_request_settles_short(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 2);
-    ASSERT_LT(elapsed_ms(&t0), 250);
+    ASSERT_LT(started_after_ms(&p, 2, &t0), 250);
     pthread_mutex_lock(&p.mu);
     int partial = p.partial_passes;
     pthread_mutex_unlock(&p.mu);
@@ -179,7 +189,7 @@ TEST an_address_request_after_an_idle_stretch_settles_short(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 2);
-    ASSERT_LT(elapsed_ms(&t0), 250);
+    ASSERT_LT(started_after_ms(&p, 2, &t0), 250);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -196,7 +206,7 @@ TEST an_address_request_right_after_a_pass_settles_long(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 2);
-    ASSERT_GTE(elapsed_ms(&t0), 290);
+    ASSERT_GTE(started_after_ms(&p, 2, &t0), 290);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -213,7 +223,7 @@ TEST a_more_request_settles_long(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     firc_nfcommit_request_more(c);
     AWAIT(&p, p.started >= 2);
-    ASSERT_GTE(elapsed_ms(&t0), 290);
+    ASSERT_GTE(started_after_ms(&p, 2, &t0), 290);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -232,7 +242,7 @@ TEST a_full_request_during_a_short_settle_waits_the_long_one(void) {
     sleep_ms(50);
     firc_nfcommit_request(c);
     AWAIT(&p, p.started >= 2);
-    ASSERT_GTE(elapsed_ms(&t0), 590);
+    ASSERT_GTE(started_after_ms(&p, 2, &t0), 590);
     sleep_ms(700);
     pthread_mutex_lock(&p.mu);
     int started = p.started, full = p.full_passes;
@@ -253,7 +263,7 @@ TEST the_first_pass_settles_long(void) {
     firc_nfcommit_t *c = start_settling(&p, 300, 1);
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 1);
-    ASSERT_GTE(elapsed_ms(&t0), 290);
+    ASSERT_GTE(started_after_ms(&p, 1, &t0), 290);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -271,11 +281,9 @@ TEST a_raced_address_pass_retries_after_the_long_settle(void) {
     p.fail_with = FIRC_ERR_AGAIN;
     pthread_mutex_unlock(&p.mu);
     firc_nfcommit_request_addresses(c);
-    AWAIT(&p, p.started >= 2);
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     AWAIT(&p, p.started >= 3);
-    ASSERT_GTE(elapsed_ms(&t0), 290);
+    struct timespec t0 = start_of(&p, 2);
+    ASSERT_GTE(started_after_ms(&p, 3, &t0), 290);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -293,11 +301,9 @@ TEST a_canceled_more_pass_retries_after_the_long_settle(void) {
     p.fail_with = FIRC_ERR_CANCELED;
     pthread_mutex_unlock(&p.mu);
     firc_nfcommit_request_more(c);
-    AWAIT(&p, p.started >= 2);
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     AWAIT(&p, p.started >= 3);
-    ASSERT_GTE(elapsed_ms(&t0), 290);
+    struct timespec t0 = start_of(&p, 2);
+    ASSERT_GTE(started_after_ms(&p, 3, &t0), 290);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -315,12 +321,10 @@ TEST a_failed_address_pass_still_backs_off(void) {
     p.fail_with = FIRC_ERR_SYS;
     pthread_mutex_unlock(&p.mu);
     firc_nfcommit_request_addresses(c);
-    AWAIT(&p, p.started >= 2);
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     AWAIT(&p, p.started >= 3);
-    ASSERT_GTE(elapsed_ms(&t0), 190);
-    ASSERT_LT(elapsed_ms(&t0), 350);
+    struct timespec t0 = start_of(&p, 2);
+    ASSERT_GTE(started_after_ms(&p, 3, &t0), 190);
+    ASSERT_LT(started_after_ms(&p, 3, &t0), 350);
     firc_nfcommit_free(c);
     probe_destroy(&p);
     PASS();
@@ -405,6 +409,7 @@ TEST request_interrupts_and_restarts(void) {
 
     pthread_mutex_lock(&p.mu);
     p.block = false;
+    p.release = true;
     pthread_mutex_unlock(&p.mu);
 
     AWAIT(&p, p.finished >= 1);
@@ -866,13 +871,15 @@ TEST the_first_write_is_pending_until_a_pass_completes(void) {
     probe_init(&p);
     p.fail_times = 2;
     p.fail_with = FIRC_ERR_IO;
+    p.gate_at = 3;
     firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, &p);
     firc_nfcommit_set_delays_for_test(c, 1, 4);
     ASSERTm("before start", health_of(c).first_pending);
     firc_nfcommit_start(c);
     firc_nfcommit_request(c);
-    AWAIT(&p, p.started >= 2);
+    AWAIT(&p, p.started >= 3);
     ASSERTm("a failed pass writes nothing", health_of(c).first_pending);
+    set_gate(&p, 0);
     AWAIT(&p, p.finished >= 1);
     bool cleared = false;
     for (int i = 0; i < 2000 && !cleared; i++) {

@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <string.h>
 
@@ -119,7 +120,7 @@ TEST many_overrides_all_survive(void) {
 }
 
 static void mk(firc_sub_rules_t *rs, const char *type, const char *text, bool on) {
-    firc_sub_rules_push(rs, text, type, on, firc_id_random());
+    firc_sub_rules_push(rs, text, type, on, test_random_id());
 }
 
 TEST an_override_reaches_only_the_rule_with_its_spec(void) {

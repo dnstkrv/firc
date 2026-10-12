@@ -1095,6 +1095,30 @@ int main(void) {
         check_n("ws with vision: skipped", 1,
                 vless_parse_url("vless://u@h:443?type=ws&flow=xtls-rprx-vision#w", &n));
         check("ws with vision: reason given", "vision cannot run over ws", n.skip_reason);
+        check_n("type=raw with reality and vision: usable", 0, vless_parse_url(
+            "vless://u@h:443?type=raw&security=reality&pbk=K&sni=a.com&flow=xtls-rprx-vision#r", &n));
+        check("type=raw reads as tcp", "tcp", n.type);
+        check_n("type=%72aw percent-encoded: usable", 0, vless_parse_url(
+            "vless://u@h:443?type=%72aw&security=reality&pbk=K&sni=a.com#r", &n));
+        check("type=%72aw reads as tcp", "tcp", n.type);
+        check_n("type=websocket: usable", 0,
+                vless_parse_url("vless://u@h:443?type=websocket&path=/ws#w", &n));
+        check("type=websocket reads as ws", "ws", n.type);
+        check_n("grpc with vision: skipped", 1, vless_parse_url(
+            "vless://u@h:443?type=grpc&serviceName=s&security=reality&pbk=K&flow=xtls-rprx-vision#g", &n));
+        check("grpc with vision: reason given", "vision cannot run over grpc", n.skip_reason);
+        check_n("xhttp with vision-udp443: skipped", 1, vless_parse_url(
+            "vless://u@h:443?type=xhttp&path=/x&security=reality&pbk=K&flow=xtls-rprx-vision-udp443#x", &n));
+        check("xhttp with vision: reason given", "vision cannot run over xhttp", n.skip_reason);
+        check_n("httpupgrade with vision: skipped", 1,
+                vless_parse_url("vless://u@h:443?type=httpupgrade&path=/up&flow=xtls-rprx-vision#h", &n));
+        check("httpupgrade with vision: reason given", "vision cannot run over httpupgrade", n.skip_reason);
+        check_n("grpc without vision: usable", 0, vless_parse_url(
+            "vless://u@h:443?type=grpc&serviceName=s&security=reality&pbk=K#g", &n));
+        check_n("tcp with vision: usable", 0, vless_parse_url(
+            "vless://u@h:443?type=tcp&security=reality&pbk=K&flow=xtls-rprx-vision#t", &n));
+        check_n("type=raws: not a known transport", 1, vless_parse_url("vless://u@h:443?type=raws#w", &n));
+        check("type=raws: reason names it", "transport raws is not supported", n.skip_reason);
         check_n("ws with bad %XX in path: skipped", 1,
                 vless_parse_url("vless://u@h:443?type=ws&path=/a%25zz#w", &n));
         check("ws with bad %XX: reason given", "bad %XX in path", n.skip_reason);
@@ -1157,6 +1181,33 @@ int main(void) {
         check_n("httpupgrade config with Connection in headers: usable", 1, (long)n);
         n = vless_parse_sub(XO("{\"network\":\"ws\",\"wsSettings\":{\"headers\":{\"X\":1}}}"), nodes, 4, &st);
         check_n("ws config: header value not a string, skipped", 0, (long)n);
+        n = vless_parse_sub(XO("{\"network\":\"xhttp\",\"security\":\"reality\",\"realitySettings\":"
+                               "{\"serverName\":\"a.com\",\"publicKey\":\"K\"}}"), nodes, 4, &st);
+        check_n("xhttp config without vision: usable", 1, (long)n);
+        n = vless_parse_sub("{\"outbounds\":[{\"protocol\":\"vless\",\"settings\":{\"vnext\":[{\"address\":\"h\","
+                            "\"port\":443,\"users\":[{\"id\":\"u\",\"flow\":\"xtls-rprx-vision\"}]}]},"
+                            "\"streamSettings\":{\"network\":\"xhttp\",\"security\":\"reality\",\"realitySettings\":"
+                            "{\"serverName\":\"a.com\",\"publicKey\":\"K\"}}}]}", nodes, 4, &st);
+        check_n("Xray config: vision over xhttp skipped", 0, (long)n);
+        check("Xray config: vision over xhttp, reason", "vision cannot run over xhttp",
+              st.reasons_n ? st.reasons[0].reason : "");
+        n = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"tag\":\"sb\",\"server\":\"h\","
+                            "\"server_port\":443,\"uuid\":\"8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124\","
+                            "\"flow\":\"xtls-rprx-vision\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"s\"}}]}",
+                            nodes, 4, &st);
+        check_n("sing-box: vision over grpc skipped", 0, (long)n);
+        check("sing-box: vision over grpc, reason", "vision cannot run over grpc",
+              st.reasons_n ? st.reasons[0].reason : "");
+        n = vless_parse_sub("proxies:\n  - {name: c, type: vless, server: h, port: 443, "
+                            "uuid: 8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124, network: grpc, flow: xtls-rprx-vision, "
+                            "grpc-opts: {grpc-service-name: s}}\n", nodes, 4, &st);
+        check_n("Clash: vision over grpc skipped", 0, (long)n);
+        check("Clash: vision over grpc, reason", "vision cannot run over grpc",
+              st.reasons_n ? st.reasons[0].reason : "");
+        n = vless_parse_sub("proxies:\n  - {name: c, type: vless, server: h, port: 443, "
+                            "uuid: 8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124, network: grpc, "
+                            "grpc-opts: {grpc-service-name: s}}\n", nodes, 4, &st);
+        check_n("Clash: grpc without vision usable", 1, (long)n);
         n = vless_parse_sub(XO("{\"network\":\"xhttp\",\"xhttpSettings\":{\"path\":\"/x\"},"
                                "\"wsSettings\":{\"path\":\"/w\"}}"), nodes, 4, &st);
         check("xhttp config with stray wsSettings: xhttp path", "/x", n ? nodes[0].path : "");
@@ -1243,6 +1294,76 @@ int main(void) {
             check_n(what[k], 3, (long)n);
             check_n("  none skipped for lack of slots", 0, (long)st.skipped);
             free(nodes);
+        }
+    }
+
+    {
+        struct vless_node nodes[4];
+        struct vless_sub_stats st;
+        size_t n;
+#define SB(tag) "{\"outbounds\":[{\"type\":\"vless\",\"tag\":\"" tag "\",\"server\":\"h\",\"server_port\":443," \
+                "\"uuid\":\"8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124\"}]}"
+        n = vless_parse_sub(SB("\\u26a1 \\u2b50 \\u0412\\u0435"), nodes, 4, &st);
+        check("json \\u: BMP letters decoded to UTF-8", "\xE2\x9A\xA1 \xE2\xAD\x90 \xD0\x92\xD0\xB5",
+              n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("\\ud83d\\udcf1 \\u00E9"), nodes, 4, &st);
+        check("json \\u: a surrogate pair is one character", "\xF0\x9F\x93\xB1 \xC3\xA9", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("a\\ud83d b\\udcf1c\\ud83d\\u0041"), nodes, 4, &st);
+        check("json \\u: lone surrogates become U+FFFD",
+              "a\xEF\xBF\xBD b\xEF\xBF\xBD" "c\xEF\xBF\xBD" "A", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("\\udbff\\udfff\\ud800\\udc00"), nodes, 4, &st);
+        check("json \\u: the pair range ends decode", "\xF4\x8F\xBF\xBF\xF0\x90\x80\x80", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("\\u07ff\\u0800\\u007f\\u0080"), nodes, 4, &st);
+        check("json \\u: two and three byte boundaries", "\xDF\xBF\xE0\xA0\x80\x7F\xC2\x80", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("q\\\"b\\\\s\\/t\\tn\\nr\\rb\\bf\\fe"), nodes, 4, &st);
+        check("json escapes: quote, backslash, slash, controls", "q\"b\\s/t\tn\nr\rb\bf\fe", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("x\\u12g4y\\x41"), nodes, 4, &st);
+        check("json: a short \\u and \\x stay letters", "xu12g4yx41", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("a\\u0000b"), nodes, 4, &st);
+        check("json \\u0000 is dropped, the rest kept", "ab", n ? nodes[0].name : "");
+        n = vless_parse_sub(SB("\\u0000"), nodes, 4, &st);
+        check_n("json name of only \\u0000: the node is still read", 1, (long)n);
+        check("json name of only \\u0000: empty", "", n ? nodes[0].name : "x");
+        n = vless_parse_sub(SB("\\ud83d\\xdc00"), nodes, 4, &st);
+        check("json \\u: a high surrogate before \\x is lone", "\xEF\xBF\xBD" "xdc00", n ? nodes[0].name : "");
+        char tag[200], want[200];
+        memset(tag, 'a', sizeof(nodes[0].name) - 3);
+        tag[sizeof(nodes[0].name) - 3] = 0;
+        memcpy(want, tag, sizeof(nodes[0].name) - 2);
+        char cfg[512];
+        snprintf(cfg, sizeof cfg, SB("%s\\ud83d\\udcf1b"), tag);
+        n = vless_parse_sub(cfg, nodes, 4, &st);
+        check("json \\u: a character that does not fit is dropped with the rest", want, n ? nodes[0].name : "");
+        memset(want, 'a', sizeof(nodes[0].name) - 2);
+        want[sizeof(nodes[0].name) - 2] = 0;
+        snprintf(cfg, sizeof cfg, SB("%s\\u00e9b"), want);
+        n = vless_parse_sub(cfg, nodes, 4, &st);
+        check("json \\u: a two byte character that does not fit is dropped", want, n ? nodes[0].name : "");
+#undef SB
+        n = vless_parse_sub("{\"remarks\":\"\\u0413\\u0435\\u0440\",\"outbounds\":[{\"protocol\":\"vless\",\"settings\":"
+                            "{\"vnext\":[{\"address\":\"h\",\"port\":443,\"users\":[{\"id\":\"u\"}]}]}}]}",
+                            nodes, 4, &st);
+        check("Xray remarks: \\u decoded", "\xD0\x93\xD0\xB5\xD1\x80", n ? nodes[0].name : "");
+#define CL(name) "proxies:\n  - name: " name "\n    type: vless\n    server: h\n    port: 443\n" \
+                 "    uuid: 8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124\n"
+        n = vless_parse_sub(CL("\"\\U0001F4F1 \\x41\\u00e9\\ud83d\\udcf1\""), nodes, 4, &st);
+        check("Clash double quotes: \\U, \\x, \\u and a pair", "\xF0\x9F\x93\xB1 A\xC3\xA9\xF0\x9F\x93\xB1",
+              n ? nodes[0].name : "");
+        n = vless_parse_sub(CL("\"\\U0000D800\\U00110000\\x4\""), nodes, 4, &st);
+        check("Clash: a surrogate or out of range \\U stays letters", "U0000D800U00110000x4", n ? nodes[0].name : "");
+        n = vless_parse_sub(CL("\"a\\x00b\\U00000000c\\u0000d\""), nodes, 4, &st);
+        check("Clash \\x00, \\U00000000, \\u0000 are dropped", "abcd", n ? nodes[0].name : "");
+        n = vless_parse_sub(CL("'\\u00e9'"), nodes, 4, &st);
+        check("Clash single quotes: no escapes", "\\u00e9", n ? nodes[0].name : "");
+        n = vless_parse_sub(CL("\\u00e9"), nodes, 4, &st);
+        check("Clash plain scalar: no escapes", "\\u00e9", n ? nodes[0].name : "");
+#undef CL
+        {
+            const char *q = "\"aaa\\u00e9b\"";
+            char out[5];
+            size_t on = 0;
+            y_scalar(q, q + strlen(q), 0, out, sizeof out, &on);
+            check("YAML: a character that does not fit is dropped with the rest", "aaa", out);
         }
     }
 

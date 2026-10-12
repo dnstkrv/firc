@@ -1,0 +1,61 @@
+{
+  "version": 5,
+  "rules": [
+    {
+      "domain": "one.example",
+      "network_type": [
+        "wifi",
+        "cellular"
+      ],
+      "network_is_expensive": true,
+      "network_is_constrained": true
+    },
+    {
+      "domain": "two.example",
+      "network_interface_address": {
+        "wifi": [
+          "192.168.1.0/24",
+          "fd00::/8"
+        ]
+      },
+      "default_interface_address": "10.0.0.0/8"
+    },
+    {
+      "domain": "three.example",
+      "process_path": "/bin/x",
+      "process_path_regex": "^/usr/",
+      "package_name": "com.x",
+      "package_name_regex": "^com\\.example"
+    },
+    {
+      "domain": "four.example",
+      "source_port": 1234,
+      "source_port_range": "1000:2000",
+      "wifi_ssid": "home",
+      "wifi_bssid": "00:11:22:33:44:55"
+    },
+    {
+      "type": "logical",
+      "mode": "or",
+      "rules": [
+        {
+          "type": "logical",
+          "mode": "and",
+          "rules": [
+            {
+              "domain": "deep.example"
+            }
+          ],
+          "invert": true
+        },
+        {
+          "domain": "five.example"
+        }
+      ]
+    },
+    {
+      "domain_suffix": "kept.example",
+      "ip_cidr": "2001:db8:1::/48"
+    }
+  ]
+}

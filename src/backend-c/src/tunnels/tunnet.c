@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <linux/rtnetlink.h>
 
 #include "firc/mark.h"
 
@@ -42,12 +43,12 @@ firc_err_t firc_tunnet_uplink_apply(firc_rtnl_t *r, uint32_t start_table, const 
     if (err == FIRC_OK) { err = firc_rtnl_alloc_mark_field_for(r, owner, &field); }
     if (err != FIRC_OK) { return err; }
     out->table = table;
-    err = firc_rtnl_route_add_blackhole(r, AF_INET, table, 20);
+    err = firc_rtnl_route_add_reject(r, AF_INET, table, 20, RTN_BLACKHOLE);
     if (err != FIRC_OK) { return err; }
     err = firc_rtnl_rule_add(r, AF_INET, firc_mark_group_value(field), FIRC_MARK_GROUP_MASK, table,
                              FIRC_RULE_PRIORITY_TUNNEL);
     if (err != FIRC_OK) {
-        (void)firc_rtnl_route_del_blackhole(r, AF_INET, table, 20);
+        (void)firc_rtnl_route_del_reject(r, AF_INET, table, 20, RTN_BLACKHOLE);
         out->table = 0;
         return err;
     }
@@ -62,7 +63,7 @@ firc_err_t firc_tunnet_uplink_remove(firc_rtnl_t *r, const firc_tunnet_uplink_t 
                                           FIRC_RULE_PRIORITY_TUNNEL);
     firc_err_t err = firc_iface_route_remove(r, AF_INET, u->table, u->dev, &route);
     if (first == FIRC_OK) { first = err; }
-    err = firc_rtnl_route_del_blackhole(r, AF_INET, u->table, 20);
+    err = firc_rtnl_route_del_reject(r, AF_INET, u->table, 20, RTN_BLACKHOLE);
     return first == FIRC_OK ? err : first;
 }
 

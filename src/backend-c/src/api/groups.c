@@ -67,7 +67,13 @@ static firc_err_t list_from_req(const cJSON *list_j, const firc_group_list_t *ex
     }
     cJSON *interval_j = cJSON_GetObjectItemCaseSensitive(list_j, "interval");
     if (cJSON_IsNumber(interval_j)) {
-        list->interval = (uint32_t)interval_j->valuedouble;
+        uint64_t interval;
+        if (!firc_json_whole(interval_j, 4294967295.0, &interval)) {
+            firc_group_list_free(list);
+            *err_msg = "list interval must be a whole number of seconds, 0 to 4294967295";
+            return FIRC_ERR_INVAL;
+        }
+        list->interval = (uint32_t)interval;
     } else if (existing != NULL) {
         list->interval = existing->interval;
     }
@@ -140,9 +146,9 @@ static firc_err_t fill_rule_fields(firc_rule_t *rule, const cJSON *req, const ch
     return FIRC_OK;
 }
 
-/* an id matching baseline_rules keeps that identity; any other case silently gets a fresh random id; NULL on OOM */
-static firc_rule_t *rule_from_req(const cJSON *req, firc_rule_t **baseline_rules, size_t n_baseline,
-                                  const char **why) {
+/* an id matching baseline_rules keeps that identity; any other case silently gets a fresh random id */
+static firc_err_t rule_from_req(const cJSON *req, firc_rule_t **baseline_rules, size_t n_baseline,
+                                firc_rule_t **out, const char **why) {
     firc_id_t id;
     bool has_id;
     bool found = false;
@@ -154,14 +160,21 @@ static firc_rule_t *rule_from_req(const cJSON *req, firc_rule_t **baseline_rules
             }
         }
     }
-    firc_rule_t *rule = firc_rule_new();
-    if (!rule) { return NULL; }
-    rule->id = found ? id : firc_id_random();
-    if (fill_rule_fields(rule, req, why) != FIRC_OK) {
-        firc_rule_free(rule);
-        return NULL; /* *why set == refused, not out of memory */
+    if (why != NULL) { *why = NULL; }
+    if (!found) {
+        firc_err_t err = firc_id_random(&id);
+        if (err != FIRC_OK) { return err; }
     }
-    return rule;
+    firc_rule_t *rule = firc_rule_new();
+    if (!rule) { return FIRC_ERR_NOMEM; }
+    rule->id = id;
+    firc_err_t err = fill_rule_fields(rule, req, why);
+    if (err != FIRC_OK) {
+        firc_rule_free(rule);
+        return err;
+    }
+    *out = rule;
+    return FIRC_OK;
 }
 
 /* unlike rule_from_req, an explicit id that matches nothing in existing_rules is FIRC_ERR_NOENT */
@@ -170,8 +183,11 @@ static firc_err_t rule_from_req_strict(const cJSON *req, firc_rule_t **existing_
     firc_id_t id;
     bool has_id;
     if (parse_optional_id(req, "id", &id, &has_id) != FIRC_OK) { return FIRC_ERR_INVAL; }
-    firc_id_t final_id = firc_id_random();
-    if (has_id) {
+    firc_id_t final_id;
+    if (!has_id) {
+        firc_err_t err = firc_id_random(&final_id);
+        if (err != FIRC_OK) { return err; }
+    } else {
         bool found = false;
         for (size_t i = 0; i < n_existing; i++) {
             if (firc_id_equal(existing_rules[i]->id, id)) {
@@ -279,9 +295,13 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
         return FIRC_ERR_INVAL;
     }
 
+    if (existing == NULL && !has_req_id) {
+        firc_err_t err = firc_id_random(&req_id);
+        if (err != FIRC_OK) { return err; }
+    }
     firc_group_t *group = firc_group_new();
     if (!group) { return FIRC_ERR_NOMEM; }
-    group->id = existing ? existing->id : (has_req_id ? req_id : firc_id_random());
+    group->id = existing ? existing->id : req_id;
 
     /* the interface name goes into an -o match: only a valid kernel interface name */
     const char *iface = get_string(req, "interface");
@@ -358,8 +378,9 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
         for (int i = 0; i < n; i++) {
             const char *rule_why = NULL;
             cJSON *rule_j = cJSON_GetArrayItem(rules_j, i);
-            firc_rule_t *r = rule_from_req(rule_j, baseline, n_baseline, &rule_why);
-            if (r == NULL && rule_why != NULL) {
+            firc_rule_t *r = NULL;
+            err = rule_from_req(rule_j, baseline, n_baseline, &r, &rule_why);
+            if (err == FIRC_ERR_INVAL && rule_why != NULL) {
                 /* falls back to existing->name when the PUT left "name" out, which is the one the operator is looking at */
                 const char *gname = (group->name != NULL && group->name[0] != '\0')
                                         ? group->name
@@ -369,10 +390,11 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
                 firc_group_free(group);
                 return FIRC_ERR_INVAL;
             }
-            if (!r || firc_group_add_rule(group, r) != FIRC_OK) {
+            if (err == FIRC_OK) { err = firc_group_add_rule(group, r); }
+            if (err != FIRC_OK) {
                 firc_rule_free(r);
                 firc_group_free(group);
-                return FIRC_ERR_NOMEM;
+                return err;
             }
         }
     } else if (existing) {
@@ -511,10 +533,15 @@ cJSON *firc_groups_group_json(firc_app_t *app, const firc_group_t *g, bool with_
     return obj;
 }
 
-void firc_groups_maybe_save(firc_groups_ctx_t *ctx, firc_http_req_t *req) {
-    if (!firc_http_req_query_is_true(req, "save") || !ctx->config_path) { return; }
+bool firc_groups_maybe_save(firc_groups_ctx_t *ctx, firc_http_req_t *req, firc_http_res_t *res) {
+    if (!firc_http_req_query_is_true(req, "save") || !ctx->config_path) { return true; }
     firc_err_t err = firc_app_save_groups(ctx->app, ctx->config_path, ctx->config_version ? ctx->config_version : "");
-    if (err != FIRC_OK) { FIRC_ERROR("failed to save config file: %s", firc_err_str(err)); }
+    if (err == FIRC_OK) { return true; }
+    FIRC_ERROR("failed to save config file: %s", firc_err_str(err));
+    char msg[160];
+    snprintf(msg, sizeof(msg), "applied, but groups.yaml was not saved: %s", firc_err_str(err));
+    firc_http_res_write_error(res, 500, msg);
+    return false;
 }
 
 /* must follow every in-place edit through firc_ruleset_group_mut, or a new rule updates netfilter but never resolves */
@@ -614,7 +641,7 @@ static void handle_put_groups(firc_http_req_t *req, firc_http_res_t *res, void *
         char msgbuf[FIRC_RULE_WHERE_MAX];
         firc_err_t err = group_from_req(group_req, existing, &new_groups[i], &err_msg, &err_field, err_group,
                                         firc_app_pool(ctx->app), msgbuf, sizeof(msgbuf));
-        if (err == FIRC_ERR_NOMEM) { /* not the client's fault -- see handle_create_group */
+        if (err != FIRC_OK && err != FIRC_ERR_INVAL) { /* not the client's fault -- see handle_create_group */
             cJSON_Delete(json);
             for (int j = 0; j < i; j++) { firc_group_free(new_groups[j]); }
             free(new_groups);
@@ -637,22 +664,20 @@ static void handle_put_groups(firc_http_req_t *req, firc_http_res_t *res, void *
         firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
     }
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     cJSON *out = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(out, "groups");
     size_t n_live = firc_app_user_group_count(ctx->app);
     for (size_t i = 0; i < n_live; i++) {
         cJSON *gj = firc_groups_group_json(ctx->app, firc_ruleset_group(firc_app_user_group_at(ctx->app, i)), true);
         if (gj == NULL) {
-            /* the replace already happened, so a ?save=true is still owed even though the response build failed */
             cJSON_Delete(out);
             firc_http_res_write_error(res, 500, "out of memory");
-            firc_groups_maybe_save(ctx, req);
             return;
         }
         cJSON_AddItemToArray(arr, gj);
     }
     firc_http_res_write_json(res, 200, out);
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_create_group(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -670,7 +695,7 @@ static void handle_create_group(firc_http_req_t *req, firc_http_res_t *res, void
     firc_err_t err = group_from_req(json, NULL, &group, &err_msg, &err_field, err_group,
                                     firc_app_pool(ctx->app), msgbuf, sizeof(msgbuf));
     cJSON_Delete(json);
-    if (err == FIRC_ERR_NOMEM) { /* not the client's fault: a 400 would tell the operator to fix a body that was fine */
+    if (err != FIRC_OK && err != FIRC_ERR_INVAL) { /* not the client's fault: a 400 would tell the operator to fix a body that was fine */
         firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
     }
@@ -686,8 +711,8 @@ static void handle_create_group(firc_http_req_t *req, firc_http_res_t *res, void
         firc_http_res_write_error(res, status, why[0] != '\0' ? why : firc_err_str(err));
         return;
     }
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write_json(res, 200, firc_groups_group_json(ctx->app, group, true)); /* still valid: no free on success */
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_get_group(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -719,7 +744,7 @@ static void handle_put_group(firc_http_req_t *req, firc_http_res_t *res, void *u
     firc_err_t err = group_from_req(json, live, &built, &err_msg, &err_field, err_group,
                                     firc_app_pool(ctx->app), msgbuf, sizeof(msgbuf));
     cJSON_Delete(json);
-    if (err == FIRC_ERR_NOMEM) {
+    if (err != FIRC_OK && err != FIRC_ERR_INVAL) {
         firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
     }
@@ -734,8 +759,8 @@ static void handle_put_group(firc_http_req_t *req, firc_http_res_t *res, void *u
         return;
     }
 
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write_json(res, 200, firc_groups_group_json(ctx->app, live, true));
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_delete_group(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -744,8 +769,8 @@ static void handle_delete_group(firc_http_req_t *req, firc_http_res_t *res, void
     if (!firc_groups_resolve(ctx, req, res, &rs)) { return; }
     /* a teardown error is logged by the app and keeps nothing, so this answers 200 regardless */
     firc_app_remove_group_by_id(ctx->app, firc_ruleset_group(rs)->id);
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write(res, 200, NULL, NULL, 0);
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_get_rules(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -800,10 +825,10 @@ static void handle_put_rules(firc_http_req_t *req, firc_http_res_t *res, void *u
             cJSON_Delete(json);
             if (err == FIRC_ERR_NOENT) {
                 firc_http_res_write_error(res, 404, "rule not found");
-            } else if (err == FIRC_ERR_NOMEM) {
-                firc_http_res_write_error(res, 500, "out of memory");
-            } else {
+            } else if (err == FIRC_ERR_INVAL) {
                 firc_http_res_write_error(res, 400, "invalid rule");
+            } else {
+                firc_http_res_write_error(res, 500, firc_err_str(err));
             }
             return;
         }
@@ -824,8 +849,8 @@ static void handle_put_rules(firc_http_req_t *req, firc_http_res_t *res, void *u
         }
     }
 
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write_json(res, 200, wrap_rules(group->rules, group->n_rules));
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_create_rule(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -840,8 +865,9 @@ static void handle_create_rule(firc_http_req_t *req, firc_http_res_t *res, void 
     }
     firc_group_t *group = firc_ruleset_group_mut(rs);
     const char *why = NULL;
-    firc_rule_t *rule = rule_from_req(json, group->rules, group->n_rules, &why);
-    if (rule == NULL && why != NULL) {
+    firc_rule_t *rule = NULL;
+    firc_err_t err = rule_from_req(json, group->rules, group->n_rules, &rule, &why);
+    if (err == FIRC_ERR_INVAL && why != NULL) {
         char msgbuf[FIRC_RULE_WHERE_MAX];
         const char *msg = locate_rule(msgbuf, sizeof(msgbuf), NULL, get_string(json, "type"),
                                       get_string(json, "rule"), (int)group->n_rules, why);
@@ -850,8 +876,8 @@ static void handle_create_rule(firc_http_req_t *req, firc_http_res_t *res, void 
         return;
     }
     cJSON_Delete(json);
-    if (!rule) {
-        firc_http_res_write_error(res, 500, "out of memory");
+    if (err != FIRC_OK) {
+        firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
     }
     if (firc_group_add_rule(group, rule) != FIRC_OK) {
@@ -862,15 +888,15 @@ static void handle_create_rule(firc_http_req_t *req, firc_http_res_t *res, void 
     republish_dns_snapshot(ctx);
 
     if (firc_ruleset_runtime_enabled(rs)) {
-        firc_err_t err = firc_app_sync_group(ctx->app, rs);
+        err = firc_app_sync_group(ctx->app, rs);
         if (err != FIRC_OK) {
             firc_http_res_write_error(res, 500, firc_err_str(err));
             return;
         }
     }
 
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write_json(res, 200, rule_to_json(rule));
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_get_rule(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -931,8 +957,8 @@ static void handle_put_rule(firc_http_req_t *req, firc_http_res_t *res, void *ud
         }
     }
 
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write_json(res, 200, rule_to_json(rule));
-    firc_groups_maybe_save(ctx, req);
 }
 
 static void handle_delete_rule(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -956,8 +982,8 @@ static void handle_delete_rule(firc_http_req_t *req, firc_http_res_t *res, void 
         }
     }
 
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     firc_http_res_write(res, 200, NULL, NULL, 0);
-    firc_groups_maybe_save(ctx, req);
 }
 
 void firc_groups_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx) {

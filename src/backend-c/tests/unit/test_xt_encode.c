@@ -99,6 +99,28 @@ TEST an_interface_at_the_length_limit_gets_a_full_mask(void) {
     PASS();
 }
 
+/* Catches: an inverted interface written with the other side's bit, both bits, or none. */
+TEST an_inverted_interface_sets_its_own_bit(void) {
+    static const unsigned at_inv[] = {83, 132};
+    static const struct { const char *line; uint8_t inv; } k[] = {
+        {"! -i nwg1 -j DROP", 0x01},
+        {"! -o nwg1 -j DROP", 0x02},
+        {"! -i nwg1 ! -o nwg1 -j DROP", 0x03},
+        {"-i nwg1 -o nwg1 -j DROP", 0x00},
+        {"-i br0 ! -o nwg1 -j DROP", 0x02},
+    };
+    for (size_t f = 0; f < 2; f++) {
+        for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+            firc_xt_entry_t e;
+            uint32_t exts = 0;
+            ASSERT_EQ_FMTm(k[i].line, FIRC_OK, enc(k_fams[f], k[i].line, &e, &exts), "%d");
+            ASSERT_EQ_FMTm(k[i].line, (unsigned)k[i].inv, (unsigned)e.bytes[at_inv[f]], "%u");
+            firc_xt_entry_clear(&e);
+        }
+    }
+    PASS();
+}
+
 /* Catches: a mark without a mask matched under a partial mask (the kernel's default is every bit). */
 TEST a_mark_without_a_mask_matches_every_bit(void) {
     firc_ipt_rule_t *r = firc_test_rule("-m mark --mark 0x10000 -j RETURN");
@@ -137,6 +159,11 @@ TEST a_rule_outside_the_vocabulary_is_refused(void) {
         "-j",
         "-d 10.0.0.1",
         "! -d 10.0.0.1 -j RETURN",
+        "! -s 10.0.0.1 -j RETURN",
+        "! -p tcp -j RETURN",
+        "! ! -o nwg1 -j DROP",
+        "-o nwg1 ! -j DROP",
+        "! -o -j DROP",
         "-j ABCDEFGHIJKLMNOPQRSTUVWXYZ012",
         "-p tcp --dport 70000 -j RETURN",
         "-p tcp --dport 90:80 -j RETURN",
@@ -765,6 +792,7 @@ int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(every_builder_rule_encodes_as_iptables_restore_wrote_it);
     RUN_TEST(an_interface_at_the_length_limit_gets_a_full_mask);
+    RUN_TEST(an_inverted_interface_sets_its_own_bit);
     RUN_TEST(a_mark_without_a_mask_matches_every_bit);
     RUN_TEST(a_rule_outside_the_vocabulary_is_refused);
     RUN_TEST(the_probe_list_names_what_the_encoder_writes);

@@ -19,7 +19,7 @@ const firc_test_xt_fixture_t firc_test_xt_all[] = {
     {"empty", "nat"}, {"firmware", "nat"}, {"firmware-firc", "nat"}, {"firmware-firc-remove", "nat"},
     {"sweep", "nat"}, {"dedupe-seed", "nat"}, {"dedupe", "nat"}, {"kept-seed", "nat"}, {"dnat2000-mark", "nat"},
     {"tiny", "nat"}, {"dnat-mark", "nat"}, {"f-empty", "filter"}, {"f-firmware", "filter"}, {"f-firc", "filter"},
-    {"m-empty", "mangle"}, {"m-firmware", "mangle"}, {"m-firc", "mangle"}, {"m-tap", "mangle"}, {"m-firc2", "mangle"},
+    {"f-egress", "filter"}, {"m-empty", "mangle"}, {"m-firmware", "mangle"}, {"m-firc", "mangle"}, {"m-tap", "mangle"}, {"m-firc2", "mangle"},
 };
 const size_t firc_test_xt_n_all = sizeof(firc_test_xt_all) / sizeof(firc_test_xt_all[0]);
 
@@ -328,13 +328,13 @@ static bool say_addr(out_t *o, bool v6, const char *flag, const uint8_t *addr, c
     return true;
 }
 
-static bool say_iface(out_t *o, const char *flag, const char *name, const uint8_t *mask) {
-    if (name[0] == '\0') { return true; }
+static bool say_iface(out_t *o, const char *flag, const char *name, const uint8_t *mask, bool inv) {
+    if (name[0] == '\0') { return !inv; }
     size_t n = strnlen(name, 16);
     for (size_t i = 0; i < 16; i++) {
         if (mask[i] != (i <= n ? 0xff : 0x00)) { return false; }
     }
-    say(o, " %s %s", flag, name);
+    say(o, "%s %s %s", inv ? " !" : "", flag, name);
     return true;
 }
 
@@ -558,18 +558,20 @@ static bool say_rule(out_t *o, const view_t *v, uint32_t off) {
     if (v6) {
         xt_ip6t_ip6_t ip;
         memcpy(&ip, e, sizeof(ip));
-        if (ip.invflags != 0 || (ip.flags & ~(XT_IP6T_F_PROTO | XT_IP6T_F_GOTO)) != 0) { return false; }
+        if ((ip.invflags & ~(XT_INV_VIA_IN | XT_INV_VIA_OUT)) != 0 || (ip.flags & ~(XT_IP6T_F_PROTO | XT_IP6T_F_GOTO)) != 0) { return false; }
         go = (ip.flags & XT_IP6T_F_GOTO) != 0;
         if (!say_addr(o, true, "-s", ip.src, ip.smsk) || !say_addr(o, true, "-d", ip.dst, ip.dmsk)) { return false; }
-        if (!say_iface(o, "-i", ip.iniface, ip.iniface_mask) || !say_iface(o, "-o", ip.outiface, ip.outiface_mask)) { return false; }
+        if (!say_iface(o, "-i", ip.iniface, ip.iniface_mask, (ip.invflags & XT_INV_VIA_IN) != 0) ||
+            !say_iface(o, "-o", ip.outiface, ip.outiface_mask, (ip.invflags & XT_INV_VIA_OUT) != 0)) { return false; }
         if (ip.proto == 6) { say(o, " -p tcp"); } else if (ip.proto == 17) { say(o, " -p udp"); } else if (ip.proto != 0) { return false; }
     } else {
         xt_ipt_ip_t ip;
         memcpy(&ip, e, sizeof(ip));
-        if (ip.invflags != 0 || (ip.flags & ~XT_IPT_F_GOTO) != 0) { return false; }
+        if ((ip.invflags & ~(XT_INV_VIA_IN | XT_INV_VIA_OUT)) != 0 || (ip.flags & ~XT_IPT_F_GOTO) != 0) { return false; }
         go = (ip.flags & XT_IPT_F_GOTO) != 0;
         if (!say_addr(o, false, "-s", ip.src, ip.smsk) || !say_addr(o, false, "-d", ip.dst, ip.dmsk)) { return false; }
-        if (!say_iface(o, "-i", ip.iniface, ip.iniface_mask) || !say_iface(o, "-o", ip.outiface, ip.outiface_mask)) { return false; }
+        if (!say_iface(o, "-i", ip.iniface, ip.iniface_mask, (ip.invflags & XT_INV_VIA_IN) != 0) ||
+            !say_iface(o, "-o", ip.outiface, ip.outiface_mask, (ip.invflags & XT_INV_VIA_OUT) != 0)) { return false; }
         if (ip.proto == 6) { say(o, " -p tcp"); } else if (ip.proto == 17) { say(o, " -p udp"); } else if (ip.proto != 0) { return false; }
     }
     for (uint32_t m = v->eh; m < toff; m += rd16(e + m)) {

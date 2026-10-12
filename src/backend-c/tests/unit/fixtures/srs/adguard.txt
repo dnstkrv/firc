@@ -1,0 +1,10 @@
+! AdGuard-style DNS filter
+||ads.example.com^
+|exact.example.org^
+tracker.net^
+||wild*card.com^
+|prefix-only
+||nocaret.example
+example.info
+0.0.0.0 host.example
+/^regex[0-9]+\.example$/

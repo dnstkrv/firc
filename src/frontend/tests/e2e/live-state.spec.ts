@@ -31,6 +31,7 @@ const GROUPS = () => [
       sync: { state: "idle", error: "", lastCheck: 1790000000 },
     },
   }),
+  group("0a000007", "Vless", { interface: "tunvless0", live: false, liveReason: "tunnel-down" }),
 ];
 
 async function setup(page: Page) {
@@ -77,7 +78,7 @@ async function setup(page: Page) {
     await route.fulfill({ json: { groups: strip(daemon.groups, withRules) } });
   });
   await page.goto("/");
-  await expect(page.locator(".group")).toHaveCount(6);
+  await expect(page.locator(".group")).toHaveCount(7);
   return daemon;
 }
 
@@ -102,6 +103,7 @@ test.describe("A group's live state", () => {
       ["Speedtest", "no-interface", "unplug"],
       ["Work", "disabled", "power-off"],
       ["Tele2", "not-written", "refresh-cw"],
+      ["Vless", "tunnel-down", "server-off"],
       ["Unavailable", "live", "circle-check"],
     ];
     for (const [name, kind, lucide] of expected) {

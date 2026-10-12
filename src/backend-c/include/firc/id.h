@@ -37,7 +37,17 @@ void firc_id_format(firc_id_t id, char *buf);
 bool firc_id_is_zero(firc_id_t id);
 bool firc_id_equal(firc_id_t a, firc_id_t b);
 
-/* Cryptographically random ID (getrandom, /dev/urandom fallback). */
-firc_id_t firc_id_random(void);
+/* Random non-zero ID from /dev/urandom; FIRC_ERR_SYS if none could be read. */
+firc_err_t firc_id_random(firc_id_t *out);
+
+typedef struct firc_id_pool {
+    uint8_t bytes[1024];
+    size_t at;
+    size_t len;
+} firc_id_pool_t;
+
+/* Next random non-zero ID, refilled 256 at a time by one read; zero-initialise the pool before the first call.
+ * FIRC_ERR_SYS if a refill could not be read. */
+firc_err_t firc_id_pool_next(firc_id_pool_t *pool, firc_id_t *out);
 
 #endif /* FIRC_ID_H */

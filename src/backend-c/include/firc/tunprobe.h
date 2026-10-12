@@ -36,7 +36,7 @@ firc_err_t firc_tunprobe_start(firc_loop_t *loop, const firc_tunprobe_opts_t *o,
 /* Kills and reaps the child; done never runs. NULL-safe, not from inside done. */
 void firc_tunprobe_cancel(firc_tunprobe_t *p);
 
-/* How long a probe of n links may run: 3 s per link plus 5 s. */
+/* How long a probe of n links may run: 6 s per link (a long and a short ClientHello) plus 5 s. */
 int64_t firc_tunprobe_deadline_ms(size_t n);
 
 #endif

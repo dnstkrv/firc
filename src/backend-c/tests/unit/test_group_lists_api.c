@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -494,7 +495,7 @@ static int create_stub_group(const char *path) {
 static firc_group_t *list_group(const char *url, int n_rules) {
     firc_group_t *g = firc_group_new();
     if (g == NULL) { return NULL; }
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->enable = true;
     if (firc_strset(&g->name, "g") != FIRC_OK || firc_strset(&g->iface, "lo") != FIRC_OK) {
         firc_group_free(g);
@@ -513,7 +514,7 @@ static firc_group_t *list_group(const char *url, int n_rules) {
     for (int i = 0; i < n_rules; i++) {
         char text[32];
         snprintf(text, sizeof(text), "r%d.example.com", i);
-        if (firc_sub_rules_push(&g->list->rules, text, "domain", true, firc_id_random()) != FIRC_OK) {
+        if (firc_sub_rules_push(&g->list->rules, text, "domain", true, test_random_id()) != FIRC_OK) {
             firc_group_free(g);
             return NULL;
         }
@@ -730,7 +731,7 @@ static firc_group_t *group_with_rules(const char *id_hex, const rule_spec_t *rul
     }
     for (size_t i = 0; i < n; i++) {
         if (firc_sub_rules_push(&g->list->rules, rules[i].text, rules[i].type, rules[i].enable,
-                                firc_id_random()) != FIRC_OK) {
+                                test_random_id()) != FIRC_OK) {
             firc_group_free(g);
             return NULL;
         }
@@ -1076,6 +1077,57 @@ TEST a_rule_edit_does_not_carry_the_whole_list(void) {
     ASSERTm("the untouched one is untouched", cJSON_IsTrue(jobj(r0, "enable")));
     ASSERTm("and the named one changed", cJSON_IsFalse(jobj(r1, "enable")));
     ASSERT_STR_EQm("the pattern is the list's", "b.example.com", jstr(r1, "rule"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static int post_list_interval(const char *interval) {
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"name\":\"g\",\"list\":{\"url\":\"http://127.0.0.1:%d/list\",\"interval\":%s}}", STUB_PORT, interval);
+    cJSON *out = NULL;
+    int status = do_request("POST", "/api/v1/groups", body, &out);
+    if (status == 200) {
+        double got = jnum(jobj(out, "list"), "interval");
+        char path[64];
+        snprintf(path, sizeof(path), "/api/v1/groups/%s", jstr(out, "id"));
+        do_request("DELETE", path, NULL, NULL);
+        if (got != strtod(interval, NULL)) { status = -2; }
+    }
+    cJSON_Delete(out);
+    return status;
+}
+
+/* Catches: an interval cast to uint32 unchecked, so -1, 2^32, 1e20 or 1.5 become some other period. */
+TEST a_list_interval_outside_uint32_seconds_is_refused(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT_EQ(200, post_list_interval("0"));
+    ASSERT_EQ(200, post_list_interval("4294967295"));
+    ASSERT_EQm("negative", 400, post_list_interval("-1"));
+    ASSERT_EQm("2^32", 400, post_list_interval("4294967296"));
+    ASSERT_EQm("far past", 400, post_list_interval("1e20"));
+    ASSERT_EQm("a fraction", 400, post_list_interval("1.5"));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a list rule edit whose ?save=true write failed answered 200, or the edit not applied. */
+TEST a_rule_edit_whose_save_fails_answers_500(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT(add_two_rule_group(h));
+    h->ctx.config_path = "/nonexistent-firc-dir/firc.conf";
+    char second[16];
+    ASSERT(nth_rule_id(TWO, 1, second, sizeof(second)));
+    char patch[160];
+    snprintf(patch, sizeof(patch), "{\"rules\":[{\"id\":\"%s\",\"enable\":false}]}", second);
+    ASSERT_EQ(500, do_request("PATCH", TWO_RULES "?save=true", patch, NULL));
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", TWO_RULES, NULL, &out));
+    ASSERTm("the edit is applied all the same",
+            cJSON_IsFalse(jobj(cJSON_GetArrayItem(jobj(out, "rules"), 1), "enable")));
     cJSON_Delete(out);
     harness_stop(h);
     PASS();
@@ -2300,6 +2352,8 @@ int main(int argc, char **argv) {
     RUN_TEST(previews_past_two_at_once_are_503);
     RUN_TEST(a_preview_in_flight_at_shutdown_is_ended);
     RUN_TEST(a_rule_edit_does_not_carry_the_whole_list);
+    RUN_TEST(a_rule_edit_whose_save_fails_answers_500);
+    RUN_TEST(a_list_interval_outside_uint32_seconds_is_refused);
     RUN_TEST(a_rule_edit_carries_the_list_through_unchanged);
     RUN_TEST(a_rule_edit_body_is_all_or_nothing);
     RUN_TEST(a_rule_edit_is_checked_the_way_every_other_path_is);

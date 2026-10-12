@@ -14,6 +14,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <time.h>
+#include <pthread.h>
 
 #include "transport.h"
 #include "reality.h"
@@ -60,7 +62,7 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
          * it the Hello looks like an old Chrome, both by size (about 540 bytes instead of about
          * 1760) and by supported_groups. Setting STEER_NOPQ (to any value) turns it off, for
          * debugging a middlebox that drops a Hello longer than one segment. */
-        .pq = !getenv("STEER_NOPQ"),
+        .pq = !getenv("STEER_NOPQ") && !l->nopq,
     };
     /* pqv: an ML-DSA-65 key, base64url. Decoded BEFORE the Hello is sent: a broken key fails the
      * node rather than letting the handshake go on without checking the signature. The
@@ -171,8 +173,92 @@ const struct security_ops *tr_security(const char *name) {
     return &tr_sec_reality;
 }
 
-int tr_link_open(struct tr_link *l, const struct tr_node *n, const char *alpn, int timeout_s) {
+long tr_nopq_ttl_s = 3600;
+long tr_nopq_skip_s = 300;
+
+struct nopq_ent {
+    uint64_t host;
+    uint16_t port;
+    uint8_t used, logged;
+    long until, skip_until;
+    uint64_t seq;
+};
+static struct nopq_ent g_nopq[TR_NOPQ_MAX];
+static uint64_t g_nopq_seq;
+static pthread_mutex_t g_nopq_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static long nopq_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec;
+}
+
+static uint64_t nopq_hash(const char *s) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 0x100000001b3ull;
+    return h;
+}
+
+static struct nopq_ent *nopq_find(uint64_t h, uint16_t port) {
+    for (size_t i = 0; i < TR_NOPQ_MAX; i++)
+        if (g_nopq[i].used && g_nopq[i].host == h && g_nopq[i].port == port) return &g_nopq[i];
+    return NULL;
+}
+
+static struct nopq_ent *nopq_slot(const struct tr_node *n, long now) {
+    uint64_t h = nopq_hash(n->host);
+    struct nopq_ent *e = nopq_find(h, n->port);
+    if (!e) {
+        e = &g_nopq[0];
+        for (size_t i = 0; i < TR_NOPQ_MAX; i++) {
+            struct nopq_ent *c = &g_nopq[i];
+            if (!c->used || (c->until <= now && c->skip_until <= now)) { e = c; break; }
+            if (c->seq < e->seq) e = c;
+        }
+        memset(e, 0, sizeof *e);
+        e->used = 1;
+        e->host = h;
+        e->port = n->port;
+    }
+    e->seq = ++g_nopq_seq;
+    return e;
+}
+
+enum { NOPQ_NONE, NOPQ_SHORT, NOPQ_USELESS };
+
+static int nopq_state(const struct tr_node *n) {
+    long now = nopq_now();
+    pthread_mutex_lock(&g_nopq_mu);
+    struct nopq_ent *e = nopq_find(nopq_hash(n->host), n->port);
+    int r = !e ? NOPQ_NONE : e->until > now ? NOPQ_SHORT : e->skip_until > now ? NOPQ_USELESS : NOPQ_NONE;
+    pthread_mutex_unlock(&g_nopq_mu);
+    return r;
+}
+
+static void nopq_useless(const struct tr_node *n) {
+    long now = nopq_now();
+    pthread_mutex_lock(&g_nopq_mu);
+    nopq_slot(n, now)->skip_until = now + tr_nopq_skip_s;
+    pthread_mutex_unlock(&g_nopq_mu);
+}
+
+static void nopq_remember(const struct tr_node *n) {
+    long now = nopq_now();
+    pthread_mutex_lock(&g_nopq_mu);
+    struct nopq_ent *e = nopq_slot(n, now);
+    e->until = now + tr_nopq_ttl_s;
+    int say = !e->logged;
+    e->logged = 1;
+    pthread_mutex_unlock(&g_nopq_mu);
+    if (say)
+        fprintf(stderr, "tunvless[warn]: node %s:%u does not answer a long ClientHello, using a short one "
+                        "without the post-quantum key share (the long one is tried again in %ld min)\n",
+                n->host, (unsigned)n->port, tr_nopq_ttl_s / 60);
+}
+
+static int link_try(struct tr_link *l, const struct tr_node *n, const char *alpn, int timeout_s, int nopq) {
     l->fd = -1;
+    l->nopq = nopq;
     int fd = tr_dial(n->host, n->port, timeout_s);
     if (fd < 0) return fd;
     l->fd = fd;
@@ -182,4 +268,18 @@ int tr_link_open(struct tr_link *l, const struct tr_node *n, const char *alpn, i
     int rc = tr_security(n->security)->handshake(l, n, alpn);
     if (rc) { close(fd); l->fd = -1; return rc; }
     return 0;
+}
+
+int tr_link_open(struct tr_link *l, const struct tr_node *n, const char *alpn, int timeout_s) {
+    const int pq_able = !getenv("STEER_NOPQ");
+    const int st = pq_able ? nopq_state(n) : NOPQ_NONE;
+    int rc = link_try(l, n, alpn, timeout_s, st == NOPQ_SHORT || !pq_able);
+    if (rc != TLS13_ETIMEOUT || !pq_able || st != NOPQ_NONE) return rc;
+    int rc2 = link_try(l, n, alpn, timeout_s, 1);
+    if (rc2 == 0) {
+        nopq_remember(n);
+        return 0;
+    }
+    if (rc2 == TLS13_ETIMEOUT) nopq_useless(n);
+    return rc;
 }

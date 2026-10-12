@@ -33,6 +33,10 @@ describe("a group's live state", () => {
       "not-written",
     );
     assert.strictEqual(
+      liveKind(enabled, false, { live: false, liveReason: "tunnel-down" }),
+      "tunnel-down",
+    );
+    assert.strictEqual(
       liveKind(enabled, false, { live: false, liveReason: "disabled" }),
       "disabled",
     );
@@ -55,6 +59,7 @@ describe("a group's live state", () => {
       "not-enabled": ["CircleX", "var(--red)"],
       "no-interface": ["Unplug", "var(--orange)"],
       "not-written": ["RefreshCw", "var(--orange)"],
+      "tunnel-down": ["ServerOff", "var(--orange)"],
       disabled: ["PowerOff", "var(--text-2)"],
       unsaved: ["CircleDashed", "var(--text-2)"],
     };
@@ -79,6 +84,18 @@ describe("a group's live state", () => {
       "The group will start working by itself when nwg1 comes up. Or choose another interface for it.",
     ]);
     assert.strictEqual(waiting.footer, true);
+  });
+
+  // Catches tunnel-down falling back to the interface text, or the tunnel's device not named.
+  it("says a tunnel with no node and points to the Tunnels tab", () => {
+    const tip = liveTooltip("tunnel-down", { iface: "tunvless0" }, t, clock);
+    assert.strictEqual(tip.title, "Tunnel tunvless0 has no working node");
+    assert.deepStrictEqual(tip.lines, [
+      "No node of tunnel tunvless0 answers right now, or the tunnel is off or restarting, so the group's sites do not open.",
+      "The group starts working by itself once a node answers. The tunnel's nodes are on the Tunnels tab.",
+    ]);
+    assert.strictEqual(tip.error, undefined);
+    assert.strictEqual(tip.footer, true);
   });
 
   it("says the daemon keeps retrying a group that did not come up", () => {

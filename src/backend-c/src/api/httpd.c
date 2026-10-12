@@ -100,6 +100,8 @@ struct firc_http_conn {
     bool headers_done;
     size_t header_end;
     size_t content_length;
+    bool admitted;
+    size_t discard;
     firc_http_req_t req;
     uint8_t *wbuf;
     size_t wbuf_len;
@@ -414,10 +416,16 @@ static void reset_idle_timer(firc_http_conn_t *c) {
 }
 
 static void conn_reset_for_next_request(firc_http_conn_t *c) {
+    if (c->rbuf_cap > FIRC_HTTPD_MAX_HEADER_BYTES + 1) {
+        free(c->rbuf);
+        c->rbuf = NULL;
+        c->rbuf_cap = 0;
+    }
     c->rbuf_len = 0;
     c->headers_done = false;
     c->header_end = 0;
     c->content_length = 0;
+    c->admitted = false;
     memset(&c->req, 0, sizeof(c->req));
     free(c->wbuf);
     c->wbuf = NULL;
@@ -472,7 +480,7 @@ static bool start_write(firc_http_conn_t *c) {
     }
     fire_after_sent(c);
     c->waiting_writable = false;
-    if (c->close_after_write) {
+    if (c->close_after_write && c->discard == 0) {
         conn_close(c);
         return false;
     }
@@ -834,14 +842,16 @@ static bool parse_headers(firc_http_conn_t *c, firc_http_req_t *req) {
         size_t name_len = (size_t)(colon - hline);
         const char *vstart = colon + 1;
         size_t vlen = hlen - name_len - 1;
-        while (vlen > 0 && *vstart == ' ') {
+        while (vlen > 0 && (*vstart == ' ' || *vstart == '\t')) {
             vstart++;
             vlen--;
         }
+        while (vlen > 0 && (vstart[vlen - 1] == ' ' || vstart[vlen - 1] == '\t')) { vlen--; }
         if (name_len >= sizeof(req->headers[0].name)) { continue; }
         kv_t *h = &req->headers[req->n_headers];
         memcpy(h->name, hline, name_len);
         h->name[name_len] = '\0';
+        if (vlen >= sizeof(h->value) && strcasecmp(h->name, "Content-Length") == 0) { return false; }
         size_t copy_len = vlen < sizeof(h->value) - 1 ? vlen : sizeof(h->value) - 1;
         memcpy(h->value, vstart, copy_len);
         h->value[copy_len] = '\0';
@@ -870,7 +880,7 @@ static void handle_complete_request(firc_http_conn_t *c) {
     c->in_dispatch = true;
 
     bool proceed = true;
-    if (c->server->middleware) {
+    if (c->server->middleware && !c->admitted) {
         proceed = c->server->middleware(req, &res, c->server->middleware_ud);
     }
     if (proceed) {
@@ -923,6 +933,42 @@ static void handle_complete_request(firc_http_conn_t *c) {
     (void)start_write(c);
 }
 
+static bool parse_length(const char *s, size_t *out) {
+    if (*s == '\0') { return false; }
+    size_t n = 0;
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '9') { return false; }
+        size_t d = (size_t)(*s - '0');
+        if (n > (SIZE_MAX - d) / 10) { return false; }
+        n = n * 10 + d;
+    }
+    *out = n;
+    return true;
+}
+
+static bool admit_body(firc_http_conn_t *c) {
+    if (c->server->middleware == NULL || c->content_length == 0) { return true; }
+    firc_http_res_t res = {0};
+    res.status = 200;
+    res.conn = c;
+    if (c->server->middleware(&c->req, &res, c->server->middleware_ud)) {
+        free(res.body);
+        c->admitted = true;
+        return true;
+    }
+    c->close_after_write = true;
+    size_t arrived = c->rbuf_len - c->header_end;
+    c->discard = arrived < c->content_length ? c->content_length - arrived : 0;
+    if (!build_response_bytes(c, &res, false)) {
+        free(res.body);
+        conn_close(c);
+        return false;
+    }
+    free(res.body);
+    (void)start_write(c);
+    return false;
+}
+
 static void on_conn_readable(firc_loop_t *loop, int fd, uint32_t events, void *ud) {
     (void)loop;
     firc_http_conn_t *c = ud;
@@ -936,6 +982,21 @@ static void on_conn_readable(firc_loop_t *loop, int fd, uint32_t events, void *u
         return;
     }
     reset_idle_timer(c);
+
+    while (c->discard > 0) {
+        uint8_t sink[4096];
+        ssize_t n = recv(fd, sink, c->discard < sizeof(sink) ? c->discard : sizeof(sink), 0);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { return; }
+        if (n <= 0) {
+            conn_close(c);
+            return;
+        }
+        c->discard -= (size_t)n;
+        if (c->discard == 0) {
+            conn_close(c);
+            return;
+        }
+    }
 
     for (;;) {
         size_t cap_needed = c->headers_done ? c->header_end + c->content_length
@@ -994,7 +1055,13 @@ static void on_conn_readable(firc_loop_t *loop, int fd, uint32_t events, void *u
                     return;
                 }
                 const char *cl = find_header(c->req.headers, c->req.n_headers, "Content-Length");
-                if (cl) { c->content_length = (size_t)strtoul(cl, NULL, 10); }
+                if (cl && !parse_length(cl, &c->content_length)) {
+                    static const char bad[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: "
+                                              "0\r\nConnection: close\r\n\r\n";
+                    send(fd, bad, strlen(bad), MSG_NOSIGNAL);
+                    conn_close(c);
+                    return;
+                }
                 if (c->content_length > FIRC_HTTPD_MAX_BODY_BYTES) {
                     static const char resp[] =
                         "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n"
@@ -1003,6 +1070,7 @@ static void on_conn_readable(firc_loop_t *loop, int fd, uint32_t events, void *u
                     conn_close(c);
                     return;
                 }
+                if (!admit_body(c)) { return; }
             } else if (c->rbuf_len >= FIRC_HTTPD_MAX_HEADER_BYTES) {
                 static const char resp[] =
                     "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: "

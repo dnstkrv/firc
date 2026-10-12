@@ -1,0 +1,20 @@
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:ACME_FWD - [0:0]
+:FIRC_EGRESS - [0:0]
+:_NDM_ACL_IN - [0:0]
+:_NDM_FORWARD - [0:0]
+-A INPUT -j _NDM_ACL_IN
+-A FORWARD -j FIRC_EGRESS
+-A FORWARD -j ACME_FWD
+-A FORWARD -j _NDM_FORWARD
+-A ACME_FWD -i br0 -o ppp0 -j ACCEPT
+-A FIRC_EGRESS -m mark --mark 0x0/0x40000000 -j RETURN
+-A FIRC_EGRESS ! -i nwg1 ! -o nwg1 -m mark --mark 0x40010000/0x40ff0000 -m conntrack --ctdir ORIGINAL -j DROP
+-A FIRC_EGRESS -m mark --mark 0x40030000/0x40ff0000 -m conntrack --ctdir ORIGINAL -j DROP
+-A _NDM_ACL_IN -i br0 -j ACCEPT
+-A _NDM_FORWARD -o ppp0 -m mark --mark 0x1/0x1 -j DROP
+-A _NDM_FORWARD -o ppp0 -j ACCEPT
+COMMIT

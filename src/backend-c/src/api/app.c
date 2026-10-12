@@ -133,6 +133,8 @@ struct firc_app {
     firc_devsel_policy_fn tap_policy;
     firc_devsel_device_fn tap_device;
     void *tap_resolver_ud;
+    firc_app_tunnel_down_fn tunnel_down;
+    void *tunnel_down_ud;
     firc_ruleset_lookup_t lookup; /* filled after the rulesets exist; read on the loop thread when a selector renders */
 
     bool pass_refused;
@@ -993,7 +995,11 @@ bool firc_app_group_live(const firc_app_t *app, firc_id_t id, const char **reaso
         why = "disabled";
     } else if (rs == NULL || !firc_ruleset_runtime_enabled(rs)) {
         why = "not-enabled";
-    } else if (!firc_ruleset_routed(rs) || !iface_link_up(app, firc_ruleset_group(rs)->iface)) {
+    } else if (!firc_ruleset_routed(rs)) {
+        why = "no-interface";
+    } else if (app->tunnel_down != NULL && app->tunnel_down(app->tunnel_down_ud, firc_ruleset_group(rs)->iface)) {
+        why = "tunnel-down";
+    } else if (!iface_link_up(app, firc_ruleset_group(rs)->iface)) {
         why = "no-interface"; /* routing itself does not read the link; the table's blackhole default routes nowhere either way */
     } else {
         /* no false live: before the first pass, or after 5s of failures, the chain may not be in the kernel */
@@ -2346,8 +2352,6 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
 
     err = firc_port_remap_prepare_iptables(app->port_remap);
     if (err != FIRC_OK) { return err; }
-    err = firc_app_stage_pool_reject(app);
-    if (err != FIRC_OK) { return err; }
 
     err = firc_app_stage_tap(app); /* every pass while a capture runs: the pass after a rewrite puts its rules back */
     if (err != FIRC_OK) { return err; }
@@ -2357,6 +2361,8 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
         err = firc_ruleset_prepare_iptables(app->rulesets[i]);
         if (err != FIRC_OK) { return err; }
     }
+    err = firc_app_stage_pool_reject(app);
+    if (err != FIRC_OK) { return err; }
 
     /* every mapping from this pass's snapshot, routed groups only; a non-routed group dies on the unreachable route */
     const char *prefix = app->cfg->app.netfilter.iptables.chain_prefix;
@@ -2614,6 +2620,12 @@ void firc_app_set_device_lookup(firc_app_t *app, firc_devsel_mark_fn mark, firc_
     app->lookup.policy_hosts = policy_hosts;
     app->lookup.policy_nets = policy_nets;
     app->lookup.ud = ud;
+}
+
+void firc_app_set_tunnel_down(firc_app_t *app, firc_app_tunnel_down_fn down, void *ud) {
+    if (app == NULL) { return; }
+    app->tunnel_down = down;
+    app->tunnel_down_ud = ud;
 }
 
 void firc_app_set_policies_read(firc_app_t *app, bool (*read)(void *ud)) {

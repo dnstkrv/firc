@@ -306,6 +306,7 @@ TEST one_familys_failure_does_not_cost_the_other_its_refresh(void) {
     fake_rtnl_set_link_flags(f.kernel, IFF_UP);
     f.link = firc_ipset_to_link_new("FIRC_g1", "lo", f.ipt, ipt6, f.rtnl, 100, NULL, "g1", NULL, NULL);
     ASSERT(f.link != NULL);
+    fake_rtnl_add_addr(f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
@@ -324,6 +325,115 @@ TEST one_familys_failure_does_not_cost_the_other_its_refresh(void) {
     fake_rtnl_stop(f.kernel);
     firc_ipt_free(f.ipt);
     firc_ipt_free(ipt6);
+    PASS();
+}
+
+typedef struct {
+    fixture_t f;
+    firc_fake_ipt_t *fipt6;
+    firc_ipt_t *ipt6;
+} dual_t;
+
+static bool up_dual(dual_t *d) {
+    memset(d, 0, sizeof(*d));
+    d->f.fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    d->fipt6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
+    if (d->f.fipt == NULL || d->fipt6 == NULL) { return false; }
+    d->f.ipt = firc_ipt_new(firc_fake_ipt_as_xt(d->f.fipt), "FIRC_");
+    d->ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(d->fipt6), "FIRC_");
+    if (d->f.ipt == NULL || d->ipt6 == NULL) { return false; }
+    firc_netfilter_register_base_chains(d->f.ipt, d->ipt6);
+    d->f.kernel = fake_rtnl_start(&d->f.rtnl);
+    if (d->f.kernel == NULL) { return false; }
+    fake_rtnl_set_link_flags(d->f.kernel, IFF_UP);
+    fake_rtnl_add_addr(d->f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    const uint8_t gw[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(d->f.kernel, 1, gw, 4);
+    d->f.link = firc_ipset_to_link_new("FIRC_g1", "lo", d->f.ipt, d->ipt6, d->f.rtnl, 100, NULL, "g1", NULL, NULL);
+    return d->f.link != NULL && firc_ipset_to_link_enable(d->f.link, NULL) == FIRC_OK;
+}
+
+static void down_dual(dual_t *d) {
+    down(&d->f);
+    firc_ipt_free(d->ipt6);
+}
+
+static size_t iface_routes_since(fixture_t *f, size_t from, int family) {
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f->kernel, m, 64), c = 0;
+    for (size_t i = from; i < n && i < 64; i++) {
+        if (m[i].type == RTM_NEWROUTE && m[i].rtm_type == RTN_UNICAST && m[i].family == family && m[i].oif == 1) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a refused blackhole of either family on link-up costing the group its defaults. */
+TEST a_refused_blackhole_on_link_up_still_writes_both_defaults(void) {
+    for (unsigned refused = 0; refused < 2; refused++) {
+        dual_t d;
+        ASSERT(up_dual(&d));
+        size_t before = fake_rtnl_messages(d.f.kernel, NULL, 0);
+        fake_rtnl_fail_after_of(d.f.kernel, RTM_NEWROUTE, EPERM, refused);
+        ASSERT_FALSEm("the refusal is reported", firc_ipset_to_link_on_link_up(d.f.link) == FIRC_OK);
+        ASSERT_EQ_FMTm("the v4 default was written", (size_t)1, iface_routes_since(&d.f, before, AF_INET), "%zu");
+        ASSERT_EQ_FMTm("and the v6 one", (size_t)1, iface_routes_since(&d.f, before, AF_INET6), "%zu");
+        down_dual(&d);
+    }
+    PASS();
+}
+
+/* Catches: a link-up whose interface lookup was refused reported as done. */
+TEST a_refused_interface_lookup_on_link_up_is_reported(void) {
+    dual_t d;
+    ASSERT(up_dual(&d));
+    fake_rtnl_fail_next_of(d.f.kernel, RTM_GETLINK, EPERM);
+    ASSERT_EQ_FMT(firc_err_from_errno(EPERM), firc_ipset_to_link_on_link_up(d.f.link), "%d");
+    down_dual(&d);
+    PASS();
+}
+
+/* Catches: a refused v4 default on link-up costing the v6 group its default. */
+TEST a_refused_v4_default_on_link_up_still_writes_the_v6_one(void) {
+    dual_t d;
+    ASSERT(up_dual(&d));
+    size_t before = fake_rtnl_messages(d.f.kernel, NULL, 0);
+    fake_rtnl_fail_after_of(d.f.kernel, RTM_NEWROUTE, EPERM, 2);
+    ASSERT_FALSEm("the refusal is reported", firc_ipset_to_link_on_link_up(d.f.link) == FIRC_OK);
+    ASSERT_EQ_FMTm("the v6 default was written", (size_t)1, iface_routes_since(&d.f, before, AF_INET6), "%zu");
+    down_dual(&d);
+    PASS();
+}
+
+/* Catches: a link going down under the write read as a failure, or its purged route still taken as present. */
+TEST a_link_down_under_the_write_is_a_skip_not_an_error(void) {
+    fixture_t f;
+    ASSERT(up(&f, IFF_UP));
+    const uint8_t gw_a[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT(firc_ipset_to_link_has_iface_route(f.link, AF_INET));
+    fake_rtnl_fail_next_of(f.kernel, RTM_NEWROUTE, ENETDOWN);
+    ASSERT_EQ_FMT(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link), "%d");
+    ASSERT_FALSEm("the route is not there", firc_ipset_to_link_has_iface_route(f.link, AF_INET));
+    down(&f);
+    PASS();
+}
+
+/* Catches: an unreachable gateway taken as a missing route, so a disable leaves the old default behind. */
+TEST an_unreachable_gateway_is_reported_and_the_old_route_still_deleted(void) {
+    fixture_t f;
+    ASSERT(up(&f, IFF_UP));
+    const uint8_t gw_a[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    fake_rtnl_fail_next_of(f.kernel, RTM_NEWROUTE, ENETUNREACH);
+    ASSERT_EQ_FMT(firc_err_from_errno(ENETUNREACH), firc_ipset_to_link_on_addr_change(f.link), "%d");
+    ASSERTm("the refused replace left the old route", firc_ipset_to_link_has_iface_route(f.link, AF_INET));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
+    ASSERT_EQ_FMTm("the disable deletes it", (size_t)1, iface_routes(&f, RTM_DELROUTE), "%zu");
+    down(&f);
     PASS();
 }
 
@@ -702,6 +812,146 @@ TEST no_twin_for_a_blackhole_group_or_for_ipv6(void) {
     PASS();
 }
 
+typedef struct {
+    fixture_t f;
+    firc_fake_ipt_t *fipt6;
+    firc_ipt_t *ipt6;
+} carrier_t;
+
+static bool up_carrier(carrier_t *d, unsigned link_flags) {
+    memset(d, 0, sizeof(*d));
+    if (!up(&d->f, link_flags)) { return false; }
+    d->fipt6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
+    d->ipt6 = d->fipt6 ? firc_ipt_new(firc_fake_ipt_as_xt(d->fipt6), "FIRC_") : NULL;
+    if (d->ipt6 == NULL) { return false; }
+    firc_netfilter_register_base_chains(d->f.ipt, d->ipt6);
+    firc_ipset_to_link_free(d->f.link);
+    d->f.link = firc_ipset_to_link_new("FIRC_g1", "lo", d->f.ipt, d->ipt6, d->f.rtnl, 100, NULL, "g1", NULL, NULL);
+    return d->f.link != NULL;
+}
+
+static void down_carrier(carrier_t *d) {
+    down(&d->f);
+    firc_ipt_free(d->ipt6);
+}
+
+static size_t v6_routes(carrier_t *d, uint16_t type, uint8_t rtm_type, uint32_t priority) {
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(d->f.kernel, m, 64), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type == type && m[i].family == AF_INET6 && m[i].rtm_type == rtm_type && m[i].dst_len == 0 &&
+            m[i].priority == priority && m[i].table == 100) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a v6 device default written for an interface with no IPv6, or its fallback left a silent blackhole. */
+TEST an_interface_without_ipv6_gets_an_unreachable_v6_table(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_LINK, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERT_EQ_FMTm("no v6 device default", (size_t)0, v6_routes(&d, RTM_NEWROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT_EQ_FMTm("the v6 default is unreachable", (size_t)1, v6_routes(&d, RTM_NEWROUTE, RTN_UNREACHABLE, 20), "%zu");
+    ASSERT_EQ_FMTm("no v6 blackhole", (size_t)0, v6_routes(&d, RTM_NEWROUTE, RTN_BLACKHOLE, 20), "%zu");
+    ASSERT_FALSEm("the table has no v6 route through the interface", firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    ASSERTm("v4 is untouched", firc_ipset_to_link_has_iface_route(d.f.link, AF_INET));
+
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(d.f.link));
+    ASSERT_EQ_FMTm("the teardown takes the unreachable back", (size_t)1, v6_routes(&d, RTM_DELROUTE, RTN_UNREACHABLE, 20), "%zu");
+    down_carrier(&d);
+    PASS();
+}
+
+/* Catches: a usable global v6 address on the interface not read as carrying IPv6. */
+TEST a_global_v6_address_makes_the_interface_carry_ipv6(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 2, RT_SCOPE_UNIVERSE, 0);
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERT_EQ_FMT((size_t)1, v6_routes(&d, RTM_NEWROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+    PASS();
+}
+
+/* Catches: another interface's global address, or a tentative or failed one, read as this one's IPv6. */
+TEST a_tunnel_with_only_link_local_or_unready_v6_carries_none(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 2, RT_SCOPE_UNIVERSE, 0);
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_LINK, 0);
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, IFA_F_TENTATIVE);
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, IFA_F_DADFAILED);
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_HOST, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERT_EQ_FMT((size_t)0, v6_routes(&d, RTM_NEWROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT_FALSE(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+    PASS();
+}
+
+/* Catches: a WAN whose IPv6 is a default route over link-local (prefix delegated to the LAN) read as v4-only. */
+TEST a_v6_default_through_the_interface_makes_it_carry_ipv6(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_LINK, 0);
+    const uint8_t any6[16] = {0};
+    fake_rtnl_add_route(d.f.kernel, AF_INET6, RT_TABLE_MAIN, RTN_UNICAST, RTPROT_BOOT, any6, 0, 1024);
+    fake_rtnl_route_via(d.f.kernel, 1, NULL, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERT_EQ_FMT((size_t)1, v6_routes(&d, RTM_NEWROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    const uint8_t router6[16] = {0xfe, 0x80, [15] = 1};
+    fake_rtnl_set_gateway(d.f.kernel, 1, router6, 16);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERTm("a default via a link-local router", firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+    PASS();
+}
+
+/* Catches: an address event that leaves the v6 default after the address went, or never brings it back. */
+TEST an_address_event_flips_the_v6_route_both_ways(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    ASSERT(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+
+    fake_rtnl_clear_addrs(d.f.kernel);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(d.f.link));
+    ASSERT_EQ_FMTm("the device default is deleted", (size_t)1, v6_routes(&d, RTM_DELROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT_FALSE(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    ASSERT_EQ_FMTm("the unreachable stays", (size_t)0, v6_routes(&d, RTM_DELROUTE, RTN_UNREACHABLE, 20), "%zu");
+
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(d.f.link));
+    ASSERT_EQ_FMTm("written again", (size_t)2, v6_routes(&d, RTM_NEWROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+    PASS();
+}
+
+/* Catches: an address lookup that failed read as "no IPv6", deleting a working v6 default. */
+TEST a_failed_address_lookup_keeps_the_v6_route(void) {
+    carrier_t d;
+    ASSERT(up_carrier(&d, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(d.f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(d.f.link, NULL));
+    fake_rtnl_fail_next_of(d.f.kernel, RTM_GETADDR, EPERM);
+    ASSERT_FALSE(firc_ipset_to_link_on_addr_change(d.f.link) == FIRC_OK);
+    ASSERT_EQ_FMT((size_t)0, v6_routes(&d, RTM_DELROUTE, RTN_UNICAST, 10), "%zu");
+    ASSERT(firc_ipset_to_link_has_iface_route(d.f.link, AF_INET6));
+    down_carrier(&d);
+    PASS();
+}
+
 /* Whether `table`/`base` holds a rule jumping to FIRC_g1. */
 static bool jumps_to_g1(fixture_t *f, const char *table, const char *base) {
     firc_ipt_rule_t *const *rules = NULL;
@@ -815,11 +1065,16 @@ int main(int argc, char **argv) {
     RUN_TEST(the_teardown_deletes_the_route_by_the_gateway_it_last_wrote);
     RUN_TEST(a_failed_gateway_lookup_keeps_the_gateway_last_written);
     RUN_TEST(an_enodev_skip_does_not_forget_the_gateway);
+    RUN_TEST(a_link_down_under_the_write_is_a_skip_not_an_error);
+    RUN_TEST(an_unreachable_gateway_is_reported_and_the_old_route_still_deleted);
     RUN_TEST(the_lookup_never_reads_the_groups_own_default_back);
     RUN_TEST(a_default_that_lost_its_gateway_for_good_is_followed);
     RUN_TEST(a_reject_default_on_the_interface_is_not_a_gatewayless_one);
     RUN_TEST(an_event_while_the_link_is_down_writes_nothing);
     RUN_TEST(one_familys_failure_does_not_cost_the_other_its_refresh);
+    RUN_TEST(a_refused_blackhole_on_link_up_still_writes_both_defaults);
+    RUN_TEST(a_refused_interface_lookup_on_link_up_is_reported);
+    RUN_TEST(a_refused_v4_default_on_link_up_still_writes_the_v6_one);
     RUN_TEST(the_gateway_is_the_interfaces_default_from_main_at_its_lowest_metric);
     RUN_TEST(a_default_route_that_vanished_keeps_the_gateway_last_written);
     RUN_TEST(a_group_that_never_saw_a_gateway_writes_a_device_route);
@@ -834,6 +1089,12 @@ int main(int argc, char **argv) {
     RUN_TEST(no_twin_for_a_blackhole_group_or_for_ipv6);
     RUN_TEST(disable_takes_back_the_rule_the_routes_and_the_chains);
     RUN_TEST(enable_writes_the_rules_and_leaves_the_chain_to_the_pass);
+    RUN_TEST(an_interface_without_ipv6_gets_an_unreachable_v6_table);
+    RUN_TEST(a_global_v6_address_makes_the_interface_carry_ipv6);
+    RUN_TEST(a_tunnel_with_only_link_local_or_unready_v6_carries_none);
+    RUN_TEST(a_v6_default_through_the_interface_makes_it_carry_ipv6);
+    RUN_TEST(an_address_event_flips_the_v6_route_both_ways);
+    RUN_TEST(a_failed_address_lookup_keeps_the_v6_route);
     RUN_TEST(disable_takes_the_rules_and_leaves_the_chain);
     RUN_TEST(a_failed_enable_names_its_step);
     RUN_TEST(an_enable_that_rolls_back_writes_no_iptables);

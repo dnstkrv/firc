@@ -22,10 +22,11 @@ static int parse_dec(const char *s, size_t len)
         if (s[i] < '0' || s[i] > '9') {
             return -1;
         }
-        n = n * 10 + (s[i] - '0');
-        if (n > 999999999) {
+        int d = s[i] - '0';
+        if (n > (999999999 - d) / 10) {
             return -1;
         }
+        n = n * 10 + d;
     }
     return n;
 }
@@ -360,13 +361,15 @@ static char *trim(char *s)
     return s;
 }
 
-static firc_id_t next_unique_id(firc_id_set_t *used)
+static firc_err_t next_unique_id(firc_id_set_t *used, firc_id_pool_t *pool, firc_id_t *out)
 {
     for (;;) {
-        firc_id_t candidate = firc_id_random();
+        firc_id_t candidate;
+        firc_err_t err = firc_id_pool_next(pool, &candidate);
+        if (err != FIRC_OK) { return err; }
         if (!firc_id_set_contains(used, candidate)) {
-            (void)firc_id_set_add(used, candidate);
-            return candidate;
+            *out = candidate;
+            return firc_id_set_add(used, candidate);
         }
     }
 }
@@ -376,6 +379,7 @@ struct firc_sub_sink {
     firc_sub_rules_t *out;
     idx_set_t *seen;
     firc_id_set_t *used;
+    firc_id_pool_t *ids;
 };
 
 firc_err_t firc_sub_sink_take(firc_sub_sink_t *s, char *piece, const char *type, const char *proto,
@@ -433,7 +437,9 @@ firc_err_t firc_sub_sink_take(firc_sub_sink_t *s, char *piece, const char *type,
     if (idx_set_find(s->seen, h, s->out, eq_type_text, &key, NULL) != NULL) {
         *took = true;
     } else {
-        err = firc_sub_rules_push_spec(s->out, text, t, true, next_unique_id(s->used), proto, ports);
+        firc_id_t id;
+        err = next_unique_id(s->used, s->ids, &id);
+        if (err == FIRC_OK) { err = firc_sub_rules_push_spec(s->out, text, t, true, id, proto, ports); }
         if (err == FIRC_OK) { err = idx_set_insert(s->seen, h, (uint32_t)(s->out->n - 1), NULL); }
         if (err == FIRC_OK) { *took = true; }
     }
@@ -490,10 +496,11 @@ static firc_err_t parse_lines(char *copy, firc_sub_sink_t *sink, size_t *dropped
     return FIRC_OK;
 }
 
-firc_err_t firc_sub_parse_rules_stats(const char *list, firc_sub_rules_t *out, firc_sub_parse_stats_t *st,
-                                      firc_sub_parse_progress_fn progress, void *ud)
+firc_err_t firc_sub_parse_rules_stats(const char *list, size_t len, firc_sub_rules_t *out,
+                                      firc_sub_parse_stats_t *st, firc_sub_parse_progress_fn progress, void *ud)
 {
     memset(st, 0, sizeof(*st));
+    bool srs = firc_sub_body_is_srs(list, len);
     const char *p = list;
     if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) { p += 3; }
     while (*p != '\0' && isspace((unsigned char)*p)) { p++; }
@@ -507,10 +514,13 @@ firc_err_t firc_sub_parse_rules_stats(const char *list, firc_sub_rules_t *out, f
     firc_sub_rules_init(&rs);
     idx_set_t seen = {NULL, 0, 0};
     firc_id_set_t used = {NULL, 0, 0};
-    firc_sub_sink_t sink = {&rs, &seen, &used};
+    firc_id_pool_t ids = {0};
+    firc_sub_sink_t sink = {&rs, &seen, &used, &ids};
 
     firc_err_t err;
-    if (*p == '{') {
+    if (srs) {
+        err = firc_sub_parse_srs(list, len, &sink, st, progress, ud);
+    } else if (*p == '{') {
         err = firc_sub_parse_singbox(p, &sink, st, progress, ud);
     } else {
         char *copy = strdup(list);
@@ -534,7 +544,7 @@ firc_err_t firc_sub_parse_rules_progress(const char *list, firc_sub_rules_t *out
                                          firc_sub_parse_progress_fn progress, void *ud)
 {
     firc_sub_parse_stats_t st;
-    firc_err_t err = firc_sub_parse_rules_stats(list, out, &st, progress, ud);
+    firc_err_t err = firc_sub_parse_rules_stats(list, strlen(list), out, &st, progress, ud);
     if (out_dropped != NULL) { *out_dropped = err == FIRC_OK ? st.dropped : 0; }
     return err;
 }
@@ -560,12 +570,13 @@ static uint32_t stored_find(const idx_set_t *by_text, const firc_sub_rules_t *ex
     return peeled != NULL ? peeled->idx : IDX_EMPTY;
 }
 
-firc_err_t firc_sub_refresh_rules(const char *list, const firc_sub_rules_t *existing,
+firc_err_t firc_sub_refresh_rules(const char *list, size_t len, const firc_sub_rules_t *existing,
                                   firc_sub_rules_t *out)
 {
     firc_sub_rules_t rs;
     firc_sub_rules_init(&rs);
-    firc_err_t err = firc_sub_parse_rules(list, &rs);
+    firc_sub_parse_stats_t st;
+    firc_err_t err = firc_sub_parse_rules_stats(list, len, &rs, &st, NULL, NULL);
     if (err == FIRC_OK) {
         err = firc_sub_rules_inherit(&rs, existing);
     }
@@ -586,6 +597,7 @@ firc_err_t firc_sub_rules_inherit(firc_sub_rules_t *rs, const firc_sub_rules_t *
     /* indexed by text (the hash), compared by list_type+text+spec (eq_text); first occurrence wins */
     idx_set_t by_text = {NULL, 0, 0};
     firc_id_set_t used = {NULL, 0, 0};
+    firc_id_pool_t ids = {0};
     firc_err_t err = FIRC_OK;
     if ((err = idx_set_reserve(&by_text, existing->n)) != FIRC_OK) { goto done; }
     for (size_t i = 0; i < existing->n; i++) {
@@ -617,7 +629,7 @@ firc_err_t firc_sub_rules_inherit(firc_sub_rules_t *rs, const firc_sub_rules_t *
             }
         }
         if (firc_id_is_zero(rs->v[i].id) || firc_id_set_contains(&used, rs->v[i].id)) {
-            rs->v[i].id = next_unique_id(&used);
+            if ((err = next_unique_id(&used, &ids, &rs->v[i].id)) != FIRC_OK) { break; }
             continue;
         }
         if ((err = firc_id_set_add(&used, rs->v[i].id)) != FIRC_OK) {

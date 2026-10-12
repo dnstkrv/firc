@@ -1,0 +1,7 @@
+*filter
+:FIRC_EGRESS - [0:0]
+-A FIRC_EGRESS -m mark --mark 0x0/0x40000000 -j RETURN
+-A FIRC_EGRESS ! -i nwg1 ! -o nwg1 -m mark --mark 0x40010000/0x40ff0000 -m conntrack --ctdir ORIGINAL -j DROP
+-A FIRC_EGRESS -m mark --mark 0x40030000/0x40ff0000 -m conntrack --ctdir ORIGINAL -j DROP
+-I FORWARD 1 -j FIRC_EGRESS
+COMMIT

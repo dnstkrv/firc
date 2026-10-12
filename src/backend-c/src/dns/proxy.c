@@ -88,6 +88,9 @@ struct firc_dnsproxy {
 
     _Atomic uint64_t inflight;
     _Atomic uint64_t dropped;
+    uint64_t drop_warn_ms;
+    uint64_t drop_warn_base;
+    bool drop_warned;
 
     struct exchange *held_head;
     size_t n_held;
@@ -263,6 +266,20 @@ static uint64_t mono_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+#define DROP_WARN_INTERVAL_MS 10000u
+
+static void note_drop(firc_dnsproxy_t *p)
+{
+    uint64_t total = atomic_fetch_add(&p->dropped, 1) + 1;
+    uint64_t now = p->cache_now();
+    if (p->drop_warned && now - p->drop_warn_ms < DROP_WARN_INTERVAL_MS) { return; }
+    FIRC_WARN("dns proxy: in-flight budget full, dropped %llu since the last warning (app.dnsProxy.maxConcurrent %u)",
+              (unsigned long long)(total - p->drop_warn_base), p->cfg.max_concurrent);
+    p->drop_warned = true;
+    p->drop_warn_ms = now;
+    p->drop_warn_base = total;
 }
 
 static uint32_t leg_timeout_ms(const exchange_t *ex)
@@ -1525,7 +1542,7 @@ static void on_udp_readable(firc_loop_t *loop, int fd, uint32_t events,
 
         uint64_t cur = atomic_load(&p->inflight);
         if (cur >= p->cfg.max_concurrent) {
-            atomic_fetch_add(&p->dropped, 1);
+            note_drop(p);
             continue;
         }
 
@@ -1663,7 +1680,7 @@ static void on_tcp_accept(firc_loop_t *loop, int fd, uint32_t events, void *ud)
             return;
         }
         if (atomic_load(&p->inflight) >= p->cfg.max_concurrent) {
-            atomic_fetch_add(&p->dropped, 1);
+            note_drop(p);
             close(cfd);
             continue;
         }

@@ -755,8 +755,8 @@ static int g_trace;
  * pool.
  *
  * The pool is refilled ONLY when a SYN arrives: a quiet router makes no background handshakes.
- * Browsers open connections in bursts: the first SYN of a burst takes a spare left from earlier
- * activity, or (cold start) goes the usual way and starts a refill; the rest get ready sessions.
+ * Browsers open connections in bursts: the first SYN after a quiet spell (SPARE_TTL_MS) goes the
+ * usual way and starts no refill, the next one starts it, and the rest get ready sessions.
  *
  * The lifetime is short not by our choice: Xray closes a connection that has not sent a VLESS
  * request within its handshake timeout, 4 s by default. An older spare is taken as dead without
@@ -783,9 +783,14 @@ static pthread_mutex_t g_spare_mu = PTHREAD_MUTEX_INITIALIZER;
  * threads start, read-only after. Also 0 for a dialer without DC_PRECONNECT: a link that needs
  * the destination cannot be prepared in advance. */
 static int g_spare_want;
-/* The last failed spare connect: while the node does not answer, refilling the pool only keeps
+/* The last failed connect: while the node does not answer, refilling the pool only keeps
  * the connectors busy with doomed attempts, racing live jobs. */
 static uint64_t g_spare_fail_ns;
+static unsigned g_spare_fail_n;
+#define SPARE_PAUSE_MS 5000
+#define SPARE_PAUSE_MAX_MS 60000
+static uint64_t g_spare_syn_ns;
+static uint64_t g_spare_clock_ns;
 
 /* The session is passed as a pointer, not computed by the connector from an index: g_sess is
  * per thread, and SESS() in another thread would address another thread's table — a bug that
@@ -803,6 +808,20 @@ static struct {
     pthread_cond_t cv;
     int started;
 } g_cq = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
+
+static uint64_t spare_now(void) { return g_spare_clock_ns ? g_spare_clock_ns : now_ns(); }
+
+static void spare_note(int ok) {
+    pthread_mutex_lock(&g_spare_mu);
+    if (ok) {
+        g_spare_fail_n = 0;
+        g_spare_fail_ns = 0;
+    } else {
+        if (g_spare_fail_n < 32) g_spare_fail_n++;
+        g_spare_fail_ns = spare_now();
+    }
+    pthread_mutex_unlock(&g_spare_mu);
+}
 
 static void *connector(void *arg) {
     (void)arg;
@@ -822,19 +841,20 @@ static void *connector(void *arg) {
             int rc = g_dl->ops->connect(g_dl->ctx, j.sess, CONNECT_TIMEOUT_S);
             pthread_mutex_lock(&g_spare_mu);
             if (rc == 0) {
-                sp->born_ns = now_ns();
+                sp->born_ns = spare_now();
                 sp->state = SPARE_READY;
             } else {
                 sp->state = SPARE_EMPTY;
-                g_spare_fail_ns = now_ns();
             }
             pthread_mutex_unlock(&g_spare_mu);
+            spare_note(rc == 0);
             continue;
         }
 
         /* The dialer also reports the outcome to node health checking (a series of failures
          * brings a check forward): whether the node is alive is its measure. */
         int rc = g_dl->ops->connect(g_dl->ctx, j.sess, CONNECT_TIMEOUT_S);
+        spare_note(rc == 0);
         j.c->rc = rc;
         /* RELEASE: the loop reads done with ACQUIRE, and everything written into the session
          * above must be visible to it by then. */
@@ -909,7 +929,7 @@ static int connq_push(const struct connjob *j) {
  * SYNs come by tens per second, not thousands. */
 static int spare_checkout(void *out) {
     const struct dialer_ops *d = g_dl->ops;
-    uint64_t now = now_ns();
+    uint64_t now = spare_now();
     struct spare *best = NULL;
     pthread_mutex_lock(&g_spare_mu);
     for (int i = 0; i < SPARE_MAX; i++) {
@@ -956,7 +976,7 @@ static int spare_checkout(void *out) {
  * buffers. Called from the deadline pass, once a second per thread. */
 static void spare_sweep(void) {
     if (g_spare_want <= 0) return;
-    uint64_t now = now_ns();
+    uint64_t now = spare_now();
     pthread_mutex_lock(&g_spare_mu);
     for (int i = 0; i < SPARE_MAX; i++) {
         struct spare *sp = &g_spares[i];
@@ -976,9 +996,19 @@ static void spare_refill(void) {
     int fill[SPARE_MAX];
     int nfill = 0;
     pthread_mutex_lock(&g_spare_mu);
-    if (g_spare_fail_ns && (now_ns() - g_spare_fail_ns) / 1000000 < 5000) {
+    uint64_t now = spare_now(), prev = g_spare_syn_ns;
+    g_spare_syn_ns = now;
+    if (!prev || (now - prev) / 1000000 >= SPARE_TTL_MS) {
         pthread_mutex_unlock(&g_spare_mu);
         return;
+    }
+    if (g_spare_fail_ns) {
+        uint64_t pause = g_spare_fail_n >= 5 ? SPARE_PAUSE_MAX_MS
+                                             : (uint64_t)SPARE_PAUSE_MS << (g_spare_fail_n ? g_spare_fail_n - 1 : 0);
+        if ((now - g_spare_fail_ns) / 1000000 < pause) {
+            pthread_mutex_unlock(&g_spare_mu);
+            return;
+        }
     }
     int have = 0;
     for (int i = 0; i < SPARE_MAX; i++)

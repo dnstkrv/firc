@@ -33,7 +33,7 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy cppcheck busybox-static libpcre2-dev libyaml-dev libmnl-dev libcjson-dev libcurl4-openssl-dev
+          sudo apt-get install -y clang-tidy cppcheck busybox-static libpcre2-dev libyaml-dev libmnl-dev libcjson-dev libcurl4-openssl-dev zlib1g-dev
 
       - name: Build (warnings as errors)
         working-directory: src/backend-c
@@ -331,7 +331,7 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpcre2-dev libyaml-dev libmnl-dev libcjson-dev libcurl4-openssl-dev socat
+          sudo apt-get install -y libpcre2-dev libyaml-dev libmnl-dev libcjson-dev libcurl4-openssl-dev zlib1g-dev socat
 
       - name: Load the legacy tables fircd writes through x_tables
         run: sudo modprobe -a iptable_nat ip6table_nat iptable_filter ip6table_filter iptable_mangle ip6table_mangle
@@ -501,7 +501,7 @@ jobs:
           SKIP: ${{ matrix.skip }}
         run: |
           set -eu
-          tests="h2match xhupmatch wsmatch b3match visionmatch submatch subpq tungromatch tunnelmatch \
+          tests="h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq tungromatch tunnelmatch \
                  rtxmatch grpcmatch vlinkmatch ctlmatch nodesmatch ctlnodesmatch tunnamematch \
                  scryptomatch hellofreeze echmatch vlessmatch takematch"
           run=""

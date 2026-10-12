@@ -163,7 +163,7 @@ static void *preview_thread(void *arg) {
         firc_sub_rules_t rules;
         firc_sub_rules_init(&rules);
         firc_sub_parse_stats_t st;
-        p->parse_err = firc_sub_parse_rules_stats(body, &rules, &st, NULL, NULL);
+        p->parse_err = firc_sub_parse_rules_stats(body, body_len, &rules, &st, NULL, NULL);
         if (p->parse_err == FIRC_ERR_INVAL) {
             preview_set(p, 422, firc_json_error(st.why));
         } else if (p->parse_err != FIRC_OK) {
@@ -421,10 +421,10 @@ static void handle_patch_rules(firc_http_req_t *req, firc_http_res_t *res, void 
         firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
     }
+    if (!firc_groups_maybe_save(ctx, req, res)) { return; }
     cJSON *ok = cJSON_CreateObject();
     cJSON_AddStringToObject(ok, "status", "ok");
     firc_http_res_write_json(res, 200, ok);
-    firc_groups_maybe_save(ctx, req);
 }
 
 /* one entry per open connection, loop thread only; a write finding the client gone frees the entry from inside itself */

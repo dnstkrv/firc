@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <limits.h>
 #include <netinet/in.h>
@@ -11,6 +12,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "firc/app.h"
 #include "firc/dnspipeline.h"
@@ -48,9 +50,16 @@ static bool should_fail(void) {
     return g_fail_after ? i >= g_fail_at : i == g_fail_at;
 }
 
-void *__wrap_malloc(size_t n) { return should_fail() ? NULL : __real_malloc(n); }
-void *__wrap_calloc(size_t a, size_t b) { return should_fail() ? NULL : __real_calloc(a, b); }
-void *__wrap_realloc(void *p, size_t n) { return should_fail() ? NULL : __real_realloc(p, n); }
+static volatile size_t g_largest = 0;
+
+static size_t noted(size_t n) {
+    if (n > g_largest) { g_largest = n; }
+    return n;
+}
+
+void *__wrap_malloc(size_t n) { return should_fail() ? NULL : __real_malloc(noted(n)); }
+void *__wrap_calloc(size_t a, size_t b) { return should_fail() ? NULL : ((void)noted(a * b), __real_calloc(a, b)); }
+void *__wrap_realloc(void *p, size_t n) { return should_fail() ? NULL : __real_realloc(p, noted(n)); }
 char *__wrap_strdup(const char *s) { return should_fail() ? NULL : __real_strdup(s); }
 
 static void arm(long at) {
@@ -261,7 +270,7 @@ static firc_group_t *published_list_group(firc_app_t *app, firc_dns_pipeline_t *
     if (g->list == NULL || firc_strset(&g->iface, "eth0") != FIRC_OK ||
         firc_strset(&g->list->url, "https://example.invalid/l.txt") != FIRC_OK ||
         firc_sub_rules_push(&g->list->rules, "ads.example.com", "namespace", true,
-                            firc_id_random()) != FIRC_OK) {
+                            test_random_id()) != FIRC_OK) {
         firc_group_free(g);
         return NULL;
     }
@@ -595,6 +604,52 @@ TEST a_capture_that_could_not_be_staged_leaves_no_chain(void) {
     PASS();
 }
 
+static uint8_t *zero_bomb(size_t inflated, size_t *len) {
+    enum { CHUNK = 1 << 20 };
+    uint8_t *zeros = calloc(1, CHUNK);
+    size_t cap = inflated / 512 + 4096;
+    uint8_t *out = malloc(cap);
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    if (zeros == NULL || out == NULL || deflateInit(&zs, 9) != Z_OK) {
+        free(zeros);
+        free(out);
+        return NULL;
+    }
+    memcpy(out, "SRS\x02", 4);
+    zs.next_out = out + 4;
+    zs.avail_out = (uInt)(cap - 4);
+    for (size_t done = 0; done < inflated; done += CHUNK) {
+        zs.next_in = zeros;
+        zs.avail_in = CHUNK;
+        (void)deflate(&zs, done + CHUNK >= inflated ? Z_FINISH : Z_NO_FLUSH);
+    }
+    *len = 4 + zs.total_out;
+    deflateEnd(&zs);
+    free(zeros);
+    return out;
+}
+
+TEST a_gibibyte_bomb_is_refused_without_allocating_past_the_cap(void) {
+    size_t len = 0;
+    uint8_t *body = zero_bomb((size_t)1 << 30, &len);
+    ASSERT(body != NULL);
+    ASSERT(len < ((size_t)2 << 20));
+    firc_sub_rules_t rs;
+    firc_sub_rules_init(&rs);
+    firc_sub_parse_stats_t st;
+    g_largest = 0;
+    firc_err_t err = firc_sub_parse_rules_stats((const char *)body, len, &rs, &st, NULL, NULL);
+    size_t largest = g_largest;
+    free(body);
+    ASSERT_EQ_FMT((int)FIRC_ERR_INVAL, (int)err, "%d");
+    ASSERT(strstr(st.why, "16 MiB") != NULL);
+    ASSERT_EQ_FMT((size_t)0, rs.n, "%zu");
+    ASSERT(largest > ((size_t)8 << 20));
+    ASSERT(largest <= ((size_t)16 << 20) + 1);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -611,5 +666,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_capture_that_could_not_be_staged_leaves_no_chain);
     RUN_TEST(a_job_that_ran_out_of_memory_says_so);
     RUN_TEST(a_start_is_always_followed_by_an_end);
+    RUN_TEST(a_gibibyte_bomb_is_refused_without_allocating_past_the_cap);
     GREATEST_MAIN_END();
 }

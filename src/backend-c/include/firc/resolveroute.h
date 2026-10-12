@@ -27,6 +27,7 @@ typedef struct firc_resolve_route {
     char iface[16];
     bool blackhole;
     uint32_t mark; /* 0: not in the kernel */
+    bool v6;
     firc_resolve_source_t source;
     size_t n_servers;
     firc_resolver_addr_t servers[FIRC_RESOLVE_MAX_SERVERS];
@@ -75,6 +76,9 @@ void firc_resolve_router_free(firc_resolve_router_t *r);
 void firc_resolve_router_publish(firc_resolve_router_t *r, firc_resolve_table_t *t);
 const firc_resolve_table_t *firc_resolve_router_table(const firc_resolve_router_t *r);
 bool firc_resolve_router_route(const firc_resolve_router_t *r, firc_id_t id, firc_resolve_route_t *out);
+
+/* A firc_dns_v6_fn; `ud` is the router. False for a group the table lacks. Loop thread. */
+bool firc_resolve_router_carries_v6(void *ud, firc_id_t group_id);
 
 /* A firc_dnsproxy_route_fn; `ud` is the router. Loop thread. */
 bool firc_resolve_router_decide(void *ud, const firc_dns_msg_t *query, const firc_ip_t *client,

@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -7,6 +8,7 @@
 #include <unistd.h>
 
 #include "firc/dnspipeline.h"
+#include "firc/fakeip.h"
 #include "firc/log.h"
 #include "firc/resolveroute.h"
 #include "firc/rulesnap.h"
@@ -324,7 +326,7 @@ static firc_dns_msg_t *query(const char *name, uint16_t qtype)
 static void add_namespace_rule(firc_group_t *g, const char *domain)
 {
     firc_rule_t *r = firc_rule_new();
-    r->id = firc_id_random();
+    r->id = test_random_id();
     firc_strset(&r->type, "namespace");
     firc_strset(&r->rule, domain);
     r->enable = true;
@@ -511,6 +513,96 @@ TEST the_stale_groups_are_the_removed_and_the_rewired(void)
     PASS();
 }
 
+static firc_dns_msg_t *aaaa_reply(const char *name)
+{
+    uint8_t b[300] = {0};
+    b[1] = 0x42;
+    b[2] = 0x81;
+    b[3] = 0x80;
+    b[5] = 1;
+    b[7] = 1;
+    size_t p = 12;
+    for (const char *s = name; *s != '\0';) {
+        const char *dot = strchr(s, '.');
+        size_t l = dot != NULL ? (size_t)(dot - s) : strlen(s);
+        b[p++] = (uint8_t)l;
+        memcpy(b + p, s, l);
+        p += l;
+        s += l + (dot != NULL ? 1 : 0);
+    }
+    b[p++] = 0;
+    const uint8_t tail[] = {0, 28, 0, 1, 0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16,
+                            0x26, 0x06, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    memcpy(b + p, tail, sizeof(tail));
+    p += sizeof(tail);
+    firc_dns_msg_t *m = NULL;
+    return firc_dns_msg_parse(b, p, &m) == FIRC_OK ? m : NULL;
+}
+
+static size_t answers_after(firc_dns_pipeline_t *pl, const char *name)
+{
+    firc_dns_msg_t *m = aaaa_reply(name);
+    if (m == NULL) { return 99; }
+    (void)firc_dns_pipeline_handle_message(pl, m, 1000, NULL, NULL);
+    size_t n = m->n_answers;
+    firc_dns_msg_free(m);
+    return n;
+}
+
+/* Catches: the v6 flag not carried into the published route, or a republish not reaching the pipeline. */
+TEST a_published_v6_flag_reaches_the_answer_and_flips_with_the_next_publish(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    firc_group_t *g = group("wg", "nwg0", 1);
+    add_namespace_rule(g, "example.com");
+    firc_config_add_group(&cfg, g);
+    firc_fakeip_cfg_t pc = {0};
+    pc.v4.base = (firc_ip_t){.b = {198, 18}, .len = 4};
+    pc.v4.pool_cidr = 15;
+    pc.v4.chunk_cidr = 24;
+    pc.v6.base = (firc_ip_t){.b = {0xfd, 0x37, 0x9a}, .len = 16};
+    pc.v6.pool_cidr = 48;
+    pc.v6.chunk_cidr = 64;
+    pc.max_names = 16;
+    pc.idle_secs = 86400;
+    pc.clamp_secs = 300;
+    firc_fakeip_t *pool = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&pc, &pool));
+    firc_dns_pipeline_t *pl = firc_dns_pipeline_create();
+    firc_resolve_router_t *r = firc_resolve_router_new(pl);
+    ASSERT(pl != NULL && r != NULL);
+    firc_dns_pipeline_set_snapshot(pl, firc_ruleset_snapshot_build(&cfg));
+    firc_dns_pipeline_set_pool(pl, pool, 300);
+    firc_dns_pipeline_set_v6_fn(pl, firc_resolve_router_carries_v6, r);
+
+    firc_id_t unknown = {0};
+    ASSERT_FALSEm("nothing published: no group carries v6", firc_resolve_router_carries_v6(r, g->id));
+    firc_resolve_input_t in = {.group = g, .mark = MARK1, .v6_route = false};
+    firc_resolve_table_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, firc_resolve_router_table(r), &t));
+    firc_resolve_router_publish(r, &t);
+    ASSERT_EQ_FMTm("no v6 route: NODATA", (size_t)0, answers_after(pl, "a.example.com"), "%zu");
+
+    in.v6_route = true;
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, firc_resolve_router_table(r), &t));
+    firc_resolve_router_publish(r, &t);
+    ASSERT(firc_resolve_router_carries_v6(r, g->id));
+    ASSERT_FALSEm("a group the table lacks", firc_resolve_router_carries_v6(r, unknown));
+    ASSERT_EQ_FMTm("a v6 route: the fake AAAA", (size_t)1, answers_after(pl, "a.example.com"), "%zu");
+
+    in.v6_route = false;
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, firc_resolve_router_table(r), &t));
+    firc_resolve_router_publish(r, &t);
+    ASSERT_EQ_FMTm("and back", (size_t)0, answers_after(pl, "a.example.com"), "%zu");
+
+    firc_resolve_router_free(r);
+    firc_dns_pipeline_destroy(pl);
+    firc_fakeip_free(pool);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -527,5 +619,6 @@ int main(int argc, char **argv)
     RUN_TEST(every_query_type_is_routed);
     RUN_TEST(what_is_not_routed_goes_to_the_common_upstream);
     RUN_TEST(the_stale_groups_are_the_removed_and_the_rewired);
+    RUN_TEST(a_published_v6_flag_reaches_the_answer_and_flips_with_the_next_publish);
     GREATEST_MAIN_END();
 }

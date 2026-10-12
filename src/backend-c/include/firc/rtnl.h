@@ -32,13 +32,15 @@ firc_err_t firc_rtnl_rule_add_reply(firc_rtnl_t *r, int family, uint32_t mark, u
 struct nlmsghdr *firc_rtnl_build_rule(void *buf, bool add, uint32_t seq, int family, uint32_t mark,
                                       uint32_t mask, uint32_t table, uint32_t priority);
 
-/* Blackhole default route; written with NLM_F_REPLACE. EEXIST/ESRCH are FIRC_OK. */
-firc_err_t firc_rtnl_route_add_blackhole(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority);
-firc_err_t firc_rtnl_route_del_blackhole(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority);
+/* Reject-type (blackhole, unreachable) default route; written with NLM_F_REPLACE. ESRCH on delete is FIRC_OK. */
+firc_err_t firc_rtnl_route_add_reject(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
+                                      uint8_t rtm_type);
+firc_err_t firc_rtnl_route_del_reject(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
+                                      uint8_t rtm_type);
 
-/* Default route via oif and optional gw; *enodev reports an interface not ready for the family. */
+/* Default route via oif and optional gw; *unavailable reports an interface down or not ready for the family. */
 firc_err_t firc_rtnl_route_add_iface(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
-                                 int oif, const uint8_t *gw, uint8_t gw_len, bool *enodev);
+                                 int oif, const uint8_t *gw, uint8_t gw_len, bool *unavailable);
 firc_err_t firc_rtnl_route_del_iface(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
                                  int oif, const uint8_t *gw, uint8_t gw_len);
 
@@ -75,6 +77,9 @@ firc_err_t firc_rtnl_gateway_for_iface(firc_rtnl_t *r, int family, int ifindex, 
 /* Also sets *gatewayless when the default route on the interface has no next hop. */
 firc_err_t firc_rtnl_gateway_for_iface2(firc_rtnl_t *r, int family, int ifindex, bool *found, uint8_t *gw,
                                         uint8_t *gw_len, bool *gatewayless);
+
+/* Whether the interface carries IPv6: a usable global-scope address on it, or a v6 default through it. */
+firc_err_t firc_rtnl_iface_carries_v6(firc_rtnl_t *r, int ifindex, bool *carries);
 
 /* Lowest unused mark/table index from start_idx; tables 0/253/254/255 count as used. */
 #define FIRC_RTNL_TABLE_END 0x7ffffffeu

@@ -99,6 +99,8 @@ function liveOf(group: any): { live: boolean; liveReason?: string } {
   if (group.enable === false) return { live: false, liveReason: "disabled" };
   const forced = LIVE_REASONS[group.id];
   if (forced && forced !== "not-written") return { live: false, liveReason: forced };
+  const tunnel = TUNNELS.find((tn) => tn.device === group.interface);
+  if (tunnel && tunnelStatus(tunnel) !== "up") return { live: false, liveReason: "tunnel-down" };
   if (group.interface === "longinterf") return { live: false, liveReason: "no-interface" };
   if (forced === "not-written" || NETFILTER.ok === false) {
     return { live: false, liveReason: "not-written" };
@@ -712,10 +714,13 @@ const tunnelNodes = (tn: any) =>
     )
     .filter((row: any) => row.name !== null);
 
-const tunnelState = (tn: any) => {
-  const status = !tn.enable
+const tunnelStatus = (tn: any) =>
+  !tn.enable
     ? "off"
     : TUNNEL_STATUS_CYCLE[Math.floor(TUNNEL_TICK / 3) % TUNNEL_STATUS_CYCLE.length];
+
+const tunnelState = (tn: any) => {
+  const status = tunnelStatus(tn);
   const nodes = tunnelNodes(tn).map((row: any, k: number) => ({
     key: row.key,
     name: row.name,

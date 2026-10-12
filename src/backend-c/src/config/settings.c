@@ -202,6 +202,7 @@ static size_t longest_chain_suffix(void)
     static const size_t lens[] = {
         FIRC_ID_STR_LEN - 1,
         FIRC_ID_STR_LEN - 1 + sizeof(FIRC_DEVICES_CHAIN_SUFFIX) - 1,
+        sizeof(FIRC_EGRESS_CHAIN_SUFFIX) - 1,
         sizeof(FIRC_DNAT_CHAIN_SUFFIX) - 1,
         sizeof(FIRC_POOL_REJECT_CHAIN_SUFFIX) - 1,
         sizeof(FIRC_TAP_CHAIN_SUFFIX FIRC_TAP_PROBE_SUFFIX) - 1,

@@ -36,7 +36,7 @@ Build output lands in `.build/<PLATFORM>_<TARGET>/`; the packages in `.build/`.
 ## Backend
 
 The daemon is C11 in `src/backend-c/`. Host libraries: libyaml, PCRE2,
-libmnl, cJSON and libcurl (development headers). From `src/backend-c/`:
+libmnl, cJSON, libcurl and zlib (development headers). From `src/backend-c/`:
 
 ```sh
 make                          # build/host/fircd and the test tools

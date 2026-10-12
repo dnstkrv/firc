@@ -2,9 +2,14 @@
 
 #include <linux/fib_rules.h>
 #include <linux/rtnetlink.h>
+#include <errno.h>
 #include <libmnl/libmnl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "firc/mark.h"
@@ -425,6 +430,266 @@ TEST a_multipath_next_hop_is_found_by_its_host_order_ifindex(void) {
     PASS();
 }
 
+static firc_rtnl_t *scripted(int sv[2]) {
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) { return NULL; }
+    struct timeval tv = {1, 0};
+    if (setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) { return NULL; }
+    return firc_rtnl_open_fd(sv[0]);
+}
+
+static void send_default_via(int fd, uint32_t seq, uint16_t flags, uint8_t last_octet) {
+    wb_t route = {0};
+    size_t at = wb_nlmsg(&route, 24, flags, seq);
+    put_default_route(&route);
+    wb_attr_bytes(&route, 5, ((const uint8_t[]){192, 168, 1, last_octet}), 4);
+    wb_attr_h32(&route, 4, 0x0107);
+    wb_nlmsg_end(&route, at);
+    (void)wb_send(fd, &route);
+}
+
+static void send_done(int fd, uint32_t seq, uint16_t flags, int32_t status) {
+    wb_t done = {0};
+    size_t at = wb_nlmsg(&done, 3, flags, seq);
+    wb_bytes(&done, &status, sizeof(status));
+    wb_nlmsg_end(&done, at);
+    (void)wb_send(fd, &done);
+}
+
+static firc_err_t lookup_0107(firc_rtnl_t *r, uint8_t *last_octet) {
+    bool found = false, gatewayless = false;
+    uint8_t gw[16] = {0};
+    uint8_t gw_len = 0;
+    firc_err_t err = firc_rtnl_gateway_for_iface2(r, AF_INET, 0x0107, &found, gw, &gw_len, &gatewayless);
+    *last_octet = found && gw_len == 4 ? gw[3] : 0;
+    return err;
+}
+
+/* Catches: a torn dump read as whole, read again only once, or its first reading kept. */
+TEST a_dump_the_kernel_marks_torn_is_read_again(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_default_via(sv[1], 1, 0x0012, 1);
+    send_done(sv[1], 1, 0x0002, 0);
+    send_default_via(sv[1], 2, 0x0012, 1);
+    send_done(sv[1], 2, 0x0002, 0);
+    send_default_via(sv[1], 3, 0x0002, 2);
+    send_done(sv[1], 3, 0x0002, 0);
+
+    uint8_t last = 0;
+    ASSERT_EQ(FIRC_OK, lookup_0107(r, &last));
+    ASSERT_EQ_FMTm("the gateway of the whole dump, not of a torn one", 2, last, "%d");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+static void send_global_v6_addr(int fd, uint32_t seq, uint16_t flags, uint32_t ifindex) {
+    wb_t addr = {0};
+    size_t at = wb_nlmsg(&addr, RTM_NEWADDR, flags, seq);
+    const uint8_t head[4] = {AF_INET6, 64, 0, RT_SCOPE_UNIVERSE};
+    wb_bytes(&addr, head, sizeof(head));
+    wb_bytes(&addr, &ifindex, sizeof(ifindex));
+    wb_nlmsg_end(&addr, at);
+    (void)wb_send(fd, &addr);
+}
+
+/* Catches: an address seen only in a torn dump kept as the interface's IPv6 on the retry. */
+TEST a_torn_address_dump_forgets_what_it_saw(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_global_v6_addr(sv[1], 1, 0x0012, 0x0107);
+    send_done(sv[1], 1, 0x0002, 0);
+    send_done(sv[1], 2, 0x0002, 0);
+    send_done(sv[1], 3, 0x0002, 0);
+    bool carries = true;
+    ASSERT_EQ(FIRC_OK, firc_rtnl_iface_carries_v6(r, 0x0107, &carries));
+    ASSERT_FALSEm("the whole dump had no address", carries);
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+/* Catches: a dump torn for ever retried without end. */
+TEST a_dump_torn_every_time_is_given_up(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    for (uint32_t seq = 1; seq <= 3; seq++) {
+        send_default_via(sv[1], seq, 0x0012, 1);
+        send_done(sv[1], seq, 0x0002, 0);
+    }
+    send_default_via(sv[1], 4, 0x0002, 2);
+    send_done(sv[1], 4, 0x0002, 0);
+
+    uint8_t last = 0;
+    ASSERT_EQ_FMT(FIRC_ERR_AGAIN, lookup_0107(r, &last), "%d");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+static void send_stale_rule(int fd, uint32_t seq) {
+    wb_t rule = {0};
+    size_t at = wb_nlmsg(&rule, 32, 0x0002, seq);
+    put_rule_hdr(&rule, 2, 1);
+    wb_attr_h32(&rule, 15, 0x66697263u);
+    wb_attr_h32(&rule, 6, FIRC_RULE_PRIORITY);
+    wb_attr_h32(&rule, 10, 0x40070000u);
+    wb_attr_h32(&rule, 16, FIRC_MARK_GROUP_MASK);
+    wb_nlmsg_end(&rule, at);
+    (void)wb_send(fd, &rule);
+}
+
+/* Catches: the torn mark looked for on data only, or a retried dump adding to the torn one's rows. */
+TEST a_dump_whose_end_is_marked_torn_is_read_again_from_scratch(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_stale_rule(sv[1], 1);
+    send_done(sv[1], 1, 0x0012, 0);
+    send_stale_rule(sv[1], 2);
+    send_done(sv[1], 2, 0x0002, 0);
+    send_done(sv[1], 3, 0x0002, 0);
+    for (uint32_t seq = 4; seq <= 6; seq++) {
+        wb_t ack = {0};
+        wb_ack(&ack, seq, 0);
+        ASSERT(wb_send(sv[1], &ack));
+    }
+
+    size_t removed = 0;
+    ASSERT_EQ(FIRC_OK, firc_rtnl_clean_stale_rules(r, &removed));
+    ASSERT_EQ_FMTm("one rule, deleted once", (size_t)1, removed, "%zu");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+static void send_tagged_route(int fd, uint32_t seq) {
+    wb_t route = {0};
+    size_t at = wb_nlmsg(&route, 24, 0x0002, seq);
+    wb_bytes(&route, (const uint8_t[]){2, 0, 0, 0, 254, FIRC_RTPROT, 0, 1}, 8);
+    wb_h32(&route, 0);
+    wb_attr_h32(&route, 15, 254);
+    wb_attr_h32(&route, 6, 10);
+    wb_attr_h32(&route, 4, 0x0107);
+    wb_nlmsg_end(&route, at);
+    (void)wb_send(fd, &route);
+}
+
+/* Catches: a retried route dump adding to the torn one's rows, so a route is deleted twice. */
+TEST a_route_dump_read_again_starts_from_scratch(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_tagged_route(sv[1], 1);
+    send_done(sv[1], 1, 0x0002, 0);
+    send_tagged_route(sv[1], 2);
+    send_done(sv[1], 2, 0x0012, 0);
+    send_tagged_route(sv[1], 3);
+    send_done(sv[1], 3, 0x0002, 0);
+    for (uint32_t seq = 4; seq <= 5; seq++) {
+        wb_t ack = {0};
+        wb_ack(&ack, seq, 0);
+        ASSERT(wb_send(sv[1], &ack));
+    }
+    for (uint32_t seq = 6; seq <= 8; seq++) { send_done(sv[1], seq, 0x0002, 0); }
+
+    size_t removed = 0, left = 0;
+    ASSERT_EQ(FIRC_OK, firc_rtnl_purge_tagged_routes(r, &removed, &left));
+    ASSERT_EQ_FMTm("the first family's route kept, the second's read once", (size_t)2, removed, "%zu");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+/* Catches: a dump that ended in an error read as a complete one. */
+TEST a_dump_that_ends_in_an_error_is_an_error(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_default_via(sv[1], 1, 0x0002, 1);
+    send_done(sv[1], 1, 0x0002, -EINVAL);
+
+    uint8_t last = 0;
+    ASSERT_EQ_FMT(FIRC_ERR_INVAL, lookup_0107(r, &last), "%d");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+/* Catches: a dump's end without its status read as a clean end. */
+TEST a_dump_end_without_its_status_is_malformed(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    send_default_via(sv[1], 1, 0x0002, 1);
+    wb_t done = {0};
+    size_t at = wb_nlmsg(&done, 3, 0x0002, 1);
+    wb_nlmsg_end(&done, at);
+    ASSERT(wb_send(sv[1], &done));
+
+    uint8_t last = 0;
+    ASSERT_EQ_FMT(FIRC_ERR_PROTO, lookup_0107(r, &last), "%d");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
+static volatile sig_atomic_t signals_seen;
+
+static void on_signal(int signo) {
+    (void)signo;
+    signals_seen++;
+}
+
+typedef struct {
+    pthread_t waiter;
+    int fd;
+} late_ack_t;
+
+static void pause_ms(long ms) {
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0) {}
+}
+
+static void *signal_then_ack(void *ud) {
+    late_ack_t *l = ud;
+    pause_ms(100);
+    pthread_kill(l->waiter, SIGUSR1);
+    pause_ms(100);
+    wb_t ack = {0};
+    wb_ack(&ack, 1, 0);
+    (void)wb_send(l->fd, &ack);
+    return NULL;
+}
+
+/* Catches: a signal landing while the answer is awaited read as a failed request. */
+TEST a_signal_during_the_wait_is_not_an_answer(void) {
+    int sv[2];
+    firc_rtnl_t *r = scripted(sv);
+    ASSERT(r != NULL);
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    ASSERT_EQ(0, sigaction(SIGUSR1, &sa, &old));
+    signals_seen = 0;
+    late_ack_t l = {pthread_self(), sv[1]};
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, signal_then_ack, &l));
+
+    firc_err_t err = firc_rtnl_rule_add(r, AF_INET, 0x40070000u, FIRC_MARK_GROUP_MASK, 100, FIRC_RULE_PRIORITY);
+    pthread_join(th, NULL);
+    sigaction(SIGUSR1, &old, NULL);
+    ASSERT_EQ_FMTm("the signal arrived", 1, (int)signals_seen, "%d");
+    ASSERT_EQ_FMT(FIRC_OK, err, "%d");
+    firc_rtnl_close(r);
+    close(sv[1]);
+    PASS();
+}
+
 int main(int argc, char **argv)
 {
     GREATEST_MAIN_BEGIN();
@@ -439,5 +704,13 @@ int main(int argc, char **argv)
     RUN_TEST(a_stale_rule_read_from_a_dump_is_deleted_with_the_values_it_carried);
     RUN_TEST(a_default_route_is_found_by_its_host_order_oif);
     RUN_TEST(a_multipath_next_hop_is_found_by_its_host_order_ifindex);
+    RUN_TEST(a_dump_the_kernel_marks_torn_is_read_again);
+    RUN_TEST(a_torn_address_dump_forgets_what_it_saw);
+    RUN_TEST(a_dump_torn_every_time_is_given_up);
+    RUN_TEST(a_dump_whose_end_is_marked_torn_is_read_again_from_scratch);
+    RUN_TEST(a_route_dump_read_again_starts_from_scratch);
+    RUN_TEST(a_dump_that_ends_in_an_error_is_an_error);
+    RUN_TEST(a_dump_end_without_its_status_is_malformed);
+    RUN_TEST(a_signal_during_the_wait_is_not_an_answer);
     GREATEST_MAIN_END();
 }

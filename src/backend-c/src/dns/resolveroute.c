@@ -58,6 +58,7 @@ static void route_fill(const firc_resolve_input_t *in, firc_resolve_route_t *r)
     snprintf(r->iface, sizeof(r->iface), "%s", g->iface != NULL ? g->iface : "");
     r->blackhole = in->blackhole;
     r->mark = in->mark;
+    r->v6 = in->v6_route;
     if (!g->resolve.tunnel) {
         r->source = FIRC_RESOLVE_SOURCE_OFF;
         return;
@@ -238,6 +239,13 @@ bool firc_resolve_router_route(const firc_resolve_router_t *r, firc_id_t id, fir
     if (f == NULL) { return false; }
     *out = *f;
     return true;
+}
+
+bool firc_resolve_router_carries_v6(void *ud, firc_id_t group_id)
+{
+    const firc_resolve_router_t *r = ud;
+    const firc_resolve_route_t *rt = r != NULL ? firc_resolve_table_find(&r->table, group_id) : NULL;
+    return rt != NULL && rt->v6;
 }
 
 bool firc_resolve_router_decide(void *ud, const firc_dns_msg_t *query, const firc_ip_t *client,

@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -111,7 +112,7 @@ static firc_group_t *group_with_list(uint8_t tag, const char *url, uint32_t inte
 static firc_group_t *synced_group(uint8_t tag, const char *url, const char *rule) {
     firc_group_t *g = group_with_list(tag, url, 3600);
     if (g == NULL) { return NULL; }
-    if (firc_sub_rules_push(&g->list->rules, rule, FIRC_RULE_NAMESPACE, true, firc_id_random()) !=
+    if (firc_sub_rules_push(&g->list->rules, rule, FIRC_RULE_NAMESPACE, true, test_random_id()) !=
         FIRC_OK) {
         firc_group_free(g);
         return NULL;
@@ -199,7 +200,7 @@ TEST a_reload_keeps_the_lists_it_already_has(void) {
     firc_group_t *g = live(id_of(1));
     ASSERT(g != NULL && g->list != NULL);
     ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&g->list->rules, "one.example", FIRC_RULE_NAMESPACE,
-                                           true, firc_id_random()));
+                                           true, test_random_id()));
     memset(g->list->body_hash, 0x5a, sizeof(g->list->body_hash));
     g->list->has_body_hash = true;
     g->list->last_update = 1800000000;
@@ -419,7 +420,7 @@ TEST a_save_mid_sync_keeps_the_running_job(void) {
     ASSERT_EQ_FMTm("no stream ended: the replace kept this list", 0, g_heard.calls, "%d");
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), seq);
-    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, test_random_id());
     firc_app_on_sync_event(g_fx.app, ev, 1000);
 
     firc_group_t *a = live(id_of(1));
@@ -471,10 +472,10 @@ TEST a_list_full_of_junk_says_it_once(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_fx.app, g));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "010.0.0.1", "subnet", true, firc_id_random());
-    firc_sub_rules_push(&ev->rules, "aa:bb:cc:dd:ee:ff", "subnet6", true, firc_id_random());
-    firc_sub_rules_push(&ev->rules, "^[a-z", "regex", true, firc_id_random());
-    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "010.0.0.1", "subnet", true, test_random_id());
+    firc_sub_rules_push(&ev->rules, "aa:bb:cc:dd:ee:ff", "subnet6", true, test_random_id());
+    firc_sub_rules_push(&ev->rules, "^[a-z", "regex", true, test_random_id());
+    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, test_random_id());
 
     char out[4096];
     bool changed = false;
@@ -507,8 +508,8 @@ TEST a_clean_list_says_nothing(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_fx.app, group_with_list(1, URL_A, 3600)));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, firc_id_random());
-    firc_sub_rules_push(&ev->rules, "a.example.com", "domain", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, test_random_id());
+    firc_sub_rules_push(&ev->rules, "a.example.com", "domain", true, test_random_id());
 
     char out[4096];
     bool changed = false;
@@ -531,7 +532,7 @@ TEST a_disabled_junk_line_is_not_counted(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_fx.app, group_with_list(1, URL_A, 3600)));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "^[a-z", "regex", false, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "^[a-z", "regex", false, test_random_id());
 
     char out[4096];
     bool changed = false;
@@ -559,7 +560,7 @@ TEST dropped_lines_are_said_with_the_group_s_name(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_fx.app, g));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "example.com", "namespace", true, test_random_id());
     ev->dropped = 2;
 
     char out[4096];
@@ -764,7 +765,7 @@ TEST a_result_with_a_stale_seq_is_dropped(void) {
     ASSERT(seq > 0);
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), seq - 1);
-    firc_sub_rules_push(&ev->rules, "x.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "x.example", "namespace", true, test_random_id());
     bool applied_changed = true;
     firc_err_t err = firc_app_apply_sync_result(g_hsx.app, ev, 2000, &applied_changed);
     ASSERT_EQ(FIRC_OK, err);
@@ -793,7 +794,7 @@ TEST a_result_for_a_deleted_group_is_dropped(void) {
     ASSERT_EQ(NULL, live_in(g_hsx.app, id_of(1)));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), seq + 1);
-    firc_sub_rules_push(&ev->rules, "x.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "x.example", "namespace", true, test_random_id());
     firc_app_on_sync_event(g_hsx.app, ev, 3000);
 
     ASSERT_EQ_FMTm("nothing came back from the dead", (void *)NULL, (void *)live_in(g_hsx.app, id_of(1)),
@@ -929,7 +930,7 @@ TEST a_list_sync_resyncs_only_its_own_group(void) {
     ASSERT_EQ(FIRC_OK, firc_strset(&g2->iface, "lo"));
     firc_rule_t *r2 = firc_rule_new();
     ASSERT(r2 != NULL);
-    r2->id = firc_id_random();
+    r2->id = test_random_id();
     r2->enable = true;
     ASSERT_EQ(FIRC_OK, firc_strset(&r2->type, FIRC_RULE_SUBNET));
     ASSERT_EQ(FIRC_OK, firc_strset(&r2->rule, "10.0.0.0/8"));
@@ -959,7 +960,7 @@ TEST a_list_sync_resyncs_only_its_own_group(void) {
     uint64_t before = firc_app_nf_passes_for_test(g_nfx.app);
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, test_random_id());
     bool changed = false;
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev, 1000, &changed));
     ASSERTm("the KNOWN GAP this task closes: the result actually applied", changed);
@@ -1005,7 +1006,7 @@ TEST a_list_line_the_kernel_refuses_leaves_its_group_out_until_a_resync(void) {
     nf_chain_name(&g_nfx.cfg, id_of(1), chain1, sizeof(chain1));
 
     firc_sub_event_t *ev1 = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev1->rules, "10.1.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
+    firc_sub_rules_push(&ev1->rules, "10.1.0.0/16", FIRC_RULE_SUBNET, true, test_random_id());
     bool changed = false;
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev1, 1000, &changed));
     ASSERT(changed);
@@ -1016,7 +1017,7 @@ TEST a_list_line_the_kernel_refuses_leaves_its_group_out_until_a_resync(void) {
 
     firc_fake_ipt_refuse_rules_containing(g_nfx.fake, "10.9.0.0/16");
     firc_sub_event_t *ev2 = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev2->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
+    firc_sub_rules_push(&ev2->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, test_random_id());
     changed = false;
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev2, 2000, &changed));
     ASSERT(changed);
@@ -1033,7 +1034,7 @@ TEST a_list_line_the_kernel_refuses_leaves_its_group_out_until_a_resync(void) {
     ASSERTm("a snapshot is still published", firc_dns_pipeline_snapshot(g_nfx.pipeline) != NULL);
 
     firc_sub_event_t *ev3 = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev3->rules, "10.1.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
+    firc_sub_rules_push(&ev3->rules, "10.1.0.0/16", FIRC_RULE_SUBNET, true, test_random_id());
     changed = false;
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev3, 3000, &changed));
     ASSERT(changed);
@@ -1061,8 +1062,8 @@ TEST a_routed_group_warns_once_not_on_every_resync(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_nfx.app, g));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "010.0.0.1", "subnet", true, firc_id_random());
-    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "010.0.0.1", "subnet", true, test_random_id());
+    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, test_random_id());
 
     char out[4096];
     bool changed = false;
@@ -1099,7 +1100,7 @@ TEST a_first_changed_sync_clears_provisional_at_once(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(g_fx.app, group_with_list(1, URL_A, 3600)));
 
     firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, firc_id_random());
+    firc_sub_rules_push(&ev->rules, "one.example", "namespace", true, test_random_id());
     bool changed = false;
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_fx.app, ev, 1000, &changed));
     ASSERT(changed);

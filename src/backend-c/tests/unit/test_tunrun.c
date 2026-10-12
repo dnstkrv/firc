@@ -502,7 +502,7 @@ TEST uplink_ok_follows_the_uplink_route(void)
     ASSERT_EQ(0, uplink_ok_of(&f, "a"));
     ASSERT_EQ(1, uplink_ok_of(&f, "b"));
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
-    firc_tunrun_link_up(f.run, "lo");
+    firc_tunrun_refresh_uplinks(f.run, "lo");
     ASSERT_EQ(1, uplink_ok_of(&f, "a"));
     fake_rtnl_set_link_flags(f.kernel, 0);
     apply(&f, s, 2);
@@ -971,10 +971,28 @@ TEST link_up_rewrites_the_default_of_its_own_uplink(void)
     apply(&f, s, 1);
     ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
-    firc_tunrun_link_up(f.run, "firc-nope0");
+    firc_tunrun_refresh_uplinks(f.run, "firc-nope0");
     ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
-    firc_tunrun_link_up(f.run, "lo");
+    firc_tunrun_refresh_uplinks(f.run, "lo");
     ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a re-read of every interface leaving tunnel uplinks out, or only the first of them rewritten */
+TEST a_reread_of_everything_rewrites_every_uplink(void)
+{
+    fx_t f;
+    ASSERT(fx_up(&f, 0));
+    const spec_t s[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}, {"b", 1, FIRC_UPLINK_IFACE, "lo", false},
+                        {"c", 2, FIRC_UPLINK_AUTO, NULL, false}};
+    apply(&f, s, 3);
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
+    firc_tunrun_refresh_uplinks(f.run, NULL);
+    ASSERT_EQ_FMT((size_t)2, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ(1, uplink_ok_of(&f, "a"));
+    ASSERT_EQ(1, uplink_ok_of(&f, "b"));
     fx_down(&f);
     PASS();
 }
@@ -1411,6 +1429,98 @@ TEST mark_of_reports_the_uplink_mark_and_whether_a_child_holds_it(void)
     PASS();
 }
 
+typedef struct {
+    fx_t *f;
+    const char *id;
+    firc_tun_status_t want;
+    int64_t deadline;
+} status_wait_t;
+
+static firc_tun_status_t status_of(fx_t *f, const char *id)
+{
+    firc_tun_state_t st[8];
+    size_t n = firc_tunrun_states(f->run, st, 8);
+    for (size_t i = 0; i < n && i < 8; i++) {
+        if (strcmp(st[i].id, id) == 0) {
+            return st[i].status;
+        }
+    }
+    return FIRC_TUN_ST_OFF;
+}
+
+static void status_cb(firc_loop_t *loop, void *ud)
+{
+    status_wait_t *w = ud;
+    if (status_of(w->f, w->id) == w->want || now_ms() >= w->deadline) {
+        firc_loop_stop(loop);
+    }
+}
+
+static firc_tun_status_t run_until_status(fx_t *f, const char *id, firc_tun_status_t want, int ms)
+{
+    status_wait_t w = {f, id, want, now_ms() + ms};
+    int timer = 0;
+    firc_loop_add_timer(f->loop, 20, 20, status_cb, &w, &timer);
+    firc_loop_run(f->loop);
+    firc_loop_del_timer(f->loop, timer);
+    return status_of(f, id);
+}
+
+/* catches: a tunnel with no node, a child in backoff or still starting, an off or waiting tunnel read as carrying,
+   an up one read as down, or a device no tunnel names read as down */
+TEST device_down_is_every_status_but_up(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    setenv("FAKE_MODE", "noread", 1);
+    apply_yaml(&f, AB_LINKS "  - id: off\n    device: tunvless1\n    enable: false\n" WAIT_TUN);
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
+    ASSERT_EQ(FIRC_TUN_ST_STARTING, status_of(&f, "a"));
+    ASSERTm("starting carries nothing yet", firc_tunrun_device_down(f.run, "tunvless0"));
+    ASSERTm("off", firc_tunrun_device_down(f.run, "tunvless1"));
+    ASSERTm("waiting", firc_tunrun_device_down(f.run, "tunvless3"));
+    ASSERT_FALSEm("no tunnel names it", firc_tunrun_device_down(f.run, "tunvless7"));
+    ASSERT_FALSEm("not a tunnel", firc_tunrun_device_down(f.run, "lo"));
+    ASSERT_FALSEm("no device", firc_tunrun_device_down(f.run, NULL));
+
+    setenv("FAKE_MODE", "ok", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    ASSERT_FALSEm("up carries", firc_tunrun_device_down(f.run, "tunvless0"));
+
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS", "{\"type\":\"no_node\",\"retry\":5}", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_NO_NODE, run_until_status(&f, "a", FIRC_TUN_ST_NO_NODE, 3000));
+    ASSERTm("no node", firc_tunrun_device_down(f.run, "tunvless0"));
+
+    setenv("FAKE_MODE", "crash", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_BACKOFF, run_until_status(&f, "a", FIRC_TUN_ST_BACKOFF, 3000));
+    ASSERTm("backoff", firc_tunrun_device_down(f.run, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a tunnel removed from the config still read down while its child lives out the grace */
+TEST a_removed_tunnel_is_not_down_while_its_child_ends(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    setenv("FAKE_MODE", "noread", 1);
+    setenv("FAKE_STUBBORN_DEV", "tunvless0", 1);
+    apply_yaml(&f, AB_LINKS);
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
+    pid_t pid = last_pid(&f, "tunvless0");
+    ASSERTm("fixture: starting reads down", firc_tunrun_device_down(f.run, "tunvless0"));
+    apply(&f, NULL, 0);
+    run_ms(&f, 200);
+    ASSERT_EQm("fixture: the child is still in its grace", 0, kill(pid, 0));
+    ASSERT_FALSE(firc_tunrun_device_down(f.run, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
 SUITE(tunrun)
 {
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
@@ -1433,6 +1543,7 @@ SUITE(tunrun)
     RUN_TEST(switching_to_auto_drops_the_rule_and_the_mark);
     RUN_TEST(an_unchanged_reload_keeps_rule_and_process);
     RUN_TEST(link_up_rewrites_the_default_of_its_own_uplink);
+    RUN_TEST(a_reread_of_everything_rewrites_every_uplink);
     RUN_TEST(stop_ends_children_then_removes_uplinks);
     RUN_TEST(only_the_effective_links_reach_tunvless);
     RUN_TEST(a_filter_edit_keeps_tunvless_running);
@@ -1450,6 +1561,8 @@ SUITE(tunrun)
     RUN_TEST(a_node_that_leaves_the_list_forgets_its_down);
     RUN_TEST(the_built_rows_are_kept_without_links);
     RUN_TEST(mark_of_reports_the_uplink_mark_and_whether_a_child_holds_it);
+    RUN_TEST(device_down_is_every_status_but_up);
+    RUN_TEST(a_removed_tunnel_is_not_down_while_its_child_ends);
 }
 
 GREATEST_MAIN_DEFS();

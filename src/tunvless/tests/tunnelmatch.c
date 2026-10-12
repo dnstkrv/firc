@@ -1428,20 +1428,20 @@ static void t_pool_spares(void) {
     pthread_mutex_lock(&g_pl.mu);
     pl_bind(d, 0);
     pthread_mutex_unlock(&g_pl.mu);
-    pl_seen(d, -1);
-    pl_seen(d, -1);
+    pl_seen_at(d, -1, pl_now_ms());
+    pl_seen_at(d, -1, pl_now_ms());
     check(!g_pl.slot[0].kick, "two failed connects — no early check yet");
-    pl_seen(d, 0);
-    pl_seen(d, -1);
-    pl_seen(d, -1);
+    pl_seen_at(d, 0, pl_now_ms());
+    pl_seen_at(d, -1, pl_now_ms());
+    pl_seen_at(d, -1, pl_now_ms());
     check(!g_pl.slot[0].kick, "a successful connect breaks the streak");
-    pl_seen(d, -1);
+    pl_seen_at(d, -1, pl_now_ms());
     check(g_pl.slot[0].kick == 1, "three failed connects in a row — check the node now");
     g_pl.slot[0].kick = 0;
-    pl_seen(d, 0);
+    pl_seen_at(d, 0, pl_now_ms());
     struct pl_sess former = *d;                 /* a connection to the slot's previous node */
     former.gen--;
-    for (int i = 0; i < 3; i++) pl_seen(&former, -1);
+    for (int i = 0; i < 3; i++) pl_seen_at(&former, -1, pl_now_ms());
     check(!g_pl.slot[0].kick,
           "failed connects to the slot's previous node do not count against it");
     g_pl.slot[0].checked_at = pl_now_ms();
@@ -1478,6 +1478,45 @@ static void t_pool_spares(void) {
     check(g_pl.slot[0].up && g_pl.slot[0].node == 0,
           "a stall whose check passed — the next failure is confirmed again");
     g_fn[0].alive = 1;
+}
+
+static void t_pool_kick_once(void) {
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 1);
+    static unsigned char dst[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *d = (struct pl_sess *)dst;
+    pl_clear(dst);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    for (int i = 0; i < 3; i++) pl_seen_at(d, -1, pl_now_ms());
+    check(g_pl.slot[0].kick == 1, "kick once: three failed connects ask for a check");
+    g_pl.slot[0].kick = 0;
+    pl_seen_at(d, -1, pl_now_ms());
+    check(!g_pl.slot[0].kick, "kick once: the next failure after a taken kick does not ask again");
+    pl_seen_at(d, -1, pl_now_ms());
+    check(!g_pl.slot[0].kick, "kick once: two new failures do not ask yet");
+    pl_seen_at(d, -1, pl_now_ms());
+    check(g_pl.slot[0].kick == 1, "kick once: three new failures ask again");
+}
+
+static void t_pool_retry_cap(void) {
+    for (int i = 0; i < 5; i++) g_fn[i].alive = 0;
+    pool_new(1, POOL_BY_CONNECTION, 2);
+    pl_check(0);
+    pl_check(0);
+    for (int k = 0; k < 8; k++) pl_check(0);
+    uint64_t t0 = pl_now_ms();
+    pl_check(0);
+    uint64_t t1 = pl_now_ms();
+    check(!g_pl.slot[0].up && g_pl.slot[0].retry == 30 && g_pl.slot[0].due >= t0 + 30000 &&
+              g_pl.slot[0].due <= t1 + 30000,
+          "retry cap: after many empty rounds a dead slot searches again every 30 s");
+    g_fn[1].alive = 1;
+    pl_check(0);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 1 && g_pl.slot[0].retry == 15,
+          "retry cap: a node found again, the round pause starts at 15 s");
+    all_alive();
 }
 
 static void publish(void *arg) { (void)arg; pl_publish(); }
@@ -1522,6 +1561,131 @@ static int stdout_has(void (*f)(void *), void *arg, const char *needle) {
     close(p[0]);
     buf[r > 0 ? r : 0] = 0;
     return strstr(buf, needle) != NULL;
+}
+
+static struct pl_sess *g_up_sess;
+static void unproven_streak(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 3; i++) pl_seen_at(g_up_sess, -1, pl_now_ms());
+    pl_check(0);
+}
+
+static void t_pool_unproven(void) {
+    all_alive();
+    g_fn[1].alive = 0;
+    pool_new(1, POOL_BY_CONNECTION, 2);
+    static unsigned char dst[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *d = (struct pl_sess *)dst;
+    g_up_sess = d;
+    pl_clear(dst);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    pl_check(0);
+    pl_check(0);
+    check(g_pl.slot[0].up, "unproven: scheduled checks that pass never count against the node");
+    for (int i = 0; i < 2; i++) {
+        g_pl.slot[0].checked_at = 0;
+        pl_lost(&g_pl, d);
+        pl_check(0);
+    }
+    check(g_pl.slot[0].up, "unproven: checks a cut connection asked for and that pass never count");
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up, "unproven: a check passing after the first streak keeps the node");
+    pl_seen_at(d, 0, pl_now_ms());
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up, "unproven: a successful connect between streaks starts the count again");
+    check(stdout_has(unproven_streak, NULL,
+                     "{\"type\":\"node_down\",\"node\":\"n0\",\"index\":0,\"why\":\"the check passes but "
+                     "connections do not open (6 failed connects in a row)\"}"),
+          "unproven: a second streak whose check passes drops the node with that reason");
+    check(!g_pl.slot[0].up && g_pl.said_up == 0, "unproven: the slot is dead and the pool says so");
+    uint64_t retry = g_pl.slot[0].retry;
+    pl_check(0);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 0, "unproven: a round finds the node answering again");
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    for (int i = 0; i < 3; i++) pl_seen_at(d, -1, pl_now_ms());
+    uint64_t t0 = pl_now_ms();
+    pl_check(0);
+    check(!g_pl.slot[0].up && g_pl.slot[0].due >= t0 + retry * 1000,
+          "unproven: revived without a connect, the first streak drops it and the round pause holds");
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    pl_check(0);
+    pl_seen_at(d, 0, pl_now_ms());
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up, "unproven: a successful connect after reviving clears the verdict");
+    g_fn[1].alive = 1;
+
+    pool_new(1, POOL_BY_CONNECTION, 2);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    unproven_streak(NULL);
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 1, "unproven: a dropped node is replaced by a free candidate");
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 1,
+          "unproven: the replacement starts its own count, one streak does not drop it");
+}
+
+static void t_pool_unproven_alone(void) {
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 1);
+    static unsigned char dst[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *d = (struct pl_sess *)dst;
+    g_up_sess = d;
+    pl_clear(dst);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    unproven_streak(NULL);
+    unsigned gen = g_pl.slot[0].gen;
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 0,
+          "unproven alone: with no free candidate the only node limps on");
+    check(g_pl.slot[0].gen == gen, "unproven alone: its connections are not reset");
+    pool_new(2, POOL_BY_CONNECTION, 2);
+    pl_check(1);
+    pl_clear(dst);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    unproven_streak(NULL);
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 0 && g_pl.slot[1].up,
+          "unproven alone: every candidate in a slot, the node limps on");
+}
+
+static void t_pool_streak_after_check(void) {
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 2);
+    static unsigned char dst[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *d = (struct pl_sess *)dst;
+    g_up_sess = d;
+    pl_clear(dst);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(d, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    uint64_t before = pl_now_ms() - 1000;
+    unproven_streak(NULL);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 0, "restart burst: the first streak's check passes");
+    for (int i = 0; i < 3; i++) pl_seen_at(d, -1, before);
+    check(!g_pl.slot[0].kick && g_pl.slot[0].streak == 0,
+          "restart burst: failures of connects started before the check do not count");
+    pl_check(0);
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 0, "restart burst: the node is not dropped for them");
+    pl_seen_at(d, -1, g_pl.slot[0].checked_at);
+    check(g_pl.slot[0].streak == 1, "restart burst: a connect started at the check counts");
+    pl_seen_at(d, 0, before);
+    check(g_pl.slot[0].streak == 0 && g_pl.slot[0].unproven == 0,
+          "restart burst: a success counts whenever it started");
 }
 
 static const int g_sel_13[] = { 1, 3 };
@@ -1784,6 +1948,11 @@ static void pool_part(void) {
     t_pool_pick();
     t_pool_refill();
     t_pool_spares();
+    t_pool_kick_once();
+    t_pool_unproven();
+    t_pool_streak_after_check();
+    t_pool_unproven_alone();
+    t_pool_retry_cap();
     t_pool_log();
     t_pool_swap();
     t_pool_swap_grow();
@@ -1984,6 +2153,148 @@ static const struct dialer_ops h_ops = {
     .deliver = h_deliver,
 };
 
+struct csess { int fd; };
+static int g_cd_rc;
+static int g_cd_spare;
+static int g_cd_busy;
+
+static int cd_connect(const void *ctx, void *sess, int t) {
+    (void)ctx; (void)t;
+    __atomic_add_fetch(&g_cd_busy, 1, __ATOMIC_SEQ_CST);
+    for (int i = 0; i < SPARE_MAX; i++)
+        if (g_spares[i].sess == sess) __atomic_add_fetch(&g_cd_spare, 1, __ATOMIC_SEQ_CST);
+    int rc = g_cd_rc;
+    ((struct csess *)sess)->fd = rc == 0 ? 99 : -1;
+    __atomic_sub_fetch(&g_cd_busy, 1, __ATOMIC_SEQ_CST);
+    return rc;
+}
+static void cd_take(void *dst, void *src) { (void)dst; (void)src; }
+static void cd_close(void *sess) { ((struct csess *)sess)->fd = -1; }
+static void cd_clear(void *sess) { ((struct csess *)sess)->fd = -1; }
+static int cd_fd(const void *sess) { (void)sess; return -1; }
+static int cd_has_data(const void *sess) { (void)sess; return 0; }
+static const struct dialer_ops cd_ops = {
+    .name = "count", .caps = DC_PRECONNECT, .rcv_wnd_max = 100000, .sess_size = sizeof(struct csess),
+    .peer = h_peer, .describe = h_describe, .strerror = h_strerror, .connect = cd_connect,
+    .take = cd_take, .close = cd_close, .clear = cd_clear, .fd = cd_fd, .has_data = cd_has_data,
+    .flow_open = h_flow_open, .send = h_send, .dgram_frame = f_dgram_frame, .read = h_read,
+    .deliver = h_deliver,
+};
+
+static void cd_settle(void) {
+    for (int i = 0; i < 400; i++) {
+        pthread_mutex_lock(&g_cq.mu);
+        int n = (int)g_cq.n;
+        pthread_mutex_unlock(&g_cq.mu);
+        if (!n && !__atomic_load_n(&g_cd_busy, __ATOMIC_SEQ_CST)) { usleep(20000); return; }
+        usleep(5000);
+    }
+}
+
+static void cd_at(uint64_t t_ms) { g_spare_clock_ns = t_ms * 1000000ull + 1000000000000ull; }
+
+static void cd_syn(uint64_t t_ms) {
+    cd_at(t_ms);
+    static struct csess out;
+    spare_sweep();
+    if (spare_checkout(&out) == 0) cd_close(&out);
+    spare_refill();
+    cd_settle();
+}
+
+static void cd_reset(int rc) {
+    cd_settle();
+    for (int i = 0; i < SPARE_MAX; i++) g_spares[i].state = SPARE_EMPTY;
+    g_spare_fail_ns = 0;
+    g_spare_fail_n = 0;
+    g_spare_syn_ns = 0;
+    g_cd_rc = rc;
+    g_cd_spare = 0;
+}
+
+static void t_spare_churn(void) {
+    static struct dialer cd = { .ops = &cd_ops, .ctx = NULL };
+    const struct dialer *save_dl = g_dl;
+    int save_want = g_spare_want;
+    g_spare_want = 4;
+    stack_setup(&cd);
+
+    cd_reset(0);
+    for (int k = 0; k < 6; k++) cd_syn((uint64_t)k * 10000);
+    check(g_cd_spare == 0, "spares: lone connections 10 s apart open no spare");
+
+    g_cd_spare = 0;
+    for (int k = 0; k < 5; k++) cd_syn(100000 + (uint64_t)k * 100);
+    check(g_cd_spare == 7, "spares: a flow of connections fills the pool (4) and tops it up (1 per taken)");
+
+    g_cd_spare = 0;
+    cd_at(400000);
+    spare_sweep();
+    cd_settle();
+    check(g_cd_spare == 0, "spares: no connections, no attempt to the node");
+
+    cd_reset(-1);
+    for (int k = 0; k < 120; k++) cd_syn(1000000 + (uint64_t)k * 1000);
+    check(g_cd_spare == 12,
+          "spares: a refusing node and a connection a second for 120 s cost 12 spare attempts (pause 40 s, then 60 s)");
+
+    g_cd_rc = 0;
+    g_cd_spare = 0;
+    for (int k = 0; k < 4; k++) cd_syn(2000000 + (uint64_t)k * 100);
+    check(g_cd_spare == 6, "spares: the node answers again, the pool fills");
+
+    g_cd_rc = -1;
+    for (int i = 0; i < SPARE_MAX; i++) g_spares[i].state = SPARE_EMPTY;
+    g_cd_spare = 0;
+    cd_syn(3000000);
+    cd_syn(3000100);
+    cd_syn(3045000);
+    cd_syn(3045100);
+    check(g_cd_spare == 8, "spares: a success clears the failures, so the next pause is 40 s again, not 60 s");
+
+    cd_reset(-1);
+    static struct conn live;
+    static struct csess live_sess;
+    memset(&live, 0, sizeof live);
+    struct connjob j = { .c = &live, .sess = &live_sess, .sp = NULL, .efd = -1 };
+    cd_at(4000000);
+    check(connq_push(&j) == 0, "spares: a live connect is queued");
+    cd_settle();
+    cd_syn(4001000);
+    cd_syn(4001100);
+    check(g_cd_spare == 0, "spares: a failed live connect pauses the refill too");
+    cd_syn(4006000);
+    cd_syn(4006100);
+    check(g_cd_spare == 4, "spares: 5 s after one failure the refill runs again");
+
+    cd_reset(-1);
+    cd_at(5000000);
+    for (int i = 0; i < 5; i++) {
+        connq_push(&j);
+        cd_settle();
+    }
+    cd_syn(5061000);
+    cd_syn(5061100);
+    check(g_cd_spare == 4, "spares: five failures in a row pause the refill for 60 s, not longer");
+
+    cd_reset(-1);
+    cd_at(6000000);
+    connq_push(&j);
+    cd_settle();
+    g_cd_rc = 0;
+    cd_at(6001000);
+    connq_push(&j);
+    cd_settle();
+    cd_syn(6002000);
+    cd_syn(6002100);
+    check(g_cd_spare == 4, "spares: a success right after a failure lifts the pause at once");
+
+    cd_reset(0);
+    g_spare_clock_ns = 0;
+    g_spare_want = save_want;
+    stack_setup(save_dl);
+}
+
 /* ACKs written to the device: how many, and the ack number of the last. */
 static int h_acks(uint32_t *ack) {
     unsigned char p[70000];
@@ -2136,6 +2447,7 @@ int main(void) {
     t_send_refused();
     t_dns_evict();
     t_spare_slot();
+    t_spare_churn();
     t_udp_early_bounds();
     t_server_first();
     t_room_window();

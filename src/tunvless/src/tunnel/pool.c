@@ -31,7 +31,7 @@
  *     by the kernel for silence (lost: stack.c, node_sock_silence);
  *   - a dead node: its connections are reset (generation) and a replacement is searched at once
  *     among the free candidates in order of preference. None answers — another round after 15 s
- *     (own node first, then the free candidates), doubling up to 5 minutes. An empty slot (fewer
+ *     (own node first, then the free candidates), doubling up to 30 s. An empty slot (fewer
  *     candidates answered at startup than `active`) searches the same way.
  */
 #define _GNU_SOURCE
@@ -56,8 +56,9 @@
 
 #define PL_CONFIRM_S   3
 #define PL_RETRY_S     15
-#define PL_RETRY_MAX_S 300
+#define PL_RETRY_MAX_S 30
 #define PL_STREAK      3
+#define PL_UNPROVEN    2
 #define PL_TIMEOUT_S   8
 /* A cut connection brings a check forward at most this often: the connections of a dead node are
  * cut together, and one check is enough. */
@@ -83,6 +84,7 @@ struct pl_slot {
     unsigned gen;
     int fails;                  /* failed checks in a row */
     int streak;                 /* failed connects in a row */
+    int unproven;
     int kick;                   /* check now */
     int lost;                   /* a stall brought the check: one failure is enough */
     uint64_t due;               /* next check, ms of CLOCK_MONOTONIC */
@@ -241,7 +243,7 @@ static int pl_taken(int c, int except) {
 static void pl_slot_alive(struct pl_slot *sl) {
     sl->up = 1;
     sl->fails = sl->streak = sl->kick = sl->lost = 0;
-    sl->retry = PL_RETRY_S;
+    if (!sl->unproven) sl->retry = PL_RETRY_S;
     sl->checked_at = pl_now_ms();
     sl->due = sl->checked_at + (uint64_t)g_pl.cf.interval_s * 1000ull;
 }
@@ -295,6 +297,7 @@ static int pl_refill(int i, int own) {
         struct pl_slot *sl = &g_pl.slot[i];
         sl->node = c;
         __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);  /* pl_stale reads it without the lock */
+        sl->unproven = 0;
         pl_slot_alive(sl);
         int n = g_pl.n;
         pthread_mutex_unlock(&g_pl.mu);
@@ -323,11 +326,19 @@ static int pl_refill(int i, int own) {
     return 0;
 }
 
+static int pl_has_free(int i) {
+    for (size_t k = 0; k < g_pl.sel->n; k++) {
+        int c = g_pl.sel->c[k];
+        if (c != g_pl.slot[i].node && !pl_taken(c, i)) return 1;
+    }
+    return 0;
+}
+
 /* One check of slot i: a live slot gets its regular check, a dead or empty one a search round. */
 static void pl_check(int i) {
     pthread_mutex_lock(&g_pl.mu);
     struct pl_slot *sl = &g_pl.slot[i];
-    int node = sl->node, up = sl->up, lost = sl->lost;
+    int node = sl->node, up = sl->up, lost = sl->lost, kicked = sl->kick;
     unsigned gen = sl->gen;
     sl->kick = sl->lost = 0;
     pthread_mutex_unlock(&g_pl.mu);
@@ -338,7 +349,8 @@ static void pl_check(int i) {
     pthread_mutex_lock(&g_pl.mu);
     if (sl->gen != gen) { pthread_mutex_unlock(&g_pl.mu); return; }
     sl->checked_at = pl_now_ms();
-    if (rc == 0) {
+    int unproven = rc == 0 && kicked && !lost && ++sl->unproven >= PL_UNPROVEN && pl_has_free(i);
+    if (rc == 0 && !unproven) {
         sl->fails = sl->streak = 0;
         sl->due = sl->checked_at + (uint64_t)g_pl.cf.interval_s * 1000ull;
         pthread_mutex_unlock(&g_pl.mu);
@@ -346,7 +358,10 @@ static void pl_check(int i) {
     }
     /* Two failures in a row, against a single loss on a radio link; one is enough when a stall
      * brought the check. */
-    if (++sl->fails < 2 && !lost) {
+    if (unproven)
+        snprintf(why, sizeof why, "the check passes but connections do not open (%d failed connects in a row)",
+                 PL_STREAK * sl->unproven);
+    if (!unproven && ++sl->fails < 2 && !lost) {
         sl->due = sl->checked_at + PL_CONFIRM_S * 1000ull;
         pthread_mutex_unlock(&g_pl.mu);
         return;
@@ -355,7 +370,7 @@ static void pl_check(int i) {
     sl->up = 0;
     sl->fails = 0;
     __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);
-    sl->retry = PL_RETRY_S;
+    if (!unproven) sl->retry = PL_RETRY_S;
     pthread_mutex_unlock(&g_pl.mu);
     snprintf(g_pl.why, sizeof g_pl.why, "%s", why);
     fprintf(stderr, PL_LOG_W "node %s does not answer: %s — looking for a replacement\n",
@@ -444,13 +459,16 @@ static void pl_describe(const void *ctx, char *out, size_t n) {
 static const char *pl_strerror(int rc) { return g_pl.in->strerror(rc); }
 
 /* A connect outcome for the slot's health: a streak of failures brings its check forward. */
-static void pl_seen(const struct pl_sess *s, int rc) {
+static void pl_seen_at(const struct pl_sess *s, int rc, uint64_t started) {
     if (s->slot < 0) return;
     pthread_mutex_lock(&g_pl.mu);
     struct pl_slot *sl = &g_pl.slot[s->slot];
     if (sl->gen == s->gen) {
-        if (rc == 0) sl->streak = 0;
-        else if (++sl->streak >= PL_STREAK) pl_kick(s->slot);
+        if (rc == 0) sl->streak = sl->unproven = 0;
+        else if (started >= sl->checked_at && ++sl->streak >= PL_STREAK) {
+            sl->streak = 0;
+            pl_kick(s->slot);
+        }
     }
     pthread_mutex_unlock(&g_pl.mu);
 }
@@ -473,8 +491,9 @@ static int pl_connect(const void *ctx, void *sess, int timeout_s) {
         pthread_mutex_unlock(&g_pl.mu);
         if (pick < 0) return TR_ECONNECT;
     }
+    uint64_t started = pl_now_ms();
     int rc = g_pl.in->connect(s->node, INNER(s), timeout_s);
-    pl_seen(s, rc);
+    pl_seen_at(s, rc, started);
     return rc;
 }
 

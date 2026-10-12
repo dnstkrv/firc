@@ -26,6 +26,14 @@ static void h_nul(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     firc_http_res_write(res, 200, "text/plain", (const uint8_t *)body, sizeof(body) - 1);
 }
 
+static const char k_srs_body[] = "SRS\x02x\x9c\x00\x01\x00";
+
+static void h_srs(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    firc_http_res_write(res, 200, "application/octet-stream", (const uint8_t *)k_srs_body, sizeof(k_srs_body) - 1);
+}
+
 static void h_empty(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)req;
     (void)ud;
@@ -107,6 +115,7 @@ static harness_t *harness_start(void) {
     firc_httpd_route(h->srv, "GET", "/list", h_list, NULL);
     firc_httpd_route(h->srv, "GET", "/empty", h_empty, NULL);
     firc_httpd_route(h->srv, "GET", "/nul", h_nul, NULL);
+    firc_httpd_route(h->srv, "GET", "/srs", h_srs, NULL);
     firc_httpd_route(h->srv, "GET", "/notfound", h_notfound_status, NULL);
     firc_httpd_route(h->srv, "GET", "/404", h_notfound_status, NULL);
     firc_httpd_route(h->srv, "GET", "/big", h_big, NULL);
@@ -170,6 +179,19 @@ TEST a_body_with_a_nul_in_it_is_not_a_list(void) {
     ASSERT_EQ_FMTm("refused, not silently truncated at the NUL", (int)FIRC_ERR_PROTO,
                    (int)firc_sub_fetch_list(url_for("/nul"), &body, &len), "%d");
     ASSERTm("and nothing handed back to parse", body == NULL);
+    harness_stop(h);
+    PASS();
+}
+
+TEST a_compiled_rule_set_is_fetched_with_its_nul_bytes(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char *body = NULL;
+    size_t len = 0;
+    ASSERT_EQ_FMT((int)FIRC_OK, (int)firc_sub_fetch_list(url_for("/srs"), &body, &len), "%d");
+    ASSERT_EQ_FMT(sizeof(k_srs_body) - 1, len, "%zu");
+    ASSERT_MEM_EQ(k_srs_body, body, len);
+    free(body);
     harness_stop(h);
     PASS();
 }
@@ -394,6 +416,7 @@ int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(fetches_plain_200);
     RUN_TEST(a_body_with_a_nul_in_it_is_not_a_list);
+    RUN_TEST(a_compiled_rule_set_is_fetched_with_its_nul_bytes);
     RUN_TEST(fetches_empty_body);
     RUN_TEST(follows_301_and_302);
     RUN_TEST(detects_redirect_loop);

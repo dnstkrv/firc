@@ -770,6 +770,21 @@ size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t 
     return t->cur.n;
 }
 
+bool firc_tunrun_device_down(const firc_tunrun_t *t, const char *device)
+{
+    if (device == NULL) {
+        return false;
+    }
+    firc_tun_state_t st[FIRC_TUN_MAX];
+    size_t n = firc_tunrun_states(t, st, FIRC_TUN_MAX);
+    for (size_t i = 0; i < n && i < FIRC_TUN_MAX; i++) {
+        if (strcmp(st[i].device, device) == 0) {
+            return st[i].status != FIRC_TUN_ST_UP;
+        }
+    }
+    return false;
+}
+
 const firc_tunnels_t *firc_tunrun_config(const firc_tunrun_t *t)
 {
     return &t->cur;
@@ -838,14 +853,14 @@ bool firc_tunrun_mark_of(const firc_tunrun_t *t, const char *id, uint32_t *mark,
     return true;
 }
 
-void firc_tunrun_link_up(firc_tunrun_t *t, const char *ifname)
+void firc_tunrun_refresh_uplinks(firc_tunrun_t *t, const char *ifname)
 {
-    if (t == NULL || t->stopped || ifname == NULL) {
+    if (t == NULL || t->stopped) {
         return;
     }
     for (size_t i = 0; i < t->cur.n; i++) {
         const char *dev = firc_tunnet_uplink_device(&t->cur.t[i], &t->cur);
-        if (t->up[i].mark != 0 && dev != NULL && strcmp(dev, ifname) == 0) {
+        if (t->up[i].mark != 0 && dev != NULL && (ifname == NULL || strcmp(dev, ifname) == 0)) {
             refresh(t, i);
         }
     }

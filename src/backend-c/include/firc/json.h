@@ -2,6 +2,8 @@
 #define FIRC_JSON_H
 
 #include <cjson/cJSON.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include "firc/err.h"
 
@@ -13,6 +15,9 @@ cJSON *firc_json_error(const char *msg);
 
 /* longest prefix of s that is <= max_bytes and ends on a UTF-8 boundary */
 int firc_api_utf8_clamp(const char *s, int max_bytes);
+
+/* true and *out set when j is a whole number in 0..max, checked on the double before any cast */
+bool firc_json_whole(const cJSON *j, double max, uint64_t *out);
 
 /* compact serialization; caller frees with free(); NULL on OOM */
 char *firc_json_dump(const cJSON *obj);

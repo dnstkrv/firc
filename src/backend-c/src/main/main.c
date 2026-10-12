@@ -169,9 +169,15 @@ static bool pool_overlaps_an_interface(const firc_fakeip_t *pool, char *iface, s
     return hit;
 }
 
+static bool tunnel_down(void *ud, const char *iface)
+{
+    return firc_tunrun_device_down(ud, iface);
+}
+
 static void daemon_teardown(struct daemon *d)
 {
     firc_tunnels_api_close(d->tunnels_ctx);
+    firc_app_set_tunnel_down(d->app, NULL, NULL);
     if (d->tunrun != NULL) { firc_tunrun_set_subs(d->tunrun, NULL); }
     firc_tunsubs_free(d->tunsubs);
     d->tunsubs = NULL;
@@ -484,24 +490,24 @@ static firc_dns_verdict_t on_response(firc_dns_msg_t *msg, const firc_ip_t *clie
     return v;
 }
 
-static void refresh_iface(struct daemon *d, const char *iface_name)
+static void resync(struct daemon *d, const char *iface_name)
 {
     for (size_t i = 0; i < firc_app_user_group_count(d->app); i++) {
         firc_ruleset_t *rs = firc_app_user_group_at(d->app, i);
         const firc_group_t *g = firc_ruleset_group(rs);
-        if (g->iface == NULL || strcmp(g->iface, iface_name) != 0) {
+        if (g->iface == NULL || (iface_name != NULL && strcmp(g->iface, iface_name) != 0)) {
             continue;
         }
         /* A connected tunnel socket keeps its old source address after the interface's address moves. */
         if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
         firc_err_t err = firc_ruleset_on_addr_change(rs);
         if (err != FIRC_OK) {
-            FIRC_ERROR(
-                "error while handling interface addr change: group=%s "
-                "err=%s",
-                g->name, firc_err_str(err));
+            FIRC_ERROR("error while re-reading interface %s: group=%s err=%s", g->iface, g->name,
+                       firc_err_str(err));
         }
     }
+    firc_tunrun_refresh_uplinks(d->tunrun, iface_name);
+    (void)firc_app_retry_groups(d->app, iface_name);
 }
 
 static void on_refresh_due(firc_loop_t *loop, void *ud)
@@ -516,24 +522,9 @@ static void on_refresh_due(firc_loop_t *loop, void *ud)
     d->refresh_all = false;
     d->n_refresh_ifaces = 0;
     if (all) {
-        /* Events were lost: re-read every group, each ruleset once. */
-        for (size_t i = 0; i < firc_app_user_group_count(d->app); i++) {
-            firc_ruleset_t *rs = firc_app_user_group_at(d->app, i);
-            const firc_group_t *g = firc_ruleset_group(rs);
-            if (g->iface == NULL) { continue; }
-            if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
-            firc_err_t err = firc_ruleset_on_addr_change(rs);
-            if (err != FIRC_OK) {
-                FIRC_ERROR("error while re-reading interfaces: group=%s err=%s", g->name, firc_err_str(err));
-            }
-        }
-        (void)firc_app_retry_groups(d->app, NULL);
-        firc_app_republish_resolve_routes(d->app);
-        return;
-    }
-    for (size_t i = 0; i < n; i++) {
-        refresh_iface(d, names[i]);
-        (void)firc_app_retry_groups(d->app, names[i]);
+        resync(d, NULL);
+    } else {
+        for (size_t i = 0; i < n; i++) { resync(d, names[i]); }
     }
     /* After every interface: a retry's own republish may predate a later interface's refresh. */
     firc_app_republish_resolve_routes(d->app);
@@ -575,7 +566,7 @@ static void on_addr_change(const char *iface_name, void *ud)
 static void on_watcher_lost(void *ud)
 {
     struct daemon *d = ud;
-    FIRC_WARN("netlink watcher lost messages; re-reading every group's interface");
+    FIRC_WARN("netlink watcher missed events; re-reading every interface");
     schedule_refresh(d, NULL);
 }
 
@@ -634,7 +625,7 @@ static void on_link_up(const char *iface_name, bool up, void *ud)
                      g->name, firc_err_str(err));
         }
     }
-    firc_tunrun_link_up(d->tunrun, iface_name);
+    firc_tunrun_refresh_uplinks(d->tunrun, iface_name);
     /* An interface coming up is the likeliest reason a failed group's retry now holds. */
     (void)firc_app_retry_groups(d->app, iface_name);
     firc_app_republish_resolve_routes(d->app);
@@ -1145,7 +1136,6 @@ int main(int argc, char **argv)
 #endif
     /* From here every matched answer is rewritten. */
     firc_dns_pipeline_set_pool(d.pipeline, d.pool, (uint32_t)pool_cfg.clamp_secs);
-    firc_dns_pipeline_set_v6_routable(d.pipeline, d.ipt6 != NULL);
     firc_dns_pipeline_set_unmatched_ttl(
         d.pipeline, (uint32_t)(cfg.app.dns_proxy.unmatched_ttl / FIRC_DURATION_SEC));
 
@@ -1199,6 +1189,7 @@ int main(int argc, char **argv)
         return 1;
     }
     firc_dnsproxy_set_router(d.proxy, firc_resolve_router_decide, d.router);
+    firc_dns_pipeline_set_v6_fn(d.pipeline, firc_resolve_router_carries_v6, d.router);
 #ifdef FIRC_ENTWARE_KN
     /* Wait (3 s bound) for the first hotspot read: a policy host asking earlier would stay unrouted. */
     if (!firc_kn_policies_wait_first(d.policies, 3000)) {
@@ -1309,6 +1300,7 @@ int main(int argc, char **argv)
             FIRC_ERROR("tunnels: subscriptions cannot be fetched (no worker thread); links still work");
         }
         firc_tunrun_set_subs(d.tunrun, d.tunsubs);
+        firc_app_set_tunnel_down(d.app, tunnel_down, d.tunrun);
         firc_tunnels_t tunnels = {0};
         if (load_tunnels(&tunnels, "starting with no tunnels")) {
             (void)firc_tunrun_apply(d.tunrun, &tunnels);

@@ -15,7 +15,7 @@
 typedef struct family_state {
     bool rule_added;
     bool reply_rule_added; /* IPv4 only */
-    bool blackhole_added;
+    bool fallback_added;
     firc_iface_route_t route;
 } family_state_t;
 
@@ -42,6 +42,7 @@ struct firc_ipset_to_link {
     uint32_t mark_field; /* 1..FIRC_MARK_MAX_GROUPS; 0 until enable */
     uint32_t table;
     family_state_t v4, v6;
+    bool v6_known, v6_carries;
 };
 
 firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char *iface_name,
@@ -205,6 +206,32 @@ static firc_err_t emit_devices_chain(firc_ipt_t *ipt, const char *dchain, const 
     return firc_ipt_append(ipt, "mangle", dchain, cm, 11);
 }
 
+static firc_err_t open_egress(firc_ipt_t *ipt, const char *chain) {
+    firc_err_t err = firc_ipt_register_chain_override(ipt, "filter", chain);
+    if (err != FIRC_OK) { return err; }
+    char handled[32];
+    snprintf(handled, sizeof(handled), "0x0/0x%x", FIRC_MARK_HANDLED);
+    const char *unmarked[] = {"-m", "mark", "--mark", handled, "-j", "RETURN"};
+    err = firc_ipt_append(ipt, "filter", chain, unmarked, 6);
+    if (err != FIRC_OK) { return err; }
+    const char *jump[] = {"-j", chain};
+    return firc_ipt_insert(ipt, "filter", "FORWARD", 1, jump, 2);
+}
+
+static firc_err_t append_guard(firc_ipt_t *ipt, const char *iface, const char *mark_str) {
+    char chain[128];
+    int n = snprintf(chain, sizeof(chain), "%s%s", firc_ipt_prefix(ipt), FIRC_EGRESS_CHAIN_SUFFIX);
+    if (n < 0 || (size_t)n >= sizeof(chain)) { return FIRC_ERR_INVAL; }
+    const char *guard[] = {"!", "-i", iface, "!", "-o", iface, "-m", "mark", "--mark", mark_str,
+                           "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "DROP"};
+    const char *const *rule = iface != NULL ? guard : guard + 6;
+    size_t len = iface != NULL ? 16 : 10;
+    firc_err_t err = firc_ipt_append(ipt, "filter", chain, rule, len);
+    if (err != FIRC_ERR_STATE) { return err; }
+    err = open_egress(ipt, chain);
+    return err != FIRC_OK ? err : firc_ipt_append(ipt, "filter", chain, rule, len);
+}
+
 firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain_name, const char *iface_name,
                                               uint32_t mark, uint32_t mark_field,
                                               const firc_fakeip_snapshot_t *snap, const char *group_id,
@@ -225,7 +252,8 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     snprintf(match_str, sizeof(match_str), "0x%x/0x%x", firc_mark_group_value(mark_field),
              FIRC_MARK_GROUP_MASK);
 
-    if (strcmp(iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) != 0) {
+    bool blackhole = strcmp(iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0;
+    if (!blackhole) {
         /* FORWARD sees the real address, so match the mark, not the chunk. */
         const char *acc[] = {"-o", iface_name, "-m", "mark", "--mark", match_str, "-j", "ACCEPT"};
         err = firc_ipt_append(ipt, "filter", chain_name, acc, 8);
@@ -233,6 +261,9 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     }
     const char *fwd_args[] = {"-j", chain_name};
     err = firc_ipt_append(ipt, "filter", "FORWARD", fwd_args, 2);
+    if (err != FIRC_OK) { return err; }
+
+    err = append_guard(ipt, blackhole ? NULL : iface_name, mark_str);
     if (err != FIRC_OK) { return err; }
 
     err = firc_ipt_register_chain_override(ipt, "mangle", chain_name);
@@ -247,7 +278,7 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     err = firc_ipt_register_chain_override(ipt, "nat", chain_name);
     if (err != FIRC_OK) { return err; }
     /* POSTROUTING sees the real address: match the mark and the output interface. */
-    if (strcmp(iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) != 0) {
+    if (!blackhole) {
         const char *nat1[] = {"-o", iface_name, "-m",          "mark",
                               "--mark", match_str, "-j", "MASQUERADE"};
         err = firc_ipt_append(ipt, "nat", chain_name, nat1, 8);
@@ -701,12 +732,12 @@ firc_err_t firc_iface_route_update(firc_rtnl_t *r, int family, uint32_t table, c
     }
 
     /* Always rewritten with NLM_F_REPLACE: link-down purges device routes behind our back. */
-    bool enodev = false;
+    bool unavailable = false;
     firc_err_t err = firc_rtnl_route_add_iface(r, family, table, FIRC_IFACE_ROUTE_METRIC, ifindex,
-                                               has_gw ? gw : NULL, gw_len, &enodev);
+                                               has_gw ? gw : NULL, gw_len, &unavailable);
     if (err != FIRC_OK) { return err; }
-    if (enodev) {
-        FIRC_WARN("interface %s not ready for this IP family, skipping route", iface_name);
+    if (unavailable) {
+        FIRC_WARN("interface %s is down or not ready for this IP family, skipping route", iface_name);
         st->present = false;
         return FIRC_OK;
     }
@@ -736,42 +767,68 @@ static firc_err_t update_iface_route(firc_ipset_to_link_t *l, int family, int if
                                    &fs->route);
 }
 
-static firc_err_t insert_ip_route(firc_ipset_to_link_t *l) {
-    if (l->ipt4) {
-        firc_err_t err = firc_rtnl_route_add_blackhole(l->rtnl, AF_INET, l->table, 20);
-        if (err != FIRC_OK) { return err; }
-        l->v4.blackhole_added = true;
-    }
-    if (l->ipt6) {
-        firc_err_t err = firc_rtnl_route_add_blackhole(l->rtnl, AF_INET6, l->table, 20);
-        if (err != FIRC_OK) { return err; }
-        l->v6.blackhole_added = true;
-    }
+static void keep_first(firc_err_t *first, firc_err_t err) {
+    if (*first == FIRC_OK) { *first = err; }
+}
 
-    if (strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) { return FIRC_OK; }
+static uint8_t fallback_type(int family) { return family == AF_INET6 ? RTN_UNREACHABLE : RTN_BLACKHOLE; }
+
+static firc_err_t update_v6_route(firc_ipset_to_link_t *l, const firc_link_info_t *li) {
+    bool carries = false;
+    firc_err_t err = firc_rtnl_iface_carries_v6(l->rtnl, li->ifindex, &carries);
+    if (err != FIRC_OK) { return err; }
+    err = carries ? update_iface_route(l, AF_INET6, li->ifindex, li->point_to_point, &l->v6)
+                  : firc_iface_route_remove(l->rtnl, AF_INET6, l->table, l->iface_name, &l->v6.route);
+    if (err != FIRC_OK) { return err; }
+    if (carries != l->v6_carries || !l->v6_known) {
+        if (!carries) {
+            FIRC_DEBUG("%s carries no IPv6: its group's names get no IPv6 address", l->iface_name);
+        } else if (l->v6_known) {
+            FIRC_DEBUG("%s carries IPv6 again: its group's names get IPv6 addresses", l->iface_name);
+        }
+        l->v6_known = true;
+        l->v6_carries = carries;
+    }
+    return FIRC_OK;
+}
+
+static firc_err_t update_iface_routes(firc_ipset_to_link_t *l, const firc_link_info_t *li) {
+    firc_err_t first = FIRC_OK;
+    if (l->ipt4) { keep_first(&first, update_iface_route(l, AF_INET, li->ifindex, li->point_to_point, &l->v4)); }
+    if (l->ipt6) { keep_first(&first, update_v6_route(l, li)); }
+    return first;
+}
+
+static firc_err_t add_fallback(firc_ipset_to_link_t *l, int family, family_state_t *fs) {
+    firc_err_t err = firc_rtnl_route_add_reject(l->rtnl, family, l->table, 20, fallback_type(family));
+    if (err == FIRC_OK) { fs->fallback_added = true; }
+    return err;
+}
+
+static firc_err_t insert_ip_route(firc_ipset_to_link_t *l) {
+    firc_err_t first = FIRC_OK;
+    if (l->ipt4) { keep_first(&first, add_fallback(l, AF_INET, &l->v4)); }
+    if (l->ipt6) { keep_first(&first, add_fallback(l, AF_INET6, &l->v6)); }
+
+    if (strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) { return first; }
 
     firc_link_info_t li;
     bool found;
     firc_err_t err = firc_rtnl_link_by_name(l->rtnl, l->iface_name, &li, &found);
-    if (err != FIRC_OK) { return err; }
+    if (err != FIRC_OK) {
+        keep_first(&first, err);
+        return first;
+    }
     if (!found) {
         FIRC_WARN("interface %s not found, it can be caught later", l->iface_name);
-        return FIRC_OK;
+        return first;
     }
     if (!li.up) {
         FIRC_WARN("interface %s is down", l->iface_name);
-        return FIRC_OK;
+        return first;
     }
-
-    if (l->ipt4) {
-        err = update_iface_route(l, AF_INET, li.ifindex, li.point_to_point, &l->v4);
-        if (err != FIRC_OK) { return err; }
-    }
-    if (l->ipt6) {
-        err = update_iface_route(l, AF_INET6, li.ifindex, li.point_to_point, &l->v6);
-        if (err != FIRC_OK) { return err; }
-    }
-    return FIRC_OK;
+    keep_first(&first, update_iface_routes(l, &li));
+    return first;
 }
 
 static firc_err_t delete_ip_route(firc_ipset_to_link_t *l) {
@@ -781,15 +838,15 @@ static firc_err_t delete_ip_route(firc_ipset_to_link_t *l) {
     if (e4 != FIRC_OK && first_err == FIRC_OK) { first_err = e4; }
     firc_err_t e6 = firc_iface_route_remove(l->rtnl, AF_INET6, l->table, l->iface_name, &l->v6.route);
     if (e6 != FIRC_OK && first_err == FIRC_OK) { first_err = e6; }
-    if (l->v4.blackhole_added) {
-        firc_err_t err = firc_rtnl_route_del_blackhole(l->rtnl, AF_INET, l->table, 20);
+    if (l->v4.fallback_added) {
+        firc_err_t err = firc_rtnl_route_del_reject(l->rtnl, AF_INET, l->table, 20, fallback_type(AF_INET));
         if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-        l->v4.blackhole_added = false;
+        l->v4.fallback_added = false;
     }
-    if (l->v6.blackhole_added) {
-        firc_err_t err = firc_rtnl_route_del_blackhole(l->rtnl, AF_INET6, l->table, 20);
+    if (l->v6.fallback_added) {
+        firc_err_t err = firc_rtnl_route_del_reject(l->rtnl, AF_INET6, l->table, 20, fallback_type(AF_INET6));
         if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-        l->v6.blackhole_added = false;
+        l->v6.fallback_added = false;
     }
     return first_err;
 }
@@ -899,16 +956,6 @@ firc_err_t firc_ipset_to_link_on_addr_change(firc_ipset_to_link_t *l) {
     /* A down link's routes would be refused; link-up puts them back. */
     if (!li.up) { return FIRC_OK; }
 
-    /* Both families, whatever one says: they fail independently. */
-    firc_err_t first = FIRC_OK;
-    if (l->ipt4) {
-        err = update_iface_route(l, AF_INET, li.ifindex, li.point_to_point, &l->v4);
-        if (err != FIRC_OK) { first = err; }
-    }
-    if (l->ipt6) {
-        err = update_iface_route(l, AF_INET6, li.ifindex, li.point_to_point, &l->v6);
-        if (err != FIRC_OK && first == FIRC_OK) { first = err; }
-    }
-    return first;
+    return update_iface_routes(l, &li);
 }
 

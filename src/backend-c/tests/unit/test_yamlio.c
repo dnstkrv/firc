@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -800,7 +801,7 @@ static firc_group_list_t *add_list_group(firc_config_t *cfg, const char *name)
 {
     firc_group_t *g = firc_group_new();
     if (g == NULL) { return NULL; }
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->list = firc_group_list_new();
     if (g->list == NULL || firc_strset(&g->name, name) != FIRC_OK ||
         firc_strset(&g->iface, "nwg0") != FIRC_OK ||
@@ -850,7 +851,7 @@ TEST a_saved_group_list_carries_edits_not_rules(void)
     ASSERT(l != NULL);
     l->interval = 86400;
     ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&l->rules, "fetched.example.com", "namespace", true,
-                                           firc_id_random()));
+                                           test_random_id()));
     bool off = false;
     ASSERT_EQ(FIRC_OK,
              firc_group_list_set_override(
@@ -884,7 +885,7 @@ TEST a_group_list_with_no_edits_writes_an_empty_list(void)
     for (int i = 0; i < 100; i++) {
         char text[64];
         snprintf(text, sizeof(text), "n%d.example.com", i);
-        ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&l->rules, text, "namespace", true, firc_id_random()));
+        ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&l->rules, text, "namespace", true, test_random_id()));
     }
 
     char *out = NULL;
@@ -1178,7 +1179,7 @@ TEST enabling_a_legacy_override_by_its_full_key_survives_a_reload(void)
     firc_sub_rules_t rules;
     firc_sub_rules_init(&rules);
     ASSERT_EQ(FIRC_OK,
-              firc_sub_rules_push(&rules, "ads.example.com", "domain", true, firc_id_random()));
+              firc_sub_rules_push(&rules, "ads.example.com", "domain", true, test_random_id()));
     firc_sub_apply_overrides(back.groups[0]->list, &rules);
     ASSERTm("the rule reads enabled after the reload", firc_sub_rules_enable(&rules, 0));
 
@@ -1217,7 +1218,7 @@ TEST a_type_edit_on_a_legacy_overridden_rule_survives_a_reload(void)
     firc_sub_rules_t rules;
     firc_sub_rules_init(&rules);
     ASSERT_EQ(FIRC_OK,
-              firc_sub_rules_push(&rules, "ads.example.com", "domain", true, firc_id_random()));
+              firc_sub_rules_push(&rules, "ads.example.com", "domain", true, test_random_id()));
     firc_sub_apply_overrides(back.groups[0]->list, &rules);
     ASSERT_STR_EQm("the type survived the reload", "wildcard", firc_sub_rules_type(&rules, 0));
     ASSERT_FALSEm("and so did the old enable opinion", firc_sub_rules_enable(&rules, 0));

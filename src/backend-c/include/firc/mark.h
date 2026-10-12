@@ -17,6 +17,9 @@
 /* A group's devices chain is `<prefix><id>` + this. */
 #define FIRC_DEVICES_CHAIN_SUFFIX "D"
 
+/* The egress dispatch chain, shared by every routed group, is `<prefix>` + this. */
+#define FIRC_EGRESS_CHAIN_SUFFIX "EGRESS"
+
 /* Field 0 means no group; past 255 a group is refused, never wrapped. */
 #define FIRC_MARK_MAX_GROUPS 255u
 

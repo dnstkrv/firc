@@ -1,0 +1,11 @@
+# sing-box 1.14.3 rule-set match -f binary legacy.srs <name>
+plain.org 1
+a.plain.org 0
+both.net 1
+a.both.net 1
+example.com 1
+a.example.com 1
+xexample.com 0
+only-sub.net 0
+a.only-sub.net 1
+aonly-sub.net 0

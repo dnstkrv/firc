@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,16 @@ TEST type_detection(void)
     ASSERT_STR_EQ("wildcard", firc_sub_detect_type("*.example.com"));
     ASSERT_STR_EQ("regex", firc_sub_detect_type("^example\\.com$"));
     ASSERT_STR_EQ("namespace", firc_sub_detect_type("300.1.2.3"));
+    PASS();
+}
+
+/* Catches: a prefix whose digits overflow int on the multiply and wrap to a valid length. */
+TEST a_prefix_too_long_to_count_is_not_a_subnet(void)
+{
+    ASSERT(strcmp("subnet6", firc_sub_detect_type("::/4294967296")) != 0);
+    ASSERT(strcmp("subnet6", firc_sub_detect_type("::/9999999999")) != 0);
+    ASSERT(strcmp("subnet6", firc_sub_detect_type("::/2147483648")) != 0);
+    ASSERT_STR_EQ("subnet6", firc_sub_detect_type("::/0000000000128"));
     PASS();
 }
 
@@ -201,12 +212,12 @@ TEST a_line_with_no_type_is_dropped(void) {
 TEST a_legacy_unanchored_regex_is_re_derived_on_sync(void) {
     firc_sub_rules_t old;
     firc_sub_rules_init(&old);
-    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "_dmarc.example.com", "namespace", true, firc_id_random()));
+    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "_dmarc.example.com", "namespace", true, test_random_id()));
     firc_sub_rules_set_type(&old, 0, "regex");
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("_dmarc.example.com\n", &old, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("_dmarc.example.com\n", strlen("_dmarc.example.com\n"), &old, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQm("re-derived as the name it is", "namespace", firc_sub_rules_type(&out, 0));
     firc_sub_rules_free(&out);
@@ -222,7 +233,7 @@ TEST the_wrap_does_not_lose_what_the_operator_set(void) {
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^v|q$\n", &old, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^v|q$\n", strlen("^v|q$\n"), &old, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQm("stored wrapped from now on", "\\A(?:^v|q$)\\z", firc_sub_rules_text(&out, 0));
     ASSERT_FALSEm("and it stays off", firc_sub_rules_enable(&out, 0));
@@ -242,7 +253,7 @@ TEST a_wrapped_rule_matches_itself_on_the_next_sync(void) {
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^v|q$\n", &old, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^v|q$\n", strlen("^v|q$\n"), &old, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_FALSEm("still off", firc_sub_rules_enable(&out, 0));
     ASSERT_EQ_FMTm("still its id", 9, (int)firc_sub_rules_id(&out, 0).b[3], "%d");
@@ -255,12 +266,12 @@ TEST a_wrapped_rule_matches_itself_on_the_next_sync(void) {
 TEST an_unusable_stored_type_is_not_restored(void) {
     firc_sub_rules_t old;
     firc_sub_rules_init(&old);
-    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "example.com", "namespace", true, firc_id_random()));
+    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "example.com", "namespace", true, test_random_id()));
     firc_sub_rules_set_type(&old, 0, "subnet");
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("example.com\n", &old, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("example.com\n", strlen("example.com\n"), &old, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQm("re-derived, not locked", "namespace", firc_sub_rules_type(&out, 0));
     ASSERTm("and it is a rule the API would take",
@@ -274,12 +285,12 @@ TEST an_unusable_stored_type_is_not_restored(void) {
 TEST an_operator_s_chosen_type_survives_a_sync(void) {
     firc_sub_rules_t old;
     firc_sub_rules_init(&old);
-    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "example.com", "namespace", true, firc_id_random()));
+    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&old, "example.com", "namespace", true, test_random_id()));
     firc_sub_rules_set_type(&old, 0, "domain");
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("example.com\n", &old, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("example.com\n", strlen("example.com\n"), &old, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQm("kept", "domain", firc_sub_rules_type(&out, 0));
     firc_sub_rules_free(&out);
@@ -326,7 +337,7 @@ TEST refresh_preserves_existing_overrides(void)
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
     ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("example.com\nsub.example.net\n",
-                                          &existing, &out));
+                                              strlen("example.com\nsub.example.net\n"), &existing, &out));
     ASSERT_EQ(2u, (unsigned)out.n);
     ASSERT_STR_EQ("example.com", firc_sub_rules_text(&out, 0));
     ASSERT(firc_id_equal(firc_sub_rules_id(&out, 0), ex0_id));
@@ -529,7 +540,7 @@ static double seconds_to_resync(size_t n, bool *out_kept) {
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    firc_err_t err = firc_sub_refresh_rules(list, &stored, &out);
+    firc_err_t err = firc_sub_refresh_rules(list, strlen(list), &stored, &out);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     if (out_kept != NULL) {
         *out_kept = err == FIRC_OK && out.n == n && firc_id_equal(firc_sub_rules_id(&out, 0), kept) &&
@@ -590,7 +601,7 @@ static double seconds_to_compare(size_t n, bool *out_same) {
         free(list);
         return -1.0;
     }
-    if (firc_sub_refresh_rules(list, &a, &b) != FIRC_OK) {
+    if (firc_sub_refresh_rules(list, strlen(list), &a, &b) != FIRC_OK) {
         firc_sub_rules_free(&b);
         firc_sub_rules_free(&a);
         free(list);
@@ -665,7 +676,7 @@ TEST the_first_stored_rule_of_a_text_is_the_one_matched(void) {
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("dup.example.com\n", &existing, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("dup.example.com\n", strlen("dup.example.com\n"), &existing, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_EQ_FMTm("the first one", 11, (int)firc_sub_rules_id(&out, 0).b[3], "%d");
     ASSERT_FALSEm("and its flag", firc_sub_rules_enable(&out, 0));
@@ -688,7 +699,7 @@ TEST the_earlier_stored_rule_wins_whichever_form_it_is_in(void) {
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^foo[0-9]+$\n", &existing, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^foo[0-9]+$\n", strlen("^foo[0-9]+$\n"), &existing, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERTm("the one stored first", firc_id_equal(firc_sub_rules_id(&out, 0), legacy_id));
     ASSERT_FALSEm("and its flag", firc_sub_rules_enable(&out, 0));
@@ -700,7 +711,7 @@ TEST the_earlier_stored_rule_wins_whichever_form_it_is_in(void) {
     ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&other, wrapped_text, "regex", true, wrapped_id));
     ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&other, legacy_text, "regex", false, legacy_id));
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^foo[0-9]+$\n", &other, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("^foo[0-9]+$\n", strlen("^foo[0-9]+$\n"), &other, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERTm("the one stored first, again", firc_id_equal(firc_sub_rules_id(&out, 0), wrapped_id));
     ASSERTm("and its flag, again", firc_sub_rules_enable(&out, 0));
@@ -720,7 +731,7 @@ TEST a_hash_collision_is_not_a_match(void) {
 
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("h1340180.example.com\n", &existing, &out));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("h1340180.example.com\n", strlen("h1340180.example.com\n"), &existing, &out));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERTm("it is a different rule, not the stored one",
             !firc_id_equal(firc_sub_rules_id(&out, 0), a_id));
@@ -742,7 +753,7 @@ TEST a_duplicate_id_is_moved_rather_than_repeated(void) {
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
     ASSERT_EQ(FIRC_OK,
-              firc_sub_refresh_rules("a.example.com\nb.example.com\n", &existing, &out));
+              firc_sub_refresh_rules("a.example.com\nb.example.com\n", strlen("a.example.com\nb.example.com\n"), &existing, &out));
     ASSERT_EQ_FMT((size_t)2, out.n, "%zu");
     ASSERTm("the second one was moved off the id the first took",
             !firc_id_equal(firc_sub_rules_id(&out, 0), firc_sub_rules_id(&out, 1)));
@@ -799,7 +810,7 @@ TEST refresh_equals_parse_then_inherit(void) {
 
     firc_sub_rules_t r1;
     firc_sub_rules_init(&r1);
-    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("a.example\nb.example\n", &old, &r1));
+    ASSERT_EQ(FIRC_OK, firc_sub_refresh_rules("a.example\nb.example\n", strlen("a.example\nb.example\n"), &old, &r1));
 
     firc_sub_rules_t r2;
     firc_sub_rules_init(&r2);
@@ -922,16 +933,16 @@ TEST one_text_under_two_types_keeps_both_across_a_sync(void) {
 TEST a_prefilled_out_survives_a_refused_or_cancelled_parse(void) {
     firc_sub_rules_t out;
     firc_sub_rules_init(&out);
-    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&out, "example.com", "namespace", true, firc_id_random()));
+    ASSERT_EQ(FIRC_OK, firc_sub_rules_push(&out, "example.com", "namespace", true, test_random_id()));
 
     firc_sub_parse_stats_t st;
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_sub_parse_rules_stats("<!DOCTYPE html>", &out, &st, NULL, NULL));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_sub_parse_rules_stats("<!DOCTYPE html>", 15, &out, &st, NULL, NULL));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQ("example.com", firc_sub_rules_text(&out, 0));
 
     char *list = name_list(45000);
     ASSERT(list != NULL);
-    ASSERT_EQ(FIRC_ERR_CANCELED, firc_sub_parse_rules_stats(list, &out, &st, abort_progress, NULL));
+    ASSERT_EQ(FIRC_ERR_CANCELED, firc_sub_parse_rules_stats(list, strlen(list), &out, &st, abort_progress, NULL));
     ASSERT_EQ_FMT((size_t)1, out.n, "%zu");
     ASSERT_STR_EQ("example.com", firc_sub_rules_text(&out, 0));
     free(list);
@@ -946,6 +957,7 @@ int main(int argc, char **argv)
 {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(type_detection);
+    RUN_TEST(a_prefix_too_long_to_count_is_not_a_subnet);
     RUN_TEST(a_name_a_list_carries_is_not_guessed_to_be_a_regex);
     RUN_TEST(a_wildcard_that_compiles_as_a_regex_is_still_a_wildcard);
     RUN_TEST(a_line_that_is_nothing_recognisable_is_refused);

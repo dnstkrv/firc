@@ -24,8 +24,9 @@ firc_ruleset_snapshot_t *firc_dns_pipeline_snapshot(firc_dns_pipeline_t *p);
 /* Borrowed; NULL turns the rewrite off. Loop thread only. */
 void firc_dns_pipeline_set_pool(firc_dns_pipeline_t *p, firc_fakeip_t *pool, uint32_t clamp_secs);
 
-/* False strips AAAA from matched answers (no ip6tables). Default true. */
-void firc_dns_pipeline_set_v6_routable(firc_dns_pipeline_t *p, bool routable);
+/* Whether a group's table routes IPv6; an owner it says no for gets AAAA NODATA. NULL: every group does. */
+typedef bool (*firc_dns_v6_fn)(void *ud, firc_id_t group_id);
+void firc_dns_pipeline_set_v6_fn(firc_dns_pipeline_t *p, firc_dns_v6_fn fn, void *ud);
 
 /* TTL ceiling for a real (unmatched) A/AAAA answer; 0 = off. Loop thread. */
 void firc_dns_pipeline_set_unmatched_ttl(firc_dns_pipeline_t *p, uint32_t secs);

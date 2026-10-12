@@ -418,7 +418,7 @@ definitions:
     description: 'The list a group takes rules from in addition to its own. The rules themselves are not here -- they are read a page at a time through GET /api/v1/groups/{groupID}/list/rules.'
     properties:
       interval:
-        description: 'How often to check the list, in seconds. 0 -- no timer.'
+        description: 'How often to check the list, in seconds. 0 -- no timer. A whole number 0..4294967295; anything else is 400.'
         example: 86400
         type: integer
       lastUpdate:
@@ -509,11 +509,12 @@ definitions:
         example: true
         type: boolean
       liveReason:
-        description: 'Present only when live is false. Checked in this order. disabled -- the group is turned off; not-enabled -- enabling it failed, and the daemon retries by itself (after 1 s, then less often, up to once a minute); no-interface -- it is in the DNS view but its interface does not exist, is down, or its name is invalid; its addresses lead nowhere; not-written -- the committer''s first pass after start has not completed, or its passes have failed for five seconds in a row, and its chains may be missing from the kernel (GET /api/v1/system/netfilter says what exactly and since when).'
+        description: 'Present only when live is false. Checked in this order. disabled -- the group is turned off; not-enabled -- enabling it failed, and the daemon retries by itself (after 1 s, then less often, up to once a minute); no-interface -- it is in the DNS view but its interface does not exist, is down, or its name is invalid; its addresses lead nowhere; tunnel-down -- its interface is a tunvless tunnel''s device and that tunnel carries no traffic (no node answers, it is starting, restarting after an exit, off, refused its configuration, has no nodes or no uplink); the routing stays as it is, and the group is live again by itself once a node carries; not-written -- the committer''s first pass after start has not completed, or its passes have failed for five seconds in a row, and its chains may be missing from the kernel (GET /api/v1/system/netfilter says what exactly and since when).'
         enum:
         - disabled
         - not-enabled
         - no-interface
+        - tunnel-down
         - not-written
         type: string
       name:
@@ -1294,7 +1295,7 @@ paths:
       - application/json
       description: 'Creates a group. A rejection of a group field names the field and the group. A group that failed to come up is 500 with the text group "<name>": <step>: <error>.'
       parameters:
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1327,7 +1328,7 @@ paths:
       - application/json
       description: 'Updates the list of groups. A rejection of a group field names the field and the group.'
       parameters:
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1364,7 +1365,7 @@ paths:
         name: groupID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1424,7 +1425,7 @@ paths:
         name: groupID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1493,7 +1494,7 @@ paths:
         name: groupID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1535,7 +1536,7 @@ paths:
         name: groupID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1581,7 +1582,7 @@ paths:
         name: ruleID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1647,7 +1648,7 @@ paths:
         name: ruleID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean
@@ -1767,7 +1768,7 @@ paths:
         name: groupID
         required: true
         type: string
-      - description: 'Save the changes to the config file'
+      - description: 'Save the changes to groups.yaml. A write that fails leaves the changes applied and answers 500 "applied, but groups.yaml was not saved: <error>"'
         in: query
         name: save
         type: boolean

@@ -108,6 +108,7 @@ struct tr_link {
      * carries our TLS records but the target connection's stream as is. Set from outside by the
      * Vision frame parser (transport_direct), because the command lives in those frames. */
     int rx_direct;
+    int nopq;
     struct tls13 tls;
 };
 
@@ -460,6 +461,7 @@ const struct security_ops *tr_security(const char *name);
 /* A whole link: socket and security handshake. On failure the socket is closed and fd == -1.
  * Shared by the main link and the xhttp second link precisely so that they cannot diverge. */
 int tr_link_open(struct tr_link *l, const struct tr_node *n, const char *alpn, int timeout_s);
+#define TR_NOPQ_MAX 256
 
 /* I/O of a link in the struct h2_io form (ctx is a struct tr_link). */
 int tr_link_write(void *ctx, const unsigned char *d, size_t n);

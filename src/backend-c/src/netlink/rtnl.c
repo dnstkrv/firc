@@ -137,9 +137,11 @@ static firc_err_t nl_execute(firc_rtnl_t *r, struct nlmsghdr *nlh, int *out_code
     const bool dump = (nlh->nlmsg_flags & NLM_F_DUMP) == NLM_F_DUMP;
     const bool acked = dump || (nlh->nlmsg_flags & NLM_F_ACK) != 0;
     uint8_t buf[FIRC_RTNL_RECVBUF];
+    bool torn = false;
     for (;;) {
         /* MSG_TRUNC: an oversized reply is an error, never a shortened dump. */
         ssize_t ret = recv(r->fd, buf, sizeof(buf), MSG_TRUNC);
+        if (ret < 0 && errno == EINTR) { continue; }
         if (ret < 0) { return firc_err_from_errno(errno); }
         if ((size_t)ret > sizeof(buf)) {
             if (dump) { drain_dump(r, seq); }
@@ -158,6 +160,7 @@ static firc_err_t nl_execute(firc_rtnl_t *r, struct nlmsghdr *nlh, int *out_code
                 continue;
             }
             ours = true;
+            if (h->nlmsg_flags & NLM_F_DUMP_INTR) { torn = true; }
             if (h->nlmsg_type == NLMSG_ERROR) {
                 if (!payload_at_least(h, sizeof(struct nlmsgerr))) {
                     if (dump) { drain_dump(r, seq); }
@@ -169,6 +172,10 @@ static firc_err_t nl_execute(firc_rtnl_t *r, struct nlmsghdr *nlh, int *out_code
                 break;
             }
             if (h->nlmsg_type == NLMSG_DONE) {
+                if (!payload_at_least(h, sizeof(int))) { return FIRC_ERR_PROTO; }
+                int status;
+                memcpy(&status, mnl_nlmsg_get_payload(h), sizeof(status));
+                *out_code = status < 0 ? -status : 0;
                 done = true;
                 break;
             }
@@ -178,7 +185,7 @@ static firc_err_t nl_execute(firc_rtnl_t *r, struct nlmsghdr *nlh, int *out_code
         if (done) { break; }
         if (!acked && ours) { break; }
     }
-    return FIRC_OK;
+    return torn ? FIRC_ERR_AGAIN : FIRC_OK;
 }
 
 static struct nlmsghdr *put_rule_header(uint8_t *buf, uint16_t type, uint16_t flags, uint32_t seq,
@@ -273,12 +280,13 @@ static struct nlmsghdr *put_route_header(uint8_t *buf, uint16_t type, uint16_t f
     return nlh;
 }
 
-firc_err_t firc_rtnl_route_add_blackhole(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority) {
+firc_err_t firc_rtnl_route_add_reject(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
+                                     uint8_t rtm_type) {
     uint8_t buf[FIRC_RTNL_REQBUF];
     memset(buf, 0, sizeof(buf));
     struct nlmsghdr *nlh = put_route_header(
         buf, RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_ACK, ++r->seq, family,
-        table, RTN_BLACKHOLE);
+        table, rtm_type);
     if (table >= 256) { mnl_attr_put_u32(nlh, RTA_TABLE, table); }
     mnl_attr_put_u32(nlh, RTA_PRIORITY, priority);
 
@@ -289,11 +297,12 @@ firc_err_t firc_rtnl_route_add_blackhole(firc_rtnl_t *r, int family, uint32_t ta
     return firc_err_from_errno(code);
 }
 
-firc_err_t firc_rtnl_route_del_blackhole(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority) {
+firc_err_t firc_rtnl_route_del_reject(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
+                                     uint8_t rtm_type) {
     uint8_t buf[FIRC_RTNL_REQBUF];
     memset(buf, 0, sizeof(buf));
     struct nlmsghdr *nlh = put_route_header(buf, RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK, ++r->seq,
-                                            family, table, RTN_BLACKHOLE);
+                                            family, table, rtm_type);
     if (table >= 256) { mnl_attr_put_u32(nlh, RTA_TABLE, table); }
     mnl_attr_put_u32(nlh, RTA_PRIORITY, priority);
 
@@ -390,8 +399,8 @@ firc_err_t firc_rtnl_route_del_unreachable(firc_rtnl_t *r, int family, uint32_t 
 }
 
 firc_err_t firc_rtnl_route_add_iface(firc_rtnl_t *r, int family, uint32_t table, uint32_t priority,
-                                 int oif, const uint8_t *gw, uint8_t gw_len, bool *enodev) {
-    *enodev = false;
+                                 int oif, const uint8_t *gw, uint8_t gw_len, bool *unavailable) {
+    *unavailable = false;
     uint8_t buf[FIRC_RTNL_REQBUF];
     memset(buf, 0, sizeof(buf));
     struct nlmsghdr *nlh = put_route_header(
@@ -405,8 +414,8 @@ firc_err_t firc_rtnl_route_add_iface(firc_rtnl_t *r, int family, uint32_t table,
     int code = 0;
     firc_err_t err = nl_execute(r, nlh, &code, NULL, NULL);
     if (err != FIRC_OK) { return err; }
-    if (code == ENODEV) {
-        *enodev = true;
+    if (code == ENODEV || code == ENETDOWN) {
+        *unavailable = true;
         return FIRC_OK;
     }
     if (code == 0) { return FIRC_OK; }
@@ -429,6 +438,43 @@ firc_err_t firc_rtnl_route_del_iface(firc_rtnl_t *r, int family, uint32_t table,
     if (err != FIRC_OK) { return err; }
     if (code == 0 || code == ESRCH) { return FIRC_OK; }
     return firc_err_from_errno(code);
+}
+
+#define FIRC_RTNL_DUMP_TRIES 3
+
+typedef void (*dump_begin_fn)(void *ud, bool retry);
+
+static firc_err_t dump_family(firc_rtnl_t *r, uint16_t msg_type, int family,
+                            void (*cb)(const struct nlmsghdr *, void *), void *ud, dump_begin_fn begin) {
+    firc_err_t err = FIRC_ERR_AGAIN;
+    for (int attempt = 0; attempt < FIRC_RTNL_DUMP_TRIES && err == FIRC_ERR_AGAIN; attempt++) {
+        if (begin != NULL) { begin(ud, attempt > 0); }
+        uint8_t buf[FIRC_RTNL_REQBUF];
+        memset(buf, 0, sizeof(buf));
+        struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf);
+        nlh->nlmsg_type = msg_type;
+        nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP;
+        nlh->nlmsg_seq = ++r->seq;
+
+        if (msg_type == RTM_GETRULE) {
+            struct fib_rule_hdr *frh = mnl_nlmsg_put_extra_header(nlh, sizeof(*frh));
+            memset(frh, 0, sizeof(*frh));
+            frh->family = (uint8_t)family;
+        } else if (msg_type == RTM_GETADDR) {
+            struct ifaddrmsg *ifa = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifa));
+            memset(ifa, 0, sizeof(*ifa));
+            ifa->ifa_family = (uint8_t)family;
+        } else {
+            struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(*rtm));
+            memset(rtm, 0, sizeof(*rtm));
+            rtm->rtm_family = (uint8_t)family;
+        }
+
+        int code = 0;
+        err = nl_execute(r, nlh, &code, cb, ud);
+        if (err == FIRC_OK && code != 0) { err = firc_err_from_errno(code); }
+    }
+    return err;
 }
 
 typedef struct link_ctx {
@@ -583,27 +629,18 @@ firc_err_t firc_rtnl_gateway_for_iface(firc_rtnl_t *r, int family, int ifindex, 
     return firc_rtnl_gateway_for_iface2(r, family, ifindex, found, gw, gw_len, &ignored);
 }
 
+static void gw_begin(void *ud, bool retry) {
+    gw_ctx_t *ctx = ud;
+    if (retry) { *ctx = (gw_ctx_t){.want_oif = ctx->want_oif}; }
+}
+
 firc_err_t firc_rtnl_gateway_for_iface2(firc_rtnl_t *r, int family, int ifindex, bool *found, uint8_t *gw,
                                         uint8_t *gw_len, bool *gatewayless) {
     *found = false;
     *gatewayless = false;
-    uint8_t buf[FIRC_RTNL_REQBUF];
-    memset(buf, 0, sizeof(buf));
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf);
-    nlh->nlmsg_type = RTM_GETROUTE;
-    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP;
-    nlh->nlmsg_seq = ++r->seq;
-    struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(*rtm));
-    memset(rtm, 0, sizeof(*rtm));
-    rtm->rtm_family = (uint8_t)family;
-
-    gw_ctx_t ctx = {0};
-    ctx.want_oif = ifindex;
-
-    int code = 0;
-    firc_err_t err = nl_execute(r, nlh, &code, gw_msg_cb, &ctx);
+    gw_ctx_t ctx = {.want_oif = ifindex};
+    firc_err_t err = dump_family(r, RTM_GETROUTE, family, gw_msg_cb, &ctx, gw_begin);
     if (err != FIRC_OK) { return err; }
-    if (code != 0) { return firc_err_from_errno(code); }
 
     if (ctx.found) {
         memcpy(gw, ctx.gw, ctx.gw_len);
@@ -679,29 +716,41 @@ static void route_scan_cb(const struct nlmsghdr *h, void *ud) {
     }
 }
 
-static firc_err_t dump_family(firc_rtnl_t *r, uint16_t msg_type, int family,
-                            void (*cb)(const struct nlmsghdr *, void *), void *ud) {
-    uint8_t buf[FIRC_RTNL_REQBUF];
-    memset(buf, 0, sizeof(buf));
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf);
-    nlh->nlmsg_type = msg_type;
-    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP;
-    nlh->nlmsg_seq = ++r->seq;
+typedef struct v6_addr_ctx {
+    int ifindex;
+    bool found;
+} v6_addr_ctx_t;
 
-    if (msg_type == RTM_GETRULE) {
-        struct fib_rule_hdr *frh = mnl_nlmsg_put_extra_header(nlh, sizeof(*frh));
-        memset(frh, 0, sizeof(*frh));
-        frh->family = (uint8_t)family;
-    } else {
-        struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(*rtm));
-        memset(rtm, 0, sizeof(*rtm));
-        rtm->rtm_family = (uint8_t)family;
-    }
+static void v6_addr_cb(const struct nlmsghdr *h, void *ud) {
+    v6_addr_ctx_t *ctx = ud;
+    if (h->nlmsg_type != RTM_NEWADDR || !payload_at_least(h, sizeof(struct ifaddrmsg))) { return; }
+    const struct ifaddrmsg *ifa = mnl_nlmsg_get_payload(h);
+    if (ifa->ifa_family != AF_INET6 || (int)ifa->ifa_index != ctx->ifindex) { return; }
+    if (ifa->ifa_scope != RT_SCOPE_UNIVERSE) { return; }
+    if ((ifa->ifa_flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED)) != 0) { return; }
+    ctx->found = true;
+}
 
-    int code = 0;
-    firc_err_t err = nl_execute(r, nlh, &code, cb, ud);
+static void v6_addr_begin(void *ud, bool retry) {
+    (void)retry;
+    ((v6_addr_ctx_t *)ud)->found = false;
+}
+
+firc_err_t firc_rtnl_iface_carries_v6(firc_rtnl_t *r, int ifindex, bool *carries) {
+    *carries = false;
+    v6_addr_ctx_t ctx = {.ifindex = ifindex};
+    firc_err_t err = dump_family(r, RTM_GETADDR, AF_INET6, v6_addr_cb, &ctx, v6_addr_begin);
     if (err != FIRC_OK) { return err; }
-    if (code != 0) { return firc_err_from_errno(code); }
+    if (ctx.found) {
+        *carries = true;
+        return FIRC_OK;
+    }
+    bool found = false, gatewayless = false;
+    uint8_t gw[16];
+    uint8_t gw_len = 0;
+    err = firc_rtnl_gateway_for_iface2(r, AF_INET6, ifindex, &found, gw, &gw_len, &gatewayless);
+    if (err != FIRC_OK) { return err; }
+    *carries = found || gatewayless;
     return FIRC_OK;
 }
 
@@ -712,9 +761,9 @@ typedef struct stale_rule {
 
 typedef struct stale_ctx {
     stale_rule_t *v;
-    size_t n, cap;
+    size_t n, cap, base;
     int family;
-    bool oom;
+    bool oom, base_oom;
 } stale_ctx_t;
 
 static void stale_scan_cb(const struct nlmsghdr *h, void *ud) {
@@ -766,6 +815,17 @@ static void stale_scan_cb(const struct nlmsghdr *h, void *ud) {
     ctx->v[ctx->n++] = (stale_rule_t){ctx->family, mark, mask, table, priority};
 }
 
+static void stale_begin(void *ud, bool retry) {
+    stale_ctx_t *ctx = ud;
+    if (retry) {
+        ctx->n = ctx->base;
+        ctx->oom = ctx->base_oom;
+    } else {
+        ctx->base = ctx->n;
+        ctx->base_oom = ctx->oom;
+    }
+}
+
 static firc_err_t flush_tunnel_tables(firc_rtnl_t *r, const stale_ctx_t *ctx, const bool *gone);
 
 firc_err_t firc_rtnl_clean_stale_rules(firc_rtnl_t *r, size_t *removed) {
@@ -777,7 +837,7 @@ firc_err_t firc_rtnl_clean_stale_rules(firc_rtnl_t *r, size_t *removed) {
     const int fams[2] = {AF_INET, AF_INET6};
     for (size_t i = 0; i < 2 && err == FIRC_OK; i++) {
         ctx.family = fams[i];
-        err = dump_family(r, RTM_GETRULE, fams[i], stale_scan_cb, &ctx);
+        err = dump_family(r, RTM_GETRULE, fams[i], stale_scan_cb, &ctx, stale_begin);
     }
     if (err == FIRC_OK && ctx.oom) { err = FIRC_ERR_NOMEM; }
 
@@ -821,9 +881,20 @@ typedef struct {
 
 typedef struct {
     seen_route_t *v;
-    size_t n, cap;
-    bool oom;
+    size_t n, cap, base;
+    bool oom, base_oom;
 } routes_ctx_t;
+
+static void routes_begin(void *ud, bool retry) {
+    routes_ctx_t *ctx = ud;
+    if (retry) {
+        ctx->n = ctx->base;
+        ctx->oom = ctx->base_oom;
+    } else {
+        ctx->base = ctx->n;
+        ctx->base_oom = ctx->oom;
+    }
+}
 
 static void routes_scan_cb(const struct nlmsghdr *h, void *ud) {
     routes_ctx_t *ctx = ud;
@@ -873,8 +944,8 @@ static void routes_scan_cb(const struct nlmsghdr *h, void *ud) {
 }
 
 static firc_err_t dump_routes(firc_rtnl_t *r, routes_ctx_t *ctx) {
-    firc_err_t err = dump_family(r, RTM_GETROUTE, AF_INET, routes_scan_cb, ctx);
-    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET6, routes_scan_cb, ctx); }
+    firc_err_t err = dump_family(r, RTM_GETROUTE, AF_INET, routes_scan_cb, ctx, routes_begin);
+    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET6, routes_scan_cb, ctx, routes_begin); }
     if (err == FIRC_OK && ctx->oom) { err = FIRC_ERR_NOMEM; }
     return err;
 }
@@ -966,7 +1037,7 @@ static firc_err_t occupant_of(firc_rtnl_t *r, int family, uint32_t table, uint32
     *ours = false;
     *rtm_type = RTN_UNSPEC;
     routes_ctx_t ctx = {0};
-    firc_err_t err = dump_family(r, RTM_GETROUTE, family, routes_scan_cb, &ctx);
+    firc_err_t err = dump_family(r, RTM_GETROUTE, family, routes_scan_cb, &ctx, routes_begin);
     if (err == FIRC_OK && ctx.oom) { err = FIRC_ERR_NOMEM; }
     if (err == FIRC_OK) {
         size_t addr_len = family == AF_INET ? 4 : 16;
@@ -1004,8 +1075,8 @@ firc_err_t firc_rtnl_alloc_mark_field(firc_rtnl_t *r, uint32_t *out_field) {
 firc_err_t firc_rtnl_alloc_mark_field_for(firc_rtnl_t *r, const char *owner, uint32_t *out_field) {
     scan_ctx_t ctx = {0};
 
-    firc_err_t err = dump_family(r, RTM_GETRULE, AF_INET, rule_scan_cb, &ctx);
-    if (err == FIRC_OK) { err = dump_family(r, RTM_GETRULE, AF_INET6, rule_scan_cb, &ctx); }
+    firc_err_t err = dump_family(r, RTM_GETRULE, AF_INET, rule_scan_cb, &ctx, NULL);
+    if (err == FIRC_OK) { err = dump_family(r, RTM_GETRULE, AF_INET6, rule_scan_cb, &ctx, NULL); }
 
     if (err == FIRC_OK) {
         /* Only the group field of an existing rule's mark counts. */
@@ -1051,10 +1122,10 @@ firc_err_t firc_rtnl_alloc_mark_table(firc_rtnl_t *r, uint32_t start_idx, uint32
     used_set_add(&ctx.tables, 254);
     used_set_add(&ctx.tables, 255);
 
-    firc_err_t err = dump_family(r, RTM_GETRULE, AF_INET, rule_scan_cb, &ctx);
-    if (err == FIRC_OK) { err = dump_family(r, RTM_GETRULE, AF_INET6, rule_scan_cb, &ctx); }
-    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET, route_scan_cb, &ctx); }
-    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET6, route_scan_cb, &ctx); }
+    firc_err_t err = dump_family(r, RTM_GETRULE, AF_INET, rule_scan_cb, &ctx, NULL);
+    if (err == FIRC_OK) { err = dump_family(r, RTM_GETRULE, AF_INET6, rule_scan_cb, &ctx, NULL); }
+    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET, route_scan_cb, &ctx, NULL); }
+    if (err == FIRC_OK) { err = dump_family(r, RTM_GETROUTE, AF_INET6, route_scan_cb, &ctx, NULL); }
 
     if (err == FIRC_OK) {
         uint32_t idx;

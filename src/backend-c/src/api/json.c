@@ -16,6 +16,16 @@ cJSON *firc_json_error(const char *msg) {
     return obj;
 }
 
+bool firc_json_whole(const cJSON *j, double max, uint64_t *out) {
+    if (!cJSON_IsNumber(j)) { return false; }
+    double d = j->valuedouble;
+    if (!(d >= 0.0 && d <= max)) { return false; }
+    uint64_t u = (uint64_t)d;
+    if ((double)u != d) { return false; }
+    *out = u;
+    return true;
+}
+
 char *firc_json_dump(const cJSON *obj) {
     return cJSON_PrintUnformatted(obj);
 }

@@ -96,6 +96,7 @@ CONFIG_SRCS := \
     src/rules/devices.c \
     src/subscriptions/subparse.c \
     src/subscriptions/subparse_singbox.c \
+    src/subscriptions/subparse_srs.c \
     src/fakeip/from_config.c \
     src/dns/pipeline.c \
     src/dns/recall.c \
@@ -208,7 +209,7 @@ DNSTOOL_OBJ := $(DNSTOOL_SRC:%.c=$(BUILDDIR)/%.o)
 
 PCRE2_LIB ?= -lpcre2-8
 CJSON_LIB ?= -lcjson
-DEP_LIBS := -lyaml $(PCRE2_LIB) -lmnl $(CJSON_LIB) -lm -lcurl
+DEP_LIBS := -lyaml $(PCRE2_LIB) -lmnl $(CJSON_LIB) -lm -lcurl -lz
 
 TEST_SUPPORT_SRCS := tests/unit/fake_iptables.c tests/unit/fake_rtnl.c tests/unit/fake_conntrack.c tests/unit/fake_nflog.c tests/unit/xt_golden.c tests/unit/fake_xtables.c
 TEST_SUPPORT_OBJS := $(TEST_SUPPORT_SRCS:tests/unit/%.c=$(BUILDDIR)/tests/support/%.o)
@@ -330,6 +331,7 @@ routing: $(ROUTECHECK)
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_mark_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_selector_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_barrier_routing.sh
+	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_egress_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_xt_nat.sh v4
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_xt_nat.sh v6
 
@@ -345,7 +347,7 @@ passbench: $(PASSBENCH)
 FUZZ_CC ?= clang
 FUZZ_RUNS ?= 100000
 
-$(BUILDDIR)/fuzz/fuzz_singbox: tests/fuzz/fuzz_singbox.c $(CORE_SRCS) $(CONFIG_SRCS)
+$(BUILDDIR)/fuzz/fuzz_singbox $(BUILDDIR)/fuzz/fuzz_srs: $(BUILDDIR)/fuzz/%: tests/fuzz/%.c $(CORE_SRCS) $(CONFIG_SRCS)
 	@mkdir -p $(dir $@)
 	$(FUZZ_CC) -std=c11 -g -O1 -Iinclude -D_POSIX_C_SOURCE=200809L \
 	    -fsanitize=fuzzer,address,undefined -o $@ $< $(CORE_SRCS) $(CONFIG_SRCS) $(DEP_LIBS)

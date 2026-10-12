@@ -56,8 +56,8 @@ bool firc_groups_resolve(firc_groups_ctx_t *ctx, firc_http_req_t *req, firc_http
 /* a group's record; NULL on OOM (fails whole); app nullable, omits the read-only resolver block */
 cJSON *firc_groups_group_json(firc_app_t *app, const firc_group_t *g, bool with_rules);
 
-/* writes the groups file when the request says ?save=true */
-void firc_groups_maybe_save(firc_groups_ctx_t *ctx, firc_http_req_t *req);
+/* writes the groups file when the request says ?save=true; false after answering 500 when the write failed */
+bool firc_groups_maybe_save(firc_groups_ctx_t *ctx, firc_http_req_t *req, firc_http_res_t *res);
 
 /* must be called before firc_groups_register_routes, so the literal /groups/list/preview matches first */
 void firc_group_lists_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx);

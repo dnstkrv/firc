@@ -545,7 +545,7 @@ TEST an_inverted_destination_marks_nothing_and_rewrites_anywhere(void) {
         ASSERT_EQ_FMT(FIRC_OK, add_line(&b, k_fams[f], v6 ? "-d fd37:9a00::7/128 -j DNAT --to-destination 2001:db8::1"
                                                            : "-d 198.18.0.7/32 -j DNAT --to-destination 93.184.216.34"), "%d");
         size_t at = v6 ? offsetof(xt_ip6t_ip6_t, invflags) : offsetof(xt_ipt_ip_t, invflags);
-        uint8_t inv = v6 ? 0x02u : 0x08u;
+        uint8_t inv = 0x10u;
         b.bytes[at] = inv;
         b.bytes[second + at] = inv;
         seen_t s;
@@ -558,6 +558,32 @@ TEST an_inverted_destination_marks_nothing_and_rewrites_anywhere(void) {
         ASSERT(memcmp(zero, s.addr[1], 16) == 0);
         ASSERT(memcmp(zero, s.mask[1], 16) == 0);
         firc_xt_block_free(&b);
+    }
+    PASS();
+}
+
+/* Catches: an inverted interface or source read as an inverted destination, so a rewrite reads as everywhere. */
+TEST only_the_destination_flag_inverts_the_destination(void) {
+    static const uint8_t others[] = {0x01u, 0x02u, 0x08u};
+    for (size_t f = 0; f < 2; f++) {
+        bool v6 = k_fams[f] == FIRC_IPT_PROTO_IPV6;
+        uint8_t a[16], m[16];
+        addr(k_fams[f], v6 ? "fd37:9a00::7" : "198.18.0.7", a);
+        prefix_mask(v6 ? 128 : 32, m);
+        for (size_t k = 0; k < sizeof(others); k++) {
+            firc_xt_block_t b;
+            firc_xt_block_init(&b);
+            ASSERT_EQ_FMT(FIRC_OK, add_line(&b, k_fams[f], v6 ? "-d fd37:9a00::7/128 -j DNAT --to-destination 2001:db8::1"
+                                                               : "-d 198.18.0.7/32 -j DNAT --to-destination 93.184.216.34"), "%d");
+            b.bytes[v6 ? offsetof(xt_ip6t_ip6_t, invflags) : offsetof(xt_ipt_ip_t, invflags)] = others[k];
+            seen_t s;
+            memset(&s, 0, sizeof(s));
+            ASSERT_EQ_FMT(FIRC_OK, firc_xt_block_roles(&b, k_fams[f], note, &s), "%d");
+            ASSERT_EQ_FMT((int)FIRC_XT_ROLE_REWRITES, (int)s.role[0], "%d");
+            ASSERT(memcmp(a, s.addr[0], 16) == 0);
+            ASSERT(memcmp(m, s.mask[0], 16) == 0);
+            firc_xt_block_free(&b);
+        }
     }
     PASS();
 }
@@ -760,6 +786,7 @@ int main(int argc, char **argv) {
     RUN_TEST(the_barrier_is_neither_a_mark_nor_a_rewrite);
     RUN_TEST(the_group_chains_say_their_marks);
     RUN_TEST(an_inverted_destination_marks_nothing_and_rewrites_anywhere);
+    RUN_TEST(only_the_destination_flag_inverts_the_destination);
     RUN_TEST(a_typed_dnat_is_a_rewrite_of_its_fake_address);
     RUN_TEST(roles_of_an_unsound_block_are_refused);
     RUN_TEST(a_kept_copy_carries_its_jumps);

@@ -1,4 +1,5 @@
 #include "greatest.h"
+#include "test_ids.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -44,7 +45,7 @@
 
 static firc_group_t *make_group(const char *name, bool enable) {
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     firc_strset(&g->name, name);
     firc_strset(&g->iface, "eth0");
     g->enable = enable;
@@ -53,7 +54,7 @@ static firc_group_t *make_group(const char *name, bool enable) {
 
 static firc_rule_t *make_rule(void) {
     firc_rule_t *r = firc_rule_new();
-    r->id = firc_id_random();
+    r->id = test_random_id();
     firc_strset(&r->type, "domain");
     firc_strset(&r->rule, "example.com");
     r->enable = true;
@@ -599,7 +600,7 @@ TEST a_capture_reads_both_sockets(void) {
     firc_group_t *g = make_group("media", true);
     firc_group_add_rule(g, make_rule());
     firc_rule_t *other = firc_rule_new();
-    other->id = firc_id_random();
+    other->id = test_random_id();
     firc_strset(&other->type, "domain");
     firc_strset(&other->rule, "video.example.net");
     other->enable = true;
@@ -1242,7 +1243,7 @@ TEST a_capture_logs_its_start_its_stop_and_its_summary(void) {
 
 static firc_rule_t *edit_rule(const char *type, const char *text) {
     firc_rule_t *r = firc_rule_new();
-    r->id = firc_id_random();
+    r->id = test_random_id();
     r->type = strdup(type);
     r->rule = strdup(text);
     r->enable = true;
@@ -1273,7 +1274,7 @@ TEST a_removed_group_leaves_with_the_next_pass_of_either_kind(void) {
         ASSERT(locked_app_up_no_committer(&l));
         fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
         firc_group_t *g = firc_group_new();
-        g->id = firc_id_random();
+        g->id = test_random_id();
         g->name = strdup("g");
         g->iface = strdup("lo");
         g->enable = true;
@@ -1304,7 +1305,7 @@ TEST a_domain_rule_edit_asks_for_no_pass_but_a_subnet_rule_does(void) {
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
 
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->name = strdup("g");
     g->iface = strdup("lo");
     g->enable = true;
@@ -1371,7 +1372,7 @@ static firc_ruleset_t *live_list_group(locked_app_t *l, const char *const (*spec
                                        firc_id_t *out_gid) {
     fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->name = strdup("g");
     g->iface = strdup("lo");
     g->enable = true;
@@ -1379,7 +1380,7 @@ static firc_ruleset_t *live_list_group(locked_app_t *l, const char *const (*spec
     firc_strset(&g->list->url, "http://127.0.0.1:1/list");
     g->list->has_body_hash = true;
     for (size_t i = 0; i < n; i++) {
-        firc_sub_rules_push(&g->list->rules, specs[i][0], specs[i][1], true, firc_id_random());
+        firc_sub_rules_push(&g->list->rules, specs[i][0], specs[i][1], true, test_random_id());
     }
     *out_gid = g->id;
     firc_app_set_running(l->app, true);
@@ -1504,7 +1505,7 @@ static firc_group_t *activation_group(uint8_t tag, const char *hand_rule, const 
     if (list_url != NULL) {
         g->list = firc_group_list_new();
         firc_strset(&g->list->url, list_url);
-        firc_sub_rules_push(&g->list->rules, list_rule, FIRC_RULE_NAMESPACE, true, firc_id_random());
+        firc_sub_rules_push(&g->list->rules, list_rule, FIRC_RULE_NAMESPACE, true, test_random_id());
         g->list->has_body_hash = true;
     }
     return g;
@@ -1602,7 +1603,7 @@ TEST a_group_whose_interface_is_not_a_name_routes_nothing(void) {
     char chains[3][128];
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         firc_group_t *g = firc_group_new();
-        g->id = firc_id_random();
+        g->id = test_random_id();
         g->name = strdup("g");
         g->iface = strdup(bad[i]);
         g->enable = true;
@@ -1863,7 +1864,7 @@ TEST stopping_the_daemon_keeps_the_flows_it_was_steering(void) {
     fake_ct_t *ctk = l.ctk;
 
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->name = strdup("g");
     g->iface = strdup("lo");
     g->enable = true;
@@ -1892,7 +1893,7 @@ TEST a_replacement_keeps_the_flows_of_groups_that_persist(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *stays = firc_group_new();
-    stays->id = firc_id_random();
+    stays->id = test_random_id();
     stays->name = strdup("stays");
     stays->iface = strdup("lo");
     stays->enable = true;
@@ -1926,7 +1927,7 @@ TEST a_replacement_drops_the_flows_of_groups_it_withdraws(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *goes = firc_group_new();
-    goes->id = firc_id_random();
+    goes->id = test_random_id();
     goes->name = strdup("goes");
     goes->iface = strdup("lo");
     goes->enable = true;
@@ -1941,7 +1942,7 @@ TEST a_replacement_drops_the_flows_of_groups_it_withdraws(void) {
 
     firc_group_t **fresh = calloc(1, sizeof(*fresh));
     fresh[0] = firc_group_new();
-    fresh[0]->id = firc_id_random();
+    fresh[0]->id = test_random_id();
     fresh[0]->name = strdup("other");
     fresh[0]->iface = strdup("lo");
     fresh[0]->enable = true;
@@ -1964,13 +1965,13 @@ TEST a_reorder_does_not_move_a_group_s_mark_field(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *a = firc_group_new();
-    a->id = firc_id_random();
+    a->id = test_random_id();
     a->name = strdup("a");
     a->iface = strdup("lo");
     a->enable = true;
     firc_id_t a_id = a->id;
     firc_group_t *b = firc_group_new();
-    b->id = firc_id_random();
+    b->id = test_random_id();
     b->name = strdup("b");
     b->iface = strdup("lo");
     b->enable = true;
@@ -2013,7 +2014,7 @@ TEST adding_a_group_ahead_of_another_does_not_take_its_field(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *a = firc_group_new();
-    a->id = firc_id_random();
+    a->id = test_random_id();
     a->name = strdup("a");
     a->iface = strdup("lo");
     a->enable = true;
@@ -2024,7 +2025,7 @@ TEST adding_a_group_ahead_of_another_does_not_take_its_field(void) {
 
     firc_group_t **fresh = calloc(2, sizeof(*fresh));
     fresh[0] = firc_group_new();
-    fresh[0]->id = firc_id_random();
+    fresh[0]->id = test_random_id();
     fresh[0]->name = strdup("new");
     fresh[0]->iface = strdup("lo");
     fresh[0]->enable = true;
@@ -2053,7 +2054,7 @@ TEST a_removed_group_gives_its_field_back(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *a = firc_group_new();
-    a->id = firc_id_random();
+    a->id = test_random_id();
     a->name = strdup("a");
     a->iface = strdup("lo");
     a->enable = true;
@@ -2067,7 +2068,7 @@ TEST a_removed_group_gives_its_field_back(void) {
     ASSERT(wait_written_after(&l, started));
 
     firc_group_t *b = firc_group_new();
-    b->id = firc_id_random();
+    b->id = test_random_id();
     b->name = strdup("b");
     b->iface = strdup("lo");
     b->enable = true;
@@ -2119,7 +2120,7 @@ TEST a_removed_group_s_entry_leaves_the_store_when_its_flush_is_paid(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *a = firc_group_new();
-    a->id = firc_id_random();
+    a->id = test_random_id();
     a->name = strdup("a");
     a->iface = strdup("lo");
     a->enable = true;
@@ -2260,7 +2261,7 @@ TEST a_list_group_that_changes_interface_drops_its_flows(void) {
     fake_ct_t *ctk = l.ctk;
     firc_app_set_running(l.app, true);
 
-    firc_id_t sid = firc_id_random();
+    firc_id_t sid = test_random_id();
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, list_group(sid, "lo", true)));
     uint32_t mark = rule_mark_installed(l.kernel);
     ASSERTm("the group is in the kernel", mark != 0);
@@ -2287,7 +2288,7 @@ TEST a_list_group_that_is_turned_off_drops_its_flows(void) {
     fake_ct_t *ctk = l.ctk;
     firc_app_set_running(l.app, true);
 
-    firc_id_t sid = firc_id_random();
+    firc_id_t sid = test_random_id();
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, list_group(sid, "lo", true)));
     uint32_t mark = rule_mark_installed(l.kernel);
     ASSERT(mark != 0);
@@ -2666,7 +2667,7 @@ TEST remove_by_id_and_by_index(void) {
     ASSERT_STR_EQ("c", firc_ruleset_group(firc_app_user_group_at(app, 1))->name);
     ASSERT_EQ(2u, cfg.n_groups);
 
-    firc_id_t ghost = firc_id_random();
+    firc_id_t ghost = test_random_id();
     ASSERT(!firc_app_remove_group_by_id(app, ghost));
 
     firc_app_remove_group_by_index(app, 0);
@@ -2846,10 +2847,11 @@ TEST a_running_group_s_route_carries_its_real_mark_and_v6_route(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    fake_rtnl_add_addr(l.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
     firc_app_set_running(l.app, true);
 
     firc_group_t *up = firc_group_new();
-    up->id = firc_id_random();
+    up->id = test_random_id();
     up->name = strdup("v6up");
     up->iface = strdup("lo");
     up->enable = true;
@@ -2867,10 +2869,25 @@ TEST a_running_group_s_route_carries_its_real_mark_and_v6_route(void) {
     ASSERT_EQ_FMTm("mark must be field | HANDLED, not the bare field", up_field | FIRC_MARK_HANDLED, r.mark,
                    "%u");
     ASSERT_EQ_FMTm("an IPv6 route: the group's own IPv6 server must survive", (size_t)1, r.n_servers, "%zu");
+    ASSERTm("and its names get IPv6 addresses", r.v6);
+
+    fake_rtnl_clear_addrs(l.kernel);
+    firc_group_t *v4 = firc_group_new();
+    v4->id = test_random_id();
+    v4->name = strdup("v4only");
+    v4->iface = strdup("lo");
+    v4->enable = true;
+    firc_strset(&v4->resolve.server, "[2620:fe::9]:53");
+    firc_id_t v4_id = v4->id;
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, v4));
+    ASSERT_FALSEm("up, but no IPv6 on it: no v6 route", firc_ruleset_has_iface_route(firc_app_find_group_by_id(l.app, v4_id), AF_INET6));
+    ASSERT(firc_resolve_router_route(l.router, v4_id, &r));
+    ASSERT_FALSEm("its names get no IPv6 address", r.v6);
+    ASSERT_EQ_FMTm("nor does its IPv6 resolver survive", (size_t)0, r.n_servers, "%zu");
 
     fake_rtnl_set_link_flags(l.kernel, 0);
     firc_group_t *down = firc_group_new();
-    down->id = firc_id_random();
+    down->id = test_random_id();
     down->name = strdup("v6down");
     down->iface = strdup("lo");
     down->enable = true;
@@ -2890,6 +2907,50 @@ TEST a_running_group_s_route_carries_its_real_mark_and_v6_route(void) {
     PASS();
 }
 
+static size_t aaaa_answers_for(firc_dns_pipeline_t *pl, const char *label) {
+    uint8_t b[128] = {0x42, 0x42, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0};
+    size_t p = 12, l = strlen(label);
+    b[p++] = (uint8_t)l;
+    memcpy(b + p, label, l);
+    p += l;
+    const uint8_t tail[] = {3, 'n', 'e', 't', 0, 0, 28, 0, 1, 0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16,
+                            0x26, 0x06, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    memcpy(b + p, tail, sizeof(tail));
+    p += sizeof(tail);
+    firc_dns_msg_t *m = NULL;
+    if (firc_dns_msg_parse(b, p, &m) != FIRC_OK) { return 99; }
+    (void)firc_dns_pipeline_handle_message(pl, m, 1000, NULL, NULL);
+    size_t n = m->n_answers;
+    firc_dns_msg_free(m);
+    return n;
+}
+
+/* Catches: a blackhole group (no interface, no v6 route) handed a fake AAAA instead of NODATA. */
+TEST a_blackhole_group_answers_aaaa_with_nodata(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    firc_dns_pipeline_set_pool(l.pipeline, l.pool, 300);
+    firc_dns_pipeline_set_v6_fn(l.pipeline, firc_resolve_router_carries_v6, l.router);
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    fake_rtnl_add_addr(l.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    firc_app_set_running(l.app, true);
+
+    firc_group_t *bh = make_group("sink", true);
+    firc_strset(&bh->iface, "blackhole");
+    firc_group_add_rule(bh, edit_rule(FIRC_RULE_DOMAIN, "bh.net"));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, bh));
+    firc_group_t *dual = make_group("dual", true);
+    firc_strset(&dual->iface, "lo");
+    firc_group_add_rule(dual, edit_rule(FIRC_RULE_DOMAIN, "dual.net"));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, dual));
+
+    ASSERT_EQ_FMTm("the blackhole group: NODATA", (size_t)0, aaaa_answers_for(l.pipeline, "bh"), "%zu");
+    ASSERT_EQ_FMTm("a group on a v6 interface, same run: the fake AAAA", (size_t)1,
+                   aaaa_answers_for(l.pipeline, "dual"), "%zu");
+    locked_app_down(&l);
+    PASS();
+}
+
 /* Catches: a neutral update republishing the route mid-update with mark 0, bumping its generation. */
 TEST an_update_of_a_running_group_does_not_bounce_its_route(void) {
     locked_app_t l;
@@ -2898,7 +2959,7 @@ TEST an_update_of_a_running_group_does_not_bounce_its_route(void) {
     firc_app_set_running(l.app, true);
 
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->name = strdup("g");
     g->iface = strdup("lo");
     g->enable = true;
@@ -2945,7 +3006,7 @@ TEST a_republish_closes_the_moved_groups_and_forgets_the_gone_ones(void) {
     const char *names[3] = {"g", "h", "k"};
     for (int i = 0; i < 3; i++) {
         firc_group_t *grp = firc_group_new();
-        grp->id = firc_id_random();
+        grp->id = test_random_id();
         grp->name = strdup(names[i]);
         grp->iface = strdup("lo");
         grp->enable = true;
@@ -3033,6 +3094,57 @@ static int group_in_kernel(locked_app_t *l, firc_id_t gid) {
 
 static bool group_fully_in(locked_app_t *l, firc_id_t gid) { return group_in_kernel(l, gid) == 6; }
 static bool group_fully_out(locked_app_t *l, firc_id_t gid) { return group_in_kernel(l, gid) == 0; }
+
+/* Catches: a guard outliving its group, the dispatch chain outliving the last group, one family only, or the barrier not first. */
+TEST a_groups_guard_comes_and_goes_with_its_chains(void) {
+    for (int full = 0; full < 2; full++) {
+        locked_app_t l;
+        ASSERT(locked_app_up_no_committer(&l));
+        fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+        firc_group_t *g = firc_group_new();
+        g->id = test_random_id();
+        g->name = strdup("g");
+        g->iface = strdup("lo");
+        g->enable = true;
+        firc_id_t gid = g->id;
+        firc_group_t *h = firc_group_new();
+        h->id = test_random_id();
+        h->name = strdup("h");
+        h->iface = strdup("lo");
+        h->enable = true;
+        firc_id_t hid = h->id;
+        firc_app_set_running(l.app, true);
+        ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g));
+        ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, h));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, full != 0));
+        firc_fake_ipt_t *fakes[] = {l.fake, l.fake6};
+        for (size_t i = 0; i < 2; i++) {
+            firc_ipt_rule_t *const *rules = NULL;
+            size_t n = 0;
+            ASSERT(firc_fake_ipt_get_rules(fakes[i], "filter", "FIRC_EGRESS", &rules, &n));
+            ASSERT_EQ_FMT((size_t)3, n, "%zu");
+            ASSERT(firc_fake_ipt_get_rules(fakes[i], "filter", "FORWARD", &rules, &n) && n > 1);
+            ASSERT_STR_EQ("FIRC_POOLREJECT", rules[0]->parts[1]);
+            ASSERT_STR_EQ("FIRC_EGRESS", rules[1]->parts[1]);
+        }
+        ASSERT(firc_app_remove_group_by_id(l.app, gid));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, full != 0));
+        for (size_t i = 0; i < 2; i++) {
+            firc_ipt_rule_t *const *rules = NULL;
+            size_t n = 0;
+            ASSERT(firc_fake_ipt_get_rules(fakes[i], "filter", "FIRC_EGRESS", &rules, &n));
+            ASSERT_EQ_FMT((size_t)2, n, "%zu");
+        }
+        ASSERT(firc_app_remove_group_by_id(l.app, hid));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, full != 0));
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT_FALSE(firc_fake_ipt_chain_exists(fakes[i], "filter", "FIRC_EGRESS"));
+            ASSERT_FALSE(chain_has_text_in(fakes[i], "filter", "FORWARD", "-j FIRC_EGRESS"));
+        }
+        locked_app_down(&l);
+    }
+    PASS();
+}
 
 static const firc_group_snapshot_t *view_owner(locked_app_t *l, const char *name) {
     const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(l->pipeline);
@@ -3871,6 +3983,77 @@ TEST live_follows_the_interface_link(void) {
 
     fake_rtnl_set_link_flags(l.kernel, 0x10);
     ASSERT_STR_EQm("down again: not live", "no-interface", live_reason(&l, 1));
+    locked_app_down(&l);
+    PASS();
+}
+
+static const char *g_tun_down_iface;
+
+static bool fake_tunnel_down(void *ud, const char *iface) {
+    (void)ud;
+    if (g_tun_down_iface == NULL || iface == NULL) { return false; }
+    return strcmp(g_tun_down_iface, "*") == 0 || strcmp(iface, g_tun_down_iface) == 0;
+}
+
+/* Catches: tunnel-down missed, misplaced among the reasons, read for another interface, or changing routing. */
+TEST live_reads_the_tunnel_behind_the_interface(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x10);
+    firc_app_set_tunnel_down(l.app, fake_tunnel_down, NULL);
+    g_tun_down_iface = "lo";
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT_EQ(FIRC_OK, firc_app_start_groups(l.app));
+    ASSERT_EQ(FIRC_OK, firc_app_start_netfilter_committer(l.app));
+
+    firc_app_nf_enter(l.app);
+    firc_app_pool_changed(l.app);
+    bool none_yet = firc_app_nf_last_completed_pass_for_test(l.app) == 0;
+    const char *link_down = live_reason(&l, 1);
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    const char *pending = live_reason(&l, 1);
+    g_tun_down_iface = NULL;
+    const char *pending_carrying = live_reason(&l, 1);
+    g_tun_down_iface = "lo";
+    firc_app_nf_leave(l.app);
+    ASSERTm("fixture: no pass has completed", none_yet);
+    ASSERT_STR_EQm("tunnel-down is said before the missing link", "tunnel-down", link_down);
+    ASSERT_STR_EQm("and before not-written", "tunnel-down", pending);
+    ASSERT_STR_EQm("fixture: a carrying tunnel leaves the pending pass", "not-written", pending_carrying);
+    ASSERT(wait_written_after(&l, 0));
+
+    ASSERT_STR_EQm("no node: not live", "tunnel-down", live_reason(&l, 1));
+    ASSERTm("routing is unchanged: still routed", group_routed(&l, 1));
+    ASSERTm("and still in the view", view_owner(&l, "a.example") != NULL);
+
+    firc_group_t *g2 = activation_group(2, "b.example", NULL, NULL);
+    g2->enable = false;
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g2));
+    firc_group_t *g3 = activation_group(3, "c.example", NULL, NULL);
+    free(g3->iface);
+    g3->iface = strdup("");
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g3));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(6, "f.example", NULL, NULL)));
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, (firc_id_t){{6, 6, 6, 6}},
+                                             activation_group(6, "f.example", NULL, NULL)));
+    ASSERT_FALSEm("fixture: group 6's re-enable met the refusal", fake_rtnl_failure_armed(l.kernel));
+    g_tun_down_iface = "*";
+    ASSERT_STR_EQm("off comes first", "disabled", live_reason(&l, 2));
+    ASSERT_STR_EQm("an unusable name comes first", "no-interface", live_reason(&l, 3));
+    ASSERT_STR_EQm("a failed enable comes first", "not-enabled", live_reason(&l, 6));
+
+    g_tun_down_iface = "tunvless0";
+    ASSERT_STR_EQm("another tunnel down is not this group's", "live", live_reason(&l, 1));
+    g_tun_down_iface = NULL;
+    ASSERT_STR_EQm("a node again: live, by itself", "live", live_reason(&l, 1));
+    fake_rtnl_set_link_flags(l.kernel, 0x10);
+    ASSERT_STR_EQm("a carrying tunnel leaves the link check", "no-interface", live_reason(&l, 1));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    g_tun_down_iface = "lo";
+    firc_app_set_tunnel_down(l.app, NULL, NULL);
+    ASSERT_STR_EQm("no tunnel reader: nothing is a tunnel", "live", live_reason(&l, 1));
+    g_tun_down_iface = NULL;
     locked_app_down(&l);
     PASS();
 }
@@ -5391,7 +5574,7 @@ static firc_group_t *subnet_group(const char *const *subnets, size_t n, bool as_
     }
     for (size_t i = 0; i < n; i++) {
         if (as_list) {
-            firc_sub_rules_push(&g->list->rules, subnets[i], FIRC_RULE_SUBNET, true, firc_id_random());
+            firc_sub_rules_push(&g->list->rules, subnets[i], FIRC_RULE_SUBNET, true, test_random_id());
         } else {
             firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, subnets[i]));
         }
@@ -5426,7 +5609,7 @@ static firc_err_t refresh_list(locked_app_t *l, const char *const *want, size_t 
     ev->result = FIRC_SUB_RESULT_PARSED;
     firc_sub_rules_init(&ev->rules);
     for (size_t i = 0; i < n; i++) {
-        firc_sub_rules_push(&ev->rules, want[i], FIRC_RULE_SUBNET, true, firc_id_random());
+        firc_sub_rules_push(&ev->rules, want[i], FIRC_RULE_SUBNET, true, test_random_id());
     }
     memset(ev->hash, (int)n + 1, sizeof(ev->hash));
     bool changed = false;
@@ -6594,7 +6777,7 @@ TEST a_sync_whose_devices_render_fails_still_writes_its_subnets(void) {
 static firc_id_t routed_group_with_a_mapping(locked_app_t *l, firc_ip_t *fake) {
     fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
     firc_group_t *g = firc_group_new();
-    g->id = firc_id_random();
+    g->id = test_random_id();
     g->name = strdup("g");
     g->iface = strdup("lo");
     g->enable = true;
@@ -6785,9 +6968,11 @@ int main(int argc, char **argv) {
     RUN_TEST(the_app_publishes_a_route_per_group);
     RUN_TEST(a_firmware_resolver_inside_the_pool_is_dropped);
     RUN_TEST(a_running_group_s_route_carries_its_real_mark_and_v6_route);
+    RUN_TEST(a_blackhole_group_answers_aaaa_with_nodata);
     RUN_TEST(an_update_of_a_running_group_does_not_bounce_its_route);
     RUN_TEST(a_domain_rule_edit_asks_for_no_pass_but_a_subnet_rule_does);
     RUN_TEST(a_removed_group_leaves_with_the_next_pass_of_either_kind);
+    RUN_TEST(a_groups_guard_comes_and_goes_with_its_chains);
     RUN_TEST(a_group_removed_after_an_aborted_pass_does_not_come_back);
     RUN_TEST(disabling_a_subnet_list_rule_asks_for_one_pass_and_the_chain_drops_it);
     RUN_TEST(a_name_list_rule_edit_asks_for_no_pass);
@@ -6814,6 +6999,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_failed_re_enable_leaves_no_chain_after_the_pass);
     RUN_TEST(live_reason_is_checked_in_its_order);
     RUN_TEST(live_follows_the_interface_link);
+    RUN_TEST(live_reads_the_tunnel_behind_the_interface);
     RUN_TEST(a_committer_that_keeps_failing_says_not_written);
     RUN_TEST(a_save_before_its_pass_still_reads_live);
     RUN_TEST(before_the_first_pass_a_group_reads_not_written);

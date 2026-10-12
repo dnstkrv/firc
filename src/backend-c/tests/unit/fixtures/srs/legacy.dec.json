@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "domain": "plain.org",
+      "domain_suffix": [
+        ".only-sub.net",
+        "both.net",
+        "example.com"
+      ]
+    }
+  ]
+}

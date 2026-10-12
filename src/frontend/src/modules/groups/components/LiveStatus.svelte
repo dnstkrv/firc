@@ -5,6 +5,7 @@
   import CircleX from "@lucide/svelte/icons/circle-x";
   import PowerOff from "@lucide/svelte/icons/power-off";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import ServerOff from "@lucide/svelte/icons/server-off";
   import Unplug from "@lucide/svelte/icons/unplug";
   import { getContext, tick } from "svelte";
 
@@ -22,6 +23,7 @@
     CircleCheck,
     CircleX,
     Unplug,
+    ServerOff,
     RefreshCw,
     PowerOff,
     CircleDashed,

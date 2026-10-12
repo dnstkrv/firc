@@ -69,6 +69,7 @@ typedef struct want {
     uint8_t src[16], smsk[16], dst[16], dmsk[16];
     char in[16], out[16];
     size_t in_len, out_len;
+    uint8_t invflags;
     uint16_t proto;
     ext_t m[MAX_MATCHES];
     size_t nm;
@@ -188,6 +189,7 @@ static void put_ip(const want_t *w, uint8_t *e) {
         memset(ip.outiface_mask, 0xff, w->out_len ? w->out_len + 1 : 0);
         ip.proto = w->proto;
         ip.flags = w->proto ? XT_IP6T_F_PROTO : 0;
+        ip.invflags = w->invflags;
         memcpy(e, &ip, sizeof(ip));
     } else {
         xt_ipt_ip_t ip;
@@ -201,6 +203,7 @@ static void put_ip(const want_t *w, uint8_t *e) {
         memset(ip.iniface_mask, 0xff, w->in_len ? w->in_len + 1 : 0);
         memset(ip.outiface_mask, 0xff, w->out_len ? w->out_len + 1 : 0);
         ip.proto = w->proto;
+        ip.invflags = w->invflags;
         memcpy(e, &ip, sizeof(ip));
     }
 }
@@ -872,7 +875,12 @@ static bool matches_complete(const want_t *w) {
     return true;
 }
 
-static bool generic_option(want_t *w, const char *a, const char *b) {
+static bool generic_option(want_t *w, const char *a, const char *b, bool inv) {
+    if (inv) {
+        bool in = strcmp(a, "-i") == 0;
+        if (!in && strcmp(a, "-o") != 0) { return false; }
+        w->invflags |= in ? XT_INV_VIA_IN : XT_INV_VIA_OUT;
+    }
     if (strcmp(a, "-s") == 0) {
         if (w->has_s || !parse_addr(w->v6, false, b, w->src, w->smsk)) { return false; }
         w->has_s = true;
@@ -902,7 +910,8 @@ static bool is_generic(const char *a) {
 }
 
 static bool invertible(const char *a) {
-    return strcmp(a, "--mark") == 0 || strcmp(a, "--ctorigdst") == 0 || strcmp(a, "--mac-source") == 0;
+    return strcmp(a, "--mark") == 0 || strcmp(a, "--ctorigdst") == 0 || strcmp(a, "--mac-source") == 0 ||
+           strcmp(a, "-i") == 0 || strcmp(a, "-o") == 0;
 }
 
 static bool read_rule(firc_ipt_proto_t fam, uint8_t mac_rev, const firc_ipt_rule_t *rule, want_t *w) {
@@ -927,7 +936,8 @@ static bool read_rule(firc_ipt_proto_t fam, uint8_t mac_rev, const firc_ipt_rule
         } else if (w->target != T_NONE) {
             return false;
         } else if (is_generic(a)) {
-            used = b != NULL && generic_option(w, a, b) ? 1 : BAD;
+            used = b != NULL && generic_option(w, a, b, inv) ? 1 : BAD;
+            inv = false;
         } else if (strcmp(a, "-m") == 0) {
             used = b != NULL && open_match(w, b) ? 1 : BAD;
         } else if (strcmp(a, "-j") == 0) {
@@ -1117,7 +1127,7 @@ static bool ip_only_dst(firc_ipt_proto_t fam, const uint8_t *e, uint8_t *addr, u
         memcpy(&ip, e, sizeof(ip));
         memcpy(addr, ip.dst, 16);
         memcpy(mask, ip.dmsk, 16);
-        inverted = (ip.invflags & XT_IP6T_INV_DSTIP) != 0;
+        inverted = (ip.invflags & XT_INV_DSTIP) != 0;
         memset(ip.dst, 0, sizeof(ip.dst));
         memset(ip.dmsk, 0, sizeof(ip.dmsk));
         ip.flags = (uint8_t)(ip.flags & ~XT_IP6T_F_GOTO);
@@ -1129,7 +1139,7 @@ static bool ip_only_dst(firc_ipt_proto_t fam, const uint8_t *e, uint8_t *addr, u
         memcpy(&ip, e, sizeof(ip));
         memcpy(addr, ip.dst, 4);
         memcpy(mask, ip.dmsk, 4);
-        inverted = (ip.invflags & XT_IPT_INV_DSTIP) != 0;
+        inverted = (ip.invflags & XT_INV_DSTIP) != 0;
         memset(ip.dst, 0, sizeof(ip.dst));
         memset(ip.dmsk, 0, sizeof(ip.dmsk));
         ip.flags = (uint8_t)(ip.flags & ~XT_IPT_F_GOTO);

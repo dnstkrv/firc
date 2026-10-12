@@ -18,16 +18,6 @@
 static const char *const k_known[] = {"domain", "domain_suffix", "domain_keyword", "domain_regex",
                                       "ip_cidr", "network", "port", "port_range", "type", "invert", NULL};
 
-enum { NET_ANY = 0, NET_TCP = 1, NET_UDP = 2 };
-
-typedef struct walk {
-    firc_sub_sink_t *sink;
-    firc_sub_parse_stats_t *st;
-    firc_sub_parse_progress_fn progress;
-    void *ud;
-    size_t values;
-} walk_t;
-
 /* a field is one value or an array of them; calls fn per value, a wrong-kind value fails the field */
 typedef bool (*value_fn)(const cJSON *v, void *ud);
 static bool each_value(const cJSON *f, value_fn fn, void *ud) {
@@ -60,23 +50,18 @@ static bool object_is_honourable(const cJSON *o) {
     return true;
 }
 
-static bool net_value(const cJSON *v, void *ud) {
-    int *net = ud;
-    if (!cJSON_IsString(v)) { return false; }
-    if (strcmp(v->valuestring, "tcp") == 0) { *net |= NET_TCP; return true; }
-    if (strcmp(v->valuestring, "udp") == 0) { *net |= NET_UDP; return true; }
+bool firc_sub_net_add(int *net, const char *s) {
+    if (strcmp(s, "tcp") == 0) { *net |= FIRC_SUB_NET_TCP; return true; }
+    if (strcmp(s, "udp") == 0) { *net |= FIRC_SUB_NET_UDP; return true; }
     return false;
 }
 
-/* ports as "N"/"N-M" items, each with its slot cost */
-typedef struct ports {
-    char item[64][12];
-    int cost[64];
-    size_t n;
-} ports_t;
+static bool net_value(const cJSON *v, void *ud) {
+    return cJSON_IsString(v) && firc_sub_net_add(ud, v->valuestring);
+}
 
-static bool add_port_item(ports_t *p, long a, long b) {
-    if (a < 1 || b > 65535 || a > b || p->n == 64) { return false; }
+bool firc_sub_ports_add(firc_sub_ports_t *p, long a, long b) {
+    if (a < 1 || b > 65535 || a > b || p->n == FIRC_SUB_PORT_ITEMS) { return false; }
     /* recast to int: -Wformat-truncation sizes "%ld" against long's range regardless of the bounds check above */
     int ai = (int)a, bi = (int)b;
     if (ai == bi) { snprintf(p->item[p->n], sizeof(p->item[0]), "%d", ai); p->cost[p->n] = 1; }
@@ -91,13 +76,12 @@ static bool port_value(const cJSON *v, void *ud) {
         v->valuedouble != (double)(long)v->valuedouble) {
         return false;
     }
-    return add_port_item(ud, (long)v->valuedouble, (long)v->valuedouble);
+    return firc_sub_ports_add(ud, (long)v->valuedouble, (long)v->valuedouble);
 }
 
 /* "a:b", "a:" (to 65535), ":b" (from 1). */
-static bool range_value(const cJSON *v, void *ud) {
-    if (!cJSON_IsString(v)) { return false; }
-    const char *s = v->valuestring, *colon = strchr(s, ':');
+bool firc_sub_ports_add_range(firc_sub_ports_t *p, const char *s) {
+    const char *colon = strchr(s, ':');
     if (colon == NULL || strchr(colon + 1, ':') != NULL) { return false; }
     char *end;
     long a = 1, b = 65535;
@@ -109,10 +93,14 @@ static bool range_value(const cJSON *v, void *ud) {
         b = strtol(colon + 1, &end, 10);
         if (*end != '\0') { return false; }
     }
-    return add_port_item(ud, a, b);
+    return firc_sub_ports_add(p, a, b);
 }
 
-static firc_err_t tick(walk_t *w) {
+static bool range_value(const cJSON *v, void *ud) {
+    return cJSON_IsString(v) && firc_sub_ports_add_range(ud, v->valuestring);
+}
+
+static firc_err_t tick(firc_sub_walk_t *w) {
     w->values++;
     if (w->progress != NULL && w->values % FIRC_SUB_PARSE_PROGRESS_LINES == 0 && !w->progress(w->ud, w->values)) {
         return FIRC_ERR_CANCELED;
@@ -121,8 +109,13 @@ static firc_err_t tick(walk_t *w) {
 }
 
 /* One value into the sink; a value the sink refuses is one drop. */
-static firc_err_t take(walk_t *w, const char *text, const char *type, const char *proto, const char *ports,
-                       bool counts_unconstrained) {
+static firc_err_t take(firc_sub_walk_t *w, const char *text, const char *type, const char *proto,
+                       const char *ports, bool counts_unconstrained) {
+    w->text += strlen(text) + 1;
+    if (w->text_cap != 0 && w->text > w->text_cap) {
+        w->st->why = "sing-box rule-set too large: its rules hold more text than a list may";
+        return FIRC_ERR_INVAL;
+    }
     char *copy = strdup(text);
     if (copy == NULL) { return FIRC_ERR_NOMEM; }
     bool took = false;
@@ -134,81 +127,91 @@ static firc_err_t take(walk_t *w, const char *text, const char *type, const char
     return tick(w);
 }
 
-typedef struct names_ud { walk_t *w; const char *type; bool constrained; firc_err_t err; } names_ud_t;
-
-static bool name_value(const cJSON *v, void *ud) {
-    names_ud_t *n = ud;
-    if (!cJSON_IsString(v)) {
-        n->w->st->dropped++;
-        n->err = tick(n->w);
-        return n->err == FIRC_OK;
-    }
-    const char *s = v->valuestring;
-    char buf[300];
-    if (strcmp(n->type, FIRC_RULE_NAMESPACE) == 0 && s[0] == '.') { s++; }
-    if (strcmp(n->type, FIRC_RULE_WILDCARD) == 0) {
-        /* a domain_keyword already holding '*'/'?' would route more than sing-box meant once wrapped; dropped instead */
-        if (strpbrk(s, "*?") != NULL) {
-            n->w->st->dropped++;
-            n->err = tick(n->w);
-            return n->err == FIRC_OK;
-        }
-        if (snprintf(buf, sizeof(buf), "*%s*", s) >= (int)sizeof(buf)) {
-            n->w->st->dropped++;
-            n->err = tick(n->w);
-            return n->err == FIRC_OK;
-        }
-        s = buf;
-    }
-    n->err = take(n->w, s, n->type, NULL, NULL, n->constrained);
-    return n->err == FIRC_OK;
-}
-
-typedef struct cidr_ud {
-    walk_t *w;
-    const char *protos[2];
-    size_t n_protos;
-    const char *chunks[64];  /* each a ports string, or NULL for none */
-    size_t n_chunks;
-    firc_err_t err;
-} cidr_ud_t;
-
-static bool cidr_value(const cJSON *v, void *ud) {
-    cidr_ud_t *c = ud;
-    if (!cJSON_IsString(v)) {
-        c->w->st->dropped++;
-        c->err = tick(c->w);
-        return c->err == FIRC_OK;
-    }
-    const char *type = strchr(v->valuestring, ':') != NULL ? FIRC_RULE_SUBNET6 : FIRC_RULE_SUBNET;
-    for (size_t p = 0; p < c->n_protos; p++) {
-        for (size_t k = 0; k < c->n_chunks; k++) {
-            c->err = take(c->w, v->valuestring, type, c->protos[p], c->chunks[k], false);
-            if (c->err != FIRC_OK) { return false; }
-        }
-    }
-    return true;
-}
-
 /* a dropped object ticks too, so a list of nothing but junk can still be cancelled */
-static firc_err_t drop_object(walk_t *w) {
+firc_err_t firc_sub_walk_drop(firc_sub_walk_t *w) {
     w->st->dropped++;
     return tick(w);
 }
 
-static firc_err_t walk_object(walk_t *w, const cJSON *o) {
-    if (!cJSON_IsObject(o) || !object_is_honourable(o)) { return drop_object(w); }
-    int net = NET_ANY;
-    ports_t ports = {.n = 0};
+firc_err_t firc_sub_walk_name(firc_sub_walk_t *w, const char *s, const char *type, bool constrained) {
+    char buf[300];
+    if (strcmp(type, FIRC_RULE_NAMESPACE) == 0 && s[0] == '.') { s++; }
+    if (strcmp(type, FIRC_RULE_WILDCARD) == 0) {
+        /* a domain_keyword already holding '*'/'?' would route more than sing-box meant once wrapped; dropped instead */
+        if (strpbrk(s, "*?") != NULL) { return firc_sub_walk_drop(w); }
+        if (snprintf(buf, sizeof(buf), "*%s*", s) >= (int)sizeof(buf)) { return firc_sub_walk_drop(w); }
+        s = buf;
+    }
+    return take(w, s, type, NULL, NULL, constrained);
+}
+
+typedef struct names_ud { firc_sub_walk_t *w; const char *type; bool constrained; firc_err_t err; } names_ud_t;
+
+static bool name_value(const cJSON *v, void *ud) {
+    names_ud_t *n = ud;
+    n->err = cJSON_IsString(v) ? firc_sub_walk_name(n->w, v->valuestring, n->type, n->constrained)
+                               : firc_sub_walk_drop(n->w);
+    return n->err == FIRC_OK;
+}
+
+void firc_sub_cidr_plan(firc_sub_cidr_plan_t *c, int net, const firc_sub_ports_t *ports) {
+    c->n_protos = 0;
+    c->n_chunks = 0;
+    bool both = net == FIRC_SUB_NET_ANY || net == (FIRC_SUB_NET_TCP | FIRC_SUB_NET_UDP);
+    if (ports->n == 0) {
+        c->protos[c->n_protos++] = both ? NULL : (net == FIRC_SUB_NET_TCP ? "tcp" : "udp");
+        c->chunks[c->n_chunks++] = NULL;
+        return;
+    }
+    if (both || net == FIRC_SUB_NET_TCP) { c->protos[c->n_protos++] = "tcp"; }
+    if (both || net == FIRC_SUB_NET_UDP) { c->protos[c->n_protos++] = "udp"; }
+    /* at most FIRC_PORTS_MAX_SLOTS slots per rule */
+    for (size_t i = 0, slots = 0; i < ports->n; i++) {
+        if (c->n_chunks == 0 || slots + (size_t)ports->cost[i] > FIRC_PORTS_MAX_SLOTS) {
+            size_t k = c->n_chunks++;
+            c->bufs[k][0] = '\0';
+            c->chunks[k] = c->bufs[k];
+            slots = 0;
+        }
+        char *b = c->bufs[c->n_chunks - 1];
+        size_t len = strlen(b);
+        snprintf(b + len, FIRC_PORTS_STR_MAX - len, "%s%s", len ? "," : "", ports->item[i]);
+        slots += (size_t)ports->cost[i];
+    }
+}
+
+firc_err_t firc_sub_walk_cidr(firc_sub_walk_t *w, const firc_sub_cidr_plan_t *c, const char *text) {
+    const char *type = strchr(text, ':') != NULL ? FIRC_RULE_SUBNET6 : FIRC_RULE_SUBNET;
+    for (size_t p = 0; p < c->n_protos; p++) {
+        for (size_t k = 0; k < c->n_chunks; k++) {
+            firc_err_t err = take(w, text, type, c->protos[p], c->chunks[k], false);
+            if (err != FIRC_OK) { return err; }
+        }
+    }
+    return FIRC_OK;
+}
+
+typedef struct cidr_ud { firc_sub_walk_t *w; const firc_sub_cidr_plan_t *plan; firc_err_t err; } cidr_ud_t;
+
+static bool cidr_value(const cJSON *v, void *ud) {
+    cidr_ud_t *c = ud;
+    c->err = cJSON_IsString(v) ? firc_sub_walk_cidr(c->w, c->plan, v->valuestring) : firc_sub_walk_drop(c->w);
+    return c->err == FIRC_OK;
+}
+
+static firc_err_t walk_object(firc_sub_walk_t *w, const cJSON *o) {
+    if (!cJSON_IsObject(o) || !object_is_honourable(o)) { return firc_sub_walk_drop(w); }
+    int net = FIRC_SUB_NET_ANY;
+    firc_sub_ports_t ports = {.n = 0};
     const cJSON *f;
     if ((f = cJSON_GetObjectItemCaseSensitive(o, "network")) != NULL && !each_value(f, net_value, &net)) {
-        return drop_object(w);
+        return firc_sub_walk_drop(w);
     }
     if (((f = cJSON_GetObjectItemCaseSensitive(o, "port")) != NULL && !each_value(f, port_value, &ports)) ||
         ((f = cJSON_GetObjectItemCaseSensitive(o, "port_range")) != NULL && !each_value(f, range_value, &ports))) {
-        return drop_object(w); /* includes more than 64 port items */
+        return firc_sub_walk_drop(w); /* includes more than 64 port items */
     }
-    bool constrained = net != NET_ANY || ports.n > 0;
+    bool constrained = net != FIRC_SUB_NET_ANY || ports.n > 0;
 
     static const struct { const char *key; const char *type; } names[] = {
         {"domain", FIRC_RULE_DOMAIN}, {"domain_suffix", FIRC_RULE_NAMESPACE},
@@ -224,31 +227,11 @@ static firc_err_t walk_object(walk_t *w, const cJSON *o) {
 
     if ((f = cJSON_GetObjectItemCaseSensitive(o, "ip_cidr")) == NULL) {
         /* honourable but with no name and no ip_cidr (e.g. {} or {"network":"udp"}) routes nothing */
-        return had_field ? FIRC_OK : drop_object(w);
+        return had_field ? FIRC_OK : firc_sub_walk_drop(w);
     }
-    cidr_ud_t c = {.w = w};
-    bool both = net == NET_ANY || net == (NET_TCP | NET_UDP);
-    if (ports.n == 0) {
-        c.protos[c.n_protos++] = both ? NULL : (net == NET_TCP ? "tcp" : "udp");
-        c.chunks[c.n_chunks++] = NULL;
-    } else {
-        if (both || net == NET_TCP) { c.protos[c.n_protos++] = "tcp"; }
-        if (both || net == NET_UDP) { c.protos[c.n_protos++] = "udp"; }
-    }
-    /* at most FIRC_PORTS_MAX_SLOTS slots per rule */
-    char bufs[64][FIRC_PORTS_STR_MAX];
-    for (size_t i = 0, slots = 0; i < ports.n; i++) {
-        if (c.n_chunks == 0 || slots + (size_t)ports.cost[i] > FIRC_PORTS_MAX_SLOTS) {
-            size_t k = c.n_chunks++;
-            bufs[k][0] = '\0';
-            c.chunks[k] = bufs[k];
-            slots = 0;
-        }
-        char *b = bufs[c.n_chunks - 1];
-        size_t len = strlen(b);
-        snprintf(b + len, FIRC_PORTS_STR_MAX - len, "%s%s", len ? "," : "", ports.item[i]);
-        slots += (size_t)ports.cost[i];
-    }
+    firc_sub_cidr_plan_t plan;
+    firc_sub_cidr_plan(&plan, net, &ports);
+    cidr_ud_t c = {w, &plan, FIRC_OK};
     (void)each_value(f, cidr_value, &c);
     return c.err;
 }
@@ -286,7 +269,7 @@ firc_err_t firc_sub_parse_singbox(const char *body, firc_sub_sink_t *sink, firc_
         st->why = "not a sing-box rule-set: a JSON list needs a \"rules\" array";
         return FIRC_ERR_INVAL;
     }
-    walk_t w = {sink, st, progress, ud, 0};
+    firc_sub_walk_t w = {sink, st, progress, ud, 0, 0, 0};
     firc_err_t err = FIRC_OK;
     const cJSON *o;
     cJSON_ArrayForEach(o, rules) {

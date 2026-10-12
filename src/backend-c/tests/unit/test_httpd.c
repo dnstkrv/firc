@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <malloc.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -49,8 +50,11 @@ static void h_not_found(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     firc_http_res_write(res, 404, "text/html", (const uint8_t *)"<h1>nope</h1>", 13);
 }
 
+static _Atomic int g_mw_calls;
+
 static bool mw_reject_blocked(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)ud;
+    atomic_fetch_add(&g_mw_calls, 1);
     if (strcmp(firc_http_req_path(req), "/blocked") == 0) {
         firc_http_res_write_error(res, 401, "Unauthorized");
         return false;
@@ -585,6 +589,232 @@ TEST middleware_can_short_circuit(void) {
     PASS();
 }
 
+/* Catches: a refused request's body awaited and buffered before the middleware answers it. */
+TEST a_refused_body_is_answered_before_it_is_sent(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    int fd = connect_tcp(TEST_PORT);
+    ASSERT(fd >= 0);
+    const char *req = "POST /blocked HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n";
+    ASSERT(send(fd, req, strlen(req), 0) > 0);
+    char resp[4096];
+    ASSERT(recv_response(fd, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(401, status_code_of(resp));
+    ASSERT(strstr(resp, "Connection: close\r\n") != NULL);
+    close(fd);
+    harness_stop(h);
+    PASS();
+}
+
+#define REFUSED_BODY ((size_t)64 * 1024)
+static char g_refused_body[REFUSED_BODY];
+
+static bool send_all(int fd, const char *p, size_t len) {
+    while (len > 0) {
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+        if (n <= 0) { return false; }
+        p += n;
+        len -= (size_t)n;
+    }
+    return true;
+}
+
+static int refused_with_body(size_t first_part, int pause_ms) {
+    int fd = connect_tcp(TEST_PORT);
+    if (fd < 0) { return -1; }
+    char head[256];
+    int hl = snprintf(head, sizeof(head), "POST /blocked HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n",
+                      REFUSED_BODY);
+    memset(g_refused_body, 'b', sizeof(g_refused_body));
+    bool sent = send_all(fd, head, (size_t)hl) && send_all(fd, g_refused_body, first_part);
+    if (sent && pause_ms > 0) { nap_ms(pause_ms); }
+    if (sent) { sent = send_all(fd, g_refused_body + first_part, REFUSED_BODY - first_part); }
+    char resp[4096];
+    ssize_t got = sent ? recv_response(fd, resp, sizeof(resp)) : -1;
+    int status = got > 0 ? status_code_of(resp) : -1;
+    char more[16];
+    errno = 0;
+    ssize_t end = recv(fd, more, sizeof(more), 0);
+    close(fd);
+    if (end != 0) { return -2; }
+    return status;
+}
+
+/* Catches: a refusal that closes with the body still arriving, so the client reads a reset instead of the 401. */
+TEST a_refusal_outlives_the_body_it_refused(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT_EQm("the body after the headers, later", 401, refused_with_body(0, 100));
+    ASSERT_EQm("part with the headers, the rest later", 401, refused_with_body(1024, 100));
+    ASSERT_EQm("64 KiB at once", 401, refused_with_body(REFUSED_BODY, 0));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: an admitted body put through the middleware twice, or lost when it follows its headers late. */
+TEST an_admitted_body_passes_the_middleware_once(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    atomic_store(&g_mw_calls, 0);
+    int fd = connect_tcp(TEST_PORT);
+    ASSERT(fd >= 0);
+    const char *head = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+    ASSERT(send(fd, head, strlen(head), 0) > 0);
+    nap_ms(100);
+    ASSERT(send(fd, "hello", 5, 0) == 5);
+    char resp[4096];
+    ASSERT(recv_response(fd, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(200, status_code_of(resp));
+    ASSERT_STR_EQ("hello", body_of(resp));
+    ASSERT_EQ(1, atomic_load(&g_mw_calls));
+    close(fd);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: one admitted body letting the next request on the connection skip the middleware. */
+TEST an_admitted_body_admits_nothing_after_it(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    int fd = connect_tcp(TEST_PORT);
+    ASSERT(fd >= 0);
+    const char *first = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello";
+    ASSERT(send(fd, first, strlen(first), 0) > 0);
+    char resp[4096];
+    ASSERT(recv_response(fd, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(200, status_code_of(resp));
+    const char *second = "GET /blocked HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    ASSERT(send(fd, second, strlen(second), 0) > 0);
+    ASSERT(recv_response(fd, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(401, status_code_of(resp));
+    close(fd);
+    harness_stop(h);
+    PASS();
+}
+
+static int echo_with_length(const char *length) {
+    int fd = connect_tcp(TEST_PORT);
+    if (fd < 0) { return -1; }
+    char req[2048];
+    snprintf(req, sizeof(req),
+             "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length:%s\r\nConnection: close\r\n\r\nhello", length);
+    if (send(fd, req, strlen(req), 0) <= 0) {
+        close(fd);
+        return -1;
+    }
+    char resp[4096];
+    ssize_t got = recv_response(fd, resp, sizeof(resp));
+    close(fd);
+    return got > 0 ? status_code_of(resp) : 0;
+}
+
+/* Catches: a Content-Length read with strtoul, which takes a sign, junk, hex and wraps past SIZE_MAX. */
+TEST a_content_length_is_digits_only(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT_EQ(200, echo_with_length(" 5"));
+    ASSERT_EQ(200, echo_with_length(" 05"));
+    ASSERT_EQm("a sign", 400, echo_with_length(" +5"));
+    ASSERT_EQm("a negative", 400, echo_with_length(" -5"));
+    ASSERT_EQm("trailing junk", 400, echo_with_length(" 5abc"));
+    ASSERT_EQm("hex", 400, echo_with_length(" 0x5"));
+    ASSERT_EQm("trailing junk after a space", 400, echo_with_length(" 5 5"));
+    ASSERT_EQm("no digits", 400, echo_with_length(" "));
+    ASSERT_EQm("2^64 + 5 wraps to 5", 400, echo_with_length(" 18446744073709551621"));
+    ASSERT_EQm("in range of size_t but over the cap", 413, echo_with_length(" 1048577"));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: optional whitespace around a Content-Length (RFC 9110: spaces and tabs) read as part of the number. */
+TEST a_content_length_may_carry_whitespace_around_it(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT_EQm("a tab after the colon", 200, echo_with_length("\t5"));
+    ASSERT_EQm("a trailing space", 200, echo_with_length(" 5 "));
+    ASSERT_EQm("a trailing tab", 200, echo_with_length(" 5\t"));
+    ASSERT_EQm("both, mixed", 200, echo_with_length(" \t5 \t "));
+    ASSERT_EQm("whitespace inside the number is not around it", 400, echo_with_length(" 5\t5"));
+    ASSERT_EQm("whitespace alone is no number", 400, echo_with_length(" \t "));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a Content-Length longer than the header value buffer cut to its leading zeros and read as 0. */
+TEST a_content_length_too_long_to_hold_is_refused(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char value[1024];
+    value[0] = ' ';
+    memset(value + 1, '0', 510);
+    strcpy(value + 511, "5");
+    ASSERTm("511 characters fit the buffer", strlen(value + 1) == 511);
+    ASSERT_EQ(200, echo_with_length(value));
+    memset(value + 1, '0', 511);
+    strcpy(value + 512, "5");
+    ASSERT_EQm("512 characters do not", 400, echo_with_length(value));
+    memset(value + 1, '0', 600);
+    strcpy(value + 601, "5");
+    ASSERT_EQm("nor 601", 400, echo_with_length(value));
+    harness_stop(h);
+    PASS();
+}
+
+#define KEPT_BODY ((size_t)512 * 1024)
+static char g_kept_req[KEPT_BODY + 256];
+static char g_kept_resp[KEPT_BODY + 4096];
+
+static size_t mapped_bytes(void) {
+    FILE *f = fopen("/proc/self/statm", "r");
+    unsigned long pages = 0;
+    if (f != NULL) {
+        if (fscanf(f, "%lu", &pages) != 1) { pages = 0; }
+        fclose(f);
+    }
+    return (size_t)pages * (size_t)sysconf(_SC_PAGESIZE);
+}
+
+/* Catches: a keep-alive connection holding the buffer of its largest body until it closes. */
+TEST a_kept_connection_lets_go_of_a_large_body(void) {
+    mallopt(M_MMAP_THRESHOLD, 64 * 1024);
+    char *volatile probe = malloc(KEPT_BODY);
+    ASSERT(probe != NULL);
+    probe[0] = 1;
+    size_t with = mapped_bytes();
+    free(probe);
+    size_t without = mapped_bytes();
+    if (with < without + KEPT_BODY) { SKIPm("the allocator does not map large blocks"); }
+
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    int fd = connect_tcp(TEST_PORT);
+    ASSERT(fd >= 0);
+    nap_ms(100);
+    size_t base = mapped_bytes();
+    int head = snprintf(g_kept_req, sizeof(g_kept_req), "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n",
+                        KEPT_BODY);
+    memset(g_kept_req + head, 'a', KEPT_BODY);
+    size_t total = (size_t)head + KEPT_BODY;
+    for (size_t off = 0; off < total;) {
+        ssize_t n = send(fd, g_kept_req + off, total - off, 0);
+        ASSERT(n > 0);
+        off += (size_t)n;
+    }
+    ASSERT(recv_response(fd, g_kept_resp, sizeof(g_kept_resp)) > (ssize_t)KEPT_BODY);
+    ASSERT_EQ(200, status_code_of(g_kept_resp));
+    ASSERT(strstr(g_kept_resp, "Connection: keep-alive\r\n") != NULL);
+    nap_ms(100);
+    size_t held = mapped_bytes();
+    const char *next = "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    ASSERT(send(fd, next, strlen(next), 0) > 0);
+    ASSERT(recv_response(fd, g_kept_resp, sizeof(g_kept_resp)) > 0);
+    ASSERT_EQm("the connection still serves", 200, status_code_of(g_kept_resp));
+    close(fd);
+    harness_stop(h);
+    ASSERT(held < base + KEPT_BODY / 2);
+    PASS();
+}
+
 TEST keep_alive_multiple_requests_one_connection(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
@@ -936,6 +1166,14 @@ int main(int argc, char **argv) {
     RUN_TEST(post_body_roundtrip);
     RUN_TEST(not_found_fallback);
     RUN_TEST(middleware_can_short_circuit);
+    RUN_TEST(a_refused_body_is_answered_before_it_is_sent);
+    RUN_TEST(a_refusal_outlives_the_body_it_refused);
+    RUN_TEST(an_admitted_body_passes_the_middleware_once);
+    RUN_TEST(an_admitted_body_admits_nothing_after_it);
+    RUN_TEST(a_content_length_is_digits_only);
+    RUN_TEST(a_content_length_too_long_to_hold_is_refused);
+    RUN_TEST(a_content_length_may_carry_whitespace_around_it);
+    RUN_TEST(a_kept_connection_lets_go_of_a_large_body);
     RUN_TEST(keep_alive_multiple_requests_one_connection);
     RUN_TEST(unix_socket_serves_same_routes);
     RUN_TEST(a_held_response_is_written_after_the_handler_returned);

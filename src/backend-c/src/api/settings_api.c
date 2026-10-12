@@ -15,6 +15,7 @@
 
 #include "firc/duration.h"
 #include "firc/events.h"
+#include "firc/json.h"
 #include "firc/listen.h"
 #include "firc/log.h"
 #include "firc/paths.h"
@@ -72,17 +73,6 @@ static cJSON *value_json(const firc_setting_t *s, const firc_app_config_t *c) {
     }
     }
     return NULL;
-}
-
-/* a double cast outside its target's range is undefined, so the range is checked on the double first */
-static bool whole(const cJSON *j, double max, uint64_t *out) {
-    if (!cJSON_IsNumber(j)) { return false; }
-    double d = j->valuedouble;
-    if (!(d >= 0.0 && d <= max)) { return false; }
-    uint64_t u = (uint64_t)d;
-    if ((double)u != d) { return false; }
-    *out = u;
-    return true;
 }
 
 static bool hex32(const char *s, uint32_t *out) {
@@ -171,19 +161,19 @@ static firc_err_t value_from_json(const firc_setting_t *s, const cJSON *j, firc_
         }
         return firc_strset((char **)v, j->valuestring);
     case FIRC_SK_PORT:
-        if (!whole(j, 65535.0, &u)) { break; }
+        if (!firc_json_whole(j, 65535.0, &u)) { break; }
         *(uint16_t *)v = (uint16_t)u;
         return FIRC_OK;
     case FIRC_SK_CHUNK:
-        if (!whole(j, 128.0, &u)) { break; }
+        if (!firc_json_whole(j, 128.0, &u)) { break; }
         *(uint8_t *)v = (uint8_t)u;
         return FIRC_OK;
     case FIRC_SK_U32:
-        if (!whole(j, 4294967295.0, &u)) { break; }
+        if (!firc_json_whole(j, 4294967295.0, &u)) { break; }
         *(uint32_t *)v = (uint32_t)u;
         return FIRC_OK;
     case FIRC_SK_U64:
-        if (!whole(j, 9007199254740992.0, &u)) { break; } /* 2^53: past it a JSON number is no longer exact */
+        if (!firc_json_whole(j, 9007199254740992.0, &u)) { break; } /* 2^53: past it a JSON number is no longer exact */
         *(uint64_t *)v = u;
         return FIRC_OK;
     case FIRC_SK_HEX32: {
@@ -198,7 +188,7 @@ static firc_err_t value_from_json(const firc_setting_t *s, const cJSON *j, firc_
     case FIRC_SK_MS:
     case FIRC_SK_SEC: {
         firc_duration_t unit = unit_of(s->kind);
-        if (!whole(j, (double)(INT64_MAX / unit), &u)) { break; } /* bounds u*unit below overflow */
+        if (!firc_json_whole(j, (double)(INT64_MAX / unit), &u)) { break; } /* bounds u*unit below overflow */
         *(firc_duration_t *)v = (firc_duration_t)u * unit;
         return FIRC_OK;
     }

@@ -38,6 +38,13 @@ typedef struct {
 } fake_route_t;
 #define FAKE_RTNL_MAX_ROUTES 32
 
+typedef struct {
+    int family;
+    uint32_t ifindex;
+    uint8_t scope, flags;
+} fake_addr_t;
+#define FAKE_RTNL_MAX_ADDRS 8
+
 struct fake_rtnl {
     int fd;
     pthread_t th;
@@ -60,6 +67,8 @@ struct fake_rtnl {
     size_t n_rules;
     fake_route_t routes[FAKE_RTNL_MAX_ROUTES];
     size_t n_routes;
+    fake_addr_t addrs[FAKE_RTNL_MAX_ADDRS];
+    size_t n_addrs;
     struct {
         uint8_t *data;
         size_t len;
@@ -490,6 +499,23 @@ static void answer(fake_rtnl_t *f, const struct nlmsghdr *req) {
                 off += nlh->nlmsg_len;
             }
         }
+        if (req->nlmsg_type == RTM_GETADDR) {
+            const struct ifaddrmsg *want = mnl_nlmsg_get_payload(req);
+            for (size_t i = 0; i < f->n_addrs; i++) {
+                if (f->addrs[i].family != want->ifa_family) { continue; }
+                struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf + off);
+                nlh->nlmsg_type = RTM_NEWADDR;
+                nlh->nlmsg_flags = NLM_F_MULTI;
+                nlh->nlmsg_seq = req->nlmsg_seq;
+                struct ifaddrmsg *ifa = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifa));
+                ifa->ifa_family = (uint8_t)f->addrs[i].family;
+                ifa->ifa_prefixlen = 64;
+                ifa->ifa_index = f->addrs[i].ifindex;
+                ifa->ifa_scope = f->addrs[i].scope;
+                ifa->ifa_flags = f->addrs[i].flags;
+                off += nlh->nlmsg_len;
+            }
+        }
         const struct rtmsg *want_rt = mnl_nlmsg_get_payload(req);
         if (req->nlmsg_type == RTM_GETROUTE) {
             fake_route_t scripted;
@@ -796,4 +822,17 @@ size_t fake_rtnl_count(fake_rtnl_t *f, uint16_t type, uint8_t rtm_type) {
     }
     pthread_mutex_unlock(&f->mu);
     return c;
+}
+
+void fake_rtnl_add_addr(fake_rtnl_t *f, int family, uint32_t ifindex, uint8_t scope, uint8_t flags) {
+    pthread_mutex_lock(&f->mu);
+    assert(f->n_addrs < FAKE_RTNL_MAX_ADDRS);
+    f->addrs[f->n_addrs++] = (fake_addr_t){family, ifindex, scope, flags};
+    pthread_mutex_unlock(&f->mu);
+}
+
+void fake_rtnl_clear_addrs(fake_rtnl_t *f) {
+    pthread_mutex_lock(&f->mu);
+    f->n_addrs = 0;
+    pthread_mutex_unlock(&f->mu);
 }

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "firc/err.h"
 #include "firc/loop.h"
@@ -23,14 +24,20 @@ typedef enum {
 
 firc_nl_recv_verdict_t firc_nl_watcher_recv_verdict(int err);
 
-/* Acts on the verdict; returns true when reading should go on. */
+/* Acts on the verdict, a fatal one by reopening the socket and then telling lost_cb; true when reading should go on. */
 bool firc_nl_watcher_handle_recv_error(firc_nl_watcher_t *w, int err);
+
+/* Wait before a reopen after `failures` failures since the last read: 100 ms, doubling, at most 5 s. */
+uint32_t firc_nl_watcher_reopen_delay_ms(unsigned failures);
 
 #define FIRC_NL_WATCHER_MAX_NEXTHOPS 8
 
 /* Interfaces a default-route message names (every ECMP leg); 0 for other routes and firc's own. */
 struct nlmsghdr;
 size_t firc_nl_watcher_default_route_oifs(const struct nlmsghdr *h, int *out, size_t max);
+
+/* The interface an address message (added or removed) is about; 0 for any other message. */
+int firc_nl_watcher_addr_ifindex(const struct nlmsghdr *h);
 
 /* Watches link, address and default-route events. loop borrowed; NULL callbacks ignore that event class. */
 firc_err_t firc_nl_watcher_create(firc_loop_t *loop, firc_nl_link_cb link_cb, void *link_ud,

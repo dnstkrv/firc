@@ -197,6 +197,22 @@ TEST a_name_with_key_characters_is_encoded(void)
     PASS();
 }
 
+TEST a_name_with_control_bytes_gets_a_key_the_config_takes(void)
+{
+    const char *names[] = {"x", "a%0Ab%09c%7Fd%1F"};
+    char *body = names_body(names, 2);
+    const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:a%0Ab%09c%7Fd%1F\"]\n");
+    ASSERT(t != NULL);
+    firc_tun_body_t b = {"https://a.example", 0, body, strlen(body)};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    free(body);
+    const char *want[] = {"aaaaaaaa:a%0Ab%09c%7Fd%1F", "aaaaaaaa:x"};
+    ASSERT(keys_are(want, 2));
+    ASSERT_STR_EQ("a\nb\tc\x7f" "d\x1f", g_nodes.v[0].name);
+    ASSERT_FALSE(g_nodes.v[0].missing);
+    PASS();
+}
+
 TEST an_ordered_key_no_source_has_is_a_missing_row(void)
 {
     /* catches: a vanished ordered node dropped silently, or sent */
@@ -468,6 +484,7 @@ int main(int argc, char **argv)
     RUN_TEST(the_filter_keeps_matching_subscription_nodes_ignoring_case);
     RUN_TEST(duplicate_names_in_one_source_get_a_number);
     RUN_TEST(a_name_with_key_characters_is_encoded);
+    RUN_TEST(a_name_with_control_bytes_gets_a_key_the_config_takes);
     RUN_TEST(an_ordered_key_no_source_has_is_a_missing_row);
     RUN_TEST(a_link_source_counts_whatever_the_filter);
     RUN_TEST(at_most_256_nodes_are_sent);

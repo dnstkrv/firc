@@ -147,7 +147,7 @@ void firc_sub_job_run(const firc_sub_job_t *job, firc_cancel_t *cancel, firc_sub
     }
 
     firc_sub_parse_stats_t st;
-    firc_err_t perr = firc_sub_parse_rules_stats(body, &res->rules, &st, parse_progress, &c);
+    firc_err_t perr = firc_sub_parse_rules_stats(body, len, &res->rules, &st, parse_progress, &c);
     free(body);
     if (perr == FIRC_ERR_CANCELED) {
         firc_sub_event_free(res);

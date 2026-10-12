@@ -45,7 +45,7 @@ Applies to both the HTTP port and the Unix socket.
 
 | what | where | value | when it is reached |
 |---|---|---|---|
-| in-flight queries | `maxConcurrent`, config | 100 | further queries wait |
+| in-flight queries | `maxConcurrent`, config | 100 | further queries are dropped, with a warning every 10 s; a query holds its slot until answered or timed out, so the ceiling is `maxConcurrent` / `timeout` queries per second while the upstream stalls (100 and 5 s: 20) |
 | idle upstream connections | `maxIdleConns`, config | 10 | a new connection is opened instead |
 | one message | `FIRC_DNS_MAX_MSG`, `dnswire.h` | 65 535 | the DNS wire limit |
 | regex match / recursion | `FIRC_REGEX_MATCH_LIMIT` / `DEPTH_LIMIT`, `match.c` | 10^6 / 10^4 | PCRE2 gives up and the rule does not match |

@@ -3858,6 +3858,85 @@ TEST refreshes_are_capped_at_sixteen(void) {
     PASS();
 }
 
+static uint64_t dropped_settled(const firc_dnsproxy_t *p, uint64_t want) {
+    for (int i = 0; i < 400 && firc_dnsproxy_dropped(p) < want; i++) { pause_ms(5); }
+    return firc_dnsproxy_dropped(p);
+}
+
+static void udp_fire(uint16_t port) {
+    int c = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in pa;
+    memset(&pa, 0, sizeof(pa));
+    pa.sin_family = AF_INET;
+    pa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    pa.sin_port = htons(port);
+    uint8_t q[512];
+    size_t qlen = build_query(q, 0x5a01, 0);
+    sendto(c, q, qlen, 0, (struct sockaddr *)&pa, sizeof(pa));
+    close(c);
+}
+
+/* Catches: a full budget dropping queries without a WARN, a WARN per drop, a count not since the last WARN, or a silent TCP or UDP drop site. */
+TEST a_full_budget_warns_once_per_interval_with_the_count_dropped(void) {
+    live_t lv;
+    g_live_cache = true;
+    g_live_timeout_ms = 5000;
+    g_live_max_concurrent = 2;
+    log_capture_start();
+    ASSERT(live_start_retrying(&lv));
+    int a = tcp_open(lv.proxy_port);
+    int b = tcp_open(lv.proxy_port);
+    ASSERT(a >= 0 && b >= 0);
+    ASSERT_EQ(1, send(a, "\0", 1, MSG_NOSIGNAL));
+    ASSERT_EQ(1, send(b, "\0", 1, MSG_NOSIGNAL));
+    ASSERT_EQ((uint64_t)2, inflight_settled(lv.proxy, 2));
+    int c[3];
+    for (int i = 0; i < 3; i++) { c[i] = tcp_open(lv.proxy_port); }
+    ASSERT_EQ((uint64_t)3, dropped_settled(lv.proxy, 3));
+    atomic_store(&g_cache_skew_ms, 9000);
+    int d = tcp_open(lv.proxy_port);
+    ASSERT_EQ((uint64_t)4, dropped_settled(lv.proxy, 4));
+    atomic_store(&g_cache_skew_ms, 11000);
+    udp_fire(lv.proxy_port);
+    ASSERT_EQ((uint64_t)5, dropped_settled(lv.proxy, 5));
+    pause_ms(50);
+    for (int i = 0; i < 3; i++) { close(c[i]); }
+    close(d);
+    close(a);
+    close(b);
+    ASSERT_EQ((uint64_t)0, inflight_settled(lv.proxy, 0));
+    live_stop(&lv);
+    int first = 0, second = 0;
+    log_capture_counts("dropped 1 since the last warning", &first, "dropped 4 since the last warning", &second);
+    ASSERT_EQm("the first drop warns at once, with its own count", 1, first);
+    ASSERT_EQm("after the interval the UDP drop warns with the 4 since", 1, second);
+    PASS();
+}
+
+/* Catches: the WARN text losing the setting to raise, so the line names no cause. */
+TEST the_budget_warning_names_the_setting(void) {
+    live_t lv;
+    g_live_cache = true;
+    g_live_timeout_ms = 5000;
+    g_live_max_concurrent = 1;
+    log_capture_start();
+    ASSERT(live_start_retrying(&lv));
+    int a = tcp_open(lv.proxy_port);
+    ASSERT_EQ(1, send(a, "\0", 1, MSG_NOSIGNAL));
+    ASSERT_EQ((uint64_t)1, inflight_settled(lv.proxy, 1));
+    udp_fire(lv.proxy_port);
+    ASSERT_EQ((uint64_t)1, dropped_settled(lv.proxy, 1));
+    pause_ms(50);
+    close(a);
+    ASSERT_EQ((uint64_t)0, inflight_settled(lv.proxy, 0));
+    live_stop(&lv);
+    int named = 0, unused = 0;
+    log_capture_counts("app.dnsProxy.maxConcurrent 1)", &named, "budget full", &unused);
+    ASSERT_EQ(1, unused);
+    ASSERT_EQ(1, named);
+    PASS();
+}
+
 /* Catches: refreshes taking the client in-flight budget, so they crowd out client queries. */
 TEST refreshes_do_not_take_the_client_budget(void) {
     live_t lv;
@@ -4195,6 +4274,8 @@ int main(int argc, char **argv)
     RUN_TEST(a_failed_refresh_leaves_the_entry_and_a_later_hit_tries_again);
     RUN_TEST(refreshes_are_capped_at_sixteen);
     RUN_TEST(refreshes_do_not_take_the_client_budget);
+    RUN_TEST(a_full_budget_warns_once_per_interval_with_the_count_dropped);
+    RUN_TEST(the_budget_warning_names_the_setting);
     RUN_TEST(no_refresh_starts_while_the_group_rests_or_probes);
     RUN_TEST(a_silent_refresh_ends_at_the_timeout_and_leaves_the_entry);
     RUN_TEST(a_refresh_in_flight_at_shutdown_is_freed);

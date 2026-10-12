@@ -33,6 +33,9 @@ void firc_tunrun_bodies_changed(void *ud);
 /* Copies up to cap states, one per configured tunnel in config order, waiting and failed uplinks included. */
 size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t cap);
 
+/* True when device is a configured tunnel's and that tunnel carries no traffic: any status but UP. */
+bool firc_tunrun_device_down(const firc_tunrun_t *t, const char *device);
+
 /* The running configuration; valid until the next apply. */
 const firc_tunnels_t *firc_tunrun_config(const firc_tunrun_t *t);
 
@@ -56,8 +59,8 @@ bool firc_tunrun_node_active(const firc_tunrun_t *t, const char *id, const char 
 /* False when id is not configured; mark is its uplink mark (0 for auto), held while a child runs with it. */
 bool firc_tunrun_mark_of(const firc_tunrun_t *t, const char *id, uint32_t *mark, bool *held);
 
-/* Rewrites the default route of every tunnel leaving through ifname. */
-void firc_tunrun_link_up(firc_tunrun_t *t, const char *ifname);
+/* Rewrites the default route of every tunnel leaving through ifname, of every tunnel with an uplink when NULL. */
+void firc_tunrun_refresh_uplinks(firc_tunrun_t *t, const char *ifname);
 
 /* Stops every child (SIGKILL after grace_ms), then removes every uplink. */
 void firc_tunrun_stop(firc_tunrun_t *t, int grace_ms);
