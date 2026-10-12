@@ -140,6 +140,38 @@ bool firc_stale_group_subnets(const firc_group_t *g, uint32_t field, bool field_
     return true;
 }
 
+static bool collect_table(table_t *t, const firc_fakeip_t *pool, const firc_stale_group_t *groups, size_t n_groups,
+                          uint32_t mask) {
+    for (size_t i = 0; i < n_groups; i++) {
+        t->field = groups[i].field & mask;
+        t->inexact = groups[i].inexact;
+        if (groups[i].id != NULL) { firc_fakeip_walk_chunks(pool, groups[i].id, collect_chunk, t); }
+        for (size_t k = 0; k < groups[i].n_subnets && !t->oom; k++) {
+            firc_ct_chunk_t sub = groups[i].subnets[k];
+            sub.is_subnet = true;
+            sub.field = t->field;
+            append(t, &sub);
+        }
+    }
+    if (!t->oom) { return true; }
+    free(t->v);
+    t->v = NULL;
+    t->n = 0;
+    return false;
+}
+
+typedef struct {
+    firc_ip_t b4, b6;
+    const uint8_t *p4, *p6;
+    uint8_t n4, n6;
+} pool_prefixes_t;
+
+static void pool_prefixes(const firc_fakeip_t *pool, pool_prefixes_t *pp) {
+    memset(pp, 0, sizeof(*pp));
+    if (firc_fakeip_pool_prefix(pool, FIRC_FAM_V4, &pp->b4, &pp->n4)) { pp->p4 = pp->b4.b; }
+    if (firc_fakeip_pool_prefix(pool, FIRC_FAM_V6, &pp->b6, &pp->n6)) { pp->p6 = pp->b6.b; }
+}
+
 firc_err_t firc_stale_marks_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, bool pool_state_trusted,
                                   bool fields_loaded, const firc_stale_group_t *groups, size_t n_groups, uint32_t mask,
                                   size_t *dropped) {
@@ -159,32 +191,32 @@ firc_err_t firc_stale_marks_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, bool
     for (size_t i = 0; i < n_groups; i++) {
         uint32_t number = (groups[i].field & mask) >> FIRC_MARK_GROUP_SHIFT;
         if (groups[i].field_kept && number >= 1 && number <= FIRC_MARK_MAX_GROUPS) { held[number] = true; }
-        t.field = groups[i].field & mask;
-        t.inexact = groups[i].inexact;
-        if (groups[i].id != NULL) { firc_fakeip_walk_chunks(pool, groups[i].id, collect_chunk, &t); }
-        for (size_t k = 0; k < groups[i].n_subnets && !t.oom; k++) {
-            firc_ct_chunk_t sub = groups[i].subnets[k];
-            sub.is_subnet = true;
-            sub.field = t.field;
-            append(&t, &sub);
-        }
     }
-    if (t.oom) {
+    if (!collect_table(&t, pool, groups, n_groups, mask)) {
         /* A partial table would call live chunks orphaned: touch nothing. */
         FIRC_WARN("not enough memory to check for flows marked by a previous run; none were touched");
-        free(t.v);
         return FIRC_ERR_NOMEM;
     }
 
-    firc_ip_t b4, b6;
-    uint8_t l4 = 0, l6 = 0;
-    bool has4 = firc_fakeip_pool_prefix(pool, FIRC_FAM_V4, &b4, &l4);
-    bool has6 = firc_fakeip_pool_prefix(pool, FIRC_FAM_V6, &b6, &l6);
-    const uint8_t *p4 = has4 ? b4.b : NULL, *p6 = has6 ? b6.b : NULL;
-    uint8_t n4 = has4 ? l4 : 0, n6 = has6 ? l6 : 0;
+    pool_prefixes_t pp;
+    pool_prefixes(pool, &pp);
     firc_err_t err = pool_state_trusted
-                         ? firc_ct_flush_stale_group_marks(ct, p4, n4, p6, n6, t.v, t.n, mask, dropped)
-                         : firc_ct_flush_stale_marks_outside_pool(ct, p4, n4, p6, n6, t.v, t.n, mask, held, dropped);
+                         ? firc_ct_flush_stale_group_marks(ct, pp.p4, pp.n4, pp.p6, pp.n6, t.v, t.n, mask, dropped)
+                         : firc_ct_flush_stale_marks_outside_pool(ct, pp.p4, pp.n4, pp.p6, pp.n6, t.v, t.n, mask, held,
+                                                                  dropped);
+    free(t.v);
+    return err;
+}
+
+firc_err_t firc_stale_field_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, const firc_stale_group_t *groups,
+                                  size_t n_groups, uint32_t mask, uint32_t field, size_t *dropped) {
+    if (dropped != NULL) { *dropped = 0; }
+    if (ct == NULL || pool == NULL || (field & mask) == 0) { return FIRC_OK; }
+    table_t t = {0};
+    if (!collect_table(&t, pool, groups, n_groups, mask)) { return FIRC_ERR_NOMEM; }
+    pool_prefixes_t pp;
+    pool_prefixes(pool, &pp);
+    firc_err_t err = firc_ct_flush_stale_field(ct, pp.p4, pp.n4, pp.p6, pp.n6, t.v, t.n, mask, field, dropped);
     free(t.v);
     return err;
 }

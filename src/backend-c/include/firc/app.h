@@ -21,6 +21,7 @@
 #include "firc/rtnl.h"
 #include "firc/ruleset.h"
 #include "firc/settings.h"
+#include "firc/stale_marks.h"
 #include "firc/yamlio.h"
 #include "firc/nflogsock.h"
 #include "firc/resolveroute.h"
@@ -101,6 +102,20 @@ firc_err_t firc_app_start_groups(firc_app_t *app);
 size_t firc_app_user_group_count(const firc_app_t *app);
 firc_ruleset_t *firc_app_user_group_at(const firc_app_t *app, size_t idx);
 firc_ruleset_t *firc_app_find_group_by_id(const firc_app_t *app, firc_id_t id); /* linear search; NULL if not found */
+
+typedef bool (*firc_app_field_kept_fn)(void *ud, const firc_group_t *g, const char *id, uint32_t field);
+
+typedef struct {
+    firc_stale_group_t *v;
+    size_t n;
+    char (*ids)[FIRC_ID_STR_LEN];
+} firc_app_stale_groups_t;
+
+/* Every group's id, field, chunk exactness and subnets for a stale-mark sweep; kept decides field_kept,
+ * only_field (0: all) limits the subnets to the groups holding it. False only on allocation failure. */
+bool firc_app_stale_groups(const firc_app_t *app, firc_app_field_kept_fn kept, void *ud, uint32_t only_field,
+                           firc_app_stale_groups_t *out);
+void firc_app_stale_groups_free(firc_app_stale_groups_t *t);
 
 /* takes ownership of group either way; FIRC_ERR_EXIST duplicate id, FIRC_ERR_INVAL dup rule id, or enable's error */
 firc_err_t firc_app_add_group(firc_app_t *app, firc_group_t *group);

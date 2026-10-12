@@ -986,8 +986,8 @@ TEST a_list_sync_resyncs_only_its_own_group(void) {
     PASS();
 }
 
-/* Catches: a pass that the kernel refused for a resync's prefix leaving the chain half-written or the error unsaid. */
-TEST a_refused_pass_after_a_resync_keeps_the_chain_it_wrote(void) {
+/* Catches: a list line the kernel refuses failing the pass or reaching the chain, or a resync without it keeping the group out. */
+TEST a_list_line_the_kernel_refuses_leaves_its_group_out_until_a_resync(void) {
     ASSERT(nf_fixture_up_no_committer(&g_nfx));
 
     firc_group_t *g1 = firc_group_new();
@@ -1021,13 +1021,25 @@ TEST a_refused_pass_after_a_resync_keeps_the_chain_it_wrote(void) {
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev2, 2000, &changed));
     ASSERT(changed);
     firc_sub_event_free(ev2);
-    ASSERTm("the refusal is the pass's to report", firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false) != FIRC_OK);
+    ASSERT_EQ(FIRC_ERR_IO, firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false));
 
     ASSERT_FALSEm("the refused prefix never reached the chain",
                   nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.9.0.0/16"));
-    ASSERTm("the chain, as last committed, still carries the old subnet",
-            nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.1.0.0/16"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(g_nfx.fake, "mangle", chain1));
+    const char *reason = NULL;
+    ASSERT_FALSE(firc_app_group_live(g_nfx.app, id_of(1), &reason));
+    ASSERT_STR_EQ("not-written", reason);
     ASSERTm("a snapshot is still published", firc_dns_pipeline_snapshot(g_nfx.pipeline) != NULL);
+
+    firc_sub_event_t *ev3 = group_parsed_event(id_of(1), 0);
+    firc_sub_rules_push(&ev3->rules, "10.1.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
+    changed = false;
+    ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev3, 3000, &changed));
+    ASSERT(changed);
+    firc_sub_event_free(ev3);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false));
+    ASSERT(nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.1.0.0/16"));
 
     nf_fixture_down(&g_nfx);
     PASS();
@@ -1139,7 +1151,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_result_with_a_stale_seq_is_dropped);
     RUN_TEST(a_result_for_a_deleted_group_is_dropped);
     RUN_TEST(a_list_sync_resyncs_only_its_own_group);
-    RUN_TEST(a_refused_pass_after_a_resync_keeps_the_chain_it_wrote);
+    RUN_TEST(a_list_line_the_kernel_refuses_leaves_its_group_out_until_a_resync);
     RUN_TEST(a_routed_group_warns_once_not_on_every_resync);
     RUN_TEST(a_first_changed_sync_clears_provisional_at_once);
     RUN_TEST(adding_a_group_with_a_list_queues_its_sync);

@@ -734,6 +734,109 @@ TEST a_kernel_that_ignores_the_filter_still_gets_the_right_answer(void) {
     PASS();
 }
 
+/* Catches: a prefix or chunk written with host bits matched as written, so its flows read as stale. */
+TEST host_bits_in_a_prefix_or_chunk_do_not_hide_its_flows(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    const uint8_t src[4] = {192, 168, 1, 10};
+    const uint8_t routed[4] = {10, 1, 9, 9}, issued[4] = {198, 18, 3, 77}, reply[4] = {93, 184, 216, 34};
+    const uint8_t pool4[4] = {198, 18, 0, 0};
+    fake_ct_add(f.kernel, AF_INET, src, routed, routed, firc_mark_group_value(1) | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, issued, reply, firc_mark_group_value(1) | FIRC_MARK_HANDLED);
+
+    firc_ct_chunk_t chunks[2] = {
+        {.family = AF_INET, .base = {198, 18, 3, 9}, .prefix = 24, .field = firc_mark_group_value(1)},
+        {.family = AF_INET, .base = {10, 1, 2, 3}, .prefix = 16, .is_subnet = true, .field = firc_mark_group_value(1)},
+    };
+    size_t deleted = 0;
+    ASSERT_EQ(FIRC_OK, firc_ct_flush_stale_field(f.ct, pool4, 15, NULL, 0, chunks, 2, FIRC_MARK_GROUP_MASK,
+                                                 firc_mark_group_value(1), &deleted));
+    ASSERT_EQ_FMT((size_t)0, deleted, "%zu");
+    down(&f);
+    PASS();
+}
+
+/* Catches: the index skipping the longest prefix length, so a /32 or /128 chunk or subnet hides its flows. */
+TEST a_host_prefix_or_chunk_keeps_its_flows_in_both_families(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    uint32_t field = firc_mark_group_value(1);
+    const uint8_t src[4] = {192, 168, 1, 10};
+    const uint8_t src6[16] = {0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
+    const uint8_t host[4] = {10, 1, 2, 3}, issued[4] = {198, 18, 3, 7}, real[4] = {93, 184, 216, 34};
+    const uint8_t loose[4] = {10, 9, 9, 9};
+    const uint8_t host6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9};
+    const uint8_t issued6[16] = {0xfd, 0x37, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7};
+    const uint8_t real6[16] = {0x26, 0x06, 0x28, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    const uint8_t pool4[4] = {198, 18, 0, 0};
+    const uint8_t pool6[16] = {0xfd, 0x37, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    fake_ct_add(f.kernel, AF_INET, src, host, host, field | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, issued, real, field | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, loose, loose, field | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET6, src6, host6, host6, field | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET6, src6, issued6, real6, field | FIRC_MARK_HANDLED);
+
+    firc_ct_chunk_t chunks[4] = {
+        {.family = AF_INET, .base = {198, 18, 3, 7}, .prefix = 32, .field = field},
+        {.family = AF_INET, .base = {10, 1, 2, 3}, .prefix = 32, .is_subnet = true, .field = field},
+        {.family = AF_INET6, .base = {0xfd, 0x37, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, .prefix = 128,
+         .field = field},
+        {.family = AF_INET6, .base = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}, .prefix = 128,
+         .is_subnet = true, .field = field},
+    };
+    size_t deleted = 0;
+    ASSERT_EQ(FIRC_OK, firc_ct_flush_stale_field(f.ct, pool4, 15, pool6, 48, chunks, 4, FIRC_MARK_GROUP_MASK,
+                                                 field, &deleted));
+    ASSERT_EQ_FMTm("only the flow nothing covers", (size_t)1, deleted, "%zu");
+    ASSERT(fake_ct_deleted(f.kernel, loose, 4));
+    down(&f);
+    PASS();
+}
+
+/* Catches: a sweep of one field asking the kernel for every handled flow, or for the field without the handled bit. */
+TEST a_sweep_of_one_field_asks_the_kernel_for_that_field(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    const uint8_t src[4] = {192, 168, 1, 10};
+    const uint8_t gone[4] = {10, 1, 0, 5};
+    const uint8_t pool4[4] = {198, 18, 0, 0};
+    fake_ct_add(f.kernel, AF_INET, src, gone, gone, firc_mark_group_value(3) | FIRC_MARK_HANDLED);
+
+    size_t deleted = 0;
+    ASSERT_EQ(FIRC_OK, firc_ct_flush_stale_field(f.ct, pool4, 15, NULL, 0, NULL, 0, FIRC_MARK_GROUP_MASK,
+                                                 firc_mark_group_value(3), &deleted));
+    uint32_t value = 0, mask = 0;
+    ASSERTm("the request named a mark", fake_ct_dump_filtered_on_mark(f.kernel, &value, &mask));
+    ASSERT_EQ_FMT(0x40030000u, value, "0x%x");
+    ASSERT_EQ_FMT(0x40ff0000u, mask, "0x%x");
+    ASSERT_EQ_FMTm("its flow no prefix covers goes", (size_t)1, deleted, "%zu");
+    down(&f);
+    PASS();
+}
+
+/* Catches: a sweep of one field judging every field when the kernel ignores the filter. */
+TEST a_sweep_of_one_field_leaves_other_fields_when_the_kernel_ignores_the_filter(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    const uint8_t src[4] = {192, 168, 1, 10};
+    const uint8_t mine[4] = {10, 1, 0, 5}, theirs[4] = {10, 9, 0, 5}, unhandled[4] = {10, 8, 0, 5};
+    const uint8_t pool4[4] = {198, 18, 0, 0};
+    fake_ct_add(f.kernel, AF_INET, src, mine, mine, firc_mark_group_value(3) | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, theirs, theirs, firc_mark_group_value(4) | FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, unhandled, unhandled, firc_mark_group_value(3));
+    fake_ct_ignore_mark_filter(f.kernel);
+
+    size_t deleted = 0;
+    ASSERT_EQ(FIRC_OK, firc_ct_flush_stale_field(f.ct, pool4, 15, NULL, 0, NULL, 0, FIRC_MARK_GROUP_MASK,
+                                                 firc_mark_group_value(3), &deleted));
+    ASSERT_EQ_FMT((size_t)1, deleted, "%zu");
+    ASSERTm("the swept field's flow went", fake_ct_deleted(f.kernel, mine, 4));
+    ASSERT_FALSEm("another field's stays", fake_ct_deleted(f.kernel, theirs, 4));
+    ASSERT_FALSEm("an unhandled one stays", fake_ct_deleted(f.kernel, unhandled, 4));
+    down(&f);
+    PASS();
+}
+
 /* Catches: a kernel that rejects the filter read as a clean table instead of retried unfiltered. */
 TEST a_kernel_that_refuses_the_filter_falls_back_to_the_whole_table(void) {
     fx_t f;
@@ -1070,6 +1173,10 @@ int main(int argc, char **argv) {
     RUN_TEST(a_filter_value_is_masked_before_it_is_sent);
     RUN_TEST(the_stale_mark_sweep_asks_for_entries_firc_marked);
     RUN_TEST(a_kernel_that_ignores_the_filter_still_gets_the_right_answer);
+    RUN_TEST(host_bits_in_a_prefix_or_chunk_do_not_hide_its_flows);
+    RUN_TEST(a_host_prefix_or_chunk_keeps_its_flows_in_both_families);
+    RUN_TEST(a_sweep_of_one_field_asks_the_kernel_for_that_field);
+    RUN_TEST(a_sweep_of_one_field_leaves_other_fields_when_the_kernel_ignores_the_filter);
     RUN_TEST(a_kernel_that_refuses_the_filter_falls_back_to_the_whole_table);
     RUN_TEST(a_refusal_that_is_not_about_the_filter_does_not_disarm_it);
     RUN_TEST(einval_is_reported_rather_than_read_as_no_filter);

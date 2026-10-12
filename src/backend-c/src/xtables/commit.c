@@ -18,6 +18,7 @@ struct firc_xt {
     bool failing[4];
     firc_xt_info_t left[4];
     char *dump_dir;
+    int refusal;
 };
 
 firc_xt_t *firc_xt_new(firc_ipt_proto_t fam, const firc_xt_kernel_ops_t *ops, void *ud) {
@@ -288,6 +289,7 @@ static firc_err_t commit_table(firc_xt_t *xt, const char *table, const firc_xt_s
     err = write_locked(xt, table, &info, &ni, w, &tm, &refused);
     xt->ops->unlock(xt->ud);
     if (refused != 0) {
+        xt->refusal = refused;
         dump_refused(xt, table, &ni, w->written + FIRC_XT_HEADROOM);
         return failed(xt, table, FIRC_ERR_IO, "x_tables refused %s %s (%s), %u entries, %u KB", fam, table,
                       errname(refused, eb, sizeof(eb)), ni.num_entries, (ni.size + 1023u) / 1024u);
@@ -336,6 +338,7 @@ static firc_err_t write_locked(firc_xt_t *xt, const char *table, const firc_xt_i
 
 firc_err_t firc_xt_commit(firc_xt_t *xt, const char *table, const firc_xt_stage_t *stage, firc_cancel_t *cancel) {
     if (xt == NULL || table == NULL || stage == NULL) { return FIRC_ERR_INVAL; }
+    xt->refusal = 0;
     if (firc_cancel_raised(cancel)) { return FIRC_ERR_CANCELED; }
     memset(&xt->left[table_slot(table)], 0, sizeof(xt->left[0]));
     work_t w;
@@ -344,6 +347,8 @@ firc_err_t firc_xt_commit(firc_xt_t *xt, const char *table, const firc_xt_stage_
     work_free(&w);
     return err;
 }
+
+int firc_xt_refusal(const firc_xt_t *xt) { return xt->refusal; }
 
 firc_xt_info_t firc_xt_left_shape(const firc_xt_t *xt, const char *table) { return xt->left[table_slot(table)]; }
 

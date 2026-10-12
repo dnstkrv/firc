@@ -991,6 +991,101 @@ TEST a_chain_that_marked_nobody_cannot_narrow(void)
     PASS();
 }
 
+typedef struct {
+    const firc_ipv4_subnet_t *v4[3];
+    const firc_ipv6_subnet_t *v6[2];
+} subnet_set_t;
+
+static firc_err_t set_prefixes(const subnet_set_t *set, firc_nf_prefixes_t *out)
+{
+    firc_ipv4_subnet_t v4[3];
+    firc_ipv6_subnet_t v6[2];
+    size_t n4 = 0, n6 = 0;
+    for (; n4 < 3 && set->v4[n4] != NULL; n4++) { v4[n4] = *set->v4[n4]; }
+    for (; n6 < 2 && set->v6[n6] != NULL; n6++) { v6[n6] = *set->v6[n6]; }
+    return firc_nf_prefixes_of(v4, n4, v6, n6, out);
+}
+
+static bool set_narrows(const subnet_set_t *was, const subnet_set_t *now, bool *got)
+{
+    firc_nf_prefixes_t a = {0}, b = {0};
+    bool ok = set_prefixes(was, &a) == FIRC_OK && set_prefixes(now, &b) == FIRC_OK;
+    if (ok) { *got = firc_nf_prefixes_narrow(&a, &b); }
+    firc_nf_prefixes_clear(&a);
+    firc_nf_prefixes_clear(&b);
+    return ok;
+}
+
+/* Catches: a removed prefix missed, a kept or wider one read as a removal, host bits or proto compared, families mixed. */
+TEST a_subnet_set_narrows_only_when_a_prefix_loses_all_cover(void)
+{
+    static const firc_ipv4_subnet_t a16 = {.addr = {10, 1, 0, 0}, .cidr = 16};
+    static const firc_ipv4_subnet_t b16 = {.addr = {10, 2, 0, 0}, .cidr = 16};
+    static const firc_ipv4_subnet_t a15 = {.addr = {10, 0, 0, 0}, .cidr = 15};
+    static const firc_ipv4_subnet_t a16_host = {.addr = {10, 1, 2, 3}, .cidr = 16};
+    static const firc_ipv4_subnet_t a16_tcp = {.addr = {10, 1, 0, 0}, .cidr = 16, .proto = IPPROTO_TCP, .ports = "443"};
+    static const firc_ipv4_subnet_t all4 = {.cidr = 0};
+    static const firc_ipv4_subnet_t ten8 = {.addr = {10, 0, 0, 0}, .cidr = 8};
+    static const firc_ipv6_subnet_t d32 = {.addr = {0x20, 0x01, 0x0d, 0xb8}, .cidr = 32};
+    static const firc_ipv6_subnet_t d48 = {.addr = {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01}, .cidr = 48};
+    static const struct {
+        subnet_set_t was, now;
+        bool narrows;
+    } k[] = {
+        {{{&a16}, {NULL}}, {{&a16}, {NULL}}, false},
+        {{{&a16}, {NULL}}, {{NULL}, {NULL}}, true},
+        {{{&a16}, {NULL}}, {{&a15}, {NULL}}, false},
+        {{{&a15}, {NULL}}, {{&a16}, {NULL}}, true},
+        {{{&a16, &b16}, {NULL}}, {{&b16, &a16}, {NULL}}, false},
+        {{{&a16, &b16}, {NULL}}, {{&b16}, {NULL}}, true},
+        {{{&a16}, {NULL}}, {{&a16_tcp}, {NULL}}, false},
+        {{{&a16_host}, {NULL}}, {{&a16}, {NULL}}, false},
+        {{{&a16}, {NULL}}, {{&a16_host}, {NULL}}, false},
+        {{{&all4}, {NULL}}, {{&ten8}, {NULL}}, true},
+        {{{&ten8}, {NULL}}, {{&all4}, {NULL}}, false},
+        {{{NULL}, {NULL}}, {{&ten8}, {NULL}}, false},
+        {{{NULL}, {&d32}}, {{NULL}, {&d32}}, false},
+        {{{NULL}, {&d32}}, {{&all4}, {NULL}}, true},
+        {{{NULL}, {&d48}}, {{NULL}, {&d32}}, false},
+        {{{NULL}, {&d32}}, {{NULL}, {&d48}}, true},
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        bool got = false;
+        static char row[32];
+        snprintf(row, sizeof(row), "row %zu", i + 1);
+        if (!set_narrows(&k[i].was, &k[i].now, &got) || got != k[i].narrows) { FAILm(row); }
+    }
+    PASS();
+}
+
+/* Catches: the link's prefixes read from something other than what set_subnets last took. */
+TEST a_link_reports_the_prefixes_it_holds(void)
+{
+    firc_fake_ipt_t *f4 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt4 = firc_ipt_new(firc_fake_ipt_as_xt(f4), "FIRC_");
+    firc_netfilter_register_base_chains(ipt4, NULL);
+    firc_ipset_to_link_t *l = firc_ipset_to_link_new("FIRC_g1", "nwg0", ipt4, NULL, NULL, 100, NULL, "g1", NULL, NULL);
+    ASSERT(l != NULL);
+    const firc_ipv4_subnet_t v4[] = {{.addr = {10, 1, 0, 0}, .cidr = 16}, {.addr = {10, 2, 0, 0}, .cidr = 16}};
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_subnets(l, v4, 2, NULL, 0, NULL));
+    firc_nf_prefixes_t was = {0}, now = {0}, kept = {0};
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_prefixes(l, &was));
+    ASSERT_EQ_FMT((size_t)2, was.n, "%zu");
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_subnets(l, v4 + 1, 1, NULL, 0, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_prefixes(l, &now));
+    ASSERT_EQ(FIRC_OK, firc_nf_prefixes_of(v4 + 1, 1, NULL, 0, &kept));
+    bool dropped = firc_nf_prefixes_narrow(&was, &now);
+    bool same = !firc_nf_prefixes_narrow(&now, &kept) && !firc_nf_prefixes_narrow(&kept, &now);
+    firc_nf_prefixes_clear(&was);
+    firc_nf_prefixes_clear(&now);
+    firc_nf_prefixes_clear(&kept);
+    firc_ipset_to_link_free(l);
+    firc_ipt_free(ipt4);
+    ASSERTm("10.1.0.0/16 left", dropped);
+    ASSERTm("what is left is 10.2.0.0/16", same);
+    PASS();
+}
+
 /* Catches: push growing by one instead of doubling, or losing the duplicate check when it grows. */
 TEST push_doubles_its_room_and_keeps_the_duplicate_scan(void)
 {
@@ -1049,5 +1144,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_narrowing_render_is_a_gained_deny_or_a_lost_allow);
     RUN_TEST(a_chain_that_marked_nobody_cannot_narrow);
     RUN_TEST(push_doubles_its_room_and_keeps_the_duplicate_scan);
+    RUN_TEST(a_subnet_set_narrows_only_when_a_prefix_loses_all_cover);
+    RUN_TEST(a_link_reports_the_prefixes_it_holds);
     GREATEST_MAIN_END();
 }

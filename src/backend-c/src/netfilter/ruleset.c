@@ -6,6 +6,7 @@
 #include "firc/match.h"
 
 #include <arpa/inet.h>
+#include <stdatomic.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -23,9 +24,30 @@ struct firc_ruleset {
     firc_ruleset_retry_t retry;
     /* Valid only right after a sync or refresh, which clear it first. */
     bool dev_narrowed;
+    _Atomic int pass;
+    _Atomic bool flush_owed;
 };
 
 firc_ruleset_retry_t *firc_ruleset_retry(firc_ruleset_t *rs) { return &rs->retry; }
+
+firc_ruleset_pass_t firc_ruleset_pass(const firc_ruleset_t *rs) {
+    return rs != NULL ? (firc_ruleset_pass_t)atomic_load_explicit(&((firc_ruleset_t *)rs)->pass, memory_order_relaxed)
+                      : FIRC_RULESET_PASS_IN;
+}
+
+void firc_ruleset_set_pass(firc_ruleset_t *rs, firc_ruleset_pass_t pass) {
+    atomic_store_explicit(&rs->pass, (int)pass, memory_order_relaxed);
+}
+
+void firc_ruleset_owe_flush(firc_ruleset_t *rs) { atomic_store_explicit(&rs->flush_owed, true, memory_order_relaxed); }
+
+bool firc_ruleset_take_flush(firc_ruleset_t *rs) {
+    return atomic_exchange_explicit(&rs->flush_owed, false, memory_order_relaxed);
+}
+
+static void staging_moved(firc_ruleset_t *rs) {
+    if (firc_ruleset_pass(rs) == FIRC_RULESET_PASS_LEFT_OUT) { firc_ruleset_set_pass(rs, FIRC_RULESET_PASS_ON_TRIAL); }
+}
 
 static firc_err_t subnets_apply(firc_ruleset_t *rs, bool *changed);
 static firc_err_t devices_apply(firc_ruleset_t *rs, bool *changed);
@@ -149,6 +171,7 @@ firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, const char **step) {
 firc_err_t firc_ruleset_disable(firc_ruleset_t *rs) {
     if (!rs->enabled) { return FIRC_OK; }
     rs->enabled = false;
+    staging_moved(rs);
     if (!configured_enabled(rs)) { return FIRC_OK; }
 
     firc_err_t e1 = FIRC_OK;
@@ -169,6 +192,7 @@ bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs) {
 firc_ipset_to_link_t *firc_ruleset_disable_hold(firc_ruleset_t *rs) {
     if (!rs->enabled) { return NULL; }
     rs->enabled = false;
+    staging_moved(rs);
     if (!configured_enabled(rs)) { return NULL; }
     firc_ipset_to_link_t *l = rs->ipset_to_link;
     rs->ipset_to_link = NULL;
@@ -497,6 +521,15 @@ const firc_nf_devices_t *firc_ruleset_devices(const firc_ruleset_t *rs) {
     return firc_ruleset_routed(rs) ? firc_ipset_to_link_devices(rs->ipset_to_link) : NULL;
 }
 
+firc_err_t firc_ruleset_prefixes(const firc_ruleset_t *rs, firc_nf_prefixes_t *out) {
+    if (!firc_ruleset_routed(rs)) {
+        out->v = NULL;
+        out->n = 0;
+        return FIRC_OK;
+    }
+    return firc_ipset_to_link_prefixes(rs->ipset_to_link, out);
+}
+
 bool firc_ruleset_has_devices(const firc_ruleset_t *rs) {
     return rs != NULL && rs->group->devices.n_allow + rs->group->devices.n_deny > 0;
 }
@@ -527,7 +560,11 @@ firc_err_t firc_ruleset_refresh_devices(firc_ruleset_t *rs, bool *changed) {
     if (changed) { *changed = false; }
     rs->dev_narrowed = false;
     if (!firc_ruleset_routed(rs) || !firc_ruleset_devices_follow_table(rs)) { return FIRC_OK; }
-    return devices_apply(rs, changed);
+    bool moved = false;
+    firc_err_t err = devices_apply(rs, &moved);
+    if (moved) { staging_moved(rs); }
+    if (changed) { *changed = moved; }
+    return err;
 }
 
 firc_err_t firc_ruleset_plan_subnets(const firc_group_t *g, firc_ruleset_plan_fn fn, void *ud) {
@@ -553,6 +590,7 @@ firc_err_t firc_ruleset_sync(firc_ruleset_t *rs, bool *chain_changed) {
     firc_err_t err = subnets_apply(rs, &sub);
     /* On a devices failure the subnets' change is still reported: the link already holds it. */
     if (err == FIRC_OK) { err = devices_apply(rs, &dev); }
+    if (sub || dev) { staging_moved(rs); }
     if (chain_changed) { *chain_changed = sub || dev; }
     return err;
 }

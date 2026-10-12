@@ -23,43 +23,65 @@
 #include "../../src/xtables/xt_internal.h"
 #include "xt_golden.h"
 
-static int addr_of(const char *ip, const char *port, struct sockaddr_in *sa)
+static int addr_of(const char *ip, const char *port, struct sockaddr_storage *sa, socklen_t *len)
 {
     memset(sa, 0, sizeof(*sa));
-    sa->sin_family = AF_INET;
-    sa->sin_port = htons((uint16_t)atoi(port));
-    return inet_pton(AF_INET, ip, &sa->sin_addr) == 1 ? 0 : -1;
+    struct sockaddr_in *a4 = (struct sockaddr_in *)sa;
+    struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)sa;
+    if (inet_pton(AF_INET, ip, &a4->sin_addr) == 1) {
+        a4->sin_family = AF_INET;
+        a4->sin_port = htons((uint16_t)atoi(port));
+        *len = sizeof(*a4);
+        return 0;
+    }
+    if (inet_pton(AF_INET6, ip, &a6->sin6_addr) == 1) {
+        a6->sin6_family = AF_INET6;
+        a6->sin6_port = htons((uint16_t)atoi(port));
+        *len = sizeof(*a6);
+        return 0;
+    }
+    return -1;
+}
+
+static const char *addr_text(const struct sockaddr_storage *sa, char *buf, size_t n)
+{
+    const void *a = sa->ss_family == AF_INET6 ? (const void *)&((const struct sockaddr_in6 *)sa)->sin6_addr
+                                              : (const void *)&((const struct sockaddr_in *)sa)->sin_addr;
+    return inet_ntop(sa->ss_family, a, buf, (socklen_t)n) != NULL ? buf : "?";
 }
 
 static int do_send(const char *ip, const char *port, const char *mark_hex, const char *sport)
 {
     const firc_dnsproxy_sock_ops_t *ops = &firc_dnsproxy_sock_ops_real;
-    struct sockaddr_in dst;
-    if (addr_of(ip, port, &dst) != 0) { return 3; }
+    struct sockaddr_storage dst;
+    socklen_t dl = 0;
+    if (addr_of(ip, port, &dst, &dl) != 0) { return 3; }
     uint32_t mark = (uint32_t)strtoul(mark_hex, NULL, 16);
-    int fd = ops->open(ops->ud, AF_INET, SOCK_DGRAM | SOCK_CLOEXEC);
+    int fd = ops->open(ops->ud, dst.ss_family, SOCK_DGRAM | SOCK_CLOEXEC);
     if (fd < 0) { perror("socket"); return 3; }
     if (mark != 0 && ops->set_mark(ops->ud, fd, mark) != 0) {
         printf("mark-refused\n");
         return 2;
     }
     if (sport != NULL) {
-        struct sockaddr_in from;
+        struct sockaddr_storage from;
+        socklen_t froml = 0;
         int one = 1;
-        if (addr_of("0.0.0.0", sport, &from) != 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0 ||
-            bind(fd, (struct sockaddr *)&from, sizeof(from)) != 0) {
+        if (addr_of(dst.ss_family == AF_INET6 ? "::" : "0.0.0.0", sport, &from, &froml) != 0 ||
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0 ||
+            bind(fd, (struct sockaddr *)&from, froml) != 0) {
             perror("bind");
             return 3;
         }
     }
-    if (ops->connect(ops->ud, fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
+    if (ops->connect(ops->ud, fd, (struct sockaddr *)&dst, dl) != 0) {
         printf("src=none reply=no\n");
         return 0;
     }
-    struct sockaddr_in src;
+    struct sockaddr_storage src;
     socklen_t sl = sizeof(src);
-    char s[INET_ADDRSTRLEN] = "?";
-    if (getsockname(fd, (struct sockaddr *)&src, &sl) == 0) { inet_ntop(AF_INET, &src.sin_addr, s, sizeof(s)); }
+    char sb[INET6_ADDRSTRLEN];
+    const char *s = getsockname(fd, (struct sockaddr *)&src, &sl) == 0 ? addr_text(&src, sb, sizeof(sb)) : "?";
     (void)ops->send(ops->ud, fd, "firc", 4, MSG_NOSIGNAL);
     struct pollfd p = {.fd = fd, .events = POLLIN};
     char buf[16];
@@ -71,13 +93,14 @@ static int do_send(const char *ip, const char *port, const char *mark_hex, const
 
 static int do_serve(const char *ip, const char *port, const char *tag)
 {
-    struct sockaddr_in at;
-    if (addr_of(ip, port, &at) != 0) { return 3; }
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0 || bind(fd, (struct sockaddr *)&at, sizeof(at)) != 0) { perror("bind"); return 3; }
+    struct sockaddr_storage at;
+    socklen_t al = 0;
+    if (addr_of(ip, port, &at, &al) != 0) { return 3; }
+    int fd = socket(at.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&at, al) != 0) { perror("bind"); return 3; }
     for (;;) {
         char buf[512];
-        struct sockaddr_in from;
+        struct sockaddr_storage from;
         socklen_t fl = sizeof(from);
         ssize_t n = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fl);
         if (n <= 0) { continue; }
@@ -91,11 +114,12 @@ static int do_serve(const char *ip, const char *port, const char *tag)
 
 static int do_ask(const char *ip, const char *port)
 {
-    struct sockaddr_in dst;
-    if (addr_of(ip, port, &dst) != 0) { return 3; }
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_storage dst;
+    socklen_t dl = 0;
+    if (addr_of(ip, port, &dst, &dl) != 0) { return 3; }
+    int fd = socket(dst.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { perror("socket"); return 3; }
-    if (connect(fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
+    if (connect(fd, (struct sockaddr *)&dst, dl) != 0) {
         printf("from=none\n");
         close(fd);
         return 0;

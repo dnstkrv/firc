@@ -319,6 +319,77 @@ firc_err_t firc_ipset_to_link_set_subnets(firc_ipset_to_link_t *l, const firc_ip
     return FIRC_OK;
 }
 
+static void mask_prefix(uint8_t *addr, unsigned cidr, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        unsigned bit = 8u * (unsigned)i;
+        unsigned keep = cidr >= bit + 8u ? 8u : cidr > bit ? cidr - bit : 0u;
+        addr[i] &= (uint8_t)(0xffu << (8u - keep));
+    }
+}
+
+static int prefix_cmp(const void *a, const void *b) {
+    const firc_nf_prefix_t *x = a, *y = b;
+    if (x->family != y->family) { return x->family < y->family ? -1 : 1; }
+    if (x->cidr != y->cidr) { return x->cidr < y->cidr ? -1 : 1; }
+    return memcmp(x->addr, y->addr, sizeof(x->addr));
+}
+
+static void put_prefix(firc_nf_prefix_t *p, uint8_t family, const uint8_t *addr, size_t len, uint8_t cidr,
+                       uint8_t max) {
+    p->family = family;
+    p->cidr = cidr < max ? cidr : max;
+    memcpy(p->addr, addr, len);
+    mask_prefix(p->addr, p->cidr, len);
+}
+
+firc_err_t firc_nf_prefixes_of(const firc_ipv4_subnet_t *v4, size_t n4, const firc_ipv6_subnet_t *v6, size_t n6,
+                               firc_nf_prefixes_t *out) {
+    out->v = NULL;
+    out->n = 0;
+    size_t n = n4 + n6;
+    if (n == 0) { return FIRC_OK; }
+    firc_nf_prefix_t *v = calloc(n, sizeof(*v));
+    if (v == NULL) { return FIRC_ERR_NOMEM; }
+    for (size_t i = 0; i < n4; i++) { put_prefix(&v[i], 4, v4[i].addr, 4, v4[i].cidr, 32); }
+    for (size_t i = 0; i < n6; i++) { put_prefix(&v[n4 + i], 6, v6[i].addr, 16, v6[i].cidr, 128); }
+    qsort(v, n, sizeof(*v), prefix_cmp);
+    out->v = v;
+    out->n = n;
+    return FIRC_OK;
+}
+
+firc_err_t firc_ipset_to_link_prefixes(const firc_ipset_to_link_t *l, firc_nf_prefixes_t *out) {
+    return firc_nf_prefixes_of(l->sub4, l->n_sub4, l->sub6, l->n_sub6, out);
+}
+
+static bool prefix_covered(const firc_nf_prefix_t *w, const firc_nf_prefixes_t *now, const bool *present) {
+    size_t len = w->family == 6 ? 16 : 4;
+    for (unsigned c = 0; c <= w->cidr; c++) {
+        if (!present[c]) { continue; }
+        firc_nf_prefix_t key = {.family = w->family, .cidr = (uint8_t)c};
+        memcpy(key.addr, w->addr, len);
+        mask_prefix(key.addr, c, len);
+        if (bsearch(&key, now->v, now->n, sizeof(*now->v), prefix_cmp) != NULL) { return true; }
+    }
+    return false;
+}
+
+bool firc_nf_prefixes_narrow(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now) {
+    bool present[2][129] = {{false}};
+    for (size_t i = 0; i < now->n; i++) { present[now->v[i].family == 6][now->v[i].cidr] = true; }
+    for (size_t i = 0; i < was->n; i++) {
+        if (!prefix_covered(&was->v[i], now, present[was->v[i].family == 6])) { return true; }
+    }
+    return false;
+}
+
+void firc_nf_prefixes_clear(firc_nf_prefixes_t *p) {
+    if (p == NULL) { return; }
+    free(p->v);
+    p->v = NULL;
+    p->n = 0;
+}
+
 void firc_nf_devices_clear(firc_nf_devices_t *d) {
     if (d == NULL) { return; }
     free(d->deny);
@@ -840,3 +911,4 @@ firc_err_t firc_ipset_to_link_on_addr_change(firc_ipset_to_link_t *l) {
     }
     return first;
 }
+

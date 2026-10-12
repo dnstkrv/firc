@@ -55,6 +55,19 @@ typedef enum {
 } scan_mode_t;
 
 typedef struct {
+    uint8_t base[16];
+    uint32_t field;
+    uint32_t order;
+    bool inexact;
+} ct_key_t;
+
+typedef struct {
+    ct_key_t *v;
+    uint32_t start[2][2][129];
+    uint32_t count[2][2][129];
+} ct_index_t;
+
+typedef struct {
     ct_hit_t *v;
     size_t n, cap;
     bool too_many;
@@ -66,10 +79,10 @@ typedef struct {
     uint8_t v4_len;
     const uint8_t *v6;
     uint8_t v6_len;
-    const firc_ct_chunk_t *chunks;
-    size_t n_chunks;
+    const ct_index_t *index;
     bool pool_untrusted;
     const bool *held;
+    uint32_t only_field;
     /* Kernel-side filter: narrows what arrives; wanted() still decides. */
     bool filter_mark;
     uint32_t filter_value, filter_mask;
@@ -173,28 +186,120 @@ static bool in_pool(const scan_t *s, int family, const uint8_t *dst) {
     return s->v6_len > 0 && prefix_eq(dst, s->v6, s->v6_len);
 }
 
-static bool chunk_owner_field(const scan_t *s, int family, const uint8_t *dst, uint32_t *out, bool *inexact) {
-    for (size_t i = 0; i < s->n_chunks; i++) {
-        const firc_ct_chunk_t *c = &s->chunks[i];
-        if (c->is_subnet || (int)c->family != family) { continue; }
-        if (prefix_eq(dst, c->base, c->prefix)) {
-            *out = c->field & s->mark_mask;
-            *inexact = c->inexact;
-            return true;
+static void mask_to(uint8_t *out, const uint8_t *addr, unsigned len, unsigned prefix) {
+    memset(out, 0, 16);
+    for (unsigned i = 0; i < len; i++) {
+        unsigned bit = 8u * i;
+        unsigned keep = prefix >= bit + 8u ? 8u : prefix > bit ? prefix - bit : 0u;
+        out[i] = (uint8_t)(addr[i] & (uint8_t)(0xffu << (8u - keep)));
+    }
+}
+
+static int key_cmp(const ct_key_t *a, const uint8_t *base, uint32_t field) {
+    int c = memcmp(a->base, base, 16);
+    if (c != 0) { return c; }
+    return a->field < field ? -1 : a->field > field ? 1 : 0;
+}
+
+static size_t lower_bound(const ct_key_t *v, size_t n, const uint8_t *base, uint32_t field) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (key_cmp(&v[mid], base, field) < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
+    }
+    return lo;
+}
+
+static bool chunk_owner_field(const scan_t *s, int family, const uint8_t *dst, uint32_t *out, bool *inexact) {
+    const ct_index_t *x = s->index;
+    unsigned fam = family == AF_INET6, len = fam ? 16u : 4u, max = fam ? 128u : 32u;
+    const ct_key_t *best = NULL;
+    for (unsigned p = 1; p <= max; p++) {
+        uint32_t n = x->count[0][fam][p];
+        if (n == 0) { continue; }
+        const ct_key_t *v = x->v + x->start[0][fam][p];
+        uint8_t key[16];
+        mask_to(key, dst, len, p);
+        for (size_t i = lower_bound(v, n, key, 0); i < n && memcmp(v[i].base, key, 16) == 0; i++) {
+            if (best == NULL || v[i].order < best->order) { best = &v[i]; }
+        }
+    }
+    if (best == NULL) { return false; }
+    *out = best->field;
+    *inexact = best->inexact;
+    return true;
+}
+
+static bool holder_routes_to(const scan_t *s, int family, const uint8_t *dst, uint32_t field) {
+    const ct_index_t *x = s->index;
+    unsigned fam = family == AF_INET6, len = fam ? 16u : 4u, max = fam ? 128u : 32u;
+    for (unsigned p = 0; p <= max; p++) {
+        uint32_t n = x->count[1][fam][p];
+        if (n == 0) { continue; }
+        const ct_key_t *v = x->v + x->start[1][fam][p];
+        uint8_t key[16];
+        mask_to(key, dst, len, p);
+        size_t i = lower_bound(v, n, key, field);
+        if (i < n && key_cmp(&v[i], key, field) == 0) { return true; }
     }
     return false;
 }
 
-static bool holder_routes_to(const scan_t *s, int family, const uint8_t *dst, uint32_t field) {
-    for (size_t i = 0; i < s->n_chunks; i++) {
-        const firc_ct_chunk_t *c = &s->chunks[i];
-        if (!c->is_subnet || (c->field & s->mark_mask) != field) { continue; }
-        if ((int)c->family != family) { continue; }
-        /* Prefix 0 covers the family; prefix_eq reads 0 as "no pool". */
-        if (c->prefix == 0 || prefix_eq(dst, c->base, c->prefix)) { return true; }
+typedef struct {
+    ct_key_t key;
+    uint8_t subnet, fam, prefix;
+} ct_sort_t;
+
+static int sort_cmp(const void *pa, const void *pb) {
+    const ct_sort_t *a = pa, *b = pb;
+    if (a->subnet != b->subnet) { return a->subnet < b->subnet ? -1 : 1; }
+    if (a->fam != b->fam) { return a->fam < b->fam ? -1 : 1; }
+    if (a->prefix != b->prefix) { return a->prefix < b->prefix ? -1 : 1; }
+    int c = key_cmp(&a->key, b->key.base, b->key.field);
+    if (c != 0) { return c; }
+    return a->key.order < b->key.order ? -1 : a->key.order > b->key.order ? 1 : 0;
+}
+
+static firc_err_t index_build(ct_index_t *x, const firc_ct_chunk_t *chunks, size_t n, uint32_t mask) {
+    memset(x, 0, sizeof(*x));
+    if (n == 0) { return FIRC_OK; }
+    if (n > UINT32_MAX) { return FIRC_ERR_NOMEM; }
+    ct_sort_t *t = calloc(n, sizeof(*t));
+    x->v = calloc(n, sizeof(*x->v));
+    if (t == NULL || x->v == NULL) {
+        free(t);
+        free(x->v);
+        x->v = NULL;
+        return FIRC_ERR_NOMEM;
     }
-    return false;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        const firc_ct_chunk_t *c = &chunks[i];
+        if (c->family != AF_INET && c->family != AF_INET6) { continue; }
+        unsigned fam = c->family == AF_INET6, max = fam ? 128u : 32u;
+        if (c->prefix > max) { continue; }
+        ct_sort_t *e = &t[k++];
+        e->subnet = c->is_subnet ? 1 : 0;
+        e->fam = (uint8_t)fam;
+        e->prefix = c->prefix;
+        mask_to(e->key.base, c->base, fam ? 16u : 4u, c->prefix);
+        e->key.field = c->field & mask;
+        e->key.order = (uint32_t)i;
+        e->key.inexact = c->inexact;
+    }
+    qsort(t, k, sizeof(*t), sort_cmp);
+    for (size_t i = 0; i < k; i++) {
+        x->v[i] = t[i].key;
+        if (x->count[t[i].subnet][t[i].fam][t[i].prefix]++ == 0) {
+            x->start[t[i].subnet][t[i].fam][t[i].prefix] = (uint32_t)i;
+        }
+    }
+    free(t);
+    return FIRC_OK;
 }
 
 /* True when the entry is stale; *why (optional) names the deciding branch. */
@@ -274,6 +379,7 @@ static bool wanted(const struct nlmsghdr *h, scan_t *s, ct_hit_t *out) {
     } else if (s->mode == SCAN_STALE_MARKS) {
         uint32_t field = mark & s->mark_mask;
         if (!have_mark || field == 0) { return false; }
+        if (s->only_field != 0 && field != s->only_field) { return false; }
         /* No handled bit: not ours. This keeps firmware policy marks out; the converse does not hold. */
         if ((mark & FIRC_MARK_HANDLED) == 0) { return false; }
         uint8_t orig_dst[16] = {0};
@@ -590,35 +696,54 @@ firc_err_t firc_ct_flush_pool_replies(firc_ct_t *ct, const uint8_t v4[4], uint8_
 
 static firc_err_t flush_stale(firc_ct_t *ct, const uint8_t v4[4], uint8_t v4_len, const uint8_t v6[16],
                              uint8_t v6_len, const firc_ct_chunk_t *chunks, size_t n_chunks, uint32_t mask,
-                             bool pool_untrusted, const bool *held, size_t *deleted) {
+                             bool pool_untrusted, const bool *held, uint32_t only_field, size_t *deleted) {
     scan_t s = {0};
     s.pool_untrusted = pool_untrusted;
     s.held = held;
+    s.only_field = only_field & mask;
     s.mode = SCAN_STALE_MARKS;
     s.mark_mask = mask;
     /* The handled bit as value and mask: this also keeps firmware policy marks out. */
     s.filter_mark = true;
-    s.filter_value = FIRC_MARK_HANDLED;
-    s.filter_mask = FIRC_MARK_HANDLED;
+    s.filter_value = FIRC_MARK_HANDLED | s.only_field;
+    s.filter_mask = FIRC_MARK_HANDLED | (s.only_field != 0 ? mask : 0u);
     s.v4 = v4;
     s.v4_len = v4_len;
     s.v6 = v6;
     s.v6_len = v6_len;
-    s.chunks = chunks;
-    s.n_chunks = n_chunks;
-    return flush(ct, &s, deleted);
+    ct_index_t *x = calloc(1, sizeof(*x));
+    if (x == NULL || index_build(x, chunks, n_chunks, mask) != FIRC_OK) {
+        free(x);
+        if (deleted != NULL) { *deleted = 0; }
+        return FIRC_ERR_NOMEM;
+    }
+    s.index = x;
+    firc_err_t err = flush(ct, &s, deleted);
+    free(x->v);
+    free(x);
+    return err;
 }
 
 firc_err_t firc_ct_flush_stale_group_marks(firc_ct_t *ct, const uint8_t v4[4], uint8_t v4_len,
                                            const uint8_t v6[16], uint8_t v6_len,
                                            const firc_ct_chunk_t *chunks, size_t n_chunks,
                                            uint32_t mask, size_t *deleted) {
-    return flush_stale(ct, v4, v4_len, v6, v6_len, chunks, n_chunks, mask, false, NULL, deleted);
+    return flush_stale(ct, v4, v4_len, v6, v6_len, chunks, n_chunks, mask, false, NULL, 0, deleted);
 }
 
 firc_err_t firc_ct_flush_stale_marks_outside_pool(firc_ct_t *ct, const uint8_t v4[4], uint8_t v4_len,
                                                   const uint8_t v6[16], uint8_t v6_len,
                                                   const firc_ct_chunk_t *chunks, size_t n_chunks,
                                                   uint32_t mask, const bool *held, size_t *deleted) {
-    return flush_stale(ct, v4, v4_len, v6, v6_len, chunks, n_chunks, mask, true, held, deleted);
+    return flush_stale(ct, v4, v4_len, v6, v6_len, chunks, n_chunks, mask, true, held, 0, deleted);
+}
+
+firc_err_t firc_ct_flush_stale_field(firc_ct_t *ct, const uint8_t v4[4], uint8_t v4_len, const uint8_t v6[16],
+                                     uint8_t v6_len, const firc_ct_chunk_t *chunks, size_t n_chunks, uint32_t mask,
+                                     uint32_t field, size_t *deleted) {
+    if ((field & mask) == 0) {
+        if (deleted != NULL) { *deleted = 0; }
+        return FIRC_OK;
+    }
+    return flush_stale(ct, v4, v4_len, v6, v6_len, chunks, n_chunks, mask, false, NULL, field, deleted);
 }

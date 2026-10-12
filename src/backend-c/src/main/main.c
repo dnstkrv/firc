@@ -729,64 +729,22 @@ static bool groups_file_exists(const char *config_path) {
     return access(groups_path, F_OK) == 0 || errno != ENOENT;
 }
 
-static bool this_runs_groups(const struct daemon *d, firc_stale_group_t **out, size_t *out_n,
-                             char (**ids_out)[FIRC_ID_STR_LEN]) {
-    firc_app_t *app = d->app;
-    size_t n = firc_app_user_group_count(app);
-    *out = NULL;
-    *out_n = 0;
-    *ids_out = NULL;
-    /* No groups is legitimate (every leftover mark is stale); an allocation failure must not read as that. */
-    if (n == 0) { return true; }
-    firc_stale_group_t *g = calloc(n, sizeof(*g));
-    char (*ids)[FIRC_ID_STR_LEN] = calloc(n, sizeof(*ids));
-    if (g == NULL || ids == NULL) {
-        free(g);
-        free(ids);
-        return false;
-    }
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-        firc_ruleset_t *rs = firc_app_user_group_at(app, i);
-        if (rs == NULL) { continue; }
-        const firc_group_t *grp = firc_ruleset_group(rs);
-        if (grp == NULL) { continue; }
-        firc_id_format(grp->id, ids[k]);
-        g[k].id = ids[k];
-        g[k].field = firc_ruleset_mark_field(rs);
-        g[k].inexact = firc_ruleset_has_devices(rs);
-        g[k].field_kept = firc_stable_fields_kept(&d->fields, ids[k], g[k].field);
-        /* An allocation failure must not read as "routes no subnets": skip the sweep instead. */
-        if (!firc_stale_group_subnets(grp, g[k].field, g[k].field_kept, (firc_ct_chunk_t **)&g[k].subnets,
-                                      &g[k].n_subnets)) {
-            for (size_t j = 0; j < k; j++) { free((void *)g[j].subnets); }
-            free(g);
-            free(ids);
-            return false;
-        }
-        k++;
-    }
-    *out_n = k;
-    *ids_out = ids;
-    *out = g;
-    return true;
+static bool field_kept_by_map(void *ud, const firc_group_t *g, const char *id, uint32_t field) {
+    (void)g;
+    return firc_stable_fields_kept(ud, id, field);
 }
 
 static void flush_stale_group_marks(struct daemon *d) {
     if (d->ct == NULL || d->pool == NULL || d->app == NULL) { return; }
-    size_t n = 0;
-    char (*ids)[FIRC_ID_STR_LEN] = NULL;
-    firc_stale_group_t *groups = NULL;
-    if (!this_runs_groups(d, &groups, &n, &ids)) {
+    firc_app_stale_groups_t groups;
+    if (!firc_app_stale_groups(d->app, field_kept_by_map, &d->fields, 0, &groups)) {
         FIRC_WARN("not enough memory to check for flows marked by a previous run; none were touched");
         return;
     }
     size_t dropped = 0;
-    firc_err_t err = firc_stale_marks_sweep(d->ct, d->pool, d->pool_state_trusted, d->fields.loaded, groups, n,
-                                            FIRC_MARK_GROUP_MASK, &dropped);
-    for (size_t i = 0; i < n; i++) { free((void *)groups[i].subnets); }
-    free(groups);
-    free(ids);
+    firc_err_t err = firc_stale_marks_sweep(d->ct, d->pool, d->pool_state_trusted, d->fields.loaded, groups.v,
+                                            groups.n, FIRC_MARK_GROUP_MASK, &dropped);
+    firc_app_stale_groups_free(&groups);
     firc_stable_fields_release(&d->fields);
     /* Count first: a sweep that failed halfway has still deleted flows. */
     if (dropped > 0) {

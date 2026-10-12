@@ -851,6 +851,7 @@ TEST probe_answers_per_node_key_without_links(void)
                     "      - id: 0000000d\n        link: \"" LINK_B "\"\n"
                     "    exclude: [\"0000000d:B\"]\n",
                     0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
     setenv("FAKE_MODE", "probe", 1);
     cJSON *ans = NULL;
     ASSERT_EQ(200, call_api("POST", "/api/v1/tunnels/probe", "{\"id\":\"a\"}", &ans));

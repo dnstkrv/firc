@@ -85,6 +85,26 @@ firc_err_t firc_ipset_to_link_set_subnets(firc_ipset_to_link_t *l, const firc_ip
                                           size_t n4, const firc_ipv6_subnet_t *v6, size_t n6,
                                           bool *changed);
 
+typedef struct firc_nf_prefix {
+    uint8_t family;
+    uint8_t cidr;
+    uint8_t addr[16];
+} firc_nf_prefix_t;
+
+typedef struct firc_nf_prefixes {
+    firc_nf_prefix_t *v;
+    size_t n;
+} firc_nf_prefixes_t;
+
+/* The prefixes of the subnets, proto and ports dropped; out is overwritten, FIRC_ERR_NOMEM leaves it empty. */
+firc_err_t firc_nf_prefixes_of(const firc_ipv4_subnet_t *v4, size_t n4, const firc_ipv6_subnet_t *v6, size_t n6,
+                               firc_nf_prefixes_t *out);
+/* firc_nf_prefixes_of the subnets set_subnets last took. */
+firc_err_t firc_ipset_to_link_prefixes(const firc_ipset_to_link_t *l, firc_nf_prefixes_t *out);
+/* Whether a prefix of `was` is covered by no prefix of `now` in its family. */
+bool firc_nf_prefixes_narrow(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now);
+void firc_nf_prefixes_clear(firc_nf_prefixes_t *p);
+
 void firc_nf_devices_clear(firc_nf_devices_t *d);
 /* Appends unless an equal-rendering source is there; FIRC_ERR_NOMEM. */
 firc_err_t firc_nf_devices_push(firc_nf_devices_t *d, bool deny, const firc_nf_source_t *s);

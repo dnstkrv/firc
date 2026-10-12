@@ -68,6 +68,7 @@ firc_err_t firc_ipt_append_dnat(firc_ipt_t *ipt, const char *table, const char *
 firc_err_t firc_ipt_commit(firc_ipt_t *ipt);
 /* The same without the skip, and with every jump of ours in a built-in chain put back at its staged place. */
 firc_err_t firc_ipt_commit_full(firc_ipt_t *ipt);
+int firc_ipt_refusal(const firc_ipt_t *ipt);
 
 /* Writes chain (unjumped) into table and takes it away again, outside the registrations; FIRC_ERR_IO when refused. */
 firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *chain, firc_ipt_rule_t *const *rules,

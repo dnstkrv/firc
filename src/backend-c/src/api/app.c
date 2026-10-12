@@ -44,7 +44,10 @@ typedef struct nf_flush {
     char iface[64];
     uint64_t ticket;
     bool narrowed; /* owner's selector narrowed: paid even if routed again the same way */
+    bool sweep;
 } nf_flush_t;
+
+typedef enum { FLUSH_TEARDOWN, FLUSH_NARROWED, FLUSH_SWEEP } flush_kind_t;
 
 typedef struct nf_held {
     firc_ipset_to_link_t *link;
@@ -132,6 +135,7 @@ struct firc_app {
     void *tap_resolver_ud;
     firc_ruleset_lookup_t lookup; /* filled after the rulesets exist; read on the loop thread when a selector renders */
 
+    bool pass_refused;
     firc_ip_t reject_base[2]; /* the pool prefixes, for the FORWARD barrier */
     uint8_t reject_len[2];
     bool reject_has[2];
@@ -269,13 +273,79 @@ static bool flush_queued_for(const firc_app_t *app, firc_id_t owner) {
     return false;
 }
 
+bool firc_app_stale_groups(const firc_app_t *app, firc_app_field_kept_fn kept, void *ud, uint32_t only_field,
+                           firc_app_stale_groups_t *out) {
+    memset(out, 0, sizeof(*out));
+    size_t n = app->n_rulesets;
+    if (n == 0) { return true; }
+    out->v = calloc(n, sizeof(*out->v));
+    out->ids = calloc(n, sizeof(*out->ids));
+    if (out->v == NULL || out->ids == NULL) {
+        firc_app_stale_groups_free(out);
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        firc_ruleset_t *rs = app->rulesets[i];
+        const firc_group_t *g = rs != NULL ? firc_ruleset_group(rs) : NULL;
+        if (g == NULL) { continue; }
+        firc_stale_group_t *e = &out->v[out->n];
+        firc_id_format(g->id, out->ids[out->n]);
+        e->id = out->ids[out->n];
+        e->field = firc_ruleset_mark_field(rs);
+        e->inexact = firc_ruleset_has_devices(rs);
+        e->field_kept = kept(ud, g, e->id, e->field);
+        firc_ct_chunk_t *subnets = NULL;
+        bool wanted = only_field == 0 || e->field == only_field;
+        if (wanted && !firc_stale_group_subnets(g, e->field, e->field_kept, &subnets, &e->n_subnets)) {
+            firc_app_stale_groups_free(out);
+            return false;
+        }
+        e->subnets = subnets;
+        out->n++;
+    }
+    return true;
+}
+
+void firc_app_stale_groups_free(firc_app_stale_groups_t *t) {
+    for (size_t i = 0; t->v != NULL && i < t->n; i++) { free((void *)t->v[i].subnets); }
+    free(t->v);
+    free(t->ids);
+    memset(t, 0, sizeof(*t));
+}
+
+static bool list_not_loaded(void *ud, const firc_group_t *g, const char *id, uint32_t field) {
+    (void)ud;
+    (void)id;
+    (void)field;
+    return g->list != NULL && !g->list->has_body_hash;
+}
+
+static void sweep_stale_field(firc_app_t *app, uint32_t value, const char *who) {
+    if (app->ct == NULL || app->pool == NULL) { return; }
+    firc_app_stale_groups_t t;
+    if (!firc_app_stale_groups(app, list_not_loaded, NULL, value, &t)) {
+        FIRC_WARN("group %s: no memory to check its flows for a prefix it no longer routes; none were touched", who);
+        return;
+    }
+    size_t dropped = 0;
+    firc_err_t err = firc_stale_field_sweep(app->ct, app->pool, t.v, t.n, FIRC_MARK_GROUP_MASK, value, &dropped);
+    firc_app_stale_groups_free(&t);
+    if (dropped > 0) { FIRC_INFO("group %s: dropped %zu flow(s) to a prefix it no longer routes", who, dropped); }
+    if (err != FIRC_OK) {
+        FIRC_WARN("group %s: the check of its flows for a prefix it no longer routes did not finish: %s", who,
+                  firc_err_str(err));
+    }
+}
+
 /* a field already queued keeps its entry (and interface) with the new ticket, so A->B->A leaves flows where they were */
-static void flush_queue_add(firc_app_t *app, uint32_t value, const firc_group_t *g, bool narrowed) {
+static void flush_queue_add(firc_app_t *app, uint32_t value, const firc_group_t *g, flush_kind_t kind) {
     uint64_t ticket = ++app->nf_change;
+    bool narrowed = kind == FLUSH_NARROWED, sweep = kind == FLUSH_SWEEP;
     for (size_t i = 0; i < app->n_flushes; i++) {
         if (app->flushes[i].value == value) {
             app->flushes[i].ticket = ticket;
             app->flushes[i].narrowed = app->flushes[i].narrowed || narrowed; /* never cleared by a merge */
+            app->flushes[i].sweep = app->flushes[i].sweep || sweep;
             return;
         }
     }
@@ -286,7 +356,11 @@ static void flush_queue_add(firc_app_t *app, uint32_t value, const firc_group_t 
         nf_flush_t *grown = realloc(app->flushes, cap * sizeof(*grown));
         if (grown == NULL) { /* early rather than never, as a teardown flush always did */
             FIRC_WARN("no memory to queue the flush of group %s; flushing now", who);
-            firc_ipset_to_link_flush_mark(app->ct, value, who);
+            if (sweep) {
+                sweep_stale_field(app, value, who);
+            } else {
+                firc_ipset_to_link_flush_mark(app->ct, value, who);
+            }
             return;
         }
         app->flushes = grown;
@@ -299,6 +373,7 @@ static void flush_queue_add(firc_app_t *app, uint32_t value, const firc_group_t 
     snprintf(e->iface, sizeof(e->iface), "%s", g->iface != NULL ? g->iface : "");
     e->ticket = ticket;
     e->narrowed = narrowed;
+    e->sweep = sweep;
 }
 
 static void release_link(firc_ipset_to_link_t *link, bool keep_reply) {
@@ -338,6 +413,13 @@ static void release_held(firc_app_t *app, uint64_t ticket, const firc_id_t *owne
 
 /* an owner routed again the same way (A->B->A) holds its field again, so its flows are skipped unpaid */
 static void pay_flushes(firc_app_t *app, uint64_t ticket) {
+    for (size_t i = 0; i < app->n_rulesets; i++) {
+        firc_ruleset_t *rs = app->rulesets[i];
+        if (!firc_ruleset_take_flush(rs)) { continue; }
+        char who[FIRC_ID_STR_LEN];
+        firc_id_format(firc_ruleset_group(rs)->id, who);
+        firc_ipset_to_link_flush_mark(app->ct, firc_ruleset_mark_field(rs), who);
+    }
     size_t kept = 0;
     for (size_t i = 0; i < app->n_flushes; i++) {
         nf_flush_t e = app->flushes[i];
@@ -350,6 +432,10 @@ static void pay_flushes(firc_app_t *app, uint64_t ticket) {
         bool again = rs != NULL && firc_ruleset_routed(rs) && now != NULL && strcmp(now, e.iface) == 0 &&
                      firc_ruleset_mark_field(rs) == e.value;
         if (again && !e.narrowed) {
+            if (e.sweep) {
+                sweep_stale_field(app, e.value, e.owner_s);
+                continue;
+            }
             FIRC_DEBUG("group %s routes through %s again: its flows are its own, not flushed", e.owner_s, e.iface);
             continue;
         }
@@ -456,7 +542,7 @@ static firc_err_t app_group_down(firc_app_t *app, firc_ruleset_t *rs) {
     }
     if (had_chain) {
         /* queued even when it keeps its routing: pay_flushes skips it if the group comes back on the same interface/field */
-        if (value != 0) { flush_queue_add(app, value, g, false); }
+        if (value != 0) { flush_queue_add(app, value, g, FLUSH_TEARDOWN); }
         app_request_more_locked(app);
     }
     return err;
@@ -476,12 +562,48 @@ static void note_narrowed(firc_app_t *app, firc_ruleset_t *rs) {
     if (value == 0 || !firc_ruleset_routed(rs)) { return; }
     const firc_group_t *g = firc_ruleset_group(rs);
     if (app->committer != NULL) {
-        flush_queue_add(app, value, g, true);
+        flush_queue_add(app, value, g, FLUSH_NARROWED);
         return;
     }
     char who[FIRC_ID_STR_LEN];
     firc_id_format(g->id, who);
     firc_ipset_to_link_flush_mark(app->ct, value, who);
+}
+
+typedef struct {
+    firc_nf_prefixes_t p;
+    bool routed;
+    bool ok;
+} subnets_before_t;
+
+static subnets_before_t subnets_before(const firc_ruleset_t *rs) {
+    subnets_before_t b = {{NULL, 0}, firc_ruleset_routed(rs), true};
+    if (b.routed) { b.ok = firc_ruleset_prefixes(rs, &b.p) == FIRC_OK; }
+    return b;
+}
+
+static bool queue_field_sweep(firc_app_t *app, firc_ruleset_t *rs) {
+    uint32_t value = firc_ruleset_mark_field(rs);
+    if (value == 0 || !firc_ruleset_routed(rs)) { return false; }
+    const firc_group_t *g = firc_ruleset_group(rs);
+    if (app->committer != NULL) {
+        flush_queue_add(app, value, g, FLUSH_SWEEP);
+        return true;
+    }
+    char who[FIRC_ID_STR_LEN];
+    firc_id_format(g->id, who);
+    sweep_stale_field(app, value, who);
+    return false;
+}
+
+static void note_subnets_shrunk(firc_app_t *app, firc_ruleset_t *rs, subnets_before_t *b) {
+    firc_nf_prefixes_t now = {NULL, 0};
+    bool shrunk = b->routed && firc_ruleset_routed(rs) &&
+                  (!b->ok || firc_ruleset_prefixes(rs, &now) != FIRC_OK || firc_nf_prefixes_narrow(&b->p, &now));
+    firc_nf_prefixes_clear(&now);
+    firc_nf_prefixes_clear(&b->p);
+    b->routed = false;
+    if (shrunk) { (void)queue_field_sweep(app, rs); }
 }
 
 /* kept across a teardown so the enable after it can compare; ok false (OOM) counts as a narrowing */
@@ -877,7 +999,9 @@ bool firc_app_group_live(const firc_app_t *app, firc_id_t id, const char **reaso
         /* no false live: before the first pass, or after 5s of failures, the chain may not be in the kernel */
         firc_nfcommit_health_t h;
         firc_app_netfilter_health(app, &h);
-        if (h.failing || h.first_pending) { why = "not-written"; }
+        if (h.failing || h.first_pending || firc_ruleset_pass(rs) == FIRC_RULESET_PASS_LEFT_OUT) {
+            why = "not-written";
+        }
     }
     if (reason != NULL) { *reason = why; }
     return why == NULL;
@@ -939,10 +1063,13 @@ void firc_app_netfilter_health(const firc_app_t *app, firc_nfcommit_health_t *ou
 /* without the lock: firc_app_sync_group is this plus the lock, for a caller not already inside it */
 static firc_err_t sync_group_ruleset_locked(firc_app_t *app, firc_ruleset_t *rs) {
     bool chain_changed = false;
+    subnets_before_t before = subnets_before(rs);
     firc_err_t r = firc_ruleset_sync(rs, &chain_changed);
     /* asked for even on error: a failed devices render already handed the link new prefixes the next sync would miss */
     if (chain_changed) { app_request_more_locked(app); }
     if (firc_ruleset_devices_narrowed(rs)) { note_narrowed(app, rs); } /* a render that narrowed resets its flows exactly as a narrowing edit does */
+    if (!chain_changed) { before.routed = false; }
+    note_subnets_shrunk(app, rs, &before);
     return r;
 }
 
@@ -1052,9 +1179,11 @@ firc_err_t firc_app_replace_groups(firc_app_t *app, firc_group_t **groups, size_
     firc_id_t *narrowed = n != 0 ? calloc(n, sizeof(*narrowed)) : NULL;
     /* each routed group's devices copy, to compare the Save's render with, by the same index as was */
     devices_before_t *was_dev = n_was != 0 ? calloc(n_was, sizeof(*was_dev)) : NULL;
-    if ((n != 0 && narrowed == NULL) || (n_was != 0 && was_dev == NULL)) {
+    subnets_before_t *was_sub = n_was != 0 ? calloc(n_was, sizeof(*was_sub)) : NULL;
+    if ((n != 0 && narrowed == NULL) || (n_was != 0 && (was_dev == NULL || was_sub == NULL))) {
         free(narrowed);
         free(was_dev);
+        free(was_sub);
         free(was);
         app_nf_leave(app);
         for (size_t i = 0; i < n; i++) { firc_group_free(groups[i]); }
@@ -1068,7 +1197,11 @@ firc_err_t firc_app_replace_groups(firc_app_t *app, firc_group_t **groups, size_
             narrowed[n_narrowed++] = groups[i]->id;
         }
     }
-    for (size_t w = 0; w < n_was; w++) { was_dev[w] = devices_before(firc_app_find_group_by_id(app, was[w])); }
+    for (size_t w = 0; w < n_was; w++) {
+        firc_ruleset_t *old = firc_app_find_group_by_id(app, was[w]);
+        was_dev[w] = devices_before(old);
+        was_sub[w] = subnets_before(old);
+    }
     release_dns_snapshot(app); /* before the gate moves any arena or anything is freed: the snapshot borrows the lists */
     for (size_t i = 0; i < n; i++) {
         for (size_t j = 0; j < app->cfg->n_groups; j++) {
@@ -1103,10 +1236,15 @@ firc_err_t firc_app_replace_groups(firc_app_t *app, firc_group_t **groups, size_
                 }
                 if (narrows) { note_narrowed(app, rs); }
             }
+            if (was_routed) { note_subnets_shrunk(app, rs, &was_sub[at]); }
         }
     }
-    for (size_t w = 0; w < n_was; w++) { firc_nf_devices_clear(&was_dev[w].dev); }
+    for (size_t w = 0; w < n_was; w++) {
+        firc_nf_devices_clear(&was_dev[w].dev);
+        firc_nf_prefixes_clear(&was_sub[w].p);
+    }
     free(was_dev);
+    free(was_sub);
     free(was);
     free(narrowed);
     for (size_t j = i + 1; j < n; j++) {
@@ -1156,6 +1294,7 @@ firc_err_t firc_app_update_group(firc_app_t *app, firc_id_t id, firc_group_t *bu
     bool was_routed = firc_ruleset_routed(rs);
     bool narrowed = was_routed && firc_devsel_spec_narrows(&live->devices, &built->devices); /* read before the move takes the old selector away */
     devices_before_t before = devices_before(rs);
+    subnets_before_t sub_before = subnets_before(rs);
     if (firc_ruleset_runtime_enabled(rs)) {
         (void)app_group_down(app, rs); /* an rtnetlink error does not stop the update; the enable below deletes a stale rule before adding its own */
     }
@@ -1167,6 +1306,7 @@ firc_err_t firc_app_update_group(firc_app_t *app, firc_id_t id, firc_group_t *bu
         hold_if_newly_routed(app, rs, was_routed);
         if (narrowed || (was_routed && devices_narrowed_since(rs, &before))) { note_narrowed(app, rs); }
     }
+    note_subnets_shrunk(app, rs, &sub_before);
     firc_nf_devices_clear(&before.dev);
     firc_err_t snap_err = republish_dns_matching_only(app); /* after the enable: before it this group was not in the view */
     if (snap_err != FIRC_OK) {
@@ -1425,6 +1565,11 @@ static void republish_if_first_list(firc_app_t *app, bool first_list) {
     republish_or_log(app);
 }
 
+static void sweep_after_first_load(firc_app_t *app, firc_id_t id) {
+    firc_ruleset_t *rs = firc_app_find_group_by_id(app, id);
+    if (rs != NULL && queue_field_sweep(app, rs)) { app_request_more_locked(app); }
+}
+
 /* the app-touching half of a sync; ev is not freed here, its rules may be moved out; the lock is the caller's */
 static firc_err_t firc_app_apply_sync_result_unlocked(firc_app_t *app, firc_sub_event_t *ev,
                                                       int64_t now_unix, bool *out_changed) {
@@ -1516,8 +1661,10 @@ static firc_err_t firc_app_apply_sync_result_unlocked(firc_app_t *app, firc_sub_
             list->last_check = (uint32_t)now_unix;
             sync_set_idle(list);
             republish_if_first_list(app, first_list);
+            if (first_list) { sweep_after_first_load(app, ev->group_id); }
             break;
         }
+        bool first_load = !list->has_body_hash;
 
         firc_sub_rules_t prev_rules = list->rules; /* kept aside for the rollback below; the list holds the new ones from here */
         uint32_t prev_last_check = list->last_check;
@@ -1556,6 +1703,7 @@ static firc_err_t firc_app_apply_sync_result_unlocked(firc_app_t *app, firc_sub_
         /* set BEFORE the republish: snapshot.c reads has_body_hash on the live group at build time */
         memcpy(list->body_hash, ev->hash, sizeof(list->body_hash));
         list->has_body_hash = true;
+        if (first_load) { sweep_after_first_load(app, ev->group_id); }
         republish_or_log(app);
         uint64_t t4 = sync_mono_ms();
         snapshot_ms = t4 - t3;
@@ -2186,7 +2334,13 @@ static bool routed_has(const char *group_id, void *ud) {
     return r->n != 0 && bsearch(group_id, r->ids, r->n, sizeof(*r->ids), routed_id_cmp) != NULL;
 }
 
-static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cancel, bool full) {
+static bool staged_in_pass(const firc_ruleset_t *rs, const firc_ruleset_t *skip) {
+    return rs != skip && firc_ruleset_pass(rs) != FIRC_RULESET_PASS_LEFT_OUT && firc_ruleset_routed(rs);
+}
+
+static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cancel, bool full,
+                                           const firc_ruleset_t *skip, int *refusal) {
+    *refusal = 0;
     firc_err_t err = firc_netfilter_register_base_chains(app->ipt4, app->ipt6);
     if (err != FIRC_OK) { return err; }
 
@@ -2199,6 +2353,7 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
     if (err != FIRC_OK) { return err; }
 
     for (size_t i = 0; i < app->n_rulesets; i++) {
+        if (!staged_in_pass(app->rulesets[i], skip)) { continue; }
         err = firc_ruleset_prepare_iptables(app->rulesets[i]);
         if (err != FIRC_OK) { return err; }
     }
@@ -2211,7 +2366,7 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
         if (routed.ids == NULL) { return FIRC_ERR_NOMEM; }
     }
     for (size_t i = 0; i < app->n_rulesets; i++) {
-        if (firc_ruleset_routed(app->rulesets[i])) {
+        if (staged_in_pass(app->rulesets[i], skip)) {
             firc_id_format(firc_ruleset_group(app->rulesets[i])->id, routed.ids[routed.n++]);
         }
     }
@@ -2229,11 +2384,68 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
 
     if (app->ipt4) {
         err = full ? firc_ipt_commit_full(app->ipt4) : firc_ipt_commit(app->ipt4);
+        *refusal = firc_ipt_refusal(app->ipt4);
         if (err != FIRC_OK) { return err; }
     }
     if (app->ipt6) {
         err = full ? firc_ipt_commit_full(app->ipt6) : firc_ipt_commit(app->ipt6);
+        *refusal = firc_ipt_refusal(app->ipt6);
         if (err != FIRC_OK) { return err; }
+    }
+    return FIRC_OK;
+}
+
+static void say_pass_group(bool out, const firc_ruleset_t *rs) {
+    char id[FIRC_ID_STR_LEN];
+    const firc_group_t *g = firc_ruleset_group(rs);
+    firc_id_format(g->id, id);
+    if (out) {
+        FIRC_WARN("group \"%s\" (%s) is left out of netfilter: the kernel refused the pass with it",
+                  g->name != NULL ? g->name : "", id);
+    } else {
+        FIRC_INFO("group \"%s\" (%s) is back in netfilter", g->name != NULL ? g->name : "", id);
+    }
+}
+
+static bool refused_rule(firc_err_t err, int refusal) {
+    return err == FIRC_ERR_IO && (refusal == EINVAL || refusal == ENOENT || refusal == ELOOP);
+}
+
+static firc_err_t rebuild_leaving_out(firc_app_t *app, firc_cancel_t *cancel, bool full) {
+    int refusal = 0;
+    firc_err_t err = rebuild_netfilter_locked(app, cancel, full, NULL, &refusal);
+    bool refused = refused_rule(err, refusal);
+    bool search = refused && app->pass_refused;
+    if (err != FIRC_ERR_CANCELED && err != FIRC_ERR_AGAIN) { app->pass_refused = refused; }
+    firc_ruleset_t *out = NULL;
+    for (size_t i = 0; search && refused && i < app->n_rulesets; i++) {
+        firc_ruleset_t *rs = app->rulesets[i];
+        if (!staged_in_pass(rs, NULL)) { continue; }
+        firc_ipt_discard(app->ipt4);
+        firc_ipt_discard(app->ipt6);
+        firc_err_t again = rebuild_netfilter_locked(app, cancel, full, rs, &refusal);
+        if (again == FIRC_OK) { out = rs; }
+        refused = refused_rule(again, refusal);
+        if (!refused) { err = again; }
+    }
+    if (search && out == NULL) {
+        firc_ipt_discard(app->ipt4);
+        firc_ipt_discard(app->ipt6);
+        (void)rebuild_netfilter_locked(app, cancel, full, NULL, &refusal);
+        if (refused) { app->pass_refused = false; }
+    }
+    if (err != FIRC_OK) { return err; }
+    app->pass_refused = false;
+    for (size_t i = 0; i < app->n_rulesets; i++) {
+        firc_ruleset_t *rs = app->rulesets[i];
+        if (rs == out || firc_ruleset_pass(rs) != FIRC_RULESET_PASS_ON_TRIAL) { continue; }
+        if (firc_ruleset_routed(rs)) { say_pass_group(false, rs); }
+        firc_ruleset_set_pass(rs, FIRC_RULESET_PASS_IN);
+    }
+    if (out != NULL) {
+        firc_ruleset_set_pass(out, FIRC_RULESET_PASS_LEFT_OUT);
+        firc_ruleset_owe_flush(out);
+        say_pass_group(true, out);
     }
     return FIRC_OK;
 }
@@ -2699,7 +2911,7 @@ static firc_err_t firc_app_rebuild_netfilter_locked(firc_app_t *app, firc_cancel
     struct timespec pass_t0, pass_t1;
     clock_gettime(CLOCK_MONOTONIC, &pass_t0);
     uint64_t gen = pass_snapshot_begin(app);
-    firc_err_t err = rebuild_netfilter_locked(app, cancel, full);
+    firc_err_t err = rebuild_leaving_out(app, cancel, full);
     pass_snapshot_end(app);
     clock_gettime(CLOCK_MONOTONIC, &pass_t1);
     firc_ipt_take_report(app->ipt4, report4, sizeof(report4));

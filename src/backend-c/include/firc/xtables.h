@@ -136,6 +136,8 @@ firc_err_t firc_xt_set_dump_dir(firc_xt_t *xt, const char *dir);
 /* Reads table, merges stage, replaces the table when the result differs. AGAIN and CANCELED mean build it again. */
 firc_err_t firc_xt_commit(firc_xt_t *xt, const char *table, const firc_xt_stage_t *stage, firc_cancel_t *cancel);
 
+int firc_xt_refusal(const firc_xt_t *xt);
+
 /* The shape the last firc_xt_commit of table left in the kernel; all zero when it failed. */
 firc_xt_info_t firc_xt_left_shape(const firc_xt_t *xt, const char *table);
 

@@ -75,6 +75,16 @@ bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs);
 /* Re-stages the chains for a full rebuild; ip rule and routes are left alone. No-op unless enabled. */
 firc_err_t firc_ruleset_prepare_iptables(firc_ruleset_t *rs);
 
+typedef enum firc_ruleset_pass {
+    FIRC_RULESET_PASS_IN = 0,
+    FIRC_RULESET_PASS_LEFT_OUT,
+    FIRC_RULESET_PASS_ON_TRIAL,
+} firc_ruleset_pass_t;
+firc_ruleset_pass_t firc_ruleset_pass(const firc_ruleset_t *rs);
+void firc_ruleset_set_pass(firc_ruleset_t *rs, firc_ruleset_pass_t pass);
+void firc_ruleset_owe_flush(firc_ruleset_t *rs);
+bool firc_ruleset_take_flush(firc_ruleset_t *rs);
+
 /* Hands the subnet prefixes and devices to the link; the next pass writes them. *chain_changed is set even on error. */
 firc_err_t firc_ruleset_sync(firc_ruleset_t *rs, bool *chain_changed);
 
@@ -91,6 +101,8 @@ firc_err_t firc_ruleset_devices_would_move(const firc_ruleset_t *rs, bool *moved
 bool firc_ruleset_devices_narrowed(const firc_ruleset_t *rs);
 /* NULL while not routed; loop thread only. */
 const firc_nf_devices_t *firc_ruleset_devices(const firc_ruleset_t *rs);
+/* The prefixes the link holds, empty while not routed; out is overwritten. */
+firc_err_t firc_ruleset_prefixes(const firc_ruleset_t *rs, firc_nf_prefixes_t *out);
 
 /* Test seam: proto is 0, IPPROTO_TCP or IPPROTO_UDP; ports in iptables form, "" for all. */
 typedef void (*firc_ruleset_plan_fn)(int family, const uint8_t *addr, uint8_t cidr, uint8_t proto, const char *ports,

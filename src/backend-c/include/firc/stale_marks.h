@@ -30,4 +30,8 @@ firc_err_t firc_stale_marks_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, bool
                                   bool fields_loaded, const firc_stale_group_t *groups, size_t n_groups,
                                   uint32_t mask, size_t *dropped);
 
+/* Judges only the flows carrying field, against a trusted pool and every group's chunks and subnets. */
+firc_err_t firc_stale_field_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, const firc_stale_group_t *groups,
+                                  size_t n_groups, uint32_t mask, uint32_t field, size_t *dropped);
+
 #endif /* FIRC_STALE_MARKS_H */
