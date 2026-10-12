@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "fake_iptables.h"
+#include "fake_xtables.h"
 #include "fake_nflog.h"
 #include "firc/capture.h"
 #include "firc/netfilter_cleaner.h"
@@ -145,7 +146,7 @@ static bool rig_up_full(rig_t *r, const rig_opts_t *o) {
     }
 
     r->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    r->ipt = firc_ipt_new(firc_fake_ipt_as_executable(r->fake));
+    r->ipt = firc_ipt_new(firc_fake_ipt_as_xt(r->fake), "FIRC_");
     firc_netfilter_register_base_chains(r->ipt, NULL);
     RIG_STEP(firc_loop_create(&r->loop) == FIRC_OK, "loop");
 
@@ -529,6 +530,19 @@ TEST a_kernel_that_refuses_the_rules_is_named(void) {
     PASS();
 }
 
+/* Catches: a capture started on a kernel without one of its extensions, its rules then refused at every pass. */
+TEST a_capture_needs_every_capture_extension(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    firc_fake_xt_lack(firc_fake_ipt_xt(r.fake), false, "string", 1);
+    char buf[4096];
+    ASSERT_EQ_FMT(501, req_unix("POST", CAPTURE_PATH, buf, sizeof(buf)), "%d");
+    ASSERTm("and names every module the rules need", strstr(buf, FIRC_TAP_LAN_MODULES) != NULL);
+    ASSERT_FALSE(running(r.app));
+    rig_down(&r);
+    PASS();
+}
+
 /* Catches: the status missing how long is left, or carrying the token. */
 TEST the_status_says_how_long_is_left(void) {
     rig_t r;
@@ -583,6 +597,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_group_that_cannot_be_bound_says_so);
     RUN_TEST(a_socket_the_loop_will_not_watch_is_named_in_the_503);
     RUN_TEST(a_kernel_that_refuses_the_rules_is_named);
+    RUN_TEST(a_capture_needs_every_capture_extension);
     RUN_TEST(the_status_says_how_long_is_left);
     RUN_TEST(the_bypass_route_is_gone);
     GREATEST_MAIN_END();

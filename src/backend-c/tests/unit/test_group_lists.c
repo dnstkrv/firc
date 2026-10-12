@@ -819,7 +819,7 @@ typedef struct nf_fixture {
 
 static nf_fixture_t g_nfx;
 
-/* `with_committer` false leaves no committer, so a list sync writes only its own chain at once. */
+/* `with_committer` false leaves no committer: the test runs each pass by hand. */
 static bool nf_fixture_up_ex(nf_fixture_t *f, bool with_committer) {
     memset(f, 0, sizeof(*f));
     if (firc_config_init_defaults(&f->cfg) != FIRC_OK) { return false; }
@@ -833,9 +833,9 @@ static bool nf_fixture_up_ex(nf_fixture_t *f, bool with_committer) {
     f->pipeline = firc_dns_pipeline_create();
     if (f->pipeline == NULL) { return false; }
     f->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    f->ipt = firc_ipt_new(firc_fake_ipt_as_executable(f->fake));
+    f->ipt = firc_ipt_new(firc_fake_ipt_as_xt(f->fake), "FIRC_");
     f->fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    f->ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(f->fake6));
+    f->ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(f->fake6), "FIRC_");
     firc_netfilter_register_base_chains(f->ipt, f->ipt6);
     f->kernel = fake_rtnl_start(&f->rtnl);
     if (f->kernel == NULL) { return false; }
@@ -986,74 +986,8 @@ TEST a_list_sync_resyncs_only_its_own_group(void) {
     PASS();
 }
 
-TEST a_list_sync_without_a_committer_names_only_its_own_chain(void) {
-    ASSERT(nf_fixture_up_no_committer(&g_nfx));
-
-    firc_group_t *g1 = firc_group_new();
-    ASSERT(g1 != NULL);
-    g1->id = id_of(1);
-    g1->enable = true;
-    ASSERT_EQ(FIRC_OK, firc_strset(&g1->name, "listed"));
-    ASSERT_EQ(FIRC_OK, firc_strset(&g1->iface, "lo"));
-    g1->list = firc_group_list_new();
-    ASSERT(g1->list != NULL);
-    ASSERT_EQ(FIRC_OK, firc_strset(&g1->list->url, URL_A));
-    ASSERT_EQ(FIRC_OK, firc_app_add_group(g_nfx.app, g1));
-
-    firc_group_t *g2 = firc_group_new();
-    ASSERT(g2 != NULL);
-    g2->id = id_of(2);
-    g2->enable = true;
-    ASSERT_EQ(FIRC_OK, firc_strset(&g2->name, "plain"));
-    ASSERT_EQ(FIRC_OK, firc_strset(&g2->iface, "lo"));
-    firc_rule_t *r2 = firc_rule_new();
-    ASSERT(r2 != NULL);
-    r2->id = firc_id_random();
-    r2->enable = true;
-    ASSERT_EQ(FIRC_OK, firc_strset(&r2->type, FIRC_RULE_SUBNET));
-    ASSERT_EQ(FIRC_OK, firc_strset(&r2->rule, "10.0.0.0/8"));
-    ASSERT_EQ(FIRC_OK, firc_group_add_rule(g2, r2));
-    ASSERT_EQ(FIRC_OK, firc_app_add_group(g_nfx.app, g2));
-
-    char chain1[64], chain2[64];
-    nf_chain_name(&g_nfx.cfg, id_of(1), chain1, sizeof(chain1));
-    nf_chain_name(&g_nfx.cfg, id_of(2), chain2, sizeof(chain2));
-
-    const char *log_so_far = firc_fake_ipt_restore_log(g_nfx.fake);
-    ASSERT(log_so_far != NULL);
-    ASSERTm("group 2's chain landed without a committer",
-            strstr(log_so_far, chain2) != NULL);
-    char *log_before = strdup(log_so_far);
-    ASSERT(log_before != NULL);
-    size_t before_len = strlen(log_before);
-
-    firc_sub_event_t *ev = group_parsed_event(id_of(1), 0);
-    firc_sub_rules_push(&ev->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
-    bool changed = false;
-    ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev, 1000, &changed));
-    ASSERT(changed);
-    firc_sub_event_free(ev);
-
-    const char *log_after = firc_fake_ipt_restore_log(g_nfx.fake);
-    ASSERT(log_after != NULL);
-    size_t after_len = strlen(log_after);
-    ASSERTm("the sync committed something", after_len > before_len);
-    ASSERT_EQ_FMTm("the log is append-only: the old text is still there, unchanged", 0,
-                   strncmp(log_before, log_after, before_len), "%d");
-    const char *delta = log_after + before_len;
-
-    ASSERTm("the new commit names the syncing group's own chain",
-            strstr(delta, chain1) != NULL);
-    ASSERTm("...and NEVER the other group's -- not merely unchanged, absent",
-            strstr(delta, chain2) == NULL);
-
-    free(log_before);
-    nf_fixture_down(&g_nfx);
-    PASS();
-}
-
-/* Catches: a refused resync leaving a changed list or chain, hiding the error, or no snapshot. */
-TEST a_failed_resync_rolls_back_the_list_and_the_chain(void) {
+/* Catches: a pass that the kernel refused for a resync's prefix leaving the chain half-written or the error unsaid. */
+TEST a_refused_pass_after_a_resync_keeps_the_chain_it_wrote(void) {
     ASSERT(nf_fixture_up_no_committer(&g_nfx));
 
     firc_group_t *g1 = firc_group_new();
@@ -1076,51 +1010,24 @@ TEST a_failed_resync_rolls_back_the_list_and_the_chain(void) {
     ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev1, 1000, &changed));
     ASSERT(changed);
     firc_sub_event_free(ev1);
-
-    firc_group_t *before = live_in(g_nfx.app, id_of(1));
-    ASSERT(before != NULL && before->list != NULL);
-    ASSERT_EQ_FMTm("one good subnet installed", 1u, (unsigned)before->list->rules.n, "%u");
-    ASSERT_STR_EQ("10.1.0.0/16", firc_sub_rules_text(&before->list->rules, 0));
-    uint32_t prev_last_update = before->list->last_update;
-    ASSERT(before->list->has_body_hash);
-    uint8_t prev_hash[32];
-    memcpy(prev_hash, before->list->body_hash, sizeof(prev_hash));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false));
     ASSERTm("the good subnet landed in the chain",
             nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.1.0.0/16"));
 
     firc_fake_ipt_refuse_rules_containing(g_nfx.fake, "10.9.0.0/16");
-
     firc_sub_event_t *ev2 = group_parsed_event(id_of(1), 0);
     firc_sub_rules_push(&ev2->rules, "10.9.0.0/16", FIRC_RULE_SUBNET, true, firc_id_random());
     changed = false;
-    firc_err_t err = firc_app_apply_sync_result(g_nfx.app, ev2, 2000, &changed);
-    ASSERTm("a refused write is reported, not swallowed", err != FIRC_OK);
+    ASSERT_EQ(FIRC_OK, firc_app_apply_sync_result(g_nfx.app, ev2, 2000, &changed));
+    ASSERT(changed);
     firc_sub_event_free(ev2);
-
-    firc_group_t *after = live_in(g_nfx.app, id_of(1));
-    ASSERT(after != NULL && after->list != NULL);
-    ASSERT_EQ_FMTm("the old rules are back", 1u, (unsigned)after->list->rules.n, "%u");
-    ASSERT_STR_EQm("the old rule text, not the refused one", "10.1.0.0/16",
-                   firc_sub_rules_text(&after->list->rules, 0));
-    ASSERT_EQ_FMTm("last_update restored", prev_last_update, after->list->last_update, "%u");
-    ASSERT_EQ(FIRC_SUB_SYNC_ERROR, after->list->sync_state);
-    ASSERT_EQ_FMTm("the hash was never overwritten", 0,
-                   memcmp(prev_hash, after->list->body_hash, sizeof(prev_hash)), "%d");
+    ASSERTm("the refusal is the pass's to report", firc_app_rebuild_netfilter_kind(g_nfx.app, NULL, false) != FIRC_OK);
 
     ASSERT_FALSEm("the refused prefix never reached the chain",
                   nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.9.0.0/16"));
-    ASSERTm("the chain, as committed, still carries the old subnet",
+    ASSERTm("the chain, as last committed, still carries the old subnet",
             nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.1.0.0/16"));
-
-    ASSERTm("a snapshot is still published even though the resync failed",
-            firc_dns_pipeline_snapshot(g_nfx.pipeline) != NULL);
-
-    firc_ruleset_t *rs1 = firc_app_find_group_by_id(g_nfx.app, id_of(1));
-    ASSERT(rs1 != NULL);
-    ASSERT_EQ_FMTm("the link was handed the restored rules, not the refused ones",
-                   FIRC_OK, firc_ruleset_rewrite_chains(rs1), "%d");
-    ASSERT_FALSEm("...and writing it again still never carries the refused prefix",
-                  nf_any_arg_equals(g_nfx.fake, "mangle", chain1, "10.9.0.0/16"));
+    ASSERTm("a snapshot is still published", firc_dns_pipeline_snapshot(g_nfx.pipeline) != NULL);
 
     nf_fixture_down(&g_nfx);
     PASS();
@@ -1232,8 +1139,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_result_with_a_stale_seq_is_dropped);
     RUN_TEST(a_result_for_a_deleted_group_is_dropped);
     RUN_TEST(a_list_sync_resyncs_only_its_own_group);
-    RUN_TEST(a_list_sync_without_a_committer_names_only_its_own_chain);
-    RUN_TEST(a_failed_resync_rolls_back_the_list_and_the_chain);
+    RUN_TEST(a_refused_pass_after_a_resync_keeps_the_chain_it_wrote);
     RUN_TEST(a_routed_group_warns_once_not_on_every_resync);
     RUN_TEST(a_first_changed_sync_clears_provisional_at_once);
     RUN_TEST(adding_a_group_with_a_list_queues_its_sync);

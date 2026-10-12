@@ -153,9 +153,8 @@ uint64_t firc_app_nf_passes_for_test(const firc_app_t *app); /* test seam */
 uint64_t firc_app_nf_last_completed_pass_for_test(const firc_app_t *app); /* test seam */
 uint64_t firc_app_nf_change_for_test(const firc_app_t *app); /* test seam, under firc_app_nf_enter */
 void firc_app_pay_flushes_for_test(firc_app_t *app, uint64_t ticket); /* test seam */
-size_t firc_app_tombstones_for_test(const firc_app_t *app); /* test seam, under firc_app_nf_enter */
 
-/* removes the group from the kernel (ip rules/routes at once, chain by tombstone) then the config and DNS view */
+/* removes the group from the kernel (ip rules/routes at once, its chains with the next pass) then the config and DNS view */
 void firc_app_remove_group_by_index(firc_app_t *app, size_t idx);
 bool firc_app_remove_group_by_id(firc_app_t *app, firc_id_t id);
 
@@ -243,7 +242,7 @@ firc_err_t firc_app_save_groups(firc_app_t *app, const char *conf_path,
                                 const char *version);
 firc_err_t firc_app_save_config(firc_app_t *app, const char *conf_path, const char *version);
 
-/* brings the netfilter tables back in line with the live groups; with a committer this only asks it to abort+rebuild */
+/* asks the committer to abort and rebuild; FIRC_ERR_STATE without one */
 firc_err_t firc_app_force_commit_iptables(firc_app_t *app);
 
 /* lets the rebuild reach the port-53 DNAT chain owned by main(); NULL disables remap53 */
@@ -263,12 +262,12 @@ typedef struct firc_capture_status {
 } firc_capture_status_t;
 
 /* starts a FIRC_CAPTURE_SECONDS capture on the LAN interfaces of app.link; FIRC_ERR_EXIST one runs, FIRC_ERR_INVAL
- * bad/empty link, FIRC_ERR_STATE no pool, FIRC_ERR_NOSYS kernel refuses the rules, FIRC_ERR_SYS NFLOG bind/watch
- * failed, FIRC_ERR_IO no token entropy, FIRC_ERR_NOMEM deadline not armed. On success token_out holds the stop token. */
+ * bad/empty link, FIRC_ERR_STATE no pool, FIRC_ERR_NOSYS kernel lacks an extension or refuses the rules, FIRC_ERR_SYS NFLOG bind/watch
+ * failed, FIRC_ERR_IO no token entropy, FIRC_ERR_AGAIN the extension probe went blind, FIRC_ERR_NOMEM deadline not armed. On success token_out holds the stop token. */
 firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
                                   char token_out[FIRC_TAP_TOKEN_CHARS + 1]);
 
-/* stops it: unstages the rules, takes the readers down, asks for a pass, logs the summary; not an error when
+/* stops it: the next pass drops the rules; takes the readers down, asks for that pass, logs the summary; not an error when
  * nothing runs. token must match the running capture's (FIRC_ERR_NOENT otherwise); NULL is the daemon's own stop. */
 firc_err_t firc_app_capture_stop(firc_app_t *app, const char *token);
 
@@ -296,7 +295,7 @@ firc_err_t firc_app_stage_tap(firc_app_t *app);
 
 firc_err_t firc_app_rebuild_netfilter(firc_app_t *app, firc_cancel_t *cancel);
 
-/* full wipes everything first (firmware rewrite, first pass); otherwise one commit writes over what is there */
+/* full writes every table again and puts our jumps back in place (firmware rewrite, first pass); otherwise a table unchanged since firc wrote it is skipped */
 firc_err_t firc_app_rebuild_netfilter_kind(firc_app_t *app, firc_cancel_t *cancel, bool full);
 
 /* starts the committer thread and with it the netfilter lock; call once everything the rebuild touches is up */

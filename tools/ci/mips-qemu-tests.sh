@@ -54,6 +54,14 @@ skip_reason() {
     esac
 }
 
+skip_test() {
+    case $1 in
+    test_app)
+        echo "a_cached_answer_for_a_committed_address_is_not_held answers through the DNS proxy, whose reply qemu-user fails with ENODEV as in test_dnsproxy"
+        ;;
+    esac
+}
+
 export QEMU_LD_PREFIX="$root"
 pass=0
 fail=0
@@ -68,7 +76,13 @@ for b in $bins; do
         continue
     fi
     echo "== $name"
-    if (cd "$backend" && timeout 900 "$QEMU" -L "$root" "$b"); then
+    set --
+    why=$(skip_test "$name")
+    if [ -n "$why" ]; then
+        echo "== SKIP $name ${why%% *}: ${why#* }"
+        set -- -x "${why%% *}"
+    fi
+    if (cd "$backend" && timeout 900 "$QEMU" -L "$root" "$b" "$@"); then
         pass=$((pass + 1))
     else
         fail=$((fail + 1))

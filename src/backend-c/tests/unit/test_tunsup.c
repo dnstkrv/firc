@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* NOLINT(bugprone-reserved-identifier): pipe2() */
 #include "greatest.h"
 
 #include <dirent.h>
@@ -5,6 +6,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +16,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "firc/iptables.h"
 #include "firc/log.h"
 #include "firc/loop.h"
 #include "firc/tunsup.h"
@@ -876,13 +877,28 @@ TEST uplink_tunnel_started_after_its_uplink(void)
     PASS();
 }
 
-static void *save_thread(void *ud)
+static void *spawn_thread(void *ud)
 {
-    firc_ipt_executable_t *exe = ud;
-    uint8_t *out = NULL;
-    size_t len = 0;
-    exe->ops->save(exe, &out, &len);
-    free(out);
+    const char *script = ud;
+    int out[2];
+    if (pipe2(out, O_CLOEXEC) != 0) {
+        return NULL;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, out[1], STDOUT_FILENO);
+    char *argv[] = {(char *)script, NULL};
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, script, &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(out[1]);
+    char buf[64];
+    while (rc == 0 && read(out[0], buf, sizeof buf) > 0) {
+    }
+    close(out[0]);
+    if (rc == 0) {
+        waitpid(pid, NULL, 0);
+    }
     return NULL;
 }
 
@@ -971,10 +987,8 @@ TEST child_inherits_no_helper_pipe(void)
     char path[1280];
     snprintf(path, sizeof path, "%s:%s", g_dir, g_path);
     setenv("PATH", path, 1);
-    firc_ipt_executable_t *exe = firc_ipt_executable_real_new(FIRC_IPT_PROTO_IPV4);
-    ASSERT(exe != NULL);
     pthread_t th;
-    ASSERT_EQ(0, pthread_create(&th, NULL, save_thread, exe));
+    ASSERT_EQ(0, pthread_create(&th, NULL, spawn_thread, save));
     struct timespec ts = {0, 300 * 1000000L};
     nanosleep(&ts, NULL);
     char *links[] = {"vless://u@h:443#x"};
@@ -988,7 +1002,6 @@ TEST child_inherits_no_helper_pipe(void)
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
     run_ms(&r, 300);
     pthread_join(th, NULL);
-    firc_ipt_executable_free(exe);
     setenv("PATH", g_path, 1);
     unlink(save);
     char buf[8192];

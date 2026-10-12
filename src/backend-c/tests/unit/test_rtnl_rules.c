@@ -378,7 +378,7 @@ TEST a_seed_naming_a_field_or_owner_already_seeded_is_refused(void) {
     PASS();
 }
 
-/* Catches: a change of assignment not reported to the store, or a report on no change or on a seed. */
+/* Catches: a change of assignment not reported to the store, or a report on no change, on a seed, or on a kernel rule of the owner's own field. */
 TEST the_store_is_told_at_every_change_and_only_then(void) {
     fx_t f;
     ASSERT(up(&f));
@@ -406,9 +406,12 @@ TEST the_store_is_told_at_every_change_and_only_then(void) {
     ASSERT_EQ_FMT((size_t)3, got.calls, "%zu");
     fake_rtnl_add_rule(f.kernel, AF_INET, 0x20000, FIRC_MARK_GROUP_MASK, 100, FIRC_RULE_PRIORITY);
     ASSERT_EQ(FIRC_OK, firc_rtnl_alloc_mark_field_for(f.rtnl, "bbbbbbbb", &field));
+    ASSERT_EQ_FMTm("a kernel rule on its own field leaves it its own", 2u, field, "%u");
+    ASSERT_EQ_FMT((size_t)3, got.calls, "%zu");
+    ASSERT_EQ(FIRC_OK, firc_rtnl_alloc_mark_field_for(f.rtnl, "dddddddd", &field));
     ASSERT_EQ_FMT(1u, field, "%u");
     ASSERT_EQ_FMT((size_t)4, got.calls, "%zu");
-    ASSERT_EQ_FMT((size_t)2, got.n, "%zu");
+    ASSERT_EQ_FMT((size_t)3, got.n, "%zu");
     firc_rtnl_watch_mark_fields(f.rtnl, NULL, NULL);
     firc_rtnl_forget_mark_field(f.rtnl, "bbbbbbbb");
     ASSERT_EQ_FMT((size_t)4, got.calls, "%zu");

@@ -79,20 +79,3 @@ char *firc_ipt_rule_string(const firc_ipt_rule_t *r) {
     out[off] = '\0';
     return out;
 }
-
-bool firc_ipt_rule_contains(const firc_ipt_rule_t *r, const char *substr) {
-    char *s = firc_ipt_rule_string(r);
-    if (!s) { return false; }
-    bool found = strstr(s, substr) != NULL;
-    free(s);
-    return found;
-}
-
-void firc_ipt_command_list_free(firc_ipt_command_t *cmds, size_t n) {
-    if (!cmds) { return; }
-    for (size_t i = 0; i < n; i++) {
-        free(cmds[i].chain);
-        firc_ipt_rule_free(cmds[i].rule);
-    }
-    free(cmds);
-}

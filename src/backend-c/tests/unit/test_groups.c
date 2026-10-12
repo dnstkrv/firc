@@ -70,7 +70,7 @@ static harness_t *harness_start_with_kernels(bool kernels) {
     firc_app_deps_t deps = {.cfg = &h->cfg, .pipeline = h->pipeline, .pool = h->pool, .router = h->router};
     if (kernels) {
         h->fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-        h->ipt = firc_ipt_new(firc_fake_ipt_as_executable(h->fipt));
+        h->ipt = firc_ipt_new(firc_fake_ipt_as_xt(h->fipt), "FIRC_");
         firc_netfilter_register_base_chains(h->ipt, NULL);
         h->kernel = fake_rtnl_start(&h->rtnl);
         if (h->kernel == NULL) { return NULL; }
@@ -510,30 +510,6 @@ TEST renaming_a_group_keeps_the_flows_it_is_steering(void) {
     cJSON_Delete(out);
     ASSERT_EQ_FMTm("the kernel was not asked to drop anything", (size_t)0, fake_ct_deletes(h->ctk), "%zu");
     ASSERT_EQ_FMTm("the flow is still running", (size_t)1, fake_ct_remaining(h->ctk), "%zu");
-    harness_stop(h);
-    PASS();
-}
-
-/* Catches: an interface change keeping flows that the old interface still carries. */
-TEST pointing_a_group_at_another_interface_drops_its_flows(void) {
-    harness_t *h = harness_start_with_kernels(true);
-    ASSERT(h != NULL);
-    cJSON *out = NULL;
-    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":\"lo\"}", &out));
-    char path[96];
-    snprintf(path, sizeof(path), "/api/v1/groups/%s", jstr(out, "id"));
-    cJSON_Delete(out);
-    uint32_t mark = installed_group_mark(h);
-    ASSERTm("the group got a mark", mark != 0);
-    const uint8_t src[4] = {192, 168, 1, 10}, dst[4] = {198, 18, 0, 5};
-    const uint8_t ours[4] = {198, 18, 0, 5}, theirs[4] = {8, 8, 8, 8};
-    fake_ct_add(h->ctk, AF_INET, src, dst, ours, mark | FIRC_MARK_HANDLED);
-    fake_ct_add(h->ctk, AF_INET, src, dst, theirs, 0);
-
-    ASSERT_EQ(200, do_request("PUT", path, "{\"name\":\"g\",\"interface\":\"eth0\"}", &out));
-    cJSON_Delete(out);
-    ASSERTm("the group's flow went", fake_ct_deleted(h->ctk, ours, 4));
-    ASSERTm("nobody else's did", !fake_ct_deleted(h->ctk, theirs, 4));
     harness_stop(h);
     PASS();
 }
@@ -1686,7 +1662,6 @@ int main(int argc, char **argv) {
     RUN_TEST(an_unknown_type_is_echoed_back);
     RUN_TEST(the_rules_the_daemon_can_use_are_still_accepted);
     RUN_TEST(renaming_a_group_keeps_the_flows_it_is_steering);
-    RUN_TEST(pointing_a_group_at_another_interface_drops_its_flows);
     RUN_TEST(deleting_a_group_drops_the_flows_it_was_steering);
     RUN_TEST(a_put_whose_teardown_was_refused_still_brings_the_group_up);
     RUN_TEST(the_bulk_put_keeps_or_clears_a_selector_like_the_single_put);

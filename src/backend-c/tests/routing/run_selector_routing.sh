@@ -2,6 +2,7 @@
 set -eu
 
 HELPER=${FIRC_ROUTECHECK:?set FIRC_ROUTECHECK to the firc-routecheck binary}
+IPT=${IPT_LEGACY:-iptables-legacy}
 
 if [ -z "${FIRC_ROUTING_INSIDE:-}" ]; then
     if [ "$(id -u)" = 0 ]; then
@@ -23,6 +24,8 @@ fail() { # stderr: a caller capturing stdout (TUN=$(netns)) would swallow it
     exit 1
 }
 
+command -v "$IPT" >/dev/null || fail "$IPT is not installed"
+
 mount -t tmpfs tmpfs /run # iptables' lock, in this mount namespace only
 sysctl -qw net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
 sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
@@ -32,13 +35,13 @@ ip link set lo up
 probe() { # <table> <rule...>
     t=$1
     shift
-    iptables -t "$t" -N PROBE
-    iptables -t "$t" -A PROBE "$@" 2>"$T/probe" || {
+    $IPT -t "$t" -N PROBE
+    $IPT -t "$t" -A PROBE "$@" 2>"$T/probe" || {
         cat "$T/probe" >&2
         fail "the kernel refused '-t $t $*' inside the user namespace; load its module (sudo modprobe -a xt_mac xt_mark xt_connmark xt_conntrack xt_nat xt_MASQUERADE nf_conntrack nf_nat iptable_nat nft_chain_nat) and run again"
     }
-    iptables -t "$t" -F PROBE
-    iptables -t "$t" -X PROBE
+    $IPT -t "$t" -F PROBE
+    $IPT -t "$t" -X PROBE
 }
 probe mangle -m mac --mac-source 02:00:00:00:00:0A -j RETURN
 probe mangle -m mark --mark 0xf00faad/0xbf00ffff -j RETURN
@@ -108,18 +111,17 @@ sleep 0.2
 
 reset() { # no firc chain, and the firmware's own chain jumped first
     for t in filter mangle nat; do
-        iptables -t "$t" -F
-        iptables -t "$t" -X
+        $IPT -t "$t" -F
+        $IPT -t "$t" -X
     done
-    iptables -t mangle -N FW
-    iptables -t mangle -A PREROUTING -j FW
+    $IPT -t mangle -N FW
+    $IPT -t mangle -A PREROUTING -j FW
 }
-firc() { # firc's chains for a selector, from the real builder, and the DNAT
+firc() { # firc's chains for a selector, written by the real builder through x_tables, and the DNAT
     "$HELPER" devchain 5 "$@" > "$T/devchain" || fail "firc-routecheck devchain $*"
     FAKE=$(sed -n 's/^# fake //p' "$T/devchain")
     [ -n "$FAKE" ] || fail "the builder issued no fake address"
-    iptables-restore --noflush < "$T/devchain" || fail "iptables-restore refused the builder's chains for: $*"
-    iptables -t nat -A PREROUTING -d "$FAKE" -j DNAT --to-destination 9.9.9.9
+    $IPT -t nat -A PREROUTING -d "$FAKE" -j DNAT --to-destination 9.9.9.9
 }
 ask() { # <label> <client pid> <which far end must answer> [address asked, default the fake]
     got=$(in_ns "$2" "$HELPER" ask "${4:-$FAKE}" 53)
@@ -153,20 +155,20 @@ ask "deny by MAC: A, not denied, goes through the tunnel" "$CA" tunnel
 ask "deny by MAC: B, denied, goes through the WAN" "$CB" wan
 
 reset
-iptables -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0a -j MARK --set-xmark 0x0ffffaad/0xffffffff
+$IPT -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0a -j MARK --set-xmark 0x0ffffaad/0xffffffff
 firc policy Guests=0ffffaad allow policy:Guests
 ask "allow by policy mark alone: A, marked into it, goes through the tunnel" "$CA" tunnel
 ask "allow by policy mark alone: B, unmarked, goes through the WAN" "$CB" wan
 
 reset
-iptables -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x0ffffaad/0xffffffff
+$IPT -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x0ffffaad/0xffffffff
 firc policy Guests=0ffffaad deny policy:Guests
 ask "deny by policy: A, outside it, goes through the tunnel" "$CA" tunnel
 ask "deny by policy: B, marked into it by the firmware, goes through the WAN" "$CB" wan
 
 reset
-iptables -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x0ffffaad/0xffffffff
-iptables -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x40010000/0x40ff0000
+$IPT -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x0ffffaad/0xffffffff
+$IPT -t mangle -A FW -m mac --mac-source 02:00:00:00:00:0b -j MARK --set-xmark 0x40010000/0x40ff0000
 firc policy Guests=0ffffaad deny policy:Guests
 ask "deny by policy after an earlier chain wrote firc's bits: A goes through the tunnel" "$CA" tunnel
 ask "deny by policy after an earlier chain wrote firc's bits: B still goes through the WAN" "$CB" wan

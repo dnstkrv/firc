@@ -107,3 +107,21 @@ else
     cat "$OUT/http_contract.diff"
     exit 1
 fi
+
+echo "== starting with the DNS remap on"
+REMAP_CONFIG="$OUT/http_remap_config.yaml"
+sed 's/disableRemap53: true/disableRemap53: false/' "$SCRATCH_CONFIG" > "$REMAP_CONFIG"
+rm -rf /run/firc 2>/dev/null || true
+rm -f "$SOCK" "$PIDFILE" "$OUT/groups.yaml" "$OUT/tunnels.yaml"
+rm -rf "$OUT/tunnels-cache"
+FIRC_TUNNELS_PATH="$OUT/tunnels.yaml" FIRC_TUNNELS_CACHE_DIR="$OUT/tunnels-cache" \
+    FIRC_TUNVLESS_BIN="$BACKEND_C_DIR/tests/unit/fixtures/fake_tunvless.sh" \
+    "$C_BIN" --config "$REMAP_CONFIG" > "$OUT/c_remap.log" 2>&1 &
+C_PID=$!
+if ! wait_for_port; then
+    echo "C daemon failed to start with the DNS remap on:"; cat "$OUT/c_remap.log"; exit 1
+fi
+kill "$C_PID" 2>/dev/null || true
+wait "$C_PID" 2>/dev/null || true
+C_PID=
+echo "   start with the DNS remap on: OK"

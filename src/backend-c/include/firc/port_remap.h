@@ -14,13 +14,14 @@ typedef struct firc_remap_addr {
 
 typedef struct firc_port_remap firc_port_remap_t;
 
-/* Chain is "<chain_prefix>DNSOR"; nat/PREROUTING must already be a patch chain. ipt4/ipt6 borrowed, nullable. */
+/* Chain is "<chain_prefix>DNSOR"; ipt4/ipt6 borrowed, nullable. */
 firc_port_remap_t *firc_port_remap_new(const char *chain_prefix, uint16_t from, uint16_t to,
                                    const firc_remap_addr_t *addrs, size_t n_addrs, firc_ipt_t *ipt4,
                                    firc_ipt_t *ipt6);
 void firc_port_remap_free(firc_port_remap_t *p);
 
 firc_err_t firc_port_remap_enable(firc_port_remap_t *p);
+/* Writes nat with nothing of ours in it: for the daemon's teardown, after every group is gone. */
 firc_err_t firc_port_remap_disable(firc_port_remap_t *p);
 
 /* Re-stages the chain and its jump for a full rebuild without committing; no-op when p is NULL or disabled. */

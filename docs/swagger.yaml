@@ -74,7 +74,7 @@ definitions:
         additionalProperties: {}
         description: >-
           YAML path -> saved value. Numbers as numbers; timeout in
-          milliseconds, ttlClamp in seconds, idleWindow in hours; link is an
+          milliseconds, ttlClamp in seconds; link is an
           array of strings; startMarkTableIndex is a string like 0x66697263
         example:
           app.dnsProxy.upstream.address: 127.0.0.1
@@ -2229,11 +2229,12 @@ paths:
             $ref: '#/definitions/types.ErrorRes'
         "501":
           description: >-
-            The kernel refused the capture rules -- the daemon first loads the
-            modules needed, then test-writes the rules into a separate chain
+            The kernel lacks a capture extension or refused the capture rules
+            -- the daemon first loads the modules needed, asks the kernel for
+            each extension, then test-writes the rules into a separate chain
             nothing references and deletes it at once; on a refusal the
             capture does not start. The answer names the modules the rules
-            need. Routing is not affected.
+            need; the daemon log names what it lacks. Routing is not affected.
           schema:
             $ref: '#/definitions/types.ErrorRes'
         "503":
@@ -2242,7 +2243,8 @@ paths:
             NFLOG group could not be bound (another tool holds it, or the
             kernel has no nfnetlink_log) or the daemon's event loop did not
             take its socket (one answer for both cases; the daemon log says
-            which); or random bytes for the token could not be read
+            which); or random bytes for the token could not be read; or the
+            kernel could not be asked which capture extensions it has
           schema:
             $ref: '#/definitions/types.ErrorRes'
       summary: 'Start a capture'

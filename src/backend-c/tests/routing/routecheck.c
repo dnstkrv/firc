@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +12,16 @@
 #include "firc/dnsproxy.h"
 #include "firc/fakeip.h"
 #include "firc/ipset_to_link.h"
+#include "firc/log.h"
 #include "firc/mark.h"
 #include "firc/match.h"
 #include "firc/models.h"
 #include "firc/netfilter_cleaner.h"
+#include "firc/pool_reject.h"
 #include "firc/ruleset.h"
+#include "firc/xtables.h"
+#include "../../src/xtables/xt_internal.h"
+#include "xt_golden.h"
 
 static int addr_of(const char *ip, const char *port, struct sockaddr_in *sa)
 {
@@ -25,7 +31,7 @@ static int addr_of(const char *ip, const char *port, struct sockaddr_in *sa)
     return inet_pton(AF_INET, ip, &sa->sin_addr) == 1 ? 0 : -1;
 }
 
-static int do_send(const char *ip, const char *port, const char *mark_hex)
+static int do_send(const char *ip, const char *port, const char *mark_hex, const char *sport)
 {
     const firc_dnsproxy_sock_ops_t *ops = &firc_dnsproxy_sock_ops_real;
     struct sockaddr_in dst;
@@ -36,6 +42,15 @@ static int do_send(const char *ip, const char *port, const char *mark_hex)
     if (mark != 0 && ops->set_mark(ops->ud, fd, mark) != 0) {
         printf("mark-refused\n");
         return 2;
+    }
+    if (sport != NULL) {
+        struct sockaddr_in from;
+        int one = 1;
+        if (addr_of("0.0.0.0", sport, &from) != 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0 ||
+            bind(fd, (struct sockaddr *)&from, sizeof(from)) != 0) {
+            perror("bind");
+            return 3;
+        }
     }
     if (ops->connect(ops->ud, fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
         printf("src=none reply=no\n");
@@ -138,27 +153,6 @@ static bool arg_mark(const char *policy, uint32_t *mark, void *ud)
     return false;
 }
 
-/* An empty kernel to save from, so every chain is written whole. */
-static firc_err_t pr_save(firc_ipt_executable_t *self, uint8_t **out, size_t *len)
-{
-    (void)self;
-    *out = calloc(1, 1);
-    *len = 0;
-    return *out != NULL ? FIRC_OK : FIRC_ERR_NOMEM;
-}
-static firc_err_t pr_restore(firc_ipt_executable_t *self, const uint8_t *data, size_t len)
-{
-    (void)self;
-    return fwrite(data, 1, len, stdout) == len ? FIRC_OK : FIRC_ERR_IO;
-}
-static firc_ipt_proto_t pr_proto(firc_ipt_executable_t *self)
-{
-    (void)self;
-    return FIRC_IPT_PROTO_IPV4;
-}
-static void pr_destroy(firc_ipt_executable_t *self) { free(self); }
-static const firc_ipt_executable_ops_t k_print_ops = {pr_save, pr_restore, pr_proto, pr_destroy, NULL};
-
 static int push_entry(char ***list, size_t *n, const char *text)
 {
     char **grown = realloc(*list, (*n + 1) * sizeof(*grown));
@@ -247,10 +241,13 @@ static int do_devchain(int argc, char **argv)
         return 3;
     }
     firc_fakeip_snapshot_t *snap = firc_fakeip_snapshot_take(pool);
-    firc_ipt_executable_t *exe = malloc(sizeof(*exe));
-    if (snap == NULL || exe == NULL) { return 3; }
-    exe->ops = &k_print_ops;
-    firc_ipt_t *ipt = firc_ipt_new(exe);
+    if (snap == NULL) { return 3; }
+    firc_xt_t *xt = firc_xt_real_new(FIRC_IPT_PROTO_IPV4);
+    if (xt == NULL) {
+        perror("x_tables raw socket");
+        return 3;
+    }
+    firc_ipt_t *ipt = firc_ipt_new(xt, "FIRC");
     if (ipt == NULL) { return 3; }
     char fake[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, v4.b, fake, sizeof(fake));
@@ -274,15 +271,165 @@ static int do_devchain(int argc, char **argv)
     return 0;
 }
 
+static int do_xtparse(const char *path, const char *fam_text) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) { perror(path); return 2; }
+    static uint8_t buf[16u << 20];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (n < XT_GETINFO_LEN) { fprintf(stderr, "%s: shorter than a GET_INFO answer\n", path); return 2; }
+    xt_getinfo_t g;
+    memcpy(&g, buf, sizeof(g));
+    if (n - XT_GETINFO_LEN != g.size) { fprintf(stderr, "%s: %zu bytes of entries, GET_INFO said %u\n", path, n - XT_GETINFO_LEN, g.size); return 2; }
+    firc_xt_info_t info;
+    info.valid_hooks = g.valid_hooks;
+    memcpy(info.hook_entry, g.hook_entry, sizeof(info.hook_entry));
+    memcpy(info.underflow, g.underflow, sizeof(info.underflow));
+    info.num_entries = g.num_entries;
+    info.size = g.size;
+    firc_xt_table_t t;
+    const char *why = NULL;
+    firc_ipt_proto_t fam = strcmp(fam_text, "v6") == 0 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4;
+    if (firc_xt_parse(fam, &info, buf + XT_GETINFO_LEN, &t, &why) != FIRC_OK) {
+        fprintf(stderr, "refused: %s\n", why != NULL ? why : "out of memory");
+        return 1;
+    }
+    for (size_t i = 0; i < t.n_chains; i++) { printf("%s %zu\n", t.chains[i].name, t.chains[i].n_rules); }
+    firc_xt_table_clear(&t);
+    return 0;
+}
+
+static int do_xtnat(const char *what, const char *fam_text) {
+    firc_log_set_fd(STDERR_FILENO);
+    firc_log_set_level(FIRC_LOG_DEBUG);
+    bool v6 = strcmp(fam_text, "v6") == 0;
+    if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
+    firc_xt_t *xt = firc_xt_real_new(v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4);
+    if (xt == NULL) {
+        perror("x_tables raw socket");
+        return 3;
+    }
+    if (strcmp(what, "probe") == 0) {
+        int rc = firc_xt_probe(xt) == FIRC_OK ? 0 : 5;
+        firc_xt_free(xt);
+        return rc;
+    }
+    static const char *const j1_4[] = {"-d", "198.18.0.0/15", "-j", "FIRC_DNAT"};
+    static const char *const j1_6[] = {"-d", "fd37:9a00::/48", "-j", "FIRC_DNAT"};
+    static const char *const m1[] = {"-o", "tun0", "-m", "mark", "--mark", "0x10000/0xff0000", "-j", "MASQUERADE"};
+    static const char *const j2[] = {"-j", "FIRC_g1"};
+    bool out = strcmp(what, "output") == 0;
+    firc_ipt_proto_t fam = v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4;
+    uint8_t fake[2][16] = {{198, 18, 0, 1}, {198, 18, 0, 2}}, real[2][16] = {{9, 9, 9, 9}, {9, 9, 9, 8}};
+    if (v6) {
+        for (int i = 0; i < 2; i++) {
+            const uint8_t f6[16] = {0xfd, 0x37, 0x9a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (uint8_t)(i + 1)};
+            const uint8_t r6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (uint8_t)(9 - i)};
+            memcpy(fake[i], f6, 16);
+            memcpy(real[i], r6, 16);
+        }
+    }
+    firc_xt_block_t dnat;
+    firc_xt_block_init(&dnat);
+    firc_err_t err = FIRC_OK;
+    for (int i = 0; i < 2 && err == FIRC_OK; i++) { err = firc_xt_block_add_dnat(&dnat, fam, fake[i], real[i]); }
+    firc_ipt_rule_t *masq[1] = {firc_ipt_rule_new(m1, 8)};
+    firc_xt_patch_op_t pre = {FIRC_IPT_OP_APPEND, 0, firc_ipt_rule_new(v6 ? j1_6 : j1_4, 4)};
+    firc_xt_patch_op_t post = {FIRC_IPT_OP_APPEND, 0, firc_ipt_rule_new(j2, 2)};
+    firc_xt_stage_chain_t chains[] = {
+        {"FIRC_DNAT", FIRC_XT_STAGE_OVERRIDE, NULL, 0, NULL, 0, &dnat},
+        {out ? "OUTPUT" : "PREROUTING", FIRC_XT_STAGE_PATCH, NULL, 0, &pre, 1, NULL},
+        {"FIRC_g1", FIRC_XT_STAGE_OVERRIDE, masq, 1, NULL, 0, NULL},
+        {"POSTROUTING", FIRC_XT_STAGE_PATCH, NULL, 0, &post, 1, NULL},
+    };
+    bool sweep = strcmp(what, "sweep") == 0;
+    firc_xt_stage_t stage = {chains, sweep ? 0 : out ? 2 : 4, sweep ? "FIRC_" : NULL, false};
+    if (err == FIRC_OK) {
+        err = sweep || out || strcmp(what, "write") == 0 ? firc_xt_commit(xt, "nat", &stage, NULL) : FIRC_ERR_INVAL;
+    }
+    firc_xt_block_free(&dnat);
+    firc_ipt_rule_free(masq[0]);
+    firc_ipt_rule_free(pre.rule);
+    firc_ipt_rule_free(post.rule);
+    firc_xt_free(xt);
+    return err == FIRC_OK ? 0 : err == FIRC_ERR_AGAIN ? 4 : 5;
+}
+
+static int do_barrier(const char *fam_text) {
+    firc_log_set_fd(STDERR_FILENO);
+    bool v6 = strcmp(fam_text, "v6") == 0;
+    if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
+    firc_xt_t *xt = firc_xt_real_new(v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4);
+    if (xt == NULL) {
+        perror("x_tables raw socket");
+        return 3;
+    }
+    firc_ipt_t *ipt = firc_ipt_new(xt, "FIRC_");
+    if (ipt == NULL) { return 3; }
+    firc_ip_t base;
+    uint8_t len = 0;
+    if (!firc_ip_parse_cidr(v6 ? "fd37:9a00::/48" : "198.18.0.0/15", &base, &len)) { return 3; }
+    firc_err_t err = firc_xt_probe(xt);
+    if (err == FIRC_OK) { err = firc_netfilter_register_base_chains(ipt, NULL); }
+    if (err == FIRC_OK) { err = firc_pool_reject_build_rules(ipt, "FIRC_", &base, len); }
+    if (err == FIRC_OK) { err = firc_ipt_commit(ipt); }
+    firc_ipt_free(ipt);
+    if (err != FIRC_OK) {
+        fprintf(stderr, "barrier: %s\n", firc_err_str(err));
+        return 5;
+    }
+    return 0;
+}
+
+static int do_xtdump(const char *table, const char *fam_text) {
+    bool v6 = strcmp(fam_text, "v6") == 0;
+    if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
+    int fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW);
+    if (fd < 0) { perror("raw socket"); return 3; }
+    int level = v6 ? XT_SOL_IPV6 : XT_SOL_IP;
+    xt_getinfo_t g;
+    memset(&g, 0, sizeof(g));
+    snprintf(g.name, sizeof(g.name), "%s", table);
+    socklen_t gl = sizeof(g);
+    if (getsockopt(fd, level, XT_SO_GET_INFO, &g, &gl) != 0) { perror("GET_INFO"); close(fd); return 5; }
+    size_t len = XT_GET_ENTRIES_HDR_LEN + g.size;
+    uint8_t *buf = calloc(1, len);
+    if (buf == NULL) { close(fd); return 5; }
+    memcpy(buf, g.name, sizeof(g.name));
+    memcpy(buf + offsetof(xt_get_entries_hdr_t, size), &g.size, sizeof(g.size));
+    socklen_t bl = (socklen_t)len;
+    int rc = getsockopt(fd, level, XT_SO_GET_ENTRIES, buf, &bl);
+    close(fd);
+    if (rc != 0) { perror("GET_ENTRIES"); free(buf); return 5; }
+    firc_xt_info_t info;
+    info.valid_hooks = g.valid_hooks;
+    memcpy(info.hook_entry, g.hook_entry, sizeof(info.hook_entry));
+    memcpy(info.underflow, g.underflow, sizeof(info.underflow));
+    info.num_entries = g.num_entries;
+    info.size = g.size;
+    char *text = firc_test_xt_print(v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4, table, &info, buf + XT_GET_ENTRIES_HDR_LEN);
+    free(buf);
+    if (text == NULL) { fprintf(stderr, "%s: the printer refused the table\n", table); return 5; }
+    fputs(text, stdout);
+    free(text);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc == 5 && strcmp(argv[1], "send") == 0) { return do_send(argv[2], argv[3], argv[4]); }
+    if ((argc == 5 || argc == 6) && strcmp(argv[1], "send") == 0) {
+        return do_send(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : NULL);
+    }
+    if (argc == 3 && strcmp(argv[1], "barrier") == 0) { return do_barrier(argv[2]); }
     if ((argc == 4 || argc == 5) && strcmp(argv[1], "serve") == 0) {
         return do_serve(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
     }
     if (argc == 4 && strcmp(argv[1], "ask") == 0) { return do_ask(argv[2], argv[3]); }
     if (argc >= 3 && strcmp(argv[1], "devchain") == 0) { return do_devchain(argc, argv); }
-    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
-                    "devchain <field> [...]\n", argv[0]);
+    if (argc == 4 && strcmp(argv[1], "xtparse") == 0) { return do_xtparse(argv[2], argv[3]); }
+    if (argc == 4 && strcmp(argv[1], "xtnat") == 0) { return do_xtnat(argv[2], argv[3]); }
+    if (argc == 4 && strcmp(argv[1], "xtdump") == 0) { return do_xtdump(argv[2], argv[3]); }
+    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> [source port] | barrier v4|v6 | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
+                    "devchain <field> [...] | xtparse <file> v4|v6 | xtnat write|output|sweep|probe v4|v6 | xtdump <table> v4|v6\n", argv[0]);
     return 64;
 }

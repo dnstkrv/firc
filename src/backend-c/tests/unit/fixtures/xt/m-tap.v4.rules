@@ -1,0 +1,6 @@
+*mangle
+:FIRC_TAP - [0:0]
+-A FIRC_TAP -i br0 -m conntrack --ctstate NEW ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 -m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 5 --nflog-threshold 1
+-A FIRC_TAP -i br0 -m conntrack ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 -p tcp --dport 443 --tcp-flags SYN,ACK ACK -m length --length 100: -m connbytes --connbytes 2:8 --connbytes-dir original --connbytes-mode packets -m string --algo bm --hex-string |1603| --from 40 --to 84 -m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 4 --nflog-threshold 1
+-I FORWARD 1 -j FIRC_TAP
+COMMIT

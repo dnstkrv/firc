@@ -1010,9 +1010,10 @@ firc_err_t firc_rtnl_alloc_mark_field_for(firc_rtnl_t *r, const char *owner, uin
     if (err == FIRC_OK) {
         /* Only the group field of an existing rule's mark counts. */
         bool taken[FIRC_MARK_MAX_GROUPS + 1] = {false};
+        uint32_t want = hint_for(r, owner);
         for (size_t i = 0; i < ctx.marks.n; i++) {
             uint32_t f = (ctx.marks.vals[i] & FIRC_MARK_GROUP_MASK) >> FIRC_MARK_GROUP_SHIFT;
-            if (f >= 1 && f <= FIRC_MARK_MAX_GROUPS) { taken[f] = true; }
+            if (f >= 1 && f <= FIRC_MARK_MAX_GROUPS && f != want) { taken[f] = true; }
         }
         /* Every other owner's field is reserved, live or not, so an added group cannot take it. */
         for (size_t i = 0; i < r->n_hints; i++) {
@@ -1022,7 +1023,6 @@ firc_err_t firc_rtnl_alloc_mark_field_for(firc_rtnl_t *r, const char *owner, uin
         }
 
         uint32_t f = 0;
-        uint32_t want = hint_for(r, owner);
         if (want >= 1 && want <= FIRC_MARK_MAX_GROUPS && !taken[want]) {
             f = want;
         } else {

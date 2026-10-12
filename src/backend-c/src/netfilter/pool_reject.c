@@ -1,4 +1,5 @@
 #include "firc/pool_reject.h"
+#include "firc/mark.h"
 
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -64,6 +65,12 @@ firc_err_t firc_pool_reject_build_rules(firc_ipt_t *ipt, const char *chain_prefi
         return FIRC_ERR_INVAL;
     }
     firc_err_t err = firc_ipt_register_chain_override(ipt, "filter", chain);
+    if (err != FIRC_OK) { return err; }
+    char handled[32];
+    snprintf(handled, sizeof(handled), "0x%x/0x%x", FIRC_MARK_HANDLED, FIRC_MARK_HANDLED);
+    const char *unmarked[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark", handled,
+                              "-m", "mark", "!", "--mark", handled, "-j", "DROP"};
+    err = firc_ipt_append(ipt, "filter", chain, unmarked, 15);
     if (err != FIRC_OK) { return err; }
     const char *tcp[] = {"-d", cidr, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"};
     err = firc_ipt_append(ipt, "filter", chain, tcp, 8);

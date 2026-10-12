@@ -1,71 +1,29 @@
 #include "firc/netfilter_cleaner.h"
 
 #include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
+#include <time.h>
 
 #include "firc/pool_reject.h"
 
-/* The barrier survives every sweep; the next pass rewrites it in place. */
-static bool is_barrier_chain(const char *chain) {
-    size_t n = strlen(chain), m = strlen(FIRC_POOL_REJECT_CHAIN_SUFFIX);
-    return n >= m && strcmp(chain + n - m, FIRC_POOL_REJECT_CHAIN_SUFFIX) == 0;
-}
-
-static firc_err_t clean_one(firc_ipt_t *ipt, const char *chain_prefix, bool keep_barrier) {
-    if (!ipt) { return FIRC_OK; }
-
-    char jump[128];
-    snprintf(jump, sizeof(jump), "-j %s", chain_prefix);
-    size_t prefix_len = strlen(chain_prefix);
-
-    firc_ipt_rules_snapshot_t *snap;
-    firc_err_t err = firc_ipt_get_current_rules(ipt, &snap);
-    if (err != FIRC_OK) { return err; }
-
-    for (size_t ti = 0; ti < snap->n_tables && err == FIRC_OK; ti++) {
-        const firc_ipt_table_rules_t *t = &snap->tables[ti];
-        for (size_t ci = 0; ci < t->n_chains && err == FIRC_OK; ci++) {
-            const firc_ipt_chain_rules_t *c = &t->chains[ci];
-
-            if (strncmp(c->chain_name, chain_prefix, prefix_len) == 0) {
-                if (keep_barrier && is_barrier_chain(c->chain_name)) { continue; }
-                err = firc_ipt_register_chain_delete(ipt, t->table_name, c->chain_name);
-                continue;
-            }
-
-            for (size_t ri = 0; ri < c->n_rules && err == FIRC_OK; ri++) {
-                firc_ipt_rule_t *r = c->rules[ri];
-                if (!firc_ipt_rule_contains(r, jump)) { continue; }
-                if (keep_barrier && r->n_parts >= 2 && is_barrier_chain(r->parts[r->n_parts - 1])) { continue; }
-
-                err = firc_ipt_delete(ipt, t->table_name, c->chain_name,
-                                    (const char *const *)r->parts, r->n_parts);
-                if (firc_ipt_err_is_chain_not_initialized(err)) {
-                    err = firc_ipt_register_chain_patch(ipt, t->table_name, c->chain_name);
-                    if (err == FIRC_OK) {
-                        err = firc_ipt_delete(ipt, t->table_name, c->chain_name,
-                                           (const char *const *)r->parts, r->n_parts);
-                    }
-                }
-            }
-        }
+static firc_err_t clean_one(firc_ipt_t *ipt, const firc_fakeip_t *pool, unsigned family) {
+    if (ipt == NULL) { return FIRC_OK; }
+    firc_ipt_discard(ipt);
+    firc_err_t err = firc_netfilter_register_base_chains(ipt, NULL);
+    firc_ip_t base;
+    uint8_t len = 0;
+    if (err == FIRC_OK && pool != NULL && firc_fakeip_pool_prefix(pool, family, &base, &len)) {
+        err = firc_pool_reject_build_rules(ipt, firc_ipt_prefix(ipt), &base, len);
     }
-
-    firc_ipt_rules_snapshot_free(snap);
-    if (err != FIRC_OK) { return err; }
-    return firc_ipt_commit(ipt);
+    if (err != FIRC_OK) {
+        firc_ipt_discard(ipt);
+        return err;
+    }
+    return firc_ipt_commit_full(ipt);
 }
 
-firc_err_t firc_netfilter_clean_iptables(firc_ipt_t *ipt4, firc_ipt_t *ipt6, const char *chain_prefix) {
-    firc_err_t e1 = clean_one(ipt4, chain_prefix, true);
-    firc_err_t e2 = clean_one(ipt6, chain_prefix, true);
-    return e1 != FIRC_OK ? e1 : e2;
-}
-
-firc_err_t firc_netfilter_purge_iptables(firc_ipt_t *ipt4, firc_ipt_t *ipt6, const char *chain_prefix) {
-    firc_err_t e1 = clean_one(ipt4, chain_prefix, false);
-    firc_err_t e2 = clean_one(ipt6, chain_prefix, false);
+firc_err_t firc_netfilter_clean(firc_ipt_t *ipt4, firc_ipt_t *ipt6, const firc_fakeip_t *pool) {
+    firc_err_t e1 = clean_one(ipt4, pool, FIRC_FAM_V4);
+    firc_err_t e2 = clean_one(ipt6, pool, FIRC_FAM_V6);
     return e1 != FIRC_OK ? e1 : e2;
 }
 
@@ -89,4 +47,34 @@ firc_err_t firc_netfilter_register_base_chains(firc_ipt_t *ipt4, firc_ipt_t *ipt
         }
     }
     return FIRC_OK;
+}
+
+#define RETRY_ATTEMPTS 3
+
+firc_err_t firc_netfilter_retry_races(firc_err_t (*step)(void *ud), void *ud) {
+    firc_err_t err = FIRC_ERR_AGAIN;
+    for (int attempt = 0; attempt < RETRY_ATTEMPTS && (err == FIRC_ERR_AGAIN || err == FIRC_ERR_CANCELED);
+         attempt++) {
+        if (attempt > 0) {
+            struct timespec pause = {0, 200 * 1000 * 1000};
+            nanosleep(&pause, NULL);
+        }
+        err = step(ud);
+    }
+    return err;
+}
+
+typedef struct {
+    firc_ipt_t *ipt4, *ipt6;
+    const firc_fakeip_t *pool;
+} clean_args_t;
+
+static firc_err_t clean_step(void *ud) {
+    const clean_args_t *a = ud;
+    return firc_netfilter_clean(a->ipt4, a->ipt6, a->pool);
+}
+
+firc_err_t firc_netfilter_clean_retrying(firc_ipt_t *ipt4, firc_ipt_t *ipt6, const firc_fakeip_t *pool) {
+    clean_args_t a = {ipt4, ipt6, pool};
+    return firc_netfilter_retry_races(clean_step, &a);
 }

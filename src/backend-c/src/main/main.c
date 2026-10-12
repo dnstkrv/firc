@@ -35,6 +35,7 @@
 #include "firc/groups.h"
 #include "firc/httpd.h"
 #include "firc/iptables.h"
+#include "firc/xtables.h"
 #include "firc/events.h"
 #include "firc/log.h"
 #include "firc/listen.h"
@@ -798,6 +799,36 @@ static void flush_stale_group_marks(struct daemon *d) {
     }
 }
 
+static firc_ipt_t *open_engine(firc_ipt_proto_t fam, bool purge, const char *prefix, bool *no_family) {
+    *no_family = false;
+    const char *name = fam == FIRC_IPT_PROTO_IPV6 ? "ipv6" : "ipv4";
+    firc_xt_t *xt = firc_xt_real_new(fam);
+    if (!xt) {
+        int e = errno;
+        *no_family = fam == FIRC_IPT_PROTO_IPV6 && e == EAFNOSUPPORT;
+        if (*no_family && purge) {
+            FIRC_INFO("purge: this kernel has no IPv6, its tables are skipped");
+        } else if (*no_family) {
+            FIRC_ERROR("cannot open x_tables for ipv6: this kernel has no IPv6; set netfilter.disableIPv6 to run without it");
+        } else {
+            FIRC_ERROR("cannot open x_tables for %s: %s", name, strerror(e));
+        }
+        return NULL;
+    }
+    if (firc_xt_set_dump_dir(xt, FIRC_APP_RUN_DIR) != FIRC_OK) {
+        FIRC_ERROR("netfilter helper init fail: out of memory");
+        firc_xt_free(xt);
+        return NULL;
+    }
+    if (!purge) { (void)firc_xt_probe(xt); }
+    firc_ipt_t *ipt = firc_ipt_new(xt, prefix);
+    if (!ipt) {
+        FIRC_ERROR("netfilter helper init fail: out of memory");
+        firc_xt_free(xt);
+    }
+    return ipt;
+}
+
 int main(int argc, char **argv)
 {
     /* init pipes stdout into logger: a dead reader must cost a dropped line, not the daemon. */
@@ -956,34 +987,18 @@ int main(int argc, char **argv)
     }
 
     if (!cfg.app.netfilter.disable_ipv4 || purge) {
-        firc_ipt_executable_t *exe = firc_ipt_executable_real_new(FIRC_IPT_PROTO_IPV4);
-        if (!exe) {
-            FIRC_ERROR("failed to create iptables executable (ipv4)");
-            daemon_teardown(&d);
-            firc_config_clear(&cfg);
-            return 1;
-        }
-        d.ipt4 = firc_ipt_new(exe);
+        bool no_family = false;
+        d.ipt4 = open_engine(FIRC_IPT_PROTO_IPV4, purge, cfg.app.netfilter.iptables.chain_prefix, &no_family);
         if (!d.ipt4) {
-            firc_ipt_executable_free(exe);
-            FIRC_ERROR("netfilter helper init fail: out of memory");
             daemon_teardown(&d);
             firc_config_clear(&cfg);
             return 1;
         }
     }
     if (!cfg.app.netfilter.disable_ipv6 || purge) {
-        firc_ipt_executable_t *exe = firc_ipt_executable_real_new(FIRC_IPT_PROTO_IPV6);
-        if (!exe) {
-            FIRC_ERROR("failed to create iptables executable (ipv6)");
-            daemon_teardown(&d);
-            firc_config_clear(&cfg);
-            return 1;
-        }
-        d.ipt6 = firc_ipt_new(exe);
-        if (!d.ipt6) {
-            firc_ipt_executable_free(exe);
-            FIRC_ERROR("netfilter helper init fail: out of memory");
+        bool no_family = false;
+        d.ipt6 = open_engine(FIRC_IPT_PROTO_IPV6, purge, cfg.app.netfilter.iptables.chain_prefix, &no_family);
+        if (!d.ipt6 && !(purge && no_family)) {
             daemon_teardown(&d);
             firc_config_clear(&cfg);
             return 1;
@@ -1009,38 +1024,6 @@ int main(int argc, char **argv)
         firc_config_clear(&cfg);
         return err == FIRC_OK ? 0 : 1;
     }
-
-    err = firc_netfilter_clean_iptables(d.ipt4, d.ipt6,
-                                      cfg.app.netfilter.iptables.chain_prefix);
-    if (err != FIRC_OK) {
-        FIRC_ERROR("failed to clear iptables: %s", firc_err_str(err));
-        daemon_teardown(&d);
-        firc_config_clear(&cfg);
-        return 1;
-    }
-    /* Without conntrack every flush is a no-op, not an error. */
-    d.ct = firc_ct_open();
-    if (d.ct == NULL) {
-        FIRC_WARN("conntrack is not available: a group's live flows will keep their old route until they end");
-    }
-    d.rtnl = firc_rtnl_open();
-    if (d.rtnl == NULL) {
-        FIRC_ERROR("failed to open rtnetlink");
-        daemon_teardown(&d);
-        firc_config_clear(&cfg);
-        return 1;
-    }
-
-    /* Stale ip rules of a killed instance would exhaust the 8-bit mark group field: swept at every start. */
-    size_t stale = 0;
-    err = firc_rtnl_clean_stale_rules(d.rtnl, &stale);
-    if (err != FIRC_OK) {
-        FIRC_WARN("failed to clear stale ip rules: %s", firc_err_str(err));
-    } else if (stale > 0) {
-        FIRC_INFO("removed %zu ip rule(s) left by a previous instance", stale);
-    }
-    (void)firc_stable_fields_start(&d.fields, FIRC_FIELDS_STATE_PATH, d.rtnl, d.ct, &cfg,
-                                   groups_file_exists(config_path));
 
     firc_fakeip_cfg_t pool_cfg;
     err = firc_fakeip_cfg_from_app(&cfg.app, FIRC_FAKEIP_V6_PREFIX_FILE, &pool_cfg);
@@ -1081,26 +1064,37 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    /* FORWARD reject barrier goes to both engines before anything else; the sweep left the old one in place. */
-    {
-        firc_ipt_t *engines[] = {d.ipt4, d.ipt6};
-        for (unsigned fam = 0; fam < 2 && err == FIRC_OK; fam++) {
-            firc_ip_t base;
-            uint8_t len = 0;
-            if (engines[fam] == NULL ||
-                !firc_fakeip_pool_prefix(d.pool, fam == 0 ? FIRC_FAM_V4 : FIRC_FAM_V6, &base, &len)) {
-                continue;
-            }
-            err = firc_pool_reject_build_rules(engines[fam], cfg.app.netfilter.iptables.chain_prefix, &base, len);
-            if (err == FIRC_OK) { err = firc_ipt_commit(engines[fam]); }
-        }
-        if (err != FIRC_OK) {
-            FIRC_ERROR("failed to write the pool reject barrier: %s", firc_err_str(err));
-            daemon_teardown(&d);
-            firc_config_clear(&cfg);
-            return 1;
-        }
+    err = firc_netfilter_clean_retrying(d.ipt4, d.ipt6, d.pool);
+    if (err != FIRC_OK) {
+        FIRC_ERROR("failed to clear iptables: %s", firc_err_str(err));
+        daemon_teardown(&d);
+        firc_config_clear(&cfg);
+        return 1;
     }
+    /* Without conntrack every flush is a no-op, not an error. */
+    d.ct = firc_ct_open();
+    if (d.ct == NULL) {
+        FIRC_WARN("conntrack is not available: a group's live flows will keep their old route until they end");
+    }
+    d.rtnl = firc_rtnl_open();
+    if (d.rtnl == NULL) {
+        FIRC_ERROR("failed to open rtnetlink");
+        daemon_teardown(&d);
+        firc_config_clear(&cfg);
+        return 1;
+    }
+
+    /* Stale ip rules of a killed instance would exhaust the 8-bit mark group field: swept at every start. */
+    size_t stale = 0;
+    err = firc_rtnl_clean_stale_rules(d.rtnl, &stale);
+    if (err != FIRC_OK) {
+        FIRC_WARN("failed to clear stale ip rules: %s", firc_err_str(err));
+    } else if (stale > 0) {
+        FIRC_INFO("removed %zu ip rule(s) left by a previous instance", stale);
+    }
+    (void)firc_stable_fields_start(&d.fields, FIRC_FIELDS_STATE_PATH, d.rtnl, d.ct, &cfg,
+                                   groups_file_exists(config_path));
+
     /* Before any address is issued: else a fake address leaves by the group's default route in the clear. */
     err = firc_pool_reject_install(d.rtnl, d.pool, RT_TABLE_MAIN, FIRC_POOL_REJECT_METRIC_MAIN);
     if (err != FIRC_OK) {

@@ -1,9 +1,15 @@
 #include "greatest.h"
 
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fake_iptables.h"
+#include "fake_xtables.h"
+#include "xt_golden.h"
+#include "firc/log.h"
 #include "firc/netfilter_cleaner.h"
 #include "firc/taprules.h"
 
@@ -38,79 +44,22 @@ static bool joined(firc_fake_ipt_t *f, const char *table, const char *chain, cha
     return true;
 }
 
-/* Catches: removing capture rules that are not there reported as an error. */
-TEST removing_nothing_is_not_an_error(void) {
-    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_remove(ipt, PREFIX));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
-    firc_ipt_free(ipt);
-    PASS();
-}
-
-/* Catches: a chain with only some of its rules or no jump read as still installed. */
-TEST half_the_rules_is_not_there(void) {
-    firc_fakeip_t *pool = make_pool();
-    ASSERT(pool != NULL);
-    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
-    const char *lan[] = {"br0"};
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
-
-    firc_fake_ipt_reset(fake);
-    static const char *jump_only[] = {"-j", TAP_CHAIN};
-    const char *const *seed[] = {jump_only};
-    const size_t lens[] = {2};
-    ASSERT_EQ(FIRC_OK,
-              firc_fake_ipt_set_initial_rules(fake, "mangle", "FORWARD", seed, lens, 1));
-
-    bool there = true;
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT_FALSEm("a jump to nothing is not watching", there);
-
-    firc_fake_ipt_reset(fake);
-    static const char *capture[] = {"-i", "br0", "-j", "NFLOG", "--nflog-group", "5"};
-    const char *const *chain_seed[] = {capture};
-    const size_t chain_lens[] = {6};
-    ASSERT_EQ(FIRC_OK,
-              firc_fake_ipt_set_initial_rules(fake, "mangle", TAP_CHAIN, chain_seed, chain_lens,
-                                              1));
-    there = true;
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT_FALSEm("a chain nothing jumps to sees no packets", there);
-
-    firc_fake_ipt_reset(fake);
-    ASSERT_EQ(FIRC_OK,
-              firc_fake_ipt_set_initial_rules(fake, "mangle", TAP_CHAIN, NULL, NULL, 0));
-    ASSERT_EQ(FIRC_OK,
-              firc_fake_ipt_set_initial_rules(fake, "mangle", "FORWARD", seed, lens, 1));
-    there = true;
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT_FALSEm("an empty chain is as deaf as no chain", there);
-
-    firc_ipt_free(ipt);
-    firc_fakeip_free(pool);
-    PASS();
-}
-
 TEST the_preflight_asks_about_the_rules_that_get_installed(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     ASSERT(ipt != NULL);
 
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_supported(ipt, PREFIX, pool, lan, 1));
-    const char *probe = firc_fake_ipt_restore_log(fake);
+    const char *probe = firc_fake_ipt_writes_log(fake);
     ASSERTm("the kernel was actually asked", probe != NULL);
     char asked[4096];
     snprintf(asked, sizeof(asked), "%s", probe);
     ASSERTm("and nothing of the probe is left",
             !firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN FIRC_TAP_PROBE_SUFFIX));
-    ASSERTm("no jump was written", strstr(asked, "FORWARD") == NULL);
+    ASSERTm("no jump was written", strstr(asked, "-A FORWARD -j " TAP_CHAIN) == NULL);
 
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
@@ -136,7 +85,7 @@ TEST the_capture_rules_go_in_a_chain_of_our_own(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     ASSERT(ipt != NULL);
 
     const char *lan[] = {"br0"};
@@ -149,13 +98,12 @@ TEST the_capture_rules_go_in_a_chain_of_our_own(void) {
                   "-m mark ! --mark 0x40000000/0x40000000 "
                   "-m limit --limit 500/sec --limit-burst 500 "
                   "-j NFLOG --nflog-group 5 --nflog-threshold 1\n"
-                  "-i br0 -m conntrack ! --ctorigdst 198.18.0.0/15 "
+                  "-i br0 -p tcp -m conntrack ! --ctorigdst 198.18.0.0/15 "
                   "-m mark ! --mark 0x40000000/0x40000000 "
-                  "-p tcp --dport 443 --tcp-flags SYN,ACK ACK "
-                  "-m length --length 100: "
-                  "-m connbytes --connbytes 2:8 --connbytes-dir original "
-                  "--connbytes-mode packets "
-                  "-m string --algo bm --hex-string |1603| --from 40 --to 84 "
+                  "-m tcp --dport 443 --tcp-flags SYN,ACK ACK "
+                  "-m length --length 100:65535 "
+                  "-m connbytes --connbytes 2:8 --connbytes-mode packets --connbytes-dir original "
+                  "-m string --hex-string \"|1603|\" --algo bm --from 40 --to 84 "
                   "-m limit --limit 500/sec --limit-burst 500 "
                   "-j NFLOG --nflog-group 4 --nflog-threshold 1",
                   buf);
@@ -173,7 +121,7 @@ TEST each_lan_interface_gets_its_own_pair_in_the_chain(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     ASSERT(ipt != NULL);
 
     const char *lan[] = {"br0", "br1"};
@@ -193,7 +141,7 @@ TEST each_lan_interface_gets_its_own_pair_in_the_chain(void) {
 TEST the_v6_engine_gets_the_v6_pool(void) {
     firc_fakeip_t *pool = make_pool();
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     ASSERT(ipt != NULL);
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
@@ -209,16 +157,17 @@ TEST the_v6_engine_gets_the_v6_pool(void) {
     PASS();
 }
 
-TEST removing_takes_the_chain_and_the_jump(void) {
+/* Catches: the capture's chain or its jump outliving a write that no longer stages them. */
+TEST a_write_without_the_capture_takes_the_chain_and_the_jump(void) {
     firc_fakeip_t *pool = make_pool();
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
     ASSERT(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
 
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_remove(ipt, PREFIX));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_register_base_chains(ipt, NULL));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
     ASSERT_FALSEm("the chain is gone", firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
 
@@ -235,34 +184,27 @@ TEST the_jump_goes_first_and_the_other_rules_stay(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_xt_info_t info;
+    uint8_t *blob = NULL;
+    ASSERT(firc_test_xt_read("m-firmware", FIRC_IPT_PROTO_IPV4, &info, &blob));
+    ASSERT(firc_fake_xt_load(firc_fake_ipt_xt(fake), "mangle", &info, blob));
+    free(blob);
 
-    static const char *rule_a[] = {"-j", "NDMMARK", "--set-xndmmark", "0x4/0x0"};
-    static const char *rule_b[] = {"-o", "ppp0", "-p", "tcp", "-j", "TCPMSS",
-                                   "--clamp-mss-to-pmtu"};
-    const char *const *seed[] = {rule_a, rule_b};
-    const size_t lens[] = {4, 7};
-    ASSERT_EQ(FIRC_OK,
-              firc_fake_ipt_set_initial_rules(fake, "mangle", "FORWARD", seed, lens, 2));
-
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
 
     char buf[1024];
     ASSERT(joined(fake, "mangle", "FORWARD", buf, sizeof(buf)));
-    ASSERT_STR_EQm("ours first, theirs untouched",
-                   "-j " TAP_CHAIN "\n"
-                   "-j NDMMARK --set-xndmmark 0x4/0x0\n"
-                   "-o ppp0 -p tcp -j TCPMSS --clamp-mss-to-pmtu",
-                   buf);
+    ASSERT_STR_EQm("ours first, theirs untouched", "-j " TAP_CHAIN "\n-j _NDM_QOS", buf);
 
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_remove(ipt, PREFIX));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_register_base_chains(ipt, NULL));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
     ASSERT(joined(fake, "mangle", "FORWARD", buf, sizeof(buf)));
-    ASSERT_STR_EQ("-j NDMMARK --set-xndmmark 0x4/0x0\n"
-                  "-o ppp0 -p tcp -j TCPMSS --clamp-mss-to-pmtu",
-                  buf);
+    ASSERT_STR_EQ("-j _NDM_QOS", buf);
+    ASSERT(joined(fake, "mangle", "_NDM_QOS", buf, sizeof(buf)));
+    ASSERT_STR_EQ("-o ppp0 -j RETURN", buf);
 
     firc_ipt_free(ipt);
     firc_fakeip_free(pool);
@@ -273,7 +215,7 @@ TEST installing_twice_leaves_one_pair(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
 
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
@@ -297,13 +239,13 @@ TEST installing_twice_leaves_one_pair(void) {
 TEST a_killed_capture_is_swept_by_the_daemons_own_cleaner(void) {
     firc_fakeip_t *pool = make_pool();
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
     ASSERT(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
 
-    ASSERT_EQ(FIRC_OK, firc_netfilter_clean_iptables(ipt, NULL, PREFIX));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean(ipt, NULL, NULL));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
 
     ASSERT_FALSEm("the chain a dead capture left is gone",
@@ -320,7 +262,7 @@ TEST a_killed_capture_is_swept_by_the_daemons_own_cleaner(void) {
 TEST a_firmware_rewrite_takes_the_rules_away(void) {
     firc_fakeip_t *pool = make_pool();
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     const char *lan[] = {"br0"};
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
@@ -330,38 +272,8 @@ TEST a_firmware_rewrite_takes_the_rules_away(void) {
     ASSERT_FALSEm("gone, with nothing said", firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
 
     ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
+    ASSERT_EQ(FIRC_OK, firc_ipt_commit_full(ipt));
     ASSERT(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
-
-    firc_ipt_free(ipt);
-    firc_fakeip_free(pool);
-    PASS();
-}
-
-TEST a_capture_can_tell_whether_its_rules_are_still_there(void) {
-    firc_fakeip_t *pool = make_pool();
-    ASSERT(pool != NULL);
-    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
-
-    bool there = true;
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT_FALSEm("nothing installed yet", there);
-
-    const char *lan[] = {"br0"};
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERTm("installed and jumped to", there);
-
-    firc_fake_ipt_reset(fake);
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT_FALSEm("taken, and the capture can see that", there);
-
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_install(ipt, PREFIX, pool, lan, 1));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
-    ASSERT_EQ(FIRC_OK, firc_tap_rules_present(ipt, PREFIX, &there));
-    ASSERT(there);
 
     firc_ipt_free(ipt);
     firc_fakeip_free(pool);
@@ -372,7 +284,7 @@ TEST install_refuses_what_build_refuses(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
 
     ASSERT_EQ(FIRC_ERR_INVAL, firc_tap_rules_install(ipt, PREFIX, pool, NULL, 0));
     ASSERT_EQ(FIRC_ERR_INVAL, firc_tap_rules_supported(ipt, PREFIX, pool, NULL, 0));
@@ -383,11 +295,95 @@ TEST install_refuses_what_build_refuses(void) {
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
     ASSERT_FALSEm("a refused install stages nothing",
                   firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
-    ASSERT_FALSEm("and FORWARD was never touched to add a jump",
-                  firc_fake_ipt_chain_exists(fake, "mangle", "FORWARD"));
+    char buf[256];
+    ASSERT(joined(fake, "mangle", "FORWARD", buf, sizeof(buf)));
+    ASSERT_STR_EQm("and FORWARD was never touched to add a jump", "", buf);
 
     firc_ipt_free(ipt);
     firc_fakeip_free(pool);
+    PASS();
+}
+
+/* Catches: the preflight trusting a dry run, so a kernel refusing NFLOG still gets a capture. */
+TEST a_kernel_that_refuses_the_write_refuses_the_capture(void) {
+    firc_fakeip_t *pool = make_pool();
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    ASSERT(pool != NULL && ipt != NULL);
+    firc_fake_ipt_refuse_rules_containing(fake, "NFLOG");
+    const char *lan[] = {"br0"};
+    ASSERT_EQ_FMT(FIRC_ERR_NOSYS, firc_tap_rules_supported(ipt, PREFIX, pool, lan, 1), "%d");
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN FIRC_TAP_PROBE_SUFFIX));
+    firc_ipt_free(ipt);
+    firc_fakeip_free(pool);
+    PASS();
+}
+
+/* Catches: the probe reusing the capture's chain or jump, or leaving its chain behind. */
+TEST an_accepted_probe_writes_nothing_that_stays(void) {
+    firc_fakeip_t *pool = make_pool();
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    ASSERT(pool != NULL && ipt != NULL);
+    char *forward_before = firc_fake_ipt_print(fake, "mangle");
+    char *before = firc_fake_xt_write_order(firc_fake_ipt_xt(fake));
+    const char *lan[] = {"br0"};
+    ASSERT_EQ_FMT(FIRC_OK, firc_tap_rules_supported(ipt, PREFIX, pool, lan, 1), "%d");
+    char *after = firc_fake_xt_write_order(firc_fake_ipt_xt(fake));
+    ASSERT_STR_EQ("mangle\nmangle\n", after + strlen(before));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN FIRC_TAP_PROBE_SUFFIX));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "mangle", TAP_CHAIN));
+    char *forward_after = firc_fake_ipt_print(fake, "mangle");
+    ASSERT_STR_EQ(forward_before, forward_after);
+    free(forward_before);
+    free(forward_after);
+    free(before);
+    free(after);
+    firc_ipt_free(ipt);
+    firc_fakeip_free(pool);
+    PASS();
+}
+
+/* Catches: the loader stopping at its first refused module, or not logging one. */
+TEST the_loader_names_each_module_the_kernel_refuses(void) {
+    char dir[64];
+    snprintf(dir, sizeof(dir), "/tmp/firc-probe-XXXXXX");
+    ASSERT(mkdtemp(dir) != NULL);
+    const char *names[] = {"nfnetlink_log.ko", "xt_string.ko"};
+    for (size_t i = 0; i < 2; i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        FILE *f = fopen(path, "w");
+        ASSERT(f != NULL);
+        fputs("not a module", f);
+        fclose(f);
+    }
+    char logpath[96];
+    snprintf(logpath, sizeof(logpath), "%s/calls.log", dir);
+    int fd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT(fd >= 0);
+    firc_log_set_fd(fd);
+    size_t loaded = firc_tap_load_modules(dir);
+    firc_log_set_fd(2);
+    close(fd);
+
+    ASSERT_EQ_FMT((size_t)0, loaded, "%zu");
+    char log[65536] = {0};
+    FILE *f = fopen(logpath, "r");
+    ASSERT(f != NULL);
+    size_t n = fread(log, 1, sizeof(log) - 1, f);
+    log[n] = '\0';
+    fclose(f);
+    for (size_t i = 0; i < 2; i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        unlink(path);
+    }
+    unlink(logpath);
+    rmdir(dir);
+    ASSERTm("the first refusal is named", strstr(log, "nfnetlink_log") != NULL);
+    ASSERTm("and the loader went on to the next", strstr(log, "xt_string") != NULL);
+    ASSERTm("a module with no file is not mentioned", strstr(log, "xt_NFLOG") == NULL);
     PASS();
 }
 
@@ -395,19 +391,18 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
-    RUN_TEST(removing_nothing_is_not_an_error);
-    RUN_TEST(half_the_rules_is_not_there);
-
     RUN_TEST(the_preflight_asks_about_the_rules_that_get_installed);
     RUN_TEST(the_capture_rules_go_in_a_chain_of_our_own);
     RUN_TEST(each_lan_interface_gets_its_own_pair_in_the_chain);
     RUN_TEST(the_v6_engine_gets_the_v6_pool);
-    RUN_TEST(removing_takes_the_chain_and_the_jump);
+    RUN_TEST(a_write_without_the_capture_takes_the_chain_and_the_jump);
     RUN_TEST(the_jump_goes_first_and_the_other_rules_stay);
     RUN_TEST(installing_twice_leaves_one_pair);
     RUN_TEST(a_killed_capture_is_swept_by_the_daemons_own_cleaner);
     RUN_TEST(a_firmware_rewrite_takes_the_rules_away);
-    RUN_TEST(a_capture_can_tell_whether_its_rules_are_still_there);
     RUN_TEST(install_refuses_what_build_refuses);
+    RUN_TEST(a_kernel_that_refuses_the_write_refuses_the_capture);
+    RUN_TEST(an_accepted_probe_writes_nothing_that_stays);
+    RUN_TEST(the_loader_names_each_module_the_kernel_refuses);
     GREATEST_MAIN_END();
 }

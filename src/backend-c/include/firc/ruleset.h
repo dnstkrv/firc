@@ -25,7 +25,7 @@ typedef struct firc_ruleset_lookup {
     bool (*policies_read)(void *ud);
 } firc_ruleset_lookup_t;
 
-/* All pointers borrowed and must outlive every ruleset built with them; pool, ct, lookup nullable. */
+/* All pointers borrowed and must outlive every ruleset built with them; pool, lookup nullable. */
 typedef struct firc_ruleset_deps {
     const firc_fakeip_t *pool;
     const firc_fakeip_snapshot_t *(*snap)(void *ud);
@@ -33,7 +33,6 @@ typedef struct firc_ruleset_deps {
     firc_ipt_t *ipt4;
     firc_ipt_t *ipt6;
     firc_rtnl_t *rtnl;
-    firc_ct_t *ct;
     const char *chain_prefix;
     uint32_t start_idx;
     const firc_ruleset_lookup_t *lookup;
@@ -64,10 +63,14 @@ void firc_ruleset_chain_name_for(const char *prefix, firc_id_t id, char *out, si
 /* "" when it does not fit in cap. */
 void firc_ruleset_devices_chain_name_for(const char *prefix, firc_id_t id, char *out, size_t cap);
 
-/* `mode` and `step` as firc_ipset_to_link_enable, plus "memory". */
-firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, firc_nf_write_t mode, const char **step);
-/* FIRC_FLOWS_KEEP unless the group's packets should stop going where they go. */
-firc_err_t firc_ruleset_disable(firc_ruleset_t *rs, firc_flows_t flows, firc_nf_write_t mode);
+/* `step` as firc_ipset_to_link_enable, plus "memory". */
+firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, const char **step);
+/* Ip rule and routes only; the next pass drops the chains, the app's queue the flows. */
+firc_err_t firc_ruleset_disable(firc_ruleset_t *rs);
+/* As firc_ruleset_disable, but its ip rules and routes stay: the link is handed back (NULL when none) to disable and free. */
+firc_ipset_to_link_t *firc_ruleset_disable_hold(firc_ruleset_t *rs);
+/* Whether the routed group put in the reply rule of its mark field. */
+bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs);
 
 /* Re-stages the chains for a full rebuild; ip rule and routes are left alone. No-op unless enabled. */
 firc_err_t firc_ruleset_prepare_iptables(firc_ruleset_t *rs);
@@ -92,9 +95,6 @@ const firc_nf_devices_t *firc_ruleset_devices(const firc_ruleset_t *rs);
 /* Test seam: proto is 0, IPPROTO_TCP or IPPROTO_UDP; ports in iptables form, "" for all. */
 typedef void (*firc_ruleset_plan_fn)(int family, const uint8_t *addr, uint8_t cidr, uint8_t proto, const char *ports,
                                      void *ud);
-
-/* Re-stages and commits the chains synchronously, for a daemon without a committer. No-op unless enabled. */
-firc_err_t firc_ruleset_rewrite_chains(firc_ruleset_t *rs);
 
 firc_err_t firc_ruleset_plan_subnets(const firc_group_t *g, firc_ruleset_plan_fn fn, void *ud);
 

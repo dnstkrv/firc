@@ -4,7 +4,6 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
-#include "firc/bytebuf.h"
 #include "firc/ifacename.h"
 #include "firc/log.h"
 #include "firc/mark.h"
@@ -104,36 +103,30 @@ firc_err_t firc_tap_rules_install(firc_ipt_t *ipt, const char *chain_prefix,
 
 typedef struct {
     unsigned want;
-    firc_bytebuf_t *buf;
-    const char *chain;
-    size_t found;
+    firc_ipt_rule_t **rules;
+    size_t found, cap;
     firc_err_t err;
 } probe_ctx_t;
 
 static void probe_one(void *ud, unsigned family, const char *const *args, size_t n_args) {
     probe_ctx_t *c = ud;
     if (family != c->want || c->err != FIRC_OK) { return; }
+    if (c->found == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 8;
+        firc_ipt_rule_t **grown = realloc(c->rules, cap * sizeof(*grown));
+        if (grown == NULL) {
+            c->err = FIRC_ERR_NOMEM;
+            return;
+        }
+        c->rules = grown;
+        c->cap = cap;
+    }
+    c->rules[c->found] = firc_ipt_rule_new(args, n_args);
+    if (c->rules[c->found] == NULL) {
+        c->err = FIRC_ERR_NOMEM;
+        return;
+    }
     c->found++;
-    c->err = firc_bytebuf_append_str(c->buf, "-A ");
-    if (c->err == FIRC_OK) { c->err = firc_bytebuf_append_str(c->buf, c->chain); }
-    for (size_t i = 0; i < n_args && c->err == FIRC_OK; i++) {
-        c->err = firc_bytebuf_append_str(c->buf, " ");
-        if (c->err == FIRC_OK) { c->err = firc_bytebuf_append_str(c->buf, args[i]); }
-    }
-    if (c->err == FIRC_OK) { c->err = firc_bytebuf_append_str(c->buf, "\n"); }
-}
-
-/* Its own write: the rules must reach the kernel before this takes the chain away again. */
-static void probe_takedown(firc_ipt_t *ipt, const char *probe) {
-    char buf[320];
-    int n = snprintf(buf, sizeof(buf), "*mangle\n-F %s\n-X %s\nCOMMIT\n", probe, probe);
-    if (n < 0 || (size_t)n >= sizeof(buf)) { return; }
-    firc_err_t err = firc_ipt_write_transcript(ipt, (const uint8_t *)buf, (size_t)n);
-    if (err != FIRC_OK) {
-        FIRC_WARN("the capture's probe chain %s was not taken away (%s); the next full "
-                  "netfilter pass sweeps it",
-                  probe, firc_err_str(err));
-    }
 }
 
 firc_err_t firc_tap_rules_supported(firc_ipt_t *ipt, const char *chain_prefix,
@@ -147,80 +140,15 @@ firc_err_t firc_tap_rules_supported(firc_ipt_t *ipt, const char *chain_prefix,
     int pn = snprintf(probe, sizeof(probe), "%s%s", chain, FIRC_TAP_PROBE_SUFFIX);
     if (pn < 0 || (size_t)pn >= sizeof(probe)) { return FIRC_ERR_INVAL; }
 
-    firc_bytebuf_t buf;
-    firc_bytebuf_init_bounded(&buf, 8192);
-    probe_ctx_t ctx = {firc_ipt_proto(ipt) == FIRC_IPT_PROTO_IPV6 ? FIRC_FAM_V6 : FIRC_FAM_V4,
-                       &buf, probe, 0, FIRC_OK};
-    err = firc_bytebuf_append_str(&buf, "*mangle\n:");
-    if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, probe); }
-    if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, " - [0:0]\n"); }
-    if (err == FIRC_OK) { err = firc_tap_rules_build(pool, lan, n_lan, probe_one, &ctx); }
+    probe_ctx_t ctx = {firc_ipt_proto(ipt) == FIRC_IPT_PROTO_IPV6 ? FIRC_FAM_V6 : FIRC_FAM_V4, NULL, 0, 0, FIRC_OK};
+    err = firc_tap_rules_build(pool, lan, n_lan, probe_one, &ctx);
     if (err == FIRC_OK) { err = ctx.err; }
-    if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, "COMMIT\n"); }
-    if (err != FIRC_OK) {
-        firc_bytebuf_free(&buf);
-        return err;
+    if (err == FIRC_OK && ctx.found > 0) {
+        err = firc_ipt_probe_chain(ipt, "mangle", probe, ctx.rules, ctx.found);
+        if (err == FIRC_ERR_IO) { err = FIRC_ERR_NOSYS; }
     }
-    /* found == 0 means the pool has no prefix for this family: nothing to ask about is not a refusal. */
-    if (ctx.found == 0) {
-        firc_bytebuf_free(&buf);
-        return FIRC_OK;
-    }
-
-    /* A real write, not --test: 1.4.21's dry run never asks the kernel module. */
-    err = firc_ipt_write_transcript(ipt, buf.data, buf.len);
-    firc_bytebuf_free(&buf);
-    if (err == FIRC_OK) { probe_takedown(ipt, probe); }
-    if (err == FIRC_ERR_IO) { return FIRC_ERR_NOSYS; }
-    return err;
-}
-
-firc_err_t firc_tap_rules_present(firc_ipt_t *ipt, const char *chain_prefix, bool *out) {
-    if (ipt == NULL || out == NULL) { return FIRC_ERR_INVAL; }
-    *out = false;
-    char chain[128];
-    firc_err_t err = tap_chain(chain_prefix, chain, sizeof(chain));
-    if (err != FIRC_OK) { return err; }
-
-    firc_ipt_rules_snapshot_t *snap = NULL;
-    err = firc_ipt_get_current_rules(ipt, &snap);
-    if (err != FIRC_OK) { return err; }
-
-    const firc_ipt_table_rules_t *mangle = firc_ipt_rules_snapshot_find_table(snap, "mangle");
-    const firc_ipt_chain_rules_t *ours =
-        mangle ? firc_ipt_table_rules_find_chain(mangle, chain) : NULL;
-    const firc_ipt_chain_rules_t *forward =
-        mangle ? firc_ipt_table_rules_find_chain(mangle, "FORWARD") : NULL;
-
-    /* Both: a chain left declared but empty by a firmware rewrite is just as deaf as a missing one. */
-    bool jumped = false;
-    if (forward != NULL) {
-        char jump[160];
-        snprintf(jump, sizeof(jump), "-j %s", chain);
-        for (size_t i = 0; i < forward->n_rules && !jumped; i++) {
-            jumped = firc_ipt_rule_contains(forward->rules[i], jump);
-        }
-    }
-    *out = ours != NULL && ours->n_rules > 0 && jumped;
-
-    firc_ipt_rules_snapshot_free(snap);
-    return FIRC_OK;
-}
-
-firc_err_t firc_tap_rules_remove(firc_ipt_t *ipt, const char *chain_prefix) {
-    if (ipt == NULL) { return FIRC_ERR_INVAL; }
-    char chain[128];
-    firc_err_t err = tap_chain(chain_prefix, chain, sizeof(chain));
-    if (err != FIRC_OK) { return err; }
-
-    err = firc_ipt_register_chain_delete(ipt, "mangle", chain);
-    if (err != FIRC_OK) { return err; }
-
-    /* The jump may not be there: a capture that failed half way, or one stopped twice, is ordinary. */
-    err = firc_ipt_register_chain_patch(ipt, "mangle", "FORWARD");
-    if (err != FIRC_OK) { return err; }
-    const char *jump[] = {"-j", chain};
-    err = firc_ipt_delete(ipt, "mangle", "FORWARD", jump, 2);
+    for (size_t i = 0; i < ctx.found; i++) { firc_ipt_rule_free(ctx.rules[i]); }
+    free(ctx.rules);
     return err;
 }
 

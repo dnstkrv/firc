@@ -9,7 +9,7 @@ firc_err_t firc_instance_lock(const char *path, int *fd_out) {
     if (fd_out == NULL) { return FIRC_ERR_INVAL; }
     *fd_out = -1;
     if (path == NULL) { return FIRC_ERR_INVAL; }
-    /* O_CLOEXEC: forked children (iptables-restore, socat) must not inherit the lock. */
+    /* O_CLOEXEC: forked children (socat, tunvless) must not inherit the lock. */
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     /* A read-only run dir must not stop the daemon: flock needs no writable descriptor. */
     if (fd < 0 && (errno == EROFS || errno == EACCES)) { fd = open(path, O_RDONLY | O_CLOEXEC); }

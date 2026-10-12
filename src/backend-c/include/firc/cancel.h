@@ -7,7 +7,7 @@
 
 typedef struct firc_cancel firc_cancel_t;
 
-/* NULL on failure (OOM or pipe exhaustion). */
+/* NULL when memory runs out. */
 firc_cancel_t *firc_cancel_new(void);
 void firc_cancel_free(firc_cancel_t *c);
 
@@ -19,8 +19,5 @@ void firc_cancel_clear(firc_cancel_t *c);
 
 /* NULL-safe: an absent token is never raised. */
 bool firc_cancel_raised(const firc_cancel_t *c);
-
-/* Readable exactly while raised, for a poll() set; -1 when c is NULL. */
-int firc_cancel_fd(const firc_cancel_t *c);
 
 #endif

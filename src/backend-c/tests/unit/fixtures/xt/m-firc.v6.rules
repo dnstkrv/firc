@@ -1,0 +1,27 @@
+*mangle
+:FIRC_g1 - [0:0]
+:FIRC_g2 - [0:0]
+:FIRC_g2D - [0:0]
+-A FIRC_g1 -m conntrack --ctdir REPLY -j RETURN
+-A FIRC_g1 -d fd37:9a00::/64 -j MARK --set-xmark 0x40010000/0x40ff0000
+-A FIRC_g1 -d fd37:9a00::/64 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A FIRC_g1 -d fd37:9a00:0:5::/64 -j MARK --set-xmark 0x40010000/0x40ff0000
+-A FIRC_g1 -d fd37:9a00:0:5::/64 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A FIRC_g1 -d 2001:db8:20::/48 -p tcp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -m tcp --dport 443 -j MARK --set-xmark 0x40010000/0x40ff0000
+-A FIRC_g1 -d 2001:db8:20::/48 -p tcp -m conntrack --ctdir ORIGINAL -m tcp --dport 443 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A FIRC_g1 -d 2001:db8:30::/48 -p udp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -m multiport --dports 53,1000:2000,5353 -j MARK --set-xmark 0x40010000/0x40ff0000
+-A FIRC_g1 -d 2001:db8:30::/48 -p udp -m conntrack --ctdir ORIGINAL -m multiport --dports 53,1000:2000,5353 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A FIRC_g1 -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -j MARK --set-xmark 0x40010000/0x40ff0000
+-A FIRC_g1 -m conntrack --ctdir ORIGINAL -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A FIRC_g2 -m conntrack --ctdir REPLY -j RETURN
+-A FIRC_g2 -d fd37:9a00:0:1::/64 -j FIRC_g2D
+-A FIRC_g2 -d 2001:db8:40::/48 -p udp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -m udp --dport 5000:5100 -j FIRC_g2D
+-A FIRC_g2D -s fd00:1::50/128 -j RETURN
+-A FIRC_g2D -m mac --mac-source 02:00:00:00:00:0A -j RETURN
+-A FIRC_g2D -m mac --mac-source 02:00:00:00:00:0B -j MARK --set-xmark 0x40020000/0x40ff0000
+-A FIRC_g2D -m mark --mark 0xf00faaa/0xbf00ffff -j MARK --set-xmark 0x40020000/0x40ff0000
+-A FIRC_g2D -s fd00:1::/64 -j MARK --set-xmark 0x40020000/0x40ff0000
+-A FIRC_g2D -m mark --mark 0x40020000/0x40ff0000 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A PREROUTING -j FIRC_g1
+-A PREROUTING -j FIRC_g2
+COMMIT

@@ -10,7 +10,7 @@
 
 typedef struct firc_nfcommit firc_nfcommit_t;
 
-/* One pass on the committer thread; `full` means drop ours first and refill. Return CANCELED once cancel is raised. */
+/* One pass on the committer thread; `full` writes every table again and puts our jumps back in place. Return CANCELED once cancel is raised. */
 typedef firc_err_t (*firc_nfcommit_rebuild_fn)(void *ud, firc_cancel_t *cancel, bool full);
 
 /* The thread is not started; requests made before start are served by the first pass. */
@@ -38,9 +38,6 @@ void firc_nfcommit_request_addresses(firc_nfcommit_t *c);
 
 /* Aborts the pass in flight, which reschedules itself. NULL-safe. */
 void firc_nfcommit_interrupt(firc_nfcommit_t *c);
-
-/* The rebuilds' cancel token; borrowed until firc_nfcommit_free. */
-firc_cancel_t *firc_nfcommit_cancel(const firc_nfcommit_t *c);
 
 uint64_t firc_nfcommit_passes(const firc_nfcommit_t *c);
 

@@ -1,0 +1,17 @@
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:FIRC_TAP - [0:0]
+:_NDM_HOTSPOT_PRERT - [0:0]
+:_NDM_QOS - [0:0]
+-A PREROUTING -j _NDM_HOTSPOT_PRERT
+-A FORWARD -j FIRC_TAP
+-A FORWARD -j _NDM_QOS
+-A FIRC_TAP -i br0 -m conntrack --ctstate NEW ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 -m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 5 --nflog-threshold 1
+-A FIRC_TAP -i br0 -p tcp -m conntrack ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 -m tcp --dport 443 --tcp-flags SYN,ACK ACK -m length --length 100:65535 -m connbytes --connbytes 2:8 --connbytes-mode packets --connbytes-dir original -m string --hex-string "|1603|" --algo bm --from 40 --to 84 -m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 4 --nflog-threshold 1
+-A _NDM_HOTSPOT_PRERT -i br0 -m mark --mark 0x0/0xfffffff -j MARK --set-xmark 0xffffaaa/0xffffffff
+-A _NDM_QOS -o ppp0 -j RETURN
+COMMIT

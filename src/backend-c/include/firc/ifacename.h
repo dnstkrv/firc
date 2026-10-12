@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* True if s is a valid kernel interface name; rejects names that could break an iptables-restore line. */
+/* True if s is a valid kernel interface name. */
 bool firc_is_interface_name(const char *s);
 
 /* Copy of s safe for a log line: non-printable bytes become '?', truncated to cap-1; always terminates. */

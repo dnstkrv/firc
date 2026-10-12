@@ -109,7 +109,7 @@ static uint32_t table_find(const table_t *t, uint32_t h, const void *key)
     }
 }
 
-/* Backward-shift deletion: no tombstones, so a probe never stops early at a gap. */
+/* Backward-shift deletion: no deleted-slot markers, so a probe never stops early at a gap. */
 static void table_unindex(table_t *t, uint32_t s)
 {
     uint32_t i = lnk(t, s)->hash & t->mask;

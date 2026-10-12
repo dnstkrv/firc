@@ -142,8 +142,8 @@ TEST add_group_while_running_rolls_back_on_failure(void) {
     firc_config_t cfg;
     firc_config_init_defaults(&cfg);
 
-    firc_ipt_executable_t *exe4 = firc_ipt_executable_real_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt4 = firc_ipt_new(exe4);
+    firc_fake_ipt_t *fake4 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt4 = firc_ipt_new(firc_fake_ipt_as_xt(fake4), "FIRC_");
     firc_rtnl_t *rtnl = firc_rtnl_open();
     ASSERT(ipt4 != NULL && rtnl != NULL);
 
@@ -298,9 +298,9 @@ static bool locked_app_up_ex(locked_app_t *l, firc_loop_t *loop,
     l->router = firc_resolve_router_new(l->pipeline);
     if (l->router == NULL) { return false; }
     l->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    l->ipt = firc_ipt_new(firc_fake_ipt_as_executable(l->fake));
+    l->ipt = firc_ipt_new(firc_fake_ipt_as_xt(l->fake), "FIRC_");
     l->fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    l->ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(l->fake6));
+    l->ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(l->fake6), "FIRC_");
     firc_netfilter_register_base_chains(l->ipt, l->ipt6);
     l->kernel = fake_rtnl_start(&l->rtnl);
     if (l->kernel == NULL) { return false; }
@@ -338,7 +338,7 @@ static bool locked_app_up_full(locked_app_t *l, firc_loop_t *loop,
     return locked_app_up_ex(l, loop, nflog_open, true);
 }
 
-/* The harness with no committer: enable and teardown write their chains on the calling thread. */
+/* The harness with no committer: the test runs each pass by hand. */
 static bool locked_app_up_no_committer(locked_app_t *l) {
     return locked_app_up_ex(l, NULL, tap_fake_open, false);
 }
@@ -525,7 +525,7 @@ TEST a_capture_survives_the_firmware_rewriting_the_table(void) {
     ASSERTm("the pass that follows puts them back, with nobody asking", wait_for_chain(&l, true));
 
     firc_fake_ipt_reset(l.fake);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_IO);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
     ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
     sleep_ms(200);
     ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
@@ -807,7 +807,7 @@ TEST a_capture_on_an_interface_that_is_not_there_says_so(void) {
 /* Waits until the fake has refused a restore since `before`, then lets the committer count it */
 static bool a_restore_was_tried(const locked_app_t *l, size_t before) {
     for (int i = 0; i < 500; i++) {
-        if (firc_fake_ipt_restore_calls(l->fake) > before) {
+        if (firc_fake_ipt_attempts(l->fake) > before) {
             sleep_ms(100);
             return true;
         }
@@ -824,8 +824,11 @@ TEST a_pass_that_failed_while_a_capture_ran_is_said_out_loud(void) {
     uint64_t since = journal_mark();
     ASSERT_EQ(FIRC_OK, firc_app_capture_start(l.app, 1000, NULL));
     ASSERT(wait_for_chain(&l, true));
-    size_t before = firc_fake_ipt_restore_calls(l.fake);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_IO);
+    size_t before = firc_fake_ipt_attempts(l.fake);
+    firc_app_nf_enter(l.app);
+    firc_fake_ipt_reset(l.fake);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
+    firc_app_nf_leave(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
     ASSERTm("the pass that fails actually ran", a_restore_was_tried(&l, before));
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
@@ -835,8 +838,11 @@ TEST a_pass_that_failed_while_a_capture_ran_is_said_out_loud(void) {
     since = journal_mark();
     ASSERT_EQ(FIRC_OK, firc_app_capture_start(l.app, 1000, NULL));
     ASSERT(wait_for_chain(&l, true));
-    before = firc_fake_ipt_restore_calls(l.fake);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_AGAIN);
+    before = firc_fake_ipt_attempts(l.fake);
+    firc_app_nf_enter(l.app);
+    firc_fake_ipt_reset(l.fake);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_AGAIN);
+    firc_app_nf_leave(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
     ASSERT(a_restore_was_tried(&l, before));
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
@@ -853,8 +859,11 @@ TEST one_captures_failed_pass_is_not_the_next_ones(void) {
     ASSERT(locked_app_up(&l));
 
     ASSERT_EQ(FIRC_OK, firc_app_capture_start(l.app, 1000, NULL));
-    size_t before = firc_fake_ipt_restore_calls(l.fake);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_IO);
+    size_t before = firc_fake_ipt_attempts(l.fake);
+    firc_app_nf_enter(l.app);
+    firc_fake_ipt_reset(l.fake);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
+    firc_app_nf_leave(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
     ASSERTm("the pass that fails actually ran", a_restore_was_tried(&l, before));
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
@@ -866,6 +875,39 @@ TEST one_captures_failed_pass_is_not_the_next_ones(void) {
     ASSERT(journal_says(since, "capture stopped"));
     ASSERT_FALSEm("this capture's rules were never gone", journal_says(since, "netfilter pass"));
 
+    locked_app_down(&l);
+    PASS();
+}
+
+static bool wait_written_after(const locked_app_t *l, uint64_t started);
+
+/* Catches: a capture opened after a probe that could not ask the kernel, its rules then failing every pass. */
+TEST a_capture_probe_that_went_blind_refuses_the_capture(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
+    bool landed = false;
+    for (int i = 0; i < 500 && !landed; i++) {
+        sleep_ms(10);
+        landed = pass_landed(&l);
+    }
+    ASSERTm("a pass got through before the capture was asked for", landed);
+
+    firc_fake_xt_fail_revision(firc_fake_ipt_xt(l.fake), "string", EIO);
+    ASSERT_EQ_FMTm("refused, not started anyway", FIRC_ERR_AGAIN, firc_app_capture_start(l.app, 1000, NULL), "%d");
+    ASSERT_FALSE(running(&l));
+    ASSERT_FALSE(tap_chain_there(&l));
+
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_fake_ipt_reset(l.fake);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("the passes keep writing", pass_landed(&l));
+    firc_nfcommit_health_t h;
+    firc_app_netfilter_health(l.app, &h);
+    ASSERT_FALSE(h.failing);
     locked_app_down(&l);
     PASS();
 }
@@ -898,11 +940,7 @@ TEST a_rule_this_kernel_will_not_take_does_not_start_a_capture(void) {
     ASSERT_FALSE(running(&l));
 
     firc_fake_ipt_refuse_rules_containing(l.fake6, NULL);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_CANCELED);
-    ASSERT_EQ_FMTm("a question that did not get out starts the capture", FIRC_OK,
-                   firc_app_capture_start(l.app, 1000, NULL), "%d");
-    ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_AGAIN);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_AGAIN);
     ASSERT_EQ_FMTm("nor does a lost race refuse it", FIRC_OK,
                    firc_app_capture_start(l.app, 1000, NULL), "%d");
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
@@ -1226,6 +1264,37 @@ static bool wait_written_after(const locked_app_t *l, uint64_t started) {
         sleep_ms(10);
     }
     return false;
+}
+
+/* Catches: a removed group's chains outliving the next pass of either kind now that no list names them for deletion. */
+TEST a_removed_group_leaves_with_the_next_pass_of_either_kind(void) {
+    for (int full = 0; full < 2; full++) {
+        locked_app_t l;
+        ASSERT(locked_app_up_no_committer(&l));
+        fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+        firc_group_t *g = firc_group_new();
+        g->id = firc_id_random();
+        g->name = strdup("g");
+        g->iface = strdup("lo");
+        g->enable = true;
+        firc_id_t gid = g->id;
+        firc_app_set_running(l.app, true);
+        ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+        char chain[128];
+        firc_ruleset_chain_name_for(l.cfg.app.netfilter.iptables.chain_prefix, gid, chain, sizeof(chain));
+        ASSERT(firc_fake_ipt_chain_exists(l.fake, "mangle", chain));
+        firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
+        ASSERT(firc_app_remove_group_by_id(l.app, gid));
+        ASSERTm("the delete's own pass was refused, so the chain is still there",
+                firc_fake_ipt_chain_exists(l.fake, "mangle", chain));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, full != 0));
+        ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "mangle", chain));
+        ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "filter", chain));
+        ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "nat", chain));
+        locked_app_down(&l);
+    }
+    PASS();
 }
 
 /* Catches: a domain rule edit costing a pass, or a subnet rule edit (a chain rule) asking for none. */
@@ -1749,8 +1818,8 @@ TEST replace_groups_while_running_keeps_the_groups_that_did_not_come_up(void) {
     if (geteuid() == 0) { SKIPm("would write real rules as root"); }
     firc_config_t cfg;
     firc_config_init_defaults(&cfg);
-    firc_ipt_executable_t *exe4 = firc_ipt_executable_real_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt4 = firc_ipt_new(exe4);
+    firc_fake_ipt_t *fake4 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt4 = firc_ipt_new(firc_fake_ipt_as_xt(fake4), "FIRC_");
     firc_rtnl_t *rtnl = firc_rtnl_open();
     ASSERT(ipt4 != NULL && rtnl != NULL);
     firc_app_deps_t deps = {.cfg = &cfg, .ipt4 = ipt4, .rtnl = rtnl};
@@ -2682,13 +2751,14 @@ TEST save_config_round_trips(void) {
     PASS();
 }
 
-TEST force_commit_iptables_noop_without_engines(void) {
+/* Catches: a forced pass without a committer writing on the caller's thread, or claiming it ran. */
+TEST force_commit_without_a_committer_is_refused(void) {
     firc_config_t cfg;
     firc_config_init_defaults(&cfg);
     firc_app_deps_t deps = {.cfg = &cfg};
     firc_app_t *app = firc_app_create(&deps);
 
-    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(app));
+    ASSERT_EQ(FIRC_ERR_STATE, firc_app_force_commit_iptables(app));
 
     firc_app_destroy(app);
     firc_config_clear(&cfg);
@@ -2971,18 +3041,28 @@ static const firc_group_snapshot_t *view_owner(locked_app_t *l, const char *name
 
 static size_t log_len(locked_app_t *l) {
     firc_app_nf_enter(l->app);
-    const char *log = firc_fake_ipt_restore_log(l->fake);
+    const char *log = firc_fake_ipt_writes_log(l->fake);
     size_t n = log != NULL ? strlen(log) : 0;
     firc_app_nf_leave(l->app);
     return n;
 }
 
-static bool log_since_has(locked_app_t *l, size_t from, const char *needle) {
+static bool every_write_since_has(locked_app_t *l, size_t from, const char *table, const char *needle) {
+    char head[16];
+    snprintf(head, sizeof(head), "*%s\n", table);
     firc_app_nf_enter(l->app);
-    const char *log = firc_fake_ipt_restore_log(l->fake);
-    bool has = log != NULL && strlen(log) > from && strstr(log + from, needle) != NULL;
+    const char *log = firc_fake_ipt_writes_log(l->fake);
+    bool all = true;
+    for (const char *at = log != NULL && strlen(log) > from ? log + from : ""; (at = strstr(at, head)) != NULL;) {
+        const char *end = strstr(at, "COMMIT\n");
+        size_t len = end != NULL ? (size_t)(end - at) : strlen(at);
+        char *one = strndup(at, len);
+        all = all && one != NULL && strstr(one, needle) != NULL;
+        free(one);
+        at += len;
+    }
     firc_app_nf_leave(l->app);
-    return has;
+    return all;
 }
 
 /* Catches: the loop writing an update itself, or a pass that lost a race to the firmware not retried. */
@@ -3004,6 +3084,7 @@ TEST an_update_that_lost_one_race_comes_back(void) {
     firc_err_t err = firc_app_update_group(l.app, gid, activation_group(1, "newer.example", NULL, NULL));
     bool loop_wrote = !firc_fake_ipt_failure_armed(l.fake);
     firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
 
     ASSERT_EQ(FIRC_OK, err);
     ASSERT_FALSEm("the loop wrote no iptables", loop_wrote);
@@ -3029,10 +3110,11 @@ TEST an_update_whose_write_was_refused_keeps_nothing_old(void) {
 
     firc_app_nf_enter(l.app);
     firc_fake_ipt_reset(l.fake);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_IO);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
     started = firc_app_nf_passes_for_test(l.app);
     firc_err_t err = firc_app_update_group(l.app, gid, activation_group(1, "other.example", NULL, NULL));
     firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
 
     ASSERT_EQ(FIRC_OK, err);
     ASSERT_EQm("the old rule left the DNS view", NULL, view_owner(&l, "2ip.example"));
@@ -3063,19 +3145,24 @@ TEST a_save_that_lost_one_race_drops_nothing(void) {
     firc_group_t **arr = calloc(3, sizeof(*arr));
     ASSERT(arr != NULL);
     for (uint8_t t = 1; t <= 3; t++) { arr[t - 1] = activation_group(t, names[t - 1], NULL, NULL); }
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
-    size_t from = log_len(&l);
+    size_t calls = firc_fake_ipt_attempts(l.fake);
     firc_app_nf_enter(l.app);
     firc_fake_ipt_reset(l.fake);
     firc_fake_ipt_refuse_rules_containing(l.fake, mark);
     firc_err_t err = firc_app_replace_groups(l.app, arr, 3);
     firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
 
     ASSERT_EQ(FIRC_OK, err);
     ASSERT_EQ_FMT((size_t)3, firc_app_user_group_count(l.app), "%zu");
     for (size_t i = 0; i < 3; i++) { ASSERTm(names[i], view_owner(&l, names[i]) != NULL); }
     ASSERTm("a pass tried", a_restore_was_tried(&l, calls));
-    ASSERTm("and group 2's rules were in what was refused", log_since_has(&l, from, mark));
+    firc_app_nf_enter(l.app);
+    char *mangle = firc_fake_ipt_print(l.fake, "mangle");
+    firc_app_nf_leave(l.app);
+    ASSERT(mangle != NULL);
+    ASSERT_FALSEm("and group 2's rules, refused, are not in the kernel", strstr(mangle, mark) != NULL);
+    free(mangle);
 
     started = firc_app_nf_passes_for_test(l.app);
     firc_fake_ipt_refuse_rules_containing(l.fake, NULL);
@@ -3119,52 +3206,26 @@ TEST no_group_mutation_asks_for_a_full_pass(void) {
     PASS();
 }
 
-/* Catches: the no-committer path leaving its writes to a committer that does not exist. */
-TEST without_a_committer_the_loop_writes_the_chain_at_once(void) {
+/* Catches: the loop writing a table itself, or a pass run by hand missing what the loop changed. */
+TEST without_a_committer_a_pass_by_hand_writes_the_chain(void) {
     locked_app_t l;
     ASSERT(locked_app_up_no_committer(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
     firc_app_set_running(l.app, true);
     firc_id_t gid = {{1, 1, 1, 1}};
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
-    ASSERTm("in the kernel as the add returns", group_fully_in(&l, gid));
+    ASSERT_FALSEm("the add writes no table", group_in_kernel(&l, gid) != 0);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERTm("in the kernel after the pass", group_fully_in(&l, gid));
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
-    ASSERTm("out of it as the delete returns", group_fully_out(&l, gid));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERTm("out of it after the pass", group_fully_out(&l, gid));
     locked_app_down(&l);
     PASS();
 }
 
-/* Catches: a deleted group's chain left in place, deleted in a commit of its own, or half deleted. */
-TEST a_deleted_group_leaves_by_tombstone_in_the_next_pass(void) {
-    locked_app_t l;
-    ASSERT(locked_app_up(&l));
-    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
-    firc_app_set_running(l.app, true);
-    firc_id_t gid = {{1, 1, 1, 1}};
-    uint64_t started = firc_app_nf_passes_for_test(l.app);
-    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
-    ASSERT(wait_written_after(&l, started));
-    ASSERT(group_fully_in(&l, gid));
-
-    char chain[64], del[80];
-    chain_of(&l, gid, chain, sizeof(chain));
-    snprintf(del, sizeof(del), "-X %s", chain);
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
-    size_t from = log_len(&l);
-    started = firc_app_nf_passes_for_test(l.app);
-    ASSERT(firc_app_remove_group_by_id(l.app, gid));
-    ASSERT(wait_written_after(&l, started));
-    sleep_ms(300);
-    ASSERTm("the chain and all three jumps are gone", group_fully_out(&l, gid));
-    ASSERTm("deleted by the pass", log_since_has(&l, from, del));
-    ASSERT_EQ_FMTm("in one restore, with the rest of the pass", calls + 1,
-                   firc_fake_ipt_restore_calls(l.fake), "%zu");
-    locked_app_down(&l);
-    PASS();
-}
-
-/* Catches: a tombstone for a chain the firmware already removed failing the pass on a missing jump. */
-TEST a_tombstone_for_a_chain_already_gone_costs_nothing(void) {
+/* Catches: a delete whose chain the firmware already removed failing the pass on a missing jump. */
+TEST a_delete_of_a_chain_already_gone_costs_nothing(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
@@ -3185,7 +3246,7 @@ TEST a_tombstone_for_a_chain_already_gone_costs_nothing(void) {
     PASS();
 }
 
-/* Catches: losing both the untombstone on re-add and the tombstones-first order, deleting the chain. */
+/* Catches: a delete and an add back before the pass writing a table without the group's chain. */
 TEST a_group_deleted_and_added_back_before_the_pass_keeps_its_chain(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
@@ -3196,9 +3257,9 @@ TEST a_group_deleted_and_added_back_before_the_pass_keeps_its_chain(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
     ASSERT(wait_written_after(&l, started));
 
-    char chain[64], del[80];
+    char chain[64], decl[80];
     chain_of(&l, gid, chain, sizeof(chain));
-    snprintf(del, sizeof(del), "-X %s", chain);
+    snprintf(decl, sizeof(decl), ":%s ", chain);
     size_t from = log_len(&l);
     firc_app_nf_enter(l.app);
     started = firc_app_nf_passes_for_test(l.app);
@@ -3207,7 +3268,7 @@ TEST a_group_deleted_and_added_back_before_the_pass_keeps_its_chain(void) {
     firc_app_nf_leave(l.app);
     ASSERT(wait_written_after(&l, started));
     ASSERT(group_fully_in(&l, gid));
-    ASSERT_FALSEm("no pass deleted it", log_since_has(&l, from, del));
+    ASSERTm("no pass wrote mangle without it", every_write_since_has(&l, from, "mangle", decl));
     locked_app_down(&l);
     PASS();
 }
@@ -3233,17 +3294,17 @@ TEST a_save_of_the_same_groups_keeps_every_chain(void) {
     ASSERT(wait_written_after(&l, started));
     for (uint8_t t = 1; t <= 2; t++) {
         firc_id_t gid = {{t, t, t, t}};
-        char chain[64], del[80];
+        char chain[64], decl[80];
         chain_of(&l, gid, chain, sizeof(chain));
-        snprintf(del, sizeof(del), "-X %s", chain);
+        snprintf(decl, sizeof(decl), ":%s ", chain);
         ASSERT(group_fully_in(&l, gid));
-        ASSERT_FALSE(log_since_has(&l, from, del));
+        ASSERT(every_write_since_has(&l, from, "mangle", decl));
     }
     locked_app_down(&l);
     PASS();
 }
 
-/* Catches: a teardown error keeping the deleted group, or skipping its tombstone. */
+/* Catches: a teardown error keeping the deleted group, or its chain outliving the next pass. */
 TEST a_delete_whose_teardown_failed_still_removes_the_group(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
@@ -3257,10 +3318,11 @@ TEST a_delete_whose_teardown_failed_still_removes_the_group(void) {
     fake_rtnl_fail_next_of(l.kernel, RTM_DELRULE, EPERM);
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
-    ASSERT_FALSEm("the teardown met the refusal", fake_rtnl_failure_armed(l.kernel));
     ASSERT_EQm("gone from the config", NULL, firc_app_find_group_by_id(l.app, gid));
     ASSERT_EQm("and from the DNS view", NULL, view_owner(&l, "a.example"));
     ASSERT(wait_written_after(&l, started));
+    for (int i = 0; i < 100 && fake_rtnl_failure_armed(l.kernel); i++) { sleep_ms(10); }
+    ASSERT_FALSEm("the teardown after the pass met the refusal", fake_rtnl_failure_armed(l.kernel));
     ASSERTm("and from the kernel after the pass", group_fully_out(&l, gid));
     locked_app_down(&l);
     PASS();
@@ -3294,6 +3356,7 @@ TEST in_view_routed_and_the_chain_name_say_what_the_kernel_has(void) {
         ASSERT(rs[t] != NULL);
     }
     ASSERT(firc_ruleset_in_view(rs[1]) && firc_ruleset_routed(rs[1]));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
     ASSERTm("routed: its chain is in the kernel under that name",
             firc_fake_ipt_chain_exists(l.fake, "mangle", "FIRC_01010101"));
     ASSERT_FALSE(firc_ruleset_in_view(rs[2]) || firc_ruleset_routed(rs[2]));
@@ -3306,8 +3369,30 @@ TEST in_view_routed_and_the_chain_name_say_what_the_kernel_has(void) {
     PASS();
 }
 
-/* Catches: a failed pass clearing the tombstones it carried, so the retry deletes nothing. */
-TEST a_tombstone_outlives_a_failed_pass(void) {
+/* Catches: an aborted pass's staging left for the next pass, which then writes back the chain of a group removed since. */
+TEST a_group_removed_after_an_aborted_pass_does_not_come_back(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    firc_id_t gid = {{1, 1, 1, 1}};
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERT(group_fully_in(&l, gid));
+
+    firc_cancel_t *cancel = firc_cancel_new();
+    ASSERT(cancel != NULL);
+    firc_cancel_raise(cancel);
+    ASSERT_EQ(FIRC_ERR_CANCELED, firc_app_rebuild_netfilter_kind(l.app, cancel, false));
+    firc_cancel_free(cancel);
+    ASSERT(firc_app_remove_group_by_id(l.app, gid));
+    ASSERTm("the delete's own pass did not carry the chain back from the aborted staging", group_fully_out(&l, gid));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a failed pass forgetting the delete it carried, so the retry leaves the chain. */
+TEST a_delete_outlives_a_failed_pass(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
@@ -3319,7 +3404,7 @@ TEST a_tombstone_outlives_a_failed_pass(void) {
     ASSERT(group_fully_in(&l, gid));
 
     firc_app_nf_enter(l.app);
-    firc_fake_ipt_fail_next_restore(l.fake, FIRC_ERR_IO);
+    firc_fake_ipt_fail_next_write(l.fake, FIRC_ERR_IO);
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
     firc_app_nf_leave(l.app);
@@ -3330,35 +3415,8 @@ TEST a_tombstone_outlives_a_failed_pass(void) {
     PASS();
 }
 
-/* Catches: a completed pass keeping its tombstones, or a delete that queues none. */
-TEST a_completed_pass_empties_the_tombstones(void) {
-    locked_app_t l;
-    ASSERT(locked_app_up(&l));
-    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
-    firc_app_set_running(l.app, true);
-    firc_id_t gid = {{1, 1, 1, 1}};
-    uint64_t started = firc_app_nf_passes_for_test(l.app);
-    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
-    ASSERT(wait_written_after(&l, started));
-
-    firc_app_nf_enter(l.app);
-    started = firc_app_nf_passes_for_test(l.app);
-    ASSERT(firc_app_remove_group_by_id(l.app, gid));
-    size_t queued = firc_app_tombstones_for_test(l.app);
-    firc_app_nf_leave(l.app);
-    ASSERT_EQ_FMTm("the delete queued its chain", (size_t)1, queued, "%zu");
-    ASSERT(wait_written_after(&l, started));
-    firc_app_nf_enter(l.app);
-    size_t left = firc_app_tombstones_for_test(l.app);
-    firc_app_nf_leave(l.app);
-    ASSERT_EQ_FMTm("and the pass that carried it cleared the list", (size_t)0, left, "%zu");
-    ASSERTm("having deleted the chain", group_fully_out(&l, gid));
-    locked_app_down(&l);
-    PASS();
-}
-
-/* Catches: a daemon stop leaving tombstoned chains, or deleting one table, no jumps or one family. */
-TEST stopping_deletes_the_chains_still_tombstoned(void) {
+/* Catches: a daemon stop leaving the chains a refused pass left, or deleting one table, no jumps or one family. */
+TEST stopping_takes_the_chains_a_refused_pass_left(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
@@ -3373,12 +3431,9 @@ TEST stopping_deletes_the_chains_still_tombstoned(void) {
     firc_app_nf_leave(l.app);
     ASSERT_EQ_FMTm("fixture: the group is in the v6 kernel too", 6, v6_before, "%d");
 
-    char chain[64], del[80];
-    chain_of(&l, gid, chain, sizeof(chain));
-    snprintf(del, sizeof(del), "-X %s", chain);
-    firc_fake_ipt_refuse_rules_containing(l.fake, del);
-    firc_fake_ipt_refuse_rules_containing(l.fake6, del);
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "FIRC_DNAT");
+    firc_fake_ipt_refuse_rules_containing(l.fake6, "FIRC_DNAT");
+    size_t calls = firc_fake_ipt_attempts(l.fake);
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
     ASSERTm("a pass tried and was refused", a_restore_was_tried(&l, calls));
     ASSERT_FALSEm("so the chain is still there", group_fully_out(&l, gid));
@@ -3638,7 +3693,7 @@ TEST live_reason_is_checked_in_its_order(void) {
     started = firc_app_nf_passes_for_test(l.app);
     firc_app_pool_changed(l.app);
     ASSERT(wait_written_after(&l, started));
-    ASSERTm("and its old chain left by tombstone", group_fully_out(&l, (firc_id_t){{3, 3, 3, 3}}));
+    ASSERTm("and its old chain left with the pass", group_fully_out(&l, (firc_id_t){{3, 3, 3, 3}}));
     locked_app_down(&l);
     PASS();
 }
@@ -3676,10 +3731,11 @@ TEST a_committer_that_keeps_failing_says_not_written(void) {
     char chain[64];
     chain_of(&l, (firc_id_t){{1, 1, 1, 1}}, chain, sizeof(chain));
     int64_t before = (int64_t)time(NULL);
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
+    size_t calls = firc_fake_ipt_attempts(l.fake);
     struct timespec ts0;
     clock_gettime(CLOCK_MONOTONIC, &ts0);
     firc_app_nf_enter(l.app);
+    firc_fake_ipt_reset(l.fake);
     firc_fake_ipt_refuse_rules_containing(l.fake, chain);
     uint64_t refused_from = firc_app_nf_passes_for_test(l.app);
     (void)firc_app_force_commit_iptables(l.app);
@@ -4206,6 +4262,102 @@ static bool answer_ready_for_a(locked_app_t *l) {
     return ready;
 }
 
+/* Catches: a full pass reading a table twice (a clean-then-refill window) or writing a table it did not change. */
+TEST a_full_pass_reads_each_table_once_and_writes_what_changed(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0};
+    ASSERT(issue(&l, "a.example", 1, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, true));
+    ASSERTm("fixture: the first name is rewritten", dnat_has(&l, &f1));
+    ASSERT(issue(&l, "b.example", 1, &f2));
+    static const char *masq[] = {"-j", "MASQUERADE"};
+    const char *const *stale[1] = {masq};
+    size_t stale_lens[1] = {2};
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(l.fake, "nat", "FIRC_old", stale, stale_lens, 1));
+    const char *log = firc_fake_ipt_writes_log(l.fake);
+    size_t from = log != NULL ? strlen(log) : 0;
+    size_t reads = firc_fake_xt_reads(firc_fake_ipt_xt(l.fake));
+
+    char *before = firc_fake_xt_write_order(firc_fake_ipt_xt(l.fake));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, true));
+    char *after = firc_fake_xt_write_order(firc_fake_ipt_xt(l.fake));
+    ASSERT_EQ_FMTm("filter, mangle and nat read once each", (size_t)3,
+                   firc_fake_xt_reads(firc_fake_ipt_xt(l.fake)) - reads, "%zu");
+    ASSERT_STR_EQm("only nat changed, so only nat is written", "nat\n", after + strlen(before));
+    free(before);
+    free(after);
+    ASSERTm("the pass's first write is nat", strncmp(firc_fake_ipt_writes_log(l.fake) + from, "*nat\n", 5) == 0);
+    ASSERT_FALSEm("fixture: the sweep had work", firc_fake_ipt_chain_exists(l.fake, "nat", "FIRC_old"));
+    ASSERTm("fixture: the second name is rewritten", dnat_has(&l, &f2));
+    locked_app_down(&l);
+    PASS();
+}
+
+typedef struct {
+    locked_app_t *l;
+    char chain[64];
+    size_t rules_deleted_before;
+    int restores, unmarked_while_rewritten;
+} stop_order_t;
+
+static size_t group_rules_deleted(fake_rtnl_t *k) {
+    fake_rtnl_msg_t msgs[256];
+    size_t n = fake_rtnl_messages(k, msgs, 256), deleted = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (msgs[i].type == 33 && (msgs[i].mark & FIRC_MARK_GROUP_MASK) != 0) { deleted++; }
+    }
+    return deleted;
+}
+
+static void note_stop_restore(void *ud) {
+    stop_order_t *s = ud;
+    s->restores++;
+    bool rewritten = firc_fake_ipt_chain_exists(s->l->fake, "nat", "FIRC_DNAT");
+    bool marked = firc_fake_ipt_chain_exists(s->l->fake, "mangle", s->chain);
+    if (rewritten && (!marked || group_rules_deleted(s->l->kernel) != s->rules_deleted_before)) { s->unmarked_while_rewritten++; }
+}
+
+static enum greatest_test_res stop_in_order(bool lost_race) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    firc_id_t gid = {{1, 1, 1, 1}};
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    firc_ip_t f1 = {{0}, 0};
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(issue(&l, "a.example", 1, &f1));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: the address is rewritten", dnat_has(&l, &f1));
+    ASSERTm("fixture: and the group marks", group_fully_in(&l, gid));
+
+    firc_app_stop_netfilter_committer(l.app);
+    stop_order_t s = {.l = &l, .rules_deleted_before = group_rules_deleted(l.kernel)};
+    chain_of(&l, gid, s.chain, sizeof(s.chain));
+    firc_fake_ipt_on_write(l.fake, note_stop_restore, &s);
+    if (lost_race) { firc_fake_xt_fail_next_replace(firc_fake_ipt_xt(l.fake), EAGAIN); }
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    firc_fake_ipt_on_write(l.fake, NULL, NULL);
+    ASSERTm("fixture: the stop wrote the tables", s.restores > 0);
+    ASSERT_EQ_FMTm("never unmarked while still rewritten", 0, s.unmarked_while_rewritten, "%d");
+    ASSERT_FALSEm("the DNAT chain went", firc_fake_ipt_chain_exists(l.fake, "nat", "FIRC_DNAT"));
+    ASSERT_FALSEm("and so did the mark", firc_fake_ipt_chain_exists(l.fake, "mangle", s.chain));
+    ASSERT_GTm("and the ip rule", group_rules_deleted(l.kernel), s.rules_deleted_before);
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a stop taking a group's mark or ip rule away while its fake addresses are still rewritten. */
+TEST stopping_takes_the_dnat_rules_out_before_any_routing(void) { return stop_in_order(false); }
+
+/* Catches: a stop giving the DNAT delete up on one lost race and leaving it to the groups' writes. */
+TEST a_stop_that_loses_a_race_still_takes_the_dnat_rules_out_first(void) { return stop_in_order(true); }
+
 /* Catches: a turned-off group keeping its DNAT rule or chain, or a pass dropping another group's rule. */
 TEST a_group_turned_off_keeps_its_mapping_and_loses_its_dnat_rule(void) {
     locked_app_t l;
@@ -4421,6 +4573,166 @@ TEST a_removed_groups_flows_go_after_the_pass_that_carries_it(void) {
     PASS();
 }
 
+static size_t rules_at(locked_app_t *l, uint16_t type, uint32_t priority) {
+    size_t n = fake_rtnl_messages(l->kernel, NULL, 0), k = 0;
+    fake_rtnl_msg_t *m = calloc(n ? n : 1, sizeof(*m));
+    if (m == NULL) { return 0; }
+    n = fake_rtnl_messages(l->kernel, m, n);
+    for (size_t i = 0; i < n; i++) { k += m[i].type == type && m[i].priority == priority ? 1u : 0u; }
+    free(m);
+    return k;
+}
+
+/* Catches: a removed group's ip rule taken away before a pass drops its marks and DNAT, so while passes fail its rewritten packets leave by the WAN. */
+TEST a_removed_groups_ip_rule_stays_until_a_pass_drops_its_chains(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+
+    firc_app_nf_enter(l.app);
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), tries = firc_fake_ipt_attempts(l.fake);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "*");
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, (firc_id_t){{1, 1, 1, 1}}));
+    firc_app_nf_leave(l.app);
+    ASSERT(a_restore_was_tried(&l, tries));
+    ASSERT_EQ_FMTm("kept while the pass is refused", dels, rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), "%zu");
+
+    firc_fake_ipt_refuse_rules_containing(l.fake, NULL);
+    ASSERT(wait_written_after(&l, started));
+    for (int i = 0; i < 100 && rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY) == dels; i++) { sleep_ms(10); }
+    ASSERT_GTm("gone after the pass that dropped its chains", rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), dels);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a withdrawn group's ip rule taken away by the report of a pass that started before the withdrawal. */
+TEST a_report_with_an_older_ticket_keeps_the_ip_rule(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+
+    firc_app_nf_enter(l.app);
+    uint64_t before = firc_app_nf_change_for_test(l.app);
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    ASSERT(firc_app_remove_group_by_id(l.app, (firc_id_t){{1, 1, 1, 1}}));
+    firc_app_pay_flushes_for_test(l.app, before);
+    size_t early = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    firc_app_pay_flushes_for_test(l.app, firc_app_nf_change_for_test(l.app));
+    size_t paid = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ_FMT(dels, early, "%zu");
+    ASSERT_GT(paid, dels);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a stop whose table write failed taking away the ip rule a withdrawn group's chains still need. */
+TEST a_failed_stop_write_keeps_a_withdrawn_groups_ip_rule(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+    firc_app_nf_enter(l.app);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "*");
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    ASSERT(firc_app_remove_group_by_id(l.app, (firc_id_t){{1, 1, 1, 1}}));
+    firc_app_nf_leave(l.app);
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERT_EQ_FMT(dels, rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), "%zu");
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a group disabled by an edit taking its held ip rule away before a pass drops its marks and DNAT. */
+TEST a_group_disabled_by_an_edit_keeps_its_ip_rule_until_a_pass(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+
+    firc_app_nf_enter(l.app);
+    size_t tries = firc_fake_ipt_attempts(l.fake);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "*");
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    firc_group_t *off = activation_group(1, "a.example", NULL, NULL);
+    off->enable = false;
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, (firc_id_t){{1, 1, 1, 1}}, off));
+    firc_app_nf_leave(l.app);
+    ASSERT(a_restore_was_tried(&l, tries));
+    ASSERT_EQ_FMTm("kept while the pass is refused", dels, rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), "%zu");
+
+    firc_fake_ipt_refuse_rules_containing(l.fake, NULL);
+    ASSERT(wait_written_after(&l, started));
+    for (int i = 0; i < 100 && rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY) == dels; i++) { sleep_ms(10); }
+    ASSERT_GTm("gone after the pass", rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), dels);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: an edited group whose new routing failed to go in losing its held ip rule as well. */
+TEST a_failed_reenable_keeps_the_held_ip_rule(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+
+    firc_app_nf_enter(l.app);
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
+    (void)firc_app_update_group(l.app, (firc_id_t){{1, 1, 1, 1}}, activation_group(1, "b.example", NULL, NULL));
+    bool met = !fake_rtnl_failure_armed(l.kernel);
+    size_t after = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY);
+    firc_app_nf_leave(l.app);
+    ASSERTm("the enable met the refusal", met);
+    ASSERT_EQ_FMT(dels, after, "%zu");
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a group edited in place moved to another mark field (its flows flushed) by its own held rule, or that rule taking the new one away later. */
+TEST an_edited_group_keeps_its_field_and_its_new_rules(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    ASSERT(first_pass_done(&l));
+    uint32_t field = field_of(&l, 1);
+
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    size_t reply_before = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY_REPLY);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, (firc_id_t){{1, 1, 1, 1}}, activation_group(1, "b.example", NULL, NULL)));
+    size_t dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), reply_dels = rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY_REPLY);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ_FMTm("only the new routing's delete-before-add", reply_before + 1, reply_dels, "%zu");
+    ASSERT(wait_written_after(&l, started));
+    sleep_ms(50);
+    firc_app_nf_enter(l.app);
+    uint32_t now = field_of(&l, 1);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ_FMT(field, now, "0x%x");
+    ASSERT_EQ_FMT(dels, rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY), "%zu");
+    ASSERT_EQ_FMT(reply_dels, rules_at(&l, RTM_DELRULE, FIRC_RULE_PRIORITY_REPLY), "%zu");
+    locked_app_down(&l);
+    PASS();
+}
+
 /* Catches: a flush paid by an older pass's report, or never paid because tickets compare backwards. */
 TEST a_report_with_an_older_ticket_does_not_pay(void) {
     locked_app_t l;
@@ -4632,14 +4944,12 @@ TEST stopping_pays_the_flushes_still_queued(void) {
     const uint8_t one[4] = {198, 18, 0, 5};
     fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
 
-    char chain[64], del[80];
-    chain_of(&l, gid, chain, sizeof(chain));
-    snprintf(del, sizeof(del), "-X %s", chain);
-    firc_fake_ipt_refuse_rules_containing(l.fake, del);
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "FIRC_DNAT");
+    size_t calls = firc_fake_ipt_attempts(l.fake);
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
     ASSERTm("a pass tried and was refused", a_restore_was_tried(&l, calls));
     ASSERT_FALSEm("so nothing was paid", fake_ct_deleted(l.ctk, one, 4));
+    firc_fake_ipt_refuse_rules_containing(l.fake, NULL);
 
     firc_app_destroy(l.app);
     l.app = NULL;
@@ -4967,8 +5277,8 @@ TEST a_deleted_selector_group_leaves_no_devices_chain(void) {
     PASS();
 }
 
-/* Catches: the no-committer path rendering without the link's devices copy. */
-TEST without_a_committer_the_devices_chain_is_written_at_once(void) {
+/* Catches: a pass by hand rendering without the link's devices copy. */
+TEST without_a_committer_the_devices_chain_is_written_by_the_next_pass(void) {
     locked_app_t l;
     ASSERT(locked_app_up_no_committer(&l));
     fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
@@ -4977,6 +5287,7 @@ TEST without_a_committer_the_devices_chain_is_written_at_once(void) {
     char mac[] = "mac:aa:bb:cc:dd:ee:ff";
     char *allow[] = {mac};
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, selector_group(1, allow, 1, NULL, 0)));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
     char dchain[64];
     devices_chain_of(&l, gid, dchain, sizeof(dchain));
     ASSERT(firc_fake_ipt_chain_exists(l.fake, "mangle", dchain));
@@ -5231,7 +5542,7 @@ TEST a_mixed_selector_writes_its_rules_in_order(void) {
     PASS();
 }
 
-/* Catches: a Save, unlike an update, not tombstoning an emptied selector's devices chain. */
+/* Catches: a Save, unlike an update, keeping an emptied selector's devices chain. */
 TEST a_save_that_empties_a_selector_loses_its_devices_chain(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
@@ -5261,7 +5572,7 @@ TEST a_save_that_empties_a_selector_loses_its_devices_chain(void) {
     PASS();
 }
 
-/* Catches: the fake not flushing a declared chain, or a tombstone forgetting the devices chain. */
+/* Catches: the devices chain outliving its group's delete, or the delete written table by table more than once. */
 TEST a_group_given_a_selector_and_then_deleted_leaves_nothing(void) {
     locked_app_t l;
     ASSERT(locked_app_up(&l));
@@ -5287,16 +5598,16 @@ TEST a_group_given_a_selector_and_then_deleted_leaves_nothing(void) {
 
     firc_app_nf_enter(l.app);
     started = firc_app_nf_passes_for_test(l.app);
-    size_t calls = firc_fake_ipt_restore_calls(l.fake);
+    size_t calls = firc_fake_ipt_writes(l.fake);
     ASSERT(firc_app_remove_group_by_id(l.app, gid));
     firc_app_nf_leave(l.app);
     ASSERT(wait_written_after(&l, started));
     ASSERT(group_fully_out(&l, gid));
     ASSERT_FALSE(mangle_chain_there(&l, dchain));
     firc_app_nf_enter(l.app);
-    size_t after = firc_fake_ipt_restore_calls(l.fake);
+    size_t after = firc_fake_ipt_writes(l.fake);
     firc_app_nf_leave(l.app);
-    ASSERT_EQ_FMTm("one v4 restore, none refused", calls + 1, after, "%zu");
+    ASSERT_EQ_FMTm("nat, mangle and filter once each, none refused", calls + 3, after, "%zu");
     firc_nfcommit_health_t h;
     firc_app_netfilter_health(l.app, &h);
     ASSERT_FALSE(h.failing);
@@ -5578,6 +5889,141 @@ TEST a_sync_whose_devices_render_fails_still_writes_its_subnets(void) {
     PASS();
 }
 
+static firc_id_t routed_group_with_a_mapping(locked_app_t *l, firc_ip_t *fake) {
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_group_t *g = firc_group_new();
+    g->id = firc_id_random();
+    g->name = strdup("g");
+    g->iface = strdup("lo");
+    g->enable = true;
+    firc_id_t gid = g->id;
+    firc_app_set_running(l->app, true);
+    if (firc_netfilter_register_base_chains(l->ipt, l->ipt6) != FIRC_OK) { abort(); }
+    if (firc_app_add_group(l->app, g) != FIRC_OK) { abort(); }
+    char id[FIRC_ID_STR_LEN];
+    firc_id_format(gid, id);
+    firc_ip_t v6;
+    if (firc_fakeip_get(l->pool, "a.dnsleaktest.com", id, 1000, fake, &v6) != FIRC_OK) { abort(); }
+    const firc_ip_t real = {{93, 184, 216, 34}, 4};
+    if (firc_fakeip_set_reals(l->pool, "a.dnsleaktest.com", &real, 1) != FIRC_OK) { abort(); }
+    if (firc_app_refresh_pool_snapshot(l->app) != FIRC_OK) { abort(); }
+    if (firc_app_rebuild_netfilter_kind(l->app, NULL, false) != FIRC_OK) { abort(); }
+    return gid;
+}
+
+/* Catches: the stop taking a mark away before the DNAT that rewrites its addresses, or taking the barrier. */
+TEST the_stop_writes_nat_first_and_keeps_the_barrier(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    firc_ip_t fake;
+    (void)routed_group_with_a_mapping(&l, &fake);
+    char *before = firc_fake_xt_write_order(firc_fake_ipt_xt(l.fake));
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    char *after = firc_fake_xt_write_order(firc_fake_ipt_xt(l.fake));
+    ASSERT_EQ(0, strncmp(after + strlen(before), "nat\n", 4));
+    ASSERT(firc_fake_ipt_chain_exists(l.fake, "filter", "FIRC_POOLREJECT"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "nat", "FIRC_DNAT"));
+    free(before);
+    free(after);
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a stop whose table write failed taking the ip rules away anyway (a rewritten, marked packet then leaves by the WAN). */
+TEST a_failed_stop_write_keeps_the_ip_rules(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    firc_ip_t fake;
+    (void)routed_group_with_a_mapping(&l, &fake);
+    size_t dels = fake_rtnl_count(l.kernel, RTM_DELRULE, 0);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "*nat");
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERT_EQ_FMT(dels, fake_rtnl_count(l.kernel, RTM_DELRULE, 0), "%zu");
+    ASSERT(firc_fake_ipt_chain_exists(l.fake, "nat", "FIRC_DNAT"));
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a stop giving up on one lost race and leaving the DNAT rules and the ip rules both in place. */
+TEST a_stop_that_loses_a_race_tries_again(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    firc_ip_t fake;
+    (void)routed_group_with_a_mapping(&l, &fake);
+    size_t dels = fake_rtnl_count(l.kernel, RTM_DELRULE, 0);
+    firc_fake_xt_fail_next_replace(firc_fake_ipt_xt(l.fake), EAGAIN);
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "nat", "FIRC_DNAT"));
+    ASSERT(firc_fake_ipt_chain_exists(l.fake, "filter", "FIRC_POOLREJECT"));
+    ASSERT_GT(fake_rtnl_count(l.kernel, RTM_DELRULE, 0), dels);
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a stop skipping a table equal to its last write although the firmware rewrote it without the barrier. */
+TEST the_stop_rewrites_the_barrier_the_firmware_took_away(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, true));
+    ASSERT(firc_fake_ipt_chain_exists(l.fake, "filter", "FIRC_POOLREJECT"));
+    firc_fake_ipt_reset(l.fake);
+    static const char *fw[] = {"-i", "eth0", "-j", "ACCEPT"};
+    const char *const *rules[1] = {fw};
+    size_t lens[1] = {4};
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(l.fake, "filter", "FORWARD", rules, lens, 1));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(l.fake, "filter", "FIRC_POOLREJECT"));
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERT(firc_fake_ipt_chain_exists(l.fake, "filter", "FIRC_POOLREJECT"));
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: a stop committing what an earlier caller left staged in a base chain. */
+TEST the_stop_writes_nothing_left_staged_before_it(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, true));
+    ASSERT_EQ(FIRC_OK, firc_ipt_register_chain_patch(l.ipt, "filter", "FORWARD"));
+    static const char *left[] = {"-i", "eth9", "-j", "ACCEPT"};
+    ASSERT_EQ(FIRC_OK, firc_ipt_append(l.ipt, "filter", "FORWARD", left, 4));
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    char *filter = firc_fake_ipt_print(l.fake, "filter");
+    ASSERT(filter != NULL);
+    bool rode = strstr(filter, "eth9") != NULL;
+    bool barrier = strstr(filter, "FIRC_POOLREJECT") != NULL;
+    free(filter);
+    ASSERT_FALSE(rode);
+    ASSERT(barrier);
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+/* Catches: the start's clean committing what an earlier caller left staged in a base chain. */
+TEST the_clean_writes_nothing_left_staged_before_it(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    ASSERT_EQ(FIRC_OK, firc_ipt_register_chain_patch(l.ipt, "filter", "FORWARD"));
+    static const char *left[] = {"-i", "eth9", "-j", "ACCEPT"};
+    ASSERT_EQ(FIRC_OK, firc_ipt_append(l.ipt, "filter", "FORWARD", left, 4));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean(l.ipt, l.ipt6, l.pool));
+    char *filter = firc_fake_ipt_print(l.fake, "filter");
+    ASSERT(filter != NULL);
+    bool rode = strstr(filter, "eth9") != NULL;
+    bool barrier = strstr(filter, "FIRC_POOLREJECT") != NULL;
+    free(filter);
+    ASSERT_FALSE(rode);
+    ASSERT(barrier);
+    locked_app_down(&l);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -5601,6 +6047,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_pass_that_failed_while_a_capture_ran_is_said_out_loud);
     RUN_TEST(one_captures_failed_pass_is_not_the_next_ones);
     RUN_TEST(a_rule_this_kernel_will_not_take_does_not_start_a_capture);
+    RUN_TEST(a_capture_probe_that_went_blind_refuses_the_capture);
     RUN_TEST(a_capture_that_cannot_read_does_not_start);
     RUN_TEST(a_reader_that_breaks_ends_the_capture);
     RUN_TEST(the_deadline_ends_the_capture_by_itself);
@@ -5632,12 +6079,14 @@ int main(int argc, char **argv) {
     RUN_TEST(remove_by_id_and_by_index);
     RUN_TEST(list_interfaces_show_all_finds_loopback);
     RUN_TEST(save_config_round_trips);
-    RUN_TEST(force_commit_iptables_noop_without_engines);
+    RUN_TEST(force_commit_without_a_committer_is_refused);
     RUN_TEST(the_app_publishes_a_route_per_group);
     RUN_TEST(a_firmware_resolver_inside_the_pool_is_dropped);
     RUN_TEST(a_running_group_s_route_carries_its_real_mark_and_v6_route);
     RUN_TEST(an_update_of_a_running_group_does_not_bounce_its_route);
     RUN_TEST(a_domain_rule_edit_asks_for_no_pass_but_a_subnet_rule_does);
+    RUN_TEST(a_removed_group_leaves_with_the_next_pass_of_either_kind);
+    RUN_TEST(a_group_removed_after_an_aborted_pass_does_not_come_back);
     RUN_TEST(disabling_a_subnet_list_rule_asks_for_one_pass_and_the_chain_drops_it);
     RUN_TEST(a_name_list_rule_edit_asks_for_no_pass);
     RUN_TEST(a_list_rule_moved_to_subnet_asks_for_one_pass);
@@ -5649,9 +6098,8 @@ int main(int argc, char **argv) {
     RUN_TEST(an_update_whose_write_was_refused_keeps_nothing_old);
     RUN_TEST(a_save_that_lost_one_race_drops_nothing);
     RUN_TEST(no_group_mutation_asks_for_a_full_pass);
-    RUN_TEST(without_a_committer_the_loop_writes_the_chain_at_once);
-    RUN_TEST(a_deleted_group_leaves_by_tombstone_in_the_next_pass);
-    RUN_TEST(a_tombstone_for_a_chain_already_gone_costs_nothing);
+    RUN_TEST(without_a_committer_a_pass_by_hand_writes_the_chain);
+    RUN_TEST(a_delete_of_a_chain_already_gone_costs_nothing);
     RUN_TEST(a_group_deleted_and_added_back_before_the_pass_keeps_its_chain);
     RUN_TEST(a_save_of_the_same_groups_keeps_every_chain);
     RUN_TEST(a_delete_whose_teardown_failed_still_removes_the_group);
@@ -5677,9 +6125,11 @@ int main(int argc, char **argv) {
     RUN_TEST(a_syncs_progress_does_not_interrupt_the_pass);
     RUN_TEST(a_lists_bookkeeping_does_not_interrupt_the_pass);
     RUN_TEST(in_view_routed_and_the_chain_name_say_what_the_kernel_has);
-    RUN_TEST(a_tombstone_outlives_a_failed_pass);
-    RUN_TEST(a_completed_pass_empties_the_tombstones);
-    RUN_TEST(stopping_deletes_the_chains_still_tombstoned);
+    RUN_TEST(a_delete_outlives_a_failed_pass);
+    RUN_TEST(stopping_takes_the_chains_a_refused_pass_left);
+    RUN_TEST(a_full_pass_reads_each_table_once_and_writes_what_changed);
+    RUN_TEST(stopping_takes_the_dnat_rules_out_before_any_routing);
+    RUN_TEST(a_stop_that_loses_a_race_still_takes_the_dnat_rules_out_first);
     RUN_TEST(a_group_turned_off_keeps_its_mapping_and_loses_its_dnat_rule);
     RUN_TEST(a_group_with_no_usable_interface_fails_closed);
     RUN_TEST(a_group_turned_back_on_holds_its_cached_names_until_the_pass);
@@ -5687,6 +6137,12 @@ int main(int argc, char **argv) {
     RUN_TEST(a_save_holds_only_the_groups_it_makes_routed);
     RUN_TEST(a_removed_groups_flows_go_after_the_pass_that_carries_it);
     RUN_TEST(a_report_with_an_older_ticket_does_not_pay);
+    RUN_TEST(a_removed_groups_ip_rule_stays_until_a_pass_drops_its_chains);
+    RUN_TEST(an_edited_group_keeps_its_field_and_its_new_rules);
+    RUN_TEST(a_group_disabled_by_an_edit_keeps_its_ip_rule_until_a_pass);
+    RUN_TEST(a_failed_reenable_keeps_the_held_ip_rule);
+    RUN_TEST(a_report_with_an_older_ticket_keeps_the_ip_rule);
+    RUN_TEST(a_failed_stop_write_keeps_a_withdrawn_groups_ip_rule);
     RUN_TEST(an_owner_added_back_before_the_payment_is_not_flushed);
     RUN_TEST(a_removed_groups_field_is_held_until_its_flush);
     RUN_TEST(an_interface_change_is_paid_although_the_owner_is_routed_again);
@@ -5704,7 +6160,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_selector_emptied_loses_its_devices_chain);
     RUN_TEST(a_selector_emptied_returns_its_subnet_rule_to_a_mark);
     RUN_TEST(a_deleted_selector_group_leaves_no_devices_chain);
-    RUN_TEST(without_a_committer_the_devices_chain_is_written_at_once);
+    RUN_TEST(without_a_committer_the_devices_chain_is_written_by_the_next_pass);
     RUN_TEST(a_narrowed_selector_resets_its_flows_after_the_pass);
     RUN_TEST(a_later_edit_before_the_pass_keeps_a_narrowing_queued);
     RUN_TEST(a_widened_selector_resets_nothing);
@@ -5723,5 +6179,11 @@ int main(int argc, char **argv) {
     RUN_TEST(a_sync_an_update_and_a_save_that_render_narrower_reset_its_flows);
     RUN_TEST(a_sync_of_an_unchanged_selector_keeps_its_chunk_flows);
     RUN_TEST(a_sync_whose_devices_render_fails_still_writes_its_subnets);
+    RUN_TEST(the_stop_writes_nat_first_and_keeps_the_barrier);
+    RUN_TEST(a_failed_stop_write_keeps_the_ip_rules);
+    RUN_TEST(a_stop_that_loses_a_race_tries_again);
+    RUN_TEST(the_stop_rewrites_the_barrier_the_firmware_took_away);
+    RUN_TEST(the_stop_writes_nothing_left_staged_before_it);
+    RUN_TEST(the_clean_writes_nothing_left_staged_before_it);
     GREATEST_MAIN_END();
 }

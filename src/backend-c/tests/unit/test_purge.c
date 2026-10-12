@@ -54,8 +54,8 @@ static bool up(fx_t *f) {
     f->fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
     seed_family(f->fake4, "198.18.0.0/15");
     seed_family(f->fake6, "fd37:9a00::/48");
-    f->ipt4 = firc_ipt_new(firc_fake_ipt_as_executable(f->fake4));
-    f->ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(f->fake6));
+    f->ipt4 = firc_ipt_new(firc_fake_ipt_as_xt(f->fake4), "FIRC_");
+    f->ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(f->fake6), "FIRC_");
     firc_netfilter_register_base_chains(f->ipt4, f->ipt6);
     f->kernel = fake_rtnl_start(&f->rtnl);
     if (f->kernel == NULL) { return false; }
@@ -144,7 +144,9 @@ TEST nothing_of_ours_is_left_and_nothing_of_anyone_elses_is_touched(void) {
     ASSERT_EQ_FMT((size_t)2, rep.rules_removed, "%zu");
     ASSERT_EQ_FMT((size_t)6, rep.routes_removed, "%zu");
     ASSERTm("a dump afterwards shows nothing of ours", rep.routes_ok);
-    ASSERT_EQ_FMTm("one restore per family", (size_t)1, firc_fake_ipt_restore_calls(f.fake4), "%zu");
+    ASSERT_EQ_FMTm("nat and filter hold ours and are written once each; mangle holds nothing of ours", (size_t)2,
+                   firc_fake_ipt_writes(f.fake4), "%zu");
+    ASSERT_EQ_FMT((size_t)2, firc_fake_ipt_writes(f.fake6), "%zu");
     fake_rtnl_msg_t msgs[16];
     size_t n = fake_rtnl_messages(f.kernel, msgs, 16);
     size_t del_routes = 0, del_rules = 0, group_table = 0, v6 = 0, scoped = 0;
@@ -186,12 +188,12 @@ TEST nothing_of_ours_is_left_and_nothing_of_anyone_elses_is_touched(void) {
 TEST a_raced_iptables_write_is_retried(void) {
     fx_t f;
     ASSERT(up(&f));
-    firc_fake_ipt_fail_next_restore(f.fake4, FIRC_ERR_AGAIN);
+    firc_fake_ipt_fail_at_commit(f.fake4, 1, FIRC_ERR_AGAIN);
     firc_purge_paths_t p = paths_of(&f);
     firc_purge_report_t rep;
     ASSERT_EQ(FIRC_OK, firc_purge(f.ipt4, f.ipt6, f.rtnl, "FIRC_", &p, &rep));
     ASSERT(rep.iptables_ok);
-    ASSERT_EQ_FMTm("the raced write was tried again", (size_t)2, firc_fake_ipt_restore_calls(f.fake4), "%zu");
+    ASSERT_EQ_FMTm("the raced write was tried again", (size_t)2, firc_fake_ipt_writes(f.fake4), "%zu");
     ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fake4, "filter", "FIRC_POOLREJECT"));
     down(&f);
     PASS();
@@ -218,7 +220,7 @@ TEST a_route_the_kernel_will_not_delete_is_reported_not_hidden(void) {
 TEST every_step_runs_whatever_the_earlier_ones_did(void) {
     fx_t f;
     ASSERT(up(&f));
-    for (int i = 0; i < 3; i++) { firc_fake_ipt_fail_next_restore(f.fake4, FIRC_ERR_IO); }
+    for (int i = 0; i < 3; i++) { firc_fake_ipt_fail_next_write(f.fake4, FIRC_ERR_IO); }
     firc_purge_paths_t p = paths_of(&f);
     firc_purge_report_t rep;
     ASSERT_EQ(FIRC_ERR_IO, firc_purge(f.ipt4, f.ipt6, f.rtnl, "FIRC_", &p, &rep));
@@ -299,6 +301,49 @@ TEST without_netlink_the_chains_still_go(void) {
     PASS();
 }
 
+/* Catches: a refused filter or mangle dump left behind by --purge (the run dir then stays). */
+TEST the_refused_table_dumps_go_with_the_purge(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    static const char *const names[] = {"refused-ipv4-filter.bin", "refused-ipv4-mangle.bin",
+                                        "refused-ipv4-nat.bin",    "refused-ipv6-filter.bin",
+                                        "refused-ipv6-mangle.bin", "refused-ipv6-nat.bin"};
+    char path[6][160];
+    for (int i = 0; i < 6; i++) {
+        snprintf(path[i], sizeof(path[i]), "%s/%s", f.dir, names[i]);
+        FILE *fp = fopen(path[i], "w");
+        ASSERT(fp != NULL);
+        fputs("x", fp);
+        fclose(fp);
+    }
+    firc_purge_paths_t p = paths_of(&f);
+    firc_purge_report_t rep;
+    (void)firc_purge(f.ipt4, f.ipt6, f.rtnl, "FIRC_", &p, &rep);
+    struct stat st;
+    for (int i = 0; i < 6; i++) {
+        ASSERT(stat(path[i], &st) != 0 && errno == ENOENT);
+    }
+    ASSERT(rep.run_dir_removed);
+    down(&f);
+    PASS();
+}
+
+/* Catches: a purge on a kernel without IPv6 failing or skipping the IPv4 tables because the v6 engine is absent. */
+TEST without_an_ipv6_engine_the_ipv4_tables_still_go(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    firc_ipt_free(f.ipt6);
+    f.ipt6 = NULL;
+    firc_purge_paths_t p = paths_of(&f);
+    firc_purge_report_t rep;
+    ASSERT_EQ(FIRC_OK, firc_purge(f.ipt4, NULL, f.rtnl, "FIRC_", &p, &rep));
+    ASSERT(rep.iptables_ok);
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fake4, "nat", "FIRC_old"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fake4, "filter", "FIRC_POOLREJECT"));
+    down(&f);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -311,5 +356,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_file_that_cannot_be_removed_fails_the_purge);
     RUN_TEST(every_step_runs_whatever_the_earlier_ones_did);
     RUN_TEST(without_netlink_the_chains_still_go);
+    RUN_TEST(the_refused_table_dumps_go_with_the_purge);
+    RUN_TEST(without_an_ipv6_engine_the_ipv4_tables_still_go);
     GREATEST_MAIN_END();
 }

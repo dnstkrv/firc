@@ -1,783 +1,659 @@
 #include "firc/iptables.h"
-#include "firc/bytebuf.h"
+#include "firc/log.h"
+#include "firc/xtables.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-typedef struct chain_reg {
-    char *chain_name;
-    firc_ipt_chain_t *chain;
-} chain_reg_t;
+enum { T_FILTER = 0, T_MANGLE = 1, T_NAT = 2, N_TABLES = 3 };
 
-typedef struct table_reg {
-    char *table_name;
-    chain_reg_t *chains;
-    size_t n_chains, cap_chains;
-} table_reg_t;
-
-struct firc_ipt {
-    table_reg_t *tables;
-    size_t n_tables, cap_tables;
-    firc_ipt_executable_t *exe;
-    firc_cancel_t *cancel;
+static const char *const k_tables[N_TABLES] = {"filter", "mangle", "nat"};
+static const char *const k_builtin[N_TABLES][6] = {
+    {"INPUT", "FORWARD", "OUTPUT", NULL},
+    {"PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING", NULL},
+    {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING", NULL},
 };
 
-firc_ipt_t *firc_ipt_new(firc_ipt_executable_t *exe) {
+typedef struct reg {
+    char *chain;
+    bool patch;
+    firc_xt_block_t block;
+    firc_xt_patch_op_t *ops;
+    size_t n_ops, cap_ops;
+} reg_t;
+
+typedef struct regs {
+    reg_t *v;
+    size_t n, cap;
+} regs_t;
+
+struct firc_ipt {
+    firc_xt_t *xt;
+    firc_ipt_proto_t fam;
+    char *prefix;
+    firc_cancel_t *cancel;
+    regs_t staged[N_TABLES];
+    regs_t written[N_TABLES];
+    bool known[N_TABLES];
+    firc_xt_info_t shape[N_TABLES];
+    bool said_inval;
+    bool said_uncovered;
+    char report[512];
+    size_t report_len;
+};
+
+static int table_index(const char *name) {
+    for (int i = 0; name != NULL && i < N_TABLES; i++) {
+        if (strcmp(name, k_tables[i]) == 0) { return i; }
+    }
+    return -1;
+}
+
+static bool builtin(int ti, const char *chain) {
+    for (size_t i = 0; k_builtin[ti][i] != NULL; i++) {
+        if (strcmp(chain, k_builtin[ti][i]) == 0) { return true; }
+    }
+    return false;
+}
+
+static const char *fam_name(const firc_ipt_t *ipt) { return ipt->fam == FIRC_IPT_PROTO_IPV6 ? "ipv6" : "ipv4"; }
+
+static size_t addr_bytes(const firc_ipt_t *ipt) { return ipt->fam == FIRC_IPT_PROTO_IPV6 ? 16 : 4; }
+
+static void block_start(const firc_ipt_t *ipt, firc_xt_block_t *b) {
+    firc_xt_block_init(b);
+    b->mac_rev = firc_xt_mac_rev(ipt->xt);
+}
+
+static void reg_clear(reg_t *r) {
+    free(r->chain);
+    firc_xt_block_free(&r->block);
+    for (size_t i = 0; i < r->n_ops; i++) { firc_ipt_rule_free(r->ops[i].rule); }
+    free(r->ops);
+    memset(r, 0, sizeof(*r));
+}
+
+static void regs_clear(regs_t *t) {
+    for (size_t i = 0; i < t->n; i++) { reg_clear(&t->v[i]); }
+    free(t->v);
+    memset(t, 0, sizeof(*t));
+}
+
+firc_ipt_t *firc_ipt_new(firc_xt_t *xt, const char *chain_prefix) {
+    if (xt == NULL || chain_prefix == NULL || chain_prefix[0] == '\0') { return NULL; }
     firc_ipt_t *ipt = calloc(1, sizeof(*ipt));
-    if (!ipt) { return NULL; }
-    ipt->exe = exe;
+    if (ipt == NULL) { return NULL; }
+    ipt->prefix = strdup(chain_prefix);
+    if (ipt->prefix == NULL) {
+        free(ipt);
+        return NULL;
+    }
+    ipt->xt = xt;
+    ipt->fam = firc_xt_proto(xt);
     return ipt;
 }
 
-static void chain_reg_destroy(chain_reg_t *r) {
-    free(r->chain_name);
-    if (r->chain) { r->chain->ops->destroy(r->chain); }
-}
-
-static void table_reg_destroy(table_reg_t *t) {
-    for (size_t i = 0; i < t->n_chains; i++) { chain_reg_destroy(&t->chains[i]); }
-    free(t->chains);
-    free(t->table_name);
-}
-
 void firc_ipt_free(firc_ipt_t *ipt) {
-    if (!ipt) { return; }
-    for (size_t i = 0; i < ipt->n_tables; i++) { table_reg_destroy(&ipt->tables[i]); }
-    free(ipt->tables);
-    firc_ipt_executable_free(ipt->exe);
+    if (ipt == NULL) { return; }
+    for (int t = 0; t < N_TABLES; t++) {
+        regs_clear(&ipt->staged[t]);
+        regs_clear(&ipt->written[t]);
+    }
+    firc_xt_free(ipt->xt);
+    free(ipt->prefix);
     free(ipt);
 }
 
+firc_ipt_proto_t firc_ipt_proto(const firc_ipt_t *ipt) { return ipt->fam; }
+const char *firc_ipt_prefix(const firc_ipt_t *ipt) { return ipt->prefix; }
+void firc_ipt_set_cancel(firc_ipt_t *ipt, firc_cancel_t *cancel) { ipt->cancel = cancel; }
+
 void firc_ipt_discard(firc_ipt_t *ipt) {
-    if (!ipt) { return; }
-    for (size_t i = 0; i < ipt->n_tables; i++) { table_reg_destroy(&ipt->tables[i]); }
-    free(ipt->tables);
-    ipt->tables = NULL;
-    ipt->n_tables = 0;
-    ipt->cap_tables = 0;
+    if (ipt == NULL) { return; }
+    for (int t = 0; t < N_TABLES; t++) { regs_clear(&ipt->staged[t]); }
 }
 
-firc_err_t firc_ipt_write_transcript(firc_ipt_t *ipt, const uint8_t *data, size_t len) {
-    if (ipt == NULL) { return FIRC_ERR_INVAL; }
-    return ipt->exe->ops->restore(ipt->exe, data, len);
-}
-
-firc_ipt_proto_t firc_ipt_proto(const firc_ipt_t *ipt) {
-    return ipt->exe->ops->proto(ipt->exe);
-}
-
-static table_reg_t *find_table(firc_ipt_t *ipt, const char *name) {
-    for (size_t i = 0; i < ipt->n_tables; i++) {
-        if (strcmp(ipt->tables[i].table_name, name) == 0) { return &ipt->tables[i]; }
+static reg_t *find_reg(const regs_t *t, const char *chain) {
+    for (size_t i = 0; i < t->n; i++) {
+        if (strcmp(t->v[i].chain, chain) == 0) { return &t->v[i]; }
     }
     return NULL;
 }
 
-static table_reg_t *find_or_create_table(firc_ipt_t *ipt, const char *name) {
-    table_reg_t *t = find_table(ipt, name);
-    if (t) { return t; }
-
-    if (ipt->n_tables + 1 > ipt->cap_tables) {
-        size_t newcap = ipt->cap_tables == 0 ? 4 : ipt->cap_tables * 2;
-        table_reg_t *tmp = realloc(ipt->tables, newcap * sizeof(*tmp));
-        if (!tmp) { return NULL; }
-        ipt->tables = tmp;
-        ipt->cap_tables = newcap;
-    }
-    table_reg_t *nt = &ipt->tables[ipt->n_tables];
-    memset(nt, 0, sizeof(*nt));
-    nt->table_name = strdup(name);
-    if (!nt->table_name) { return NULL; }
-    ipt->n_tables++;
-    return nt;
-}
-
-static chain_reg_t *find_chain_reg(table_reg_t *t, const char *name) {
-    for (size_t i = 0; i < t->n_chains; i++) {
-        if (strcmp(t->chains[i].chain_name, name) == 0) { return &t->chains[i]; }
-    }
-    return NULL;
-}
-
-static firc_err_t register_chain(firc_ipt_t *ipt, const char *table, const char *chain,
-                               firc_ipt_chain_t *(*ctor)(void)) {
-    table_reg_t *t = find_or_create_table(ipt, table);
-    if (!t) { return FIRC_ERR_NOMEM; }
-
-    firc_ipt_chain_t *newchain = ctor();
-    if (!newchain) { return FIRC_ERR_NOMEM; }
-
-    chain_reg_t *c = find_chain_reg(t, chain);
-    if (c) {
-        c->chain->ops->destroy(c->chain);
-        c->chain = newchain;
-        return FIRC_OK;
-    }
-
-    if (t->n_chains + 1 > t->cap_chains) {
-        size_t newcap = t->cap_chains == 0 ? 4 : t->cap_chains * 2;
-        chain_reg_t *tmp = realloc(t->chains, newcap * sizeof(*tmp));
-        if (!tmp) {
-            newchain->ops->destroy(newchain);
-            return FIRC_ERR_NOMEM;
+static firc_err_t register_chain(firc_ipt_t *ipt, const char *table, const char *chain, bool patch) {
+    int ti = table_index(table);
+    if (ipt == NULL || ti < 0 || chain == NULL) { return FIRC_ERR_INVAL; }
+    size_t plen = strlen(ipt->prefix);
+    bool ok = patch ? builtin(ti, chain) : strncmp(chain, ipt->prefix, plen) == 0 && strlen(chain) <= 28;
+    if (!ok) { return FIRC_ERR_INVAL; }
+    regs_t *t = &ipt->staged[ti];
+    reg_t *r = find_reg(t, chain);
+    if (r != NULL && patch && r->patch) { return FIRC_OK; }
+    if (r != NULL) {
+        char *name = r->chain;
+        r->chain = NULL;
+        reg_clear(r);
+        r->chain = name;
+    } else {
+        if (t->n == t->cap) {
+            size_t cap = t->cap ? t->cap * 2 : 8;
+            reg_t *grown = realloc(t->v, cap * sizeof(*grown));
+            if (grown == NULL) { return FIRC_ERR_NOMEM; }
+            t->v = grown;
+            t->cap = cap;
         }
-        t->chains = tmp;
-        t->cap_chains = newcap;
+        r = &t->v[t->n];
+        memset(r, 0, sizeof(*r));
+        r->chain = strdup(chain);
+        if (r->chain == NULL) { return FIRC_ERR_NOMEM; }
+        t->n++;
     }
-    chain_reg_t *nc = &t->chains[t->n_chains];
-    nc->chain_name = strdup(chain);
-    if (!nc->chain_name) {
-        newchain->ops->destroy(newchain);
-        return FIRC_ERR_NOMEM;
-    }
-    nc->chain = newchain;
-    t->n_chains++;
+    r->patch = patch;
+    block_start(ipt, &r->block);
     return FIRC_OK;
 }
 
-firc_err_t firc_ipt_register_chain_delete(firc_ipt_t *ipt, const char *table, const char *chain) {
-    return register_chain(ipt, table, chain, firc_ipt_chain_delete_new);
-}
 firc_err_t firc_ipt_register_chain_patch(firc_ipt_t *ipt, const char *table, const char *chain) {
-    return register_chain(ipt, table, chain, firc_ipt_chain_patch_new);
+    return register_chain(ipt, table, chain, true);
 }
 firc_err_t firc_ipt_register_chain_override(firc_ipt_t *ipt, const char *table, const char *chain) {
-    return register_chain(ipt, table, chain, firc_ipt_chain_override_new);
+    return register_chain(ipt, table, chain, false);
 }
 
-static firc_err_t dispatch_rule_op(firc_ipt_t *ipt, const char *table, const char *chain,
-                                 const char *const *args, size_t n_args, int rule_num,
-                                 int op /* 0=append 1=insert 2=delete */) {
-    table_reg_t *t = find_table(ipt, table);
-    chain_reg_t *c = t ? find_chain_reg(t, chain) : NULL;
-    if (!c) { return FIRC_ERR_STATE; }
-
-    firc_ipt_rule_t *rule = firc_ipt_rule_new(args, n_args);
-    if (!rule) { return FIRC_ERR_NOMEM; }
-
-    firc_err_t err;
-    switch (op) {
-    case 0: err = c->chain->ops->append(c->chain, rule); break;
-    case 1: err = c->chain->ops->insert(c->chain, rule_num, rule); break;
-    default: err = c->chain->ops->remove(c->chain, rule); break;
+static void say_refused(firc_ipt_t *ipt, const char *table, const char *chain, const firc_ipt_rule_t *rule) {
+    char *words = firc_ipt_rule_string(rule);
+    if (!ipt->said_inval) {
+        FIRC_WARN("x_tables %s %s: the rule \"%s\" in %s is outside what firc writes", fam_name(ipt), table,
+                  words ? words : "", chain);
+        ipt->said_inval = true;
+    } else {
+        FIRC_DEBUG("x_tables %s %s: the rule \"%s\" in %s is outside what firc writes", fam_name(ipt), table,
+                   words ? words : "", chain);
     }
+    free(words);
+}
+
+static firc_err_t add_op(reg_t *r, firc_ipt_option_t op, int num, const firc_ipt_rule_t *rule) {
+    size_t kept = 0;
+    for (size_t i = 0; i < r->n_ops; i++) {
+        if (firc_ipt_rule_equal(r->ops[i].rule, rule)) {
+            firc_ipt_rule_free(r->ops[i].rule);
+            continue;
+        }
+        r->ops[kept++] = r->ops[i];
+    }
+    r->n_ops = kept;
+    if (r->n_ops == r->cap_ops) {
+        size_t cap = r->cap_ops ? r->cap_ops * 2 : 8;
+        firc_xt_patch_op_t *grown = realloc(r->ops, cap * sizeof(*grown));
+        if (grown == NULL) { return FIRC_ERR_NOMEM; }
+        r->ops = grown;
+        r->cap_ops = cap;
+    }
+    firc_ipt_rule_t *owned = firc_ipt_rule_clone(rule);
+    if (owned == NULL) { return FIRC_ERR_NOMEM; }
+    r->ops[r->n_ops++] = (firc_xt_patch_op_t){op, num, owned};
+    return FIRC_OK;
+}
+
+static void find_rewrite(void *ud, uint32_t index, firc_xt_role_t role, const uint8_t *addr, const uint8_t *mask) {
+    (void)index;
+    (void)addr;
+    (void)mask;
+    if (role == FIRC_XT_ROLE_REWRITES) { *(bool *)ud = true; }
+}
+
+static firc_err_t rule_op(firc_ipt_t *ipt, const char *table, const char *chain, firc_ipt_option_t op, int num,
+                          const char *const *args, size_t n_args) {
+    int ti = table_index(table);
+    reg_t *r = ipt == NULL || ti < 0 || chain == NULL ? NULL : find_reg(&ipt->staged[ti], chain);
+    if (r == NULL) { return FIRC_ERR_STATE; }
+    firc_ipt_rule_t *rule = firc_ipt_rule_new(args, n_args);
+    if (rule == NULL) { return FIRC_ERR_NOMEM; }
+    firc_err_t err;
+    if (r->patch) {
+        firc_xt_block_t check;
+        block_start(ipt, &check);
+        err = firc_xt_block_add_rule(&check, ipt->fam, rule);
+        bool rewrites = false;
+        if (err == FIRC_OK) { err = firc_xt_block_roles(&check, ipt->fam, find_rewrite, &rewrites); }
+        if (err == FIRC_OK && rewrites) { err = FIRC_ERR_INVAL; }
+        firc_xt_block_free(&check);
+        if (err == FIRC_OK) { err = add_op(r, op, num, rule); }
+    } else if (op == FIRC_IPT_OP_INSERT) {
+        err = FIRC_ERR_INVAL;
+    } else {
+        err = firc_xt_block_add_rule(&r->block, ipt->fam, rule);
+    }
+    if (err == FIRC_ERR_INVAL) { say_refused(ipt, table, chain, rule); }
     firc_ipt_rule_free(rule);
     return err;
 }
 
-firc_err_t firc_ipt_append(firc_ipt_t *ipt, const char *table, const char *chain,
-                       const char *const *args, size_t n_args) {
-    return dispatch_rule_op(ipt, table, chain, args, n_args, 0, 0);
+firc_err_t firc_ipt_append(firc_ipt_t *ipt, const char *table, const char *chain, const char *const *args, size_t n_args) {
+    return rule_op(ipt, table, chain, FIRC_IPT_OP_APPEND, 0, args, n_args);
 }
-firc_err_t firc_ipt_insert(firc_ipt_t *ipt, const char *table, const char *chain, int rule_num,
-                       const char *const *args, size_t n_args) {
-    return dispatch_rule_op(ipt, table, chain, args, n_args, rule_num, 1);
-}
-firc_err_t firc_ipt_delete(firc_ipt_t *ipt, const char *table, const char *chain,
-                       const char *const *args, size_t n_args) {
-    return dispatch_rule_op(ipt, table, chain, args, n_args, 0, 2);
+firc_err_t firc_ipt_insert(firc_ipt_t *ipt, const char *table, const char *chain, int rule_num, const char *const *args,
+                           size_t n_args) {
+    return rule_op(ipt, table, chain, FIRC_IPT_OP_INSERT, rule_num, args, n_args);
 }
 
-bool firc_ipt_err_is_chain_not_initialized(firc_err_t err) {
-    return err == FIRC_ERR_STATE;
+firc_err_t firc_ipt_append_dnat(firc_ipt_t *ipt, const char *table, const char *chain, const uint8_t *fake,
+                                const uint8_t *real) {
+    int ti = table_index(table);
+    reg_t *r = ipt == NULL || ti < 0 || chain == NULL ? NULL : find_reg(&ipt->staged[ti], chain);
+    if (r == NULL) { return FIRC_ERR_STATE; }
+    if (r->patch) { return FIRC_ERR_INVAL; }
+    return firc_xt_block_add_dnat(&r->block, ipt->fam, fake, real);
 }
 
-typedef struct chain_builder {
-    char *chain_name;
-    firc_ipt_rule_t **rules;
-    size_t n_rules, cap_rules;
-} chain_builder_t;
-
-typedef struct table_builder {
-    char *table_name;
-    chain_builder_t *chains;
-    size_t n_chains, cap_chains;
-} table_builder_t;
-
-static chain_builder_t *builder_find_chain(table_builder_t *t, const char *name, size_t len) {
-    for (size_t i = 0; i < t->n_chains; i++) {
-        if (strlen(t->chains[i].chain_name) == len &&
-            memcmp(t->chains[i].chain_name, name, len) == 0) {
-            return &t->chains[i];
-}
-    }
-    return NULL;
-}
-
-static chain_builder_t *builder_find_or_create_chain(table_builder_t *t, const char *name,
-                                                     size_t len) {
-    chain_builder_t *c = builder_find_chain(t, name, len);
-    if (c) { return c; }
-
-    if (t->n_chains + 1 > t->cap_chains) {
-        size_t newcap = t->cap_chains == 0 ? 4 : t->cap_chains * 2;
-        chain_builder_t *tmp = realloc(t->chains, newcap * sizeof(*tmp));
-        if (!tmp) { return NULL; }
-        t->chains = tmp;
-        t->cap_chains = newcap;
-    }
-    chain_builder_t *nc = &t->chains[t->n_chains];
-    nc->chain_name = strndup(name, len);
-    if (!nc->chain_name) { return NULL; }
-    /* Non-NULL even when empty: NULL means the chain is absent. */
-    nc->rules = calloc(1, sizeof(firc_ipt_rule_t *));
-    if (!nc->rules) { return NULL; }
-    nc->n_rules = 0;
-    nc->cap_rules = 1;
-    t->n_chains++;
-    return nc;
-}
-
-static firc_err_t chain_builder_add_rule(chain_builder_t *c, firc_ipt_rule_t *rule) {
-    if (c->n_rules + 1 > c->cap_rules) {
-        size_t newcap = c->cap_rules == 0 ? 4 : c->cap_rules * 2;
-        firc_ipt_rule_t **tmp = realloc(c->rules, newcap * sizeof(*tmp));
-        if (!tmp) { return FIRC_ERR_NOMEM; }
-        c->rules = tmp;
-        c->cap_rules = newcap;
-    }
-    c->rules[c->n_rules++] = rule;
-    return FIRC_OK;
-}
-
-static table_builder_t *tb_find(table_builder_t *tables, size_t n, const char *name, size_t len) {
-    for (size_t i = 0; i < n; i++) {
-        if (strlen(tables[i].table_name) == len && memcmp(tables[i].table_name, name, len) == 0) {
-            return &tables[i];
-}
-    }
-    return NULL;
-}
-
-static table_builder_t *tb_find_or_create(table_builder_t **tables, size_t *n, size_t *cap,
-                                          const char *name, size_t len) {
-    table_builder_t *t = tb_find(*tables, *n, name, len);
-    if (t) { return t; }
-
-    if (*n + 1 > *cap) {
-        size_t newcap = *cap == 0 ? 4 : *cap * 2;
-        table_builder_t *tmp = realloc(*tables, newcap * sizeof(*tmp));
-        if (!tmp) { return NULL; }
-        *tables = tmp;
-        *cap = newcap;
-    }
-    table_builder_t *nt = &(*tables)[*n];
-    memset(nt, 0, sizeof(*nt));
-    nt->table_name = strndup(name, len);
-    if (!nt->table_name) { return NULL; }
-    (*n)++;
-    return nt;
-}
-
-/* Leaves the `tables` array itself alone; the caller frees it once. */
-static void builders_free_range(table_builder_t *tables, size_t start, size_t end) {
-    for (size_t ti = start; ti < end; ti++) {
-        table_builder_t *t = &tables[ti];
-        for (size_t ci = 0; ci < t->n_chains; ci++) {
-            chain_builder_t *c = &t->chains[ci];
-            for (size_t ri = 0; ri < c->n_rules; ri++) { firc_ipt_rule_free(c->rules[ri]); }
-            free(c->rules);
-            free(c->chain_name);
-        }
-        free(t->chains);
-        free(t->table_name);
-    }
-}
-
-static void builders_free(table_builder_t *tables, size_t n) {
-    builders_free_range(tables, 0, n);
-    free(tables);
-}
-
-/* Spans point into the caller's buffer. */
-typedef struct field_span {
-    size_t off, len;
-} field_span_t;
-
-static firc_err_t split_fields(const uint8_t *line, size_t line_len, field_span_t **out,
-                             size_t *out_n) {
-    field_span_t *fields = NULL;
-    size_t n = 0, cap = 0;
-    long start = -1;
-
-    for (size_t i = 0; i < line_len; i++) {
-        uint8_t b = line[i];
-        if (b == ' ' || b == '\t') {
-            if (start >= 0) {
-                if (n + 1 > cap) {
-                    size_t newcap = cap == 0 ? 8 : cap * 2;
-                    field_span_t *tmp = realloc(fields, newcap * sizeof(*tmp));
-                    if (!tmp) {
-                        free(fields);
-                        return FIRC_ERR_NOMEM;
-                    }
-                    fields = tmp;
-                    cap = newcap;
-                }
-                fields[n].off = (size_t)start;
-                fields[n].len = i - (size_t)start;
-                n++;
-                start = -1;
-            }
-        } else if (start < 0) {
-            start = (long)i;
+static bool reg_equal(const reg_t *a, const reg_t *b) {
+    if (strcmp(a->chain, b->chain) != 0 || a->patch != b->patch) { return false; }
+    if (!a->patch) { return firc_xt_block_equal(&a->block, &b->block); }
+    if (a->n_ops != b->n_ops) { return false; }
+    for (size_t i = 0; i < a->n_ops; i++) {
+        if (a->ops[i].option != b->ops[i].option || a->ops[i].rule_num != b->ops[i].rule_num ||
+            !firc_ipt_rule_equal(a->ops[i].rule, b->ops[i].rule)) {
+            return false;
         }
     }
-    if (start >= 0) {
-        if (n + 1 > cap) {
-            field_span_t *tmp = realloc(fields, (n + 1) * sizeof(*tmp));
-            if (!tmp) {
-                free(fields);
-                return FIRC_ERR_NOMEM;
-            }
-            fields = tmp;
+    return true;
+}
+
+static bool regs_equal(const regs_t *a, const regs_t *b) {
+    if (a->n != b->n) { return false; }
+    for (size_t i = 0; i < a->n; i++) {
+        if (!reg_equal(&a->v[i], &b->v[i])) { return false; }
+    }
+    return true;
+}
+
+static firc_err_t write_regs(firc_ipt_t *ipt, int ti, const regs_t *t, bool full) {
+    firc_xt_stage_chain_t *chains = calloc(t->n ? t->n : 1, sizeof(*chains));
+    if (chains == NULL) { return FIRC_ERR_NOMEM; }
+    size_t n = 0;
+    for (size_t i = 0; i < t->n; i++) {
+        const reg_t *r = &t->v[i];
+        chains[n].name = r->chain;
+        chains[n].kind = r->patch ? FIRC_XT_STAGE_PATCH : FIRC_XT_STAGE_OVERRIDE;
+        if (r->patch) {
+            chains[n].ops = r->ops;
+            chains[n].n_ops = r->n_ops;
+        } else {
+            chains[n].block = &r->block;
         }
-        fields[n].off = (size_t)start;
-        fields[n].len = line_len - (size_t)start;
         n++;
     }
-
-    *out = fields;
-    *out_n = n;
-    return FIRC_OK;
+    firc_xt_stage_t stage = {chains, n, ipt->prefix, full};
+    firc_err_t err = firc_xt_commit(ipt->xt, k_tables[ti], &stage, ipt->cancel);
+    free(chains);
+    return err;
 }
 
-firc_err_t firc_ipt_get_current_rules(firc_ipt_t *ipt, firc_ipt_rules_snapshot_t **out) {
-    *out = NULL;
-
-    uint8_t *data = NULL;
-    size_t data_len = 0;
-    firc_err_t err = ipt->exe->ops->save(ipt->exe, &data, &data_len);
-    if (err != FIRC_OK) { return err; }
-
-    table_builder_t *tables = NULL;
-    size_t n_tables = 0, cap_tables = 0;
-    table_builder_t *cur_table = NULL;
-
-    size_t line_start = 0;
-    for (size_t i = 0; i <= data_len && err == FIRC_OK; i++) {
-        if (i < data_len && data[i] != '\n') { continue; }
-
-        const uint8_t *line = data + line_start;
-        size_t line_len = i - line_start;
-        line_start = i + 1;
-
-        if (line_len == 0) { continue; }
-
-        switch (line[0]) {
-        case '*': {
-            cur_table = tb_find_or_create(&tables, &n_tables, &cap_tables,
-                                          (const char *)line + 1, line_len - 1);
-            if (!cur_table) { err = FIRC_ERR_NOMEM; }
-            break;
-        }
-        case ':': {
-            size_t name_len;
-            const uint8_t *body = line + 1;
-            size_t body_len = line_len - 1;
-            size_t space_idx = body_len;
-            for (size_t k = 0; k < body_len; k++) {
-                if (body[k] == ' ') {
-                    space_idx = k;
-                    break;
-                }
-            }
-            name_len = space_idx;
-            if (name_len == 0) {
-                err = FIRC_ERR_PROTO;
-                break;
-            }
-            if (!cur_table) {
-                err = FIRC_ERR_PROTO;
-                break;
-            }
-            if (!builder_find_or_create_chain(cur_table, (const char *)body, name_len)) {
-                err = FIRC_ERR_NOMEM;
-}
-            break;
-        }
-        case '-': {
-            if (!cur_table) {
-                err = FIRC_ERR_PROTO;
-                break;
-            }
-            field_span_t *fields = NULL;
-            size_t n_fields = 0;
-            err = split_fields(line, line_len, &fields, &n_fields);
-            if (err != FIRC_OK) { break; }
-            if (n_fields < 2) {
-                err = FIRC_ERR_PROTO;
-                free(fields);
-                break;
-            }
-            if (fields[0].len < 2) {
-                err = FIRC_ERR_PROTO;
-                free(fields);
-                break;
-            }
-            uint8_t op = line[fields[0].off + 1];
-            chain_builder_t *cb = builder_find_or_create_chain(
-                cur_table, (const char *)line + fields[1].off, fields[1].len);
-            if (!cb) {
-                err = FIRC_ERR_NOMEM;
-                free(fields);
-                break;
-            }
-            if (op == 'A') {
-                size_t n_parts = n_fields - 2;
-                char **parts = NULL;
-                if (n_parts > 0) {
-                    parts = calloc(n_parts, sizeof(char *));
-                    if (!parts) {
-                        err = FIRC_ERR_NOMEM;
-                        free(fields);
-                        break;
-                    }
-                    for (size_t k = 0; k < n_parts; k++) {
-                        parts[k] = strndup((const char *)line + fields[k + 2].off,
-                                           fields[k + 2].len);
-                        if (!parts[k]) {
-                            for (size_t j = 0; j < k; j++) { free(parts[j]); }
-                            free(parts);
-                            parts = NULL;
-                            err = FIRC_ERR_NOMEM;
-                            break;
-                        }
-                    }
-                }
-                if (err == FIRC_OK) {
-                    firc_ipt_rule_t *rule = firc_ipt_rule_new((const char *const *)parts, n_parts);
-                    for (size_t k = 0; k < n_parts; k++) { free(parts[k]); }
-                    free(parts);
-                    if (!rule) {
-                        err = FIRC_ERR_NOMEM;
-                    } else {
-                        err = chain_builder_add_rule(cb, rule);
-                        if (err != FIRC_OK) { firc_ipt_rule_free(rule); }
-                    }
-                }
-            } else {
-                err = FIRC_ERR_PROTO;
-            }
-            free(fields);
-            break;
-        }
-        case '#':
-            break; /* comment */
-        case 'C':
-            cur_table = NULL; /* COMMIT */
-            break;
-        default:
-            err = FIRC_ERR_PROTO;
-            break;
-        }
-    }
-
-    free(data);
-
-    if (err != FIRC_OK) {
-        builders_free(tables, n_tables);
-        return err;
-    }
-
-    firc_ipt_rules_snapshot_t *snap = calloc(1, sizeof(*snap));
-    if (!snap) {
-        builders_free(tables, n_tables);
-        return FIRC_ERR_NOMEM;
-    }
-    if (n_tables > 0) {
-        snap->tables = calloc(n_tables, sizeof(*snap->tables));
-        if (!snap->tables) {
-            free(snap);
-            builders_free(tables, n_tables);
-            return FIRC_ERR_NOMEM;
-        }
-    }
-    snap->n_tables = n_tables;
-
-    for (size_t ti = 0; ti < n_tables; ti++) {
-        table_builder_t *tb = &tables[ti];
-        firc_ipt_table_rules_t *dst = &snap->tables[ti];
-        dst->table_name = tb->table_name;
-        dst->n_chains = tb->n_chains;
-        if (tb->n_chains > 0) {
-            dst->chains = calloc(tb->n_chains, sizeof(*dst->chains));
-            if (!dst->chains) {
-                /* snap owns tables[0,ti); tables[ti..) still own their names. */
-                snap->n_tables = ti;
-                firc_ipt_rules_snapshot_free(snap);
-                builders_free_range(tables, ti, n_tables);
-                free(tables);
-                return FIRC_ERR_NOMEM;
-            }
-        } else {
-            dst->chains = NULL;
-        }
-        for (size_t ci = 0; ci < tb->n_chains; ci++) {
-            chain_builder_t *cb = &tb->chains[ci];
-            dst->chains[ci].chain_name = cb->chain_name;
-            dst->chains[ci].rules = cb->rules;
-            dst->chains[ci].n_rules = cb->n_rules;
-        }
-        free(tb->chains); /* shell only: fields moved above */
-    }
-    free(tables);
-
-    *out = snap;
-    return FIRC_OK;
-}
-
-const firc_ipt_table_rules_t *firc_ipt_rules_snapshot_find_table(const firc_ipt_rules_snapshot_t *snap,
-                                                              const char *table_name) {
-    if (!snap) { return NULL; }
-    for (size_t i = 0; i < snap->n_tables; i++) {
-        if (strcmp(snap->tables[i].table_name, table_name) == 0) { return &snap->tables[i]; }
-    }
-    return NULL;
-}
-
-const firc_ipt_chain_rules_t *firc_ipt_table_rules_find_chain(const firc_ipt_table_rules_t *table,
-                                                          const char *chain_name) {
-    if (!table) { return NULL; }
-    for (size_t i = 0; i < table->n_chains; i++) {
-        if (strcmp(table->chains[i].chain_name, chain_name) == 0) { return &table->chains[i]; }
-    }
-    return NULL;
-}
-
-void firc_ipt_rules_snapshot_free(firc_ipt_rules_snapshot_t *snap) {
-    if (!snap) { return; }
-    for (size_t ti = 0; ti < snap->n_tables; ti++) {
-        firc_ipt_table_rules_t *t = &snap->tables[ti];
-        for (size_t ci = 0; ci < t->n_chains; ci++) {
-            firc_ipt_chain_rules_t *c = &t->chains[ci];
-            for (size_t ri = 0; ri < c->n_rules; ri++) { firc_ipt_rule_free(c->rules[ri]); }
-            free(c->rules);
-            free(c->chain_name);
-        }
-        free(t->chains);
-        free(t->table_name);
-    }
-    free(snap->tables);
-    free(snap);
-}
-
-typedef struct prio_bucket {
-    int8_t priority;
-    firc_ipt_command_t *cmds;
+typedef struct cover {
+    uint8_t (*addr)[16];
+    uint8_t (*mask)[16];
     size_t n, cap;
-} prio_bucket_t;
+    bool all;
+} cover_t;
 
-static prio_bucket_t *bucket_find_or_create(prio_bucket_t **buckets, size_t *n, size_t *cap,
-                                            int8_t priority) {
-    for (size_t i = 0; i < *n; i++) {
-        if ((*buckets)[i].priority == priority) { return &(*buckets)[i]; }
-    }
-    if (*n + 1 > *cap) {
-        size_t newcap = *cap == 0 ? 4 : *cap * 2;
-        prio_bucket_t *tmp = realloc(*buckets, newcap * sizeof(*tmp));
-        if (!tmp) { return NULL; }
-        *buckets = tmp;
-        *cap = newcap;
-    }
-    prio_bucket_t *b = &(*buckets)[*n];
-    b->priority = priority;
-    b->cmds = NULL;
-    b->n = 0;
-    b->cap = 0;
-    (*n)++;
-    return b;
+static void cover_free(cover_t *c) {
+    free(c->addr);
+    free(c->mask);
+    memset(c, 0, sizeof(*c));
 }
 
-static firc_err_t bucket_append_range(prio_bucket_t *b, firc_ipt_command_t *src, size_t n_src) {
-    if (b->n + n_src > b->cap) {
-        size_t newcap = b->cap == 0 ? 8 : b->cap;
-        while (newcap < b->n + n_src) { newcap *= 2; }
-        firc_ipt_command_t *tmp = realloc(b->cmds, newcap * sizeof(*tmp));
-        if (!tmp) { return FIRC_ERR_NOMEM; }
-        b->cmds = tmp;
-        b->cap = newcap;
+typedef struct collect {
+    cover_t *c;
+    firc_xt_role_t want;
+    firc_err_t err;
+} collect_t;
+
+static void collect_fn(void *ud, uint32_t index, firc_xt_role_t role, const uint8_t *addr, const uint8_t *mask) {
+    collect_t *k = ud;
+    (void)index;
+    if (role != k->want || k->err != FIRC_OK) { return; }
+    cover_t *c = k->c;
+    if (c->n == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 64;
+        uint8_t (*a)[16] = realloc(c->addr, cap * sizeof(*a));
+        if (a == NULL) {
+            k->err = FIRC_ERR_NOMEM;
+            return;
+        }
+        c->addr = a;
+        uint8_t (*m)[16] = realloc(c->mask, cap * sizeof(*m));
+        if (m == NULL) {
+            k->err = FIRC_ERR_NOMEM;
+            return;
+        }
+        c->mask = m;
+        c->cap = cap;
     }
-    memcpy(b->cmds + b->n, src, n_src * sizeof(*src));
-    b->n += n_src;
+    memcpy(c->addr[c->n], addr, 16);
+    memcpy(c->mask[c->n], mask, 16);
+    c->n++;
+}
+
+static const char *plain_jump(const firc_ipt_rule_t *r) {
+    if (r == NULL || r->n_parts != 2) { return NULL; }
+    return strcmp(r->parts[0], "-j") == 0 || strcmp(r->parts[0], "-g") == 0 ? r->parts[1] : NULL;
+}
+
+static bool reach(const regs_t *t, bool *reached, const char *chain) {
+    for (size_t i = 0; i < t->n; i++) {
+        const reg_t *r = &t->v[i];
+        if (!reached[i] && !r->patch && strcmp(r->chain, chain) == 0) {
+            reached[i] = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mark_reached(const regs_t *t, bool *reached) {
+    for (size_t i = 0; i < t->n; i++) {
+        const reg_t *r = &t->v[i];
+        if (!r->patch || strcmp(r->chain, "PREROUTING") != 0) { continue; }
+        for (size_t k = 0; k < r->n_ops; k++) {
+            const char *to = plain_jump(r->ops[k].rule);
+            if (to != NULL) { (void)reach(t, reached, to); }
+        }
+    }
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (size_t i = 0; i < t->n; i++) {
+            if (!reached[i]) { continue; }
+            const firc_xt_block_t *b = &t->v[i].block;
+            for (size_t j = 0; j < b->n_jumps; j++) { grew = reach(t, reached, b->jumps[j].chain) || grew; }
+        }
+    }
+}
+
+static firc_err_t cover_of(const regs_t *t, firc_ipt_proto_t fam, firc_xt_role_t want, cover_t *out) {
+    bool *reached = calloc(t->n ? t->n : 1, sizeof(*reached));
+    if (reached == NULL) { return FIRC_ERR_NOMEM; }
+    if (want == FIRC_XT_ROLE_MARKS) { mark_reached(t, reached); }
+    collect_t k = {out, want, FIRC_OK};
+    firc_err_t err = FIRC_OK;
+    for (size_t i = 0; i < t->n && err == FIRC_OK && k.err == FIRC_OK; i++) {
+        const reg_t *r = &t->v[i];
+        if (r->patch || (want == FIRC_XT_ROLE_MARKS && !reached[i])) { continue; }
+        err = firc_xt_block_roles(&r->block, fam, collect_fn, &k);
+    }
+    free(reached);
+    return err != FIRC_OK ? err : k.err;
+}
+
+static bool inside(const uint8_t *addr, const uint8_t *amask, const cover_t *m, size_t bytes) {
+    if (m->all) { return true; }
+    bool anywhere = true;
+    for (size_t b = 0; b < bytes; b++) { anywhere = anywhere && amask[b] == 0; }
+    if (anywhere) { return false; }
+    for (size_t j = 0; j < m->n; j++) {
+        bool hit = true;
+        for (size_t b = 0; b < bytes && hit; b++) {
+            uint8_t mm = m->mask[j][b];
+            hit = (mm & (uint8_t)~amask[b]) == 0 && (addr[b] & mm) == (m->addr[j][b] & mm);
+        }
+        if (hit) { return true; }
+    }
+    return false;
+}
+
+static bool covered(const cover_t *d, const cover_t *m, size_t bytes) {
+    if (d->all) { return m->all; }
+    for (size_t i = 0; i < d->n; i++) {
+        if (!inside(d->addr[i], d->mask[i], m, bytes)) { return false; }
+    }
+    return true;
+}
+
+typedef struct keep_ctx {
+    const cover_t *a, *b;
+    size_t bytes;
+    bool *keep;
+} keep_ctx_t;
+
+static void keep_fn(void *ud, uint32_t index, firc_xt_role_t role, const uint8_t *addr, const uint8_t *mask) {
+    keep_ctx_t *k = ud;
+    k->keep[index] =
+        role != FIRC_XT_ROLE_REWRITES || (inside(addr, mask, k->a, k->bytes) && inside(addr, mask, k->b, k->bytes));
+}
+
+static firc_err_t nat_part(const firc_ipt_t *ipt, const regs_t *nat, const cover_t *old_marks, const cover_t *new_marks,
+                           regs_t *out) {
+    out->v = calloc(nat->n ? nat->n : 1, sizeof(*out->v));
+    if (out->v == NULL) { return FIRC_ERR_NOMEM; }
+    out->cap = nat->n;
+    for (size_t i = 0; i < nat->n; i++) {
+        const reg_t *r = &nat->v[i];
+        reg_t *o = &out->v[out->n++];
+        o->chain = strdup(r->chain);
+        o->patch = r->patch;
+        firc_xt_block_init(&o->block);
+        if (o->chain == NULL) { return FIRC_ERR_NOMEM; }
+        for (size_t k = 0; r->patch && k < r->n_ops; k++) {
+            firc_err_t err = add_op(o, r->ops[k].option, r->ops[k].rule_num, r->ops[k].rule);
+            if (err != FIRC_OK) { return err; }
+        }
+        if (r->patch) { continue; }
+        bool *keep = calloc(r->block.n ? r->block.n : 1, sizeof(*keep));
+        if (keep == NULL) { return FIRC_ERR_NOMEM; }
+        keep_ctx_t kc = {old_marks, new_marks, addr_bytes(ipt), keep};
+        firc_err_t err = firc_xt_block_roles(&r->block, ipt->fam, keep_fn, &kc);
+        if (err == FIRC_OK) { err = firc_xt_block_keep(&r->block, ipt->fam, keep, &o->block); }
+        free(keep);
+        if (err != FIRC_OK) { return err; }
+    }
     return FIRC_OK;
 }
 
-static int bucket_cmp(const void *a, const void *b) {
-    int8_t pa = ((const prio_bucket_t *)a)->priority;
-    int8_t pb = ((const prio_bucket_t *)b)->priority;
-    return (pa > pb) - (pa < pb);
+typedef struct step {
+    int table;
+    bool part;
+} step_t;
+
+static const regs_t *after_commit(const firc_ipt_t *ipt, int t) {
+    if (ipt->staged[t].n > 0) { return &ipt->staged[t]; }
+    return ipt->known[t] ? &ipt->written[t] : NULL;
 }
 
-static void buckets_free(prio_bucket_t *buckets, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        for (size_t j = 0; j < buckets[i].n; j++) {
-            free(buckets[i].cmds[j].chain);
-            firc_ipt_rule_free(buckets[i].cmds[j].rule);
-        }
-        free(buckets[i].cmds);
+static firc_err_t unmarked_rewrites(const firc_ipt_t *ipt, size_t *lost) {
+    *lost = 0;
+    const regs_t *rewrites = after_commit(ipt, T_NAT), *marks = after_commit(ipt, T_MANGLE);
+    if (rewrites == NULL) { return FIRC_OK; }
+    cover_t mn, rn;
+    memset(&mn, 0, sizeof(mn));
+    memset(&rn, 0, sizeof(rn));
+    firc_err_t err = marks != NULL ? cover_of(marks, ipt->fam, FIRC_XT_ROLE_MARKS, &mn) : FIRC_OK;
+    if (err == FIRC_OK) { err = cover_of(rewrites, ipt->fam, FIRC_XT_ROLE_REWRITES, &rn); }
+    for (size_t i = 0; err == FIRC_OK && i < rn.n; i++) {
+        *lost += inside(rn.addr[i], rn.mask[i], &mn, addr_bytes(ipt)) ? 0u : 1u;
     }
-    free(buckets);
-}
-
-static firc_err_t write_rule_string(firc_bytebuf_t *buf, const firc_ipt_rule_t *rule) {
-    firc_err_t err = FIRC_OK;
-    for (size_t i = 0; i < rule->n_parts && err == FIRC_OK; i++) {
-        if (i > 0) { err = firc_bytebuf_append_byte(buf, ' '); }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, rule->parts[i]); }
-    }
+    cover_free(&mn);
+    cover_free(&rn);
     return err;
 }
 
-static firc_err_t write_command(firc_bytebuf_t *buf, const firc_ipt_command_t *cmd) {
-    firc_err_t err = FIRC_OK;
-    switch (cmd->option) {
-    case FIRC_IPT_OP_APPEND:
-        err = firc_bytebuf_append_str(buf, "-A ");
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, cmd->chain); }
-        if (err == FIRC_OK && cmd->rule && cmd->rule->n_parts > 0) {
-            err = firc_bytebuf_append_byte(buf, ' ');
-            if (err == FIRC_OK) { err = write_rule_string(buf, cmd->rule); }
+static firc_err_t order(firc_ipt_t *ipt, bool *add, bool *withdraw, regs_t *part) {
+    size_t bytes = addr_bytes(ipt);
+    cover_t mw, mn, rw, rn;
+    memset(&mw, 0, sizeof(mw));
+    memset(&mn, 0, sizeof(mn));
+    memset(&rw, 0, sizeof(rw));
+    memset(&rn, 0, sizeof(rn));
+    const regs_t *marks = after_commit(ipt, T_MANGLE);
+    firc_err_t err = marks != NULL ? cover_of(marks, ipt->fam, FIRC_XT_ROLE_MARKS, &mn) : FIRC_OK;
+    if (err == FIRC_OK && ipt->known[T_MANGLE]) { err = cover_of(&ipt->written[T_MANGLE], ipt->fam, FIRC_XT_ROLE_MARKS, &mw); }
+    if (err == FIRC_OK) { err = cover_of(&ipt->staged[T_NAT], ipt->fam, FIRC_XT_ROLE_REWRITES, &rn); }
+    if (err == FIRC_OK) {
+        if (ipt->known[T_NAT]) {
+            err = cover_of(&ipt->written[T_NAT], ipt->fam, FIRC_XT_ROLE_REWRITES, &rw);
+        } else {
+            rw.all = true;
         }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, '\n'); }
-        break;
-    case FIRC_IPT_OP_DELETE:
-        err = firc_bytebuf_append_str(buf, "-D ");
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, cmd->chain); }
-        if (err == FIRC_OK && cmd->rule && cmd->rule->n_parts > 0) {
-            err = firc_bytebuf_append_byte(buf, ' ');
-            if (err == FIRC_OK) { err = write_rule_string(buf, cmd->rule); }
-        }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, '\n'); }
-        break;
-    case FIRC_IPT_OP_INSERT: {
-        char num[32];
-        int written = snprintf(num, sizeof(num), "%d", cmd->rule_num);
-        if (written < 0 || (size_t)written >= sizeof(num)) { return FIRC_ERR_INVAL; }
-        err = firc_bytebuf_append_str(buf, "-I ");
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, cmd->chain); }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, ' '); }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, num); }
-        if (err == FIRC_OK && cmd->rule && cmd->rule->n_parts > 0) {
-            err = firc_bytebuf_append_byte(buf, ' ');
-            if (err == FIRC_OK) { err = write_rule_string(buf, cmd->rule); }
-        }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, '\n'); }
-        break;
     }
-    case FIRC_IPT_OP_FLUSH:
-        err = firc_bytebuf_append_str(buf, "-F ");
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, cmd->chain); }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, '\n'); }
-        break;
-    case FIRC_IPT_OP_DELETE_CHAIN:
-        err = firc_bytebuf_append_str(buf, "-X ");
-        if (err == FIRC_OK) { err = firc_bytebuf_append_str(buf, cmd->chain); }
-        if (err == FIRC_OK) { err = firc_bytebuf_append_byte(buf, '\n'); }
-        break;
+    if (err == FIRC_OK) {
+        *add = !covered(&rn, &mw, bytes);
+        *withdraw = !covered(&rw, &mn, bytes);
     }
+    if (err == FIRC_OK && *add && *withdraw) { err = nat_part(ipt, &ipt->staged[T_NAT], &mw, &mn, part); }
+    cover_free(&mw);
+    cover_free(&mn);
+    cover_free(&rw);
+    cover_free(&rn);
     return err;
 }
 
-void firc_ipt_set_cancel(firc_ipt_t *ipt, firc_cancel_t *cancel) {
-    ipt->cancel = cancel;
-    if (ipt->exe->ops->set_cancel) { ipt->exe->ops->set_cancel(ipt->exe, cancel); }
+static firc_err_t plan(firc_ipt_t *ipt, const bool *due, step_t *steps, size_t *ns, regs_t *part) {
+    *ns = 0;
+    bool add = false, withdraw = false;
+    if (due[T_MANGLE] || due[T_NAT]) {
+        size_t lost = 0;
+        firc_err_t err = unmarked_rewrites(ipt, &lost);
+        if (err != FIRC_OK) { return err; }
+        if (lost > 0) {
+            if (!ipt->said_uncovered) {
+                FIRC_WARN("x_tables %s: %zu rewrites in nat would be left without their mark in mangle; not written",
+                          fam_name(ipt), lost);
+                ipt->said_uncovered = true;
+            } else {
+                FIRC_DEBUG("x_tables %s: %zu rewrites in nat would be left without their mark in mangle; not written",
+                           fam_name(ipt), lost);
+            }
+            return FIRC_ERR_INVAL;
+        }
+    }
+    if ((due[T_FILTER] || due[T_MANGLE]) && due[T_NAT]) {
+        firc_err_t err = order(ipt, &add, &withdraw, part);
+        if (err != FIRC_OK) { return err; }
+    }
+    if (withdraw) { steps[(*ns)++] = (step_t){T_NAT, add}; }
+    if (due[T_FILTER]) { steps[(*ns)++] = (step_t){T_FILTER, false}; }
+    if (due[T_MANGLE]) { steps[(*ns)++] = (step_t){T_MANGLE, false}; }
+    if (due[T_NAT] && (!withdraw || add)) { steps[(*ns)++] = (step_t){T_NAT, false}; }
+    return FIRC_OK;
 }
 
-firc_err_t firc_ipt_commit(firc_ipt_t *ipt) {
-    /* Checked here too, so an abort between the two transfers stops the write. */
-    if (firc_cancel_raised(ipt->cancel)) { return FIRC_ERR_CANCELED; }
+static void report_add(firc_ipt_t *ipt, const char *what, long long ms, firc_err_t err) {
+    size_t room = sizeof(ipt->report) - ipt->report_len;
+    if (room <= 1 || firc_log_level() > FIRC_LOG_DEBUG) { return; }
+    const char *sep = ipt->report_len ? ", " : "";
+    char *at = ipt->report + ipt->report_len;
+    int n = ms < 0 ? snprintf(at, room, "%s%s skipped", sep, what)
+                   : snprintf(at, room, "%s%s %lld ms%s", sep, what, ms, err == FIRC_OK ? "" : " failed");
+    if (n > 0) { ipt->report_len += (size_t)n < room ? (size_t)n : room - 1; }
+}
 
-    firc_ipt_rules_snapshot_t *cur = NULL;
-    firc_err_t err = firc_ipt_get_current_rules(ipt, &cur);
-    if (err != FIRC_OK) { return err; }
+static long long ms_since(const struct timespec *t0) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (long long)((t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000);
+}
 
-    firc_bytebuf_t buf;
-    firc_bytebuf_init(&buf);
+void firc_ipt_take_report(firc_ipt_t *ipt, char *out, size_t cap) {
+    if (cap == 0) { return; }
+    out[0] = '\0';
+    if (ipt == NULL) { return; }
+    snprintf(out, cap, "%s", ipt->report_len ? ipt->report : "nothing to write");
+    ipt->report_len = 0;
+    ipt->report[0] = '\0';
+}
 
-    for (size_t ti = 0; ti < ipt->n_tables && err == FIRC_OK; ti++) {
-        table_reg_t *t = &ipt->tables[ti];
-        const firc_ipt_table_rules_t *cur_table = firc_ipt_rules_snapshot_find_table(cur, t->table_name);
-
-        prio_bucket_t *buckets = NULL;
-        size_t n_buckets = 0, cap_buckets = 0;
-        bool table_written = false;
-
-        for (size_t ci = 0; ci < t->n_chains && err == FIRC_OK; ci++) {
-            chain_reg_t *c = &t->chains[ci];
-            const firc_ipt_chain_rules_t *cur_chain =
-                cur_table ? firc_ipt_table_rules_find_chain(cur_table, c->chain_name) : NULL;
-            firc_ipt_rule_t *const *existing = cur_chain ? cur_chain->rules : NULL;
-            size_t n_existing = cur_chain ? cur_chain->n_rules : 0;
-
-            firc_ipt_command_t *cmds = NULL;
-            size_t n_cmds = 0;
-            int8_t priority = 0;
-            err = c->chain->ops->compile(c->chain, c->chain_name, existing, n_existing, &cmds,
-                                         &n_cmds, &priority);
-            if (err != FIRC_OK) { break; }
-            if (n_cmds == 0) { continue; }
-
-            if (!table_written) {
-                err = firc_bytebuf_append_byte(&buf, '*');
-                if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, t->table_name); }
-                if (err == FIRC_OK) { err = firc_bytebuf_append_byte(&buf, '\n'); }
-                if (err != FIRC_OK) {
-                    firc_ipt_command_list_free(cmds, n_cmds);
-                    break;
-                }
-                table_written = true;
-            }
-            err = firc_bytebuf_append_byte(&buf, ':');
-            if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, c->chain_name); }
-            if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, " - [0:0]\n"); }
-            if (err != FIRC_OK) {
-                firc_ipt_command_list_free(cmds, n_cmds);
-                break;
-            }
-
-            prio_bucket_t *bucket = bucket_find_or_create(&buckets, &n_buckets, &cap_buckets, priority);
-            if (!bucket) {
-                firc_ipt_command_list_free(cmds, n_cmds);
-                err = FIRC_ERR_NOMEM;
-                break;
-            }
-            err = bucket_append_range(bucket, cmds, n_cmds);
-            free(cmds); /* shallow: ownership of chain/rule moved into bucket */
-        }
-
-        if (err == FIRC_OK && table_written) {
-            qsort(buckets, n_buckets, sizeof(*buckets), bucket_cmp);
-            for (size_t bi = 0; bi < n_buckets && err == FIRC_OK; bi++) {
-                for (size_t ci = 0; ci < buckets[bi].n && err == FIRC_OK; ci++) {
-                    err = write_command(&buf, &buckets[bi].cmds[ci]);
-                }
-            }
-            if (err == FIRC_OK) { err = firc_bytebuf_append_str(&buf, "COMMIT\n"); }
-        }
-
-        buckets_free(buckets, n_buckets);
-    }
-
-    firc_ipt_rules_snapshot_free(cur);
-
-    if (err != FIRC_OK) {
-        firc_bytebuf_free(&buf);
-        return err;
-    }
-
-    if (buf.len == 0) {
-        firc_bytebuf_free(&buf);
-        return FIRC_OK;
-    }
-
+static firc_err_t commit_kind(firc_ipt_t *ipt, bool full) {
+    if (ipt == NULL) { return FIRC_ERR_INVAL; }
     if (firc_cancel_raised(ipt->cancel)) {
-        firc_bytebuf_free(&buf);
+        firc_ipt_discard(ipt);
         return FIRC_ERR_CANCELED;
     }
-
-    err = ipt->exe->ops->restore(ipt->exe, buf.data, buf.len);
-    firc_bytebuf_free(&buf);
+    for (int t = 0; t < N_TABLES; t++) {
+        if (ipt->known[t] && !firc_xt_shape_is(ipt->xt, k_tables[t], &ipt->shape[t])) {
+            FIRC_DEBUG("x_tables %s %s: changed since firc wrote it, read again", fam_name(ipt), k_tables[t]);
+            regs_clear(&ipt->written[t]);
+            ipt->known[t] = false;
+        }
+    }
+    bool due[N_TABLES];
+    for (int t = 0; t < N_TABLES; t++) {
+        bool staged = ipt->staged[t].n > 0;
+        due[t] = staged && (full || !ipt->known[t] || !regs_equal(&ipt->staged[t], &ipt->written[t]));
+        if (staged && !due[t]) {
+            FIRC_DEBUG("netfilter %s: staged as last written, skipped", k_tables[t]);
+            report_add(ipt, k_tables[t], -1, FIRC_OK);
+        }
+    }
+    step_t steps[4];
+    size_t ns = 0;
+    regs_t part;
+    memset(&part, 0, sizeof(part));
+    firc_err_t err = plan(ipt, due, steps, &ns, &part);
+    for (size_t s = 0; s < ns && err == FIRC_OK; s++) {
+        if (firc_cancel_raised(ipt->cancel)) {
+            err = FIRC_ERR_CANCELED;
+            break;
+        }
+        int t = steps[s].table;
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        err = write_regs(ipt, t, steps[s].part ? &part : &ipt->staged[t], full);
+        report_add(ipt, steps[s].part ? "nat (first part)" : k_tables[t], ms_since(&t0), err);
+        if (err != FIRC_OK) { break; }
+        regs_clear(&ipt->written[t]);
+        if (steps[s].part) {
+            ipt->written[t] = part;
+            memset(&part, 0, sizeof(part));
+        } else {
+            ipt->written[t] = ipt->staged[t];
+            memset(&ipt->staged[t], 0, sizeof(ipt->staged[t]));
+        }
+        ipt->known[t] = true;
+        ipt->shape[t] = firc_xt_left_shape(ipt->xt, k_tables[t]);
+    }
+    regs_clear(&part);
+    firc_ipt_discard(ipt);
+    if (err == FIRC_OK) {
+        ipt->said_inval = false;
+        ipt->said_uncovered = false;
+    }
     return err;
 }
+
+firc_err_t firc_ipt_commit(firc_ipt_t *ipt) { return commit_kind(ipt, false); }
+firc_err_t firc_ipt_commit_full(firc_ipt_t *ipt) { return commit_kind(ipt, true); }
+
+firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *chain, firc_ipt_rule_t *const *rules,
+                                size_t n) {
+    int ti = table_index(table);
+    if (ipt == NULL || ti < 0 || chain == NULL || strncmp(chain, ipt->prefix, strlen(ipt->prefix)) != 0 ||
+        strlen(chain) > 28) {
+        return FIRC_ERR_INVAL;
+    }
+    firc_xt_block_t b;
+    block_start(ipt, &b);
+    firc_err_t err = FIRC_OK;
+    for (size_t i = 0; i < n && err == FIRC_OK; i++) {
+        err = firc_xt_block_add_rule(&b, ipt->fam, rules[i]);
+        if (err == FIRC_ERR_INVAL) { say_refused(ipt, table, chain, rules[i]); }
+    }
+    if (err == FIRC_OK) {
+        firc_xt_stage_chain_t sc = {chain, FIRC_XT_STAGE_OVERRIDE, NULL, 0, NULL, 0, &b};
+        firc_xt_stage_t add = {&sc, 1, NULL, false};
+        err = firc_xt_commit(ipt->xt, table, &add, NULL);
+    }
+    if (err == FIRC_OK) {
+        firc_xt_stage_t drop = {NULL, 0, chain, false};
+        firc_err_t gone = firc_xt_commit(ipt->xt, table, &drop, NULL);
+        if (gone != FIRC_OK) {
+            ipt->known[ti] = false;
+            FIRC_WARN("the probe chain %s was not taken away (%s); the next netfilter pass drops it", chain,
+                      firc_err_str(gone));
+        }
+    }
+    firc_xt_block_free(&b);
+    return err;
+}
+
+firc_err_t firc_ipt_probe_capture(firc_ipt_t *ipt) { return ipt != NULL ? firc_xt_probe_capture(ipt->xt) : FIRC_ERR_INVAL; }

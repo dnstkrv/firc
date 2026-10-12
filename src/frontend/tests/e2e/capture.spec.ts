@@ -12,7 +12,11 @@ function isRefusal(v: Win | number | Refusal): v is Refusal {
 
 const KERNEL_REFUSAL =
   "this kernel will not take the capture rules: they need xt_conntrack, xt_mark, xt_limit, " +
-  "xt_string, xt_length, xt_connbytes and xt_NFLOG. The line it refused is in the daemon's log";
+  "xt_string, xt_length, xt_connbytes and xt_NFLOG. The daemon's log names what it lacks";
+
+const BLIND_PROBE =
+  "the kernel could not be asked which capture extensions it has; " +
+  "the daemon's log names the error. Routing is not affected";
 
 async function shell(page: Page, onCapture: Handler) {
   await signedIn(page);
@@ -99,6 +103,20 @@ test("a kernel that refuses the rules is quoted, and stays quoted past the next 
   await page.waitForTimeout(11000);
   await expect(notice).toContainText("xt_string");
   await expect(page.getByRole("button", { name: "Capture 5 min" })).toBeDisabled();
+});
+
+// Catches a blind kernel probe shown as a missing extension, or not shown at all.
+test("a probe that could not ask the kernel is quoted as its own refusal", async ({ page }) => {
+  await shell(page, (method) =>
+    method === "POST" ? { status: 503, error: BLIND_PROBE } : { running: false },
+  );
+
+  await page.getByRole("button", { name: "Capture 5 min" }).click();
+
+  await expect(
+    page.locator(".status .err").filter({ hasText: "could not be asked" }),
+  ).toBeVisible();
+  await expect(page.getByText("cannot capture")).toHaveCount(0);
 });
 
 // Catches the button keeping a countdown for a capture the daemon says has ended.

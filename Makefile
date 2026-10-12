@@ -217,7 +217,7 @@ package_ipk: prepare_files
 	echo 'Description: $(PKG_DESCRIPTION)' >> $(IPK_CONTROL_DIR)/control
 	echo 'Section: net' >> $(IPK_CONTROL_DIR)/control
 	echo 'Priority: optional' >> $(IPK_CONTROL_DIR)/control
-	@DEPS="libc, iptables, $(DEPS_IPK), cJSON"; \
+	@DEPS="libc, $(DEPS_IPK), cJSON"; \
 	if echo "$(TARGET)" | grep -q '_kn$$'; then \
 		DEPS="$$DEPS, socat"; \
 	fi; \

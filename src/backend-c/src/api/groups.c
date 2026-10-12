@@ -283,7 +283,7 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
     if (!group) { return FIRC_ERR_NOMEM; }
     group->id = existing ? existing->id : (has_req_id ? req_id : firc_id_random());
 
-    /* the interface name is written unquoted into an iptables-restore transcript; a newline corrupts the whole thing */
+    /* the interface name goes into an -o match: only a valid kernel interface name */
     const char *iface = get_string(req, "interface");
     if (iface != NULL && iface[0] != '\0' && !firc_is_interface_name(iface)) {
         firc_group_free(group);

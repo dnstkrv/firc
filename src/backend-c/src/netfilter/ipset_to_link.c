@@ -40,7 +40,6 @@ struct firc_ipset_to_link {
     bool enabled;
     uint32_t mark;       /* what the MARK rule writes: group field + handled bit */
     uint32_t mark_field; /* 1..FIRC_MARK_MAX_GROUPS; 0 until enable */
-    firc_ct_t *ct;
     uint32_t table;
     family_state_t v4, v6;
 };
@@ -124,7 +123,7 @@ static void emit_chunk_rule(void *ud, const char *group_id, unsigned family,
     const char *mk[] = {"-d", cidr, "-j", "MARK", "--set-xmark", e->mark_str};
     e->err = firc_ipt_append(e->ipt, "mangle", e->chain, mk, 6);
     if (e->err != FIRC_OK) { return; }
-    /* Masks spelled out as iptables-save echoes them; only firc's bits reach ctmark. */
+    /* Only firc's bits reach ctmark. */
     const char *cm[] = {"-d", cidr, "-j", "CONNMARK", "--save-mark", "--nfmask", "0x40ff0000", "--ctmask", "0x40ff0000"};
     e->err = firc_ipt_append(e->ipt, "mangle", e->chain, cm, 9);
 }
@@ -134,14 +133,14 @@ firc_err_t firc_ipset_to_link_devices_chain_of(const char *chain, char *out, siz
     return n < 0 || (size_t)n >= cap ? FIRC_ERR_INVAL : FIRC_OK;
 }
 
-/* Parts in iptables-save order, none for a /0; false for the other family. */
+/* Match parts, none for a /0; false for the other family. */
 static bool source_match(const firc_nf_source_t *s, bool is6, char *text, size_t cap, const char **parts,
                          size_t *n) {
     *n = 0;
     switch (s->kind) {
     case FIRC_NF_SRC_ADDR: {
         if ((s->family == 6) != is6) { return false; }
-        if (s->prefix == 0) { return true; } /* iptables-save never echoes -s 0.0.0.0/0 */
+        if (s->prefix == 0) { return true; }
         char a[INET6_ADDRSTRLEN];
         if (inet_ntop(is6 ? AF_INET6 : AF_INET, s->addr, a, sizeof(a)) == NULL) { return false; }
         snprintf(text, cap, "%s/%u", a, s->prefix);
@@ -150,7 +149,6 @@ static bool source_match(const firc_nf_source_t *s, bool is6, char *text, size_t
         return true;
     }
     case FIRC_NF_SRC_MAC:
-        /* %02X as libxt_mac echoes it, or the chain is rewritten every pass. */
         snprintf(text, cap, "%02X:%02X:%02X:%02X:%02X:%02X", s->mac[0], s->mac[1], s->mac[2], s->mac[3],
                  s->mac[4], s->mac[5]);
         parts[(*n)++] = "-m";
@@ -438,11 +436,11 @@ firc_err_t firc_ipset_to_link_set_devices(firc_ipset_to_link_t *l, const firc_nf
 
 const firc_nf_devices_t *firc_ipset_to_link_devices(const firc_ipset_to_link_t *l) { return &l->dev; }
 
-/* Real prefixes: original direction and not yet handled; parts in iptables-save order, no -d for /0. */
 static const char *proto_name(uint8_t proto) {
     return proto == IPPROTO_TCP ? "tcp" : proto == IPPROTO_UDP ? "udp" : NULL;
 }
 
+/* Real prefixes: original direction and not yet handled; no -d for /0. */
 static firc_err_t emit_subnet_rule(firc_ipt_t *ipt, const char *chain, const char *cidr,
                                    unsigned prefix, uint8_t proto, const char *ports,
                                    const char *mark_str, const char *jump) {
@@ -523,21 +521,6 @@ firc_err_t firc_ipset_to_link_build_subnet_rules(firc_ipt_t *ipt, const char *ch
     return firc_ipset_to_link_build_subnet_rules_dev(ipt, chain_name, mark, v4, n4, v6, n6, NULL);
 }
 
-static firc_err_t insert_iptables_rules(firc_ipset_to_link_t *l, firc_ipt_t *ipt) {
-    if (!ipt) { return FIRC_OK; }
-
-    firc_err_t err = build_iptables_rules(l, ipt);
-    if (err != FIRC_OK) { return err; }
-    return firc_ipt_commit(ipt);
-}
-
-firc_err_t firc_ipset_to_link_rewrite_chains(firc_ipset_to_link_t *l) {
-    if (!l || !l->enabled) { return FIRC_OK; }
-    firc_err_t e4 = insert_iptables_rules(l, l->ipt4);
-    firc_err_t e6 = insert_iptables_rules(l, l->ipt6);
-    return e4 != FIRC_OK ? e4 : e6;
-}
-
 firc_err_t firc_ipset_to_link_stage_for_test(firc_ipset_to_link_t *l) {
     if (!l) { return FIRC_ERR_INVAL; }
     firc_err_t e4 = build_iptables_rules(l, l->ipt4);
@@ -551,41 +534,6 @@ firc_err_t firc_ipset_to_link_prepare_iptables(firc_ipset_to_link_t *l) {
     firc_err_t e4 = build_iptables_rules(l, l->ipt4);
     firc_err_t e6 = build_iptables_rules(l, l->ipt6);
     return e4 != FIRC_OK ? e4 : e6;
-}
-
-firc_err_t firc_ipset_to_link_stage_delete(firc_ipt_t *ipt, const char *chain_name) {
-    if (!ipt) { return FIRC_OK; }
-    static const struct {
-        const char *table;
-        const char *base;
-    } k_where[] = {{"filter", "FORWARD"}, {"mangle", "PREROUTING"}, {"nat", "POSTROUTING"}};
-    firc_err_t first_err = FIRC_OK;
-    for (size_t i = 0; i < sizeof(k_where) / sizeof(k_where[0]); i++) {
-        firc_err_t err = firc_ipt_register_chain_delete(ipt, k_where[i].table, chain_name);
-        if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-        const char *jump[] = {"-j", chain_name};
-        err = firc_ipt_delete(ipt, k_where[i].table, k_where[i].base, jump, 2);
-        if (err != FIRC_OK && err != FIRC_ERR_NOENT && first_err == FIRC_OK) { first_err = err; }
-    }
-    /* -X order is safe: the group chain is flushed at its declaration. */
-    char dchain[128];
-    firc_err_t derr = firc_ipset_to_link_devices_chain_of(chain_name, dchain, sizeof(dchain));
-    if (derr == FIRC_OK) { derr = firc_ipt_register_chain_delete(ipt, "mangle", dchain); }
-    if (derr != FIRC_OK && first_err == FIRC_OK) { first_err = derr; }
-    return first_err;
-}
-
-firc_err_t firc_ipset_to_link_stage_delete_devices(firc_ipt_t *ipt, const char *devices_chain) {
-    if (!ipt) { return FIRC_OK; }
-    return firc_ipt_register_chain_delete(ipt, "mangle", devices_chain);
-}
-
-static firc_err_t delete_iptables_rules(firc_ipset_to_link_t *l, firc_ipt_t *ipt) {
-    if (!ipt) { return FIRC_OK; }
-    firc_err_t first_err = firc_ipset_to_link_stage_delete(ipt, l->chain_name);
-    firc_err_t err = firc_ipt_commit(ipt);
-    if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-    return first_err;
 }
 
 static firc_err_t insert_ip_rule(firc_ipset_to_link_t *l, const char **failed) {
@@ -792,15 +740,6 @@ void firc_ipset_to_link_flush_mark(firc_ct_t *ct, uint32_t group_value, const ch
     }
 }
 
-static void flush_flows(firc_ipset_to_link_t *l) {
-    if (l->mark_field == 0) { return; }
-    firc_ipset_to_link_flush_mark(l->ct, firc_mark_group_value(l->mark_field), l->chain_name);
-}
-
-void firc_ipset_to_link_set_conntrack(firc_ipset_to_link_t *l, firc_ct_t *ct) {
-    if (l != NULL) { l->ct = ct; }
-}
-
 uint32_t firc_ipset_to_link_mark_field(const firc_ipset_to_link_t *l) {
     return l == NULL ? 0 : l->mark_field;
 }
@@ -810,20 +749,15 @@ bool firc_ipset_to_link_has_iface_route(const firc_ipset_to_link_t *l, int famil
     return family == AF_INET6 ? l->v6.route.present : l->v4.route.present;
 }
 
-static firc_err_t teardown(firc_ipset_to_link_t *l, firc_nf_write_t mode) {
+static firc_err_t teardown(firc_ipset_to_link_t *l) {
     /* Rule first, then routes, so the rule never points at an emptying table. */
     firc_err_t e2 = delete_ip_rule(l);
     firc_err_t e1 = delete_ip_route(l);
-    /* By the committer the caller tombstones the chains. */
-    firc_err_t e3 = mode == FIRC_NF_WRITE_NOW ? delete_iptables_rules(l, l->ipt4) : FIRC_OK;
-    firc_err_t e4 = mode == FIRC_NF_WRITE_NOW ? delete_iptables_rules(l, l->ipt6) : FIRC_OK;
     if (e1 != FIRC_OK) { return e1; }
-    if (e2 != FIRC_OK) { return e2; }
-    if (e3 != FIRC_OK) { return e3; }
-    return e4;
+    return e2;
 }
 
-firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, firc_nf_write_t mode, const char **step) {
+firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, const char **step) {
     if (l->enabled) { return FIRC_OK; }
     const char *failed = NULL;
 
@@ -851,14 +785,9 @@ firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, firc_nf_write_t mo
     err = insert_ip_route(l);
     if (err != FIRC_OK) { failed = "route"; }
     if (err == FIRC_OK) { err = insert_ip_rule(l, &failed); }
-    if (err == FIRC_OK && mode == FIRC_NF_WRITE_NOW) {
-        err = insert_iptables_rules(l, l->ipt4);
-        if (err == FIRC_OK) { err = insert_iptables_rules(l, l->ipt6); }
-        if (err != FIRC_OK) { failed = "iptables"; }
-    }
 
     if (err != FIRC_OK) {
-        teardown(l, mode);
+        teardown(l);
         if (step) { *step = failed; }
         return err;
     }
@@ -868,14 +797,20 @@ firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, firc_nf_write_t mo
     return FIRC_OK;
 }
 
-firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l, firc_flows_t flows, firc_nf_write_t mode) {
+firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l) {
     if (!l->enabled) { return FIRC_OK; }
     l->enabled = false;
-    firc_err_t err = teardown(l, mode);
-    /* After rules and routes are gone, so nothing re-marks a flow; the committer path queues it instead. */
-    if (flows == FIRC_FLOWS_DROP && mode == FIRC_NF_WRITE_NOW) { flush_flows(l); }
+    return teardown(l);
+}
+
+firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, bool keep_reply) {
+    if (keep_reply) { l->v4.reply_rule_added = false; }
+    firc_err_t err = firc_ipset_to_link_disable(l);
+    firc_ipset_to_link_free(l);
     return err;
 }
+
+bool firc_ipset_to_link_has_reply_rule(const firc_ipset_to_link_t *l) { return l != NULL && l->v4.reply_rule_added; }
 
 firc_err_t firc_ipset_to_link_on_link_up(firc_ipset_to_link_t *l) {
     if (!l->enabled) { return FIRC_OK; }

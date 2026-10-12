@@ -1,0 +1,12 @@
+*filter
+:ACME_FWD - [0:0]
+:_NDM_ACL_IN - [0:0]
+:_NDM_FORWARD - [0:0]
+-A INPUT -j _NDM_ACL_IN
+-A FORWARD -j ACME_FWD
+-A FORWARD -j _NDM_FORWARD
+-A ACME_FWD -i br0 -o ppp0 -j ACCEPT
+-A _NDM_ACL_IN -i br0 -j ACCEPT
+-A _NDM_FORWARD -o ppp0 -m mark --mark 0x1/0x1 -j DROP
+-A _NDM_FORWARD -o ppp0 -j ACCEPT
+COMMIT

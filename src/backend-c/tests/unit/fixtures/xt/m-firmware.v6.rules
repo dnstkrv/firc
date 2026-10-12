@@ -1,0 +1,8 @@
+*mangle
+:_NDM_HOTSPOT_PRERT - [0:0]
+:_NDM_QOS - [0:0]
+-A PREROUTING -j _NDM_HOTSPOT_PRERT
+-A FORWARD -j _NDM_QOS
+-A _NDM_HOTSPOT_PRERT -i br0 -m mark --mark 0x0/0xfffffff -j MARK --set-xmark 0xffffaaa/0xffffffff
+-A _NDM_QOS -o ppp0 -j RETURN
+COMMIT

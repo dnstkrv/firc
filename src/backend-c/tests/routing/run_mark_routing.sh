@@ -58,14 +58,19 @@ nsenter -t "$FAR" -n "$HELPER" serve 9.9.9.9 53 &
 SRV=$!
 sleep 0.2
 
-check() { # <label> <mark-hex> <want line>
-    got=$("$HELPER" send 9.9.9.9 53 "$2")
-    [ "$got" = "$3" ] || fail "$1: got \"$got\", want \"$3\""
+check() { # <label> <destination> <mark-hex> <want line>
+    got=$("$HELPER" send "$2" 53 "$3")
+    [ "$got" = "$4" ] || fail "$1: got \"$got\", want \"$4\""
     echo "ok: $1 ($got)"
 }
 
-check "a query with the group's mark leaves by the tunnel" 0x40010000 "src=10.99.0.1 reply=yes"
-check "a query without a mark leaves by the WAN" 0 "src=10.98.0.1 reply=no"
-check "another group's mark is not this group's table" 0x40020000 "src=10.98.0.1 reply=no"
-check "the handled bit alone routes nothing" 0x40000000 "src=10.98.0.1 reply=no"
+check "a query with the group's mark leaves by the tunnel" 9.9.9.9 0x40010000 "src=10.99.0.1 reply=yes"
+check "a query without a mark leaves by the WAN" 9.9.9.9 0 "src=10.98.0.1 reply=no"
+check "another group's mark is not this group's table" 9.9.9.9 0x40020000 "src=10.98.0.1 reply=no"
+check "the handled bit alone routes nothing" 9.9.9.9 0x40000000 "src=10.98.0.1 reply=no"
+
+"$HELPER" xtnat output v4 2>/dev/null || fail "the DNAT rules for output could not be written"
+check "a fake address with the handled bit is rewritten" 198.18.0.1 0x40010000 "src=10.99.0.1 reply=yes"
+check "a fake address without the handled bit is not rewritten" 198.18.0.1 0x10000 "src=10.99.0.1 reply=no"
+check "an unmarked fake address is not rewritten" 198.18.0.1 0 "src=10.98.0.1 reply=no"
 echo "PASS: mark routing"

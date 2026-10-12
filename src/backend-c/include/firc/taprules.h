@@ -31,23 +31,17 @@ firc_err_t firc_tap_rules_build(const firc_fakeip_t *pool, const char *const *la
 #define FIRC_TAP_CHAIN_SUFFIX "TAP"
 #define FIRC_TAP_PROBE_SUFFIX "PROBE" /* "<prefix>TAPPROBE"; nothing jumps to it */
 
-/* A later failure leaves the chain staged; the caller must then call firc_tap_rules_remove. */
+/* A later failure leaves the chain staged; the caller discards the staging. */
 firc_err_t firc_tap_rules_install(firc_ipt_t *ipt, const char *chain_prefix,
                                   const firc_fakeip_t *pool, const char *const *lan,
                                   size_t n_lan);
 
-/* Stages removal of both the chain and its jump. Safe when they are not there. */
-firc_err_t firc_tap_rules_remove(firc_ipt_t *ipt, const char *chain_prefix);
-
-/* A real write, since --test never asks the kernel module; FIRC_ERR_NOSYS means the kernel refused a rule. */
+/* A real write of an unjumped chain, taken away again; FIRC_ERR_NOSYS means the kernel refused a rule. */
 firc_err_t firc_tap_rules_supported(firc_ipt_t *ipt, const char *chain_prefix,
                                     const firc_fakeip_t *pool, const char *const *lan,
                                     size_t n_lan);
 
 /* Loads whichever capture-rule modules are not loaded yet from dir (NULL: /lib/modules/<release>); returns how many. */
 size_t firc_tap_load_modules(const char *dir);
-
-/* Whether the chain and its jump are both in the kernel right now; one iptables-save per call. */
-firc_err_t firc_tap_rules_present(firc_ipt_t *ipt, const char *chain_prefix, bool *out);
 
 #endif /* FIRC_TAPRULES_H */

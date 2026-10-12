@@ -36,12 +36,6 @@
 #include "firc/sub_worker.h"
 #include "firc/subparse.h"
 
-/* no ticket: the lock proves it was written before the pass that clears it */
-typedef struct nf_tombstone {
-    char chain[128];
-    bool devices; /* a devices chain alone */
-} nf_tombstone_t;
-
 /* a flow flush a pass must carry before it runs */
 typedef struct nf_flush {
     uint32_t value; /* firc_mark_group_value(field) */
@@ -51,6 +45,12 @@ typedef struct nf_flush {
     uint64_t ticket;
     bool narrowed; /* owner's selector narrowed: paid even if routed again the same way */
 } nf_flush_t;
+
+typedef struct nf_held {
+    firc_ipset_to_link_t *link;
+    firc_id_t owner;
+    uint64_t ticket;
+} nf_held_t;
 
 struct firc_app {
     bool owed_full_sweep; /* a failed-to-report full pass asked for one more; cleared by the next landed report */
@@ -86,14 +86,13 @@ struct firc_app {
     bool nf_mu_ready;
     uint64_t nf_enters; /* acquisitions of nf_mu through app_nf_enter, loop thread's only; test seam */
     firc_nfcommit_t *committer;
-    /* written by the loop under nf_mu; cleared by the pass that carries it, before it releases nf_mu */
-    nf_tombstone_t *tombs;
-    size_t n_tombs;
-    size_t cap_tombs;
     uint64_t nf_change; /* moved on under nf_mu by every mutation that asks for a pass; a pass reads it once, at lock time */
     nf_flush_t *flushes; /* loop thread only, at most one entry per mark field (FIRC_MARK_MAX_GROUPS) */
     size_t n_flushes;
     size_t cap_flushes;
+    nf_held_t *held;
+    size_t n_held;
+    size_t cap_held;
 
     firc_sub_worker_t *sub_worker;
     uint64_t sync_seq_counter; /* monotonic across the app, not per list */
@@ -141,7 +140,6 @@ struct firc_app {
 /* every entry point that mutates the registry or drives an iptables engine must hold this */
 static void app_nf_enter(firc_app_t *app);
 static void app_nf_leave(firc_app_t *app);
-static firc_err_t firc_tap_rules_remove_all(firc_app_t *app);
 static void on_tap_readable(firc_loop_t *loop, int fd, uint32_t events, void *ud);
 static void tap_reader_down(firc_app_t *app);
 static void on_tap_deadline(firc_loop_t *loop, void *ud);
@@ -229,7 +227,6 @@ static firc_ruleset_deps_t ruleset_deps(firc_app_t *app) {
         .ipt4 = app->ipt4,
         .ipt6 = app->ipt6,
         .rtnl = app->rtnl,
-        .ct = app->ct,
         .pool = app->pool,
         .snap = rules_snapshot,
         .snap_ud = app,
@@ -259,74 +256,10 @@ static void rulesets_remove_at(firc_app_t *app, size_t idx) {
     app->n_rulesets--;
 }
 
-static firc_nf_write_t app_write_mode(const firc_app_t *app) {
-    return app->committer != NULL ? FIRC_NF_WRITE_BY_COMMITTER : FIRC_NF_WRITE_NOW;
-}
-
-/* never a full pass: a full one commits its flush before its refill (the fail-open window) */
+/* never a full pass: it would move jumps someone put above ours */
 static void app_request_more_locked(firc_app_t *app) {
     app->nf_change++;
     firc_nfcommit_request_more(app->committer);
-}
-
-static void group_chain_name(const firc_app_t *app, firc_id_t id, char *out, size_t cap) {
-    firc_ruleset_chain_name_for(app->cfg->app.netfilter.iptables.chain_prefix, id, out, cap);
-}
-
-static void tombstone_remove(firc_app_t *app, const char *chain) {
-    for (size_t i = 0; i < app->n_tombs; i++) {
-        if (strcmp(app->tombs[i].chain, chain) != 0) { continue; }
-        app->tombs[i] = app->tombs[--app->n_tombs];
-        return;
-    }
-}
-
-static void tombstone_add_kind(firc_app_t *app, const char *chain, bool devices) {
-    for (size_t i = 0; i < app->n_tombs; i++) {
-        if (strcmp(app->tombs[i].chain, chain) == 0) { return; }
-    }
-    if (app->n_tombs == app->cap_tombs) {
-        size_t cap = app->cap_tombs != 0 ? app->cap_tombs * 2 : 8;
-        nf_tombstone_t *grown = realloc(app->tombs, cap * sizeof(*grown));
-        if (grown == NULL) { /* a full pass's cleaner removes every chain of ours anyway; the lesser harm than one that marks traffic forever */
-            FIRC_WARN("no memory to remember that chain %s is to be deleted; asking for a full rebuild",
-                      chain);
-            firc_nfcommit_request(app->committer);
-            return;
-        }
-        app->tombs = grown;
-        app->cap_tombs = cap;
-    }
-    snprintf(app->tombs[app->n_tombs].chain, sizeof(app->tombs[0].chain), "%s", chain);
-    app->tombs[app->n_tombs].devices = devices;
-    app->n_tombs++;
-}
-
-static void tombstone_add(firc_app_t *app, const char *chain) { tombstone_add_kind(app, chain, false); }
-
-/* a group chain's delete takes its devices chain with it; a devices tombstone deletes that chain alone */
-static firc_err_t stage_tombstone(firc_ipt_t *ipt, const nf_tombstone_t *t) {
-    return t->devices ? firc_ipset_to_link_stage_delete_devices(ipt, t->chain)
-                      : firc_ipset_to_link_stage_delete(ipt, t->chain);
-}
-
-/* once no pass will run again: each chain's delete, both engines, committed at once */
-static void write_tombstones_now(firc_app_t *app) {
-    if (app->n_tombs == 0) { return; }
-    firc_ipt_t *engines[] = {app->ipt4, app->ipt6};
-    for (size_t e = 0; e < 2; e++) {
-        if (engines[e] == NULL) { continue; }
-        firc_err_t err = FIRC_OK;
-        for (size_t i = 0; i < app->n_tombs && err == FIRC_OK; i++) {
-            err = stage_tombstone(engines[e], &app->tombs[i]);
-        }
-        if (err == FIRC_OK) { err = firc_ipt_commit(engines[e]); } else { firc_ipt_discard(engines[e]); }
-        if (err != FIRC_OK) {
-            FIRC_WARN("%zu removed group chain(s) not deleted at stop (%s): the next start's clean "
-                      "removes them", app->n_tombs, firc_err_str(err));
-        }
-    }
-    app->n_tombs = 0;
 }
 
 static bool flush_queued_for(const firc_app_t *app, firc_id_t owner) {
@@ -368,6 +301,41 @@ static void flush_queue_add(firc_app_t *app, uint32_t value, const firc_group_t 
     e->narrowed = narrowed;
 }
 
+static void release_link(firc_ipset_to_link_t *link, bool keep_reply) {
+    firc_err_t err = firc_ipset_to_link_release(link, keep_reply);
+    if (err != FIRC_OK) { FIRC_WARN("a withdrawn group's ip rules and routes: %s", firc_err_str(err)); }
+}
+
+static firc_err_t hold_routing(firc_app_t *app, firc_ruleset_t *rs) {
+    firc_id_t owner = firc_ruleset_group(rs)->id;
+    firc_ipset_to_link_t *link = firc_ruleset_disable_hold(rs);
+    if (link == NULL) { return FIRC_OK; }
+    if (app->n_held == app->cap_held) {
+        size_t cap = app->cap_held != 0 ? app->cap_held * 2 : 8;
+        nf_held_t *grown = realloc(app->held, cap * sizeof(*grown));
+        if (grown == NULL) {
+            release_link(link, false);
+            return FIRC_ERR_NOMEM;
+        }
+        app->held = grown;
+        app->cap_held = cap;
+    }
+    app->held[app->n_held++] = (nf_held_t){link, owner, ++app->nf_change};
+    return FIRC_OK;
+}
+
+static void release_held(firc_app_t *app, uint64_t ticket, const firc_id_t *owner, bool keep_reply) {
+    size_t kept = 0;
+    for (size_t i = 0; i < app->n_held; i++) {
+        if (owner != NULL ? !firc_id_equal(app->held[i].owner, *owner) : app->held[i].ticket > ticket) {
+            app->held[kept++] = app->held[i];
+            continue;
+        }
+        release_link(app->held[i].link, keep_reply);
+    }
+    app->n_held = kept;
+}
+
 /* an owner routed again the same way (A->B->A) holds its field again, so its flows are skipped unpaid */
 static void pay_flushes(firc_app_t *app, uint64_t ticket) {
     size_t kept = 0;
@@ -389,6 +357,7 @@ static void pay_flushes(firc_app_t *app, uint64_t ticket) {
         if (rs == NULL) { firc_rtnl_forget_mark_field(app->rtnl, e.owner_s); }
     }
     app->n_flushes = kept;
+    release_held(app, ticket, NULL, false);
 }
 
 static uint64_t real_mono_ms(void) {
@@ -452,15 +421,11 @@ static void retry_note_success(firc_app_t *app, firc_ruleset_t *rs) {
     retry_rearm(app);
 }
 
-/* a routed group's name comes off the tombstones, or the pass would write then delete its chain */
 static firc_err_t app_group_up_ex(firc_app_t *app, firc_ruleset_t *rs, char *why, size_t why_len,
                                   bool quiet) {
-    firc_nf_write_t mode = app_write_mode(app);
     const firc_group_t *g = firc_ruleset_group(rs);
-    char chain[128];
-    group_chain_name(app, g->id, chain, sizeof(chain));
     const char *step = NULL;
-    firc_err_t err = firc_ruleset_enable(rs, mode, &step);
+    firc_err_t err = firc_ruleset_enable(rs, &step);
     if (err != FIRC_OK) {
         char line[256];
         snprintf(line, sizeof(line), "group \"%s\": %s: %s", g->name != NULL ? g->name : "",
@@ -470,24 +435,9 @@ static firc_err_t app_group_up_ex(firc_app_t *app, firc_ruleset_t *rs, char *why
         retry_note_failure(app, rs, !quiet);
     } else {
         retry_note_success(app, rs);
+        if (firc_ruleset_routed(rs)) { release_held(app, 0, &g->id, firc_ruleset_has_reply_rule(rs)); }
     }
-    if (mode == FIRC_NF_WRITE_BY_COMMITTER) {
-        if (firc_ruleset_routed(rs)) {
-            tombstone_remove(app, chain);
-            /* losing its selector must drop the devices chain too, or the engine keeps writing it back */
-            char dchain[128];
-            firc_ruleset_devices_chain_name_for(app->cfg->app.netfilter.iptables.chain_prefix, g->id, dchain,
-                                                sizeof(dchain));
-            if (firc_ruleset_has_devices(rs)) {
-                tombstone_remove(app, dchain);
-            } else {
-                tombstone_add_kind(app, dchain, true);
-            }
-        } else {
-            tombstone_add(app, chain); /* stage_delete takes <chain>D with it */
-        }
-        app_request_more_locked(app);
-    }
+    app_request_more_locked(app);
     return err;
 }
 
@@ -496,20 +446,16 @@ static firc_err_t app_group_up(firc_app_t *app, firc_ruleset_t *rs, char *why, s
 }
 
 /* an rtnetlink error is logged and returned, but no caller stops on it: the next enable deletes a stale rule first */
-static firc_err_t app_group_down(firc_app_t *app, firc_ruleset_t *rs, firc_flows_t flows) {
-    firc_nf_write_t mode = app_write_mode(app);
+static firc_err_t app_group_down(firc_app_t *app, firc_ruleset_t *rs) {
     const firc_group_t *g = firc_ruleset_group(rs);
     bool had_chain = firc_ruleset_routed(rs);
     uint32_t value = firc_ruleset_mark_field(rs);
-    char chain[128];
-    group_chain_name(app, g->id, chain, sizeof(chain));
-    firc_err_t err = firc_ruleset_disable(rs, flows, mode);
+    firc_err_t err = had_chain && app->committer != NULL ? hold_routing(app, rs) : firc_ruleset_disable(rs);
     if (err != FIRC_OK) {
         FIRC_WARN("group \"%s\": teardown: %s", g->name != NULL ? g->name : "", firc_err_str(err));
     }
-    if (mode == FIRC_NF_WRITE_BY_COMMITTER && had_chain) {
-        tombstone_add(app, chain);
-        /* queued even for a KEEP: pay_flushes skips it if the group comes back on the same interface/field */
+    if (had_chain) {
+        /* queued even when it keeps its routing: pay_flushes skips it if the group comes back on the same interface/field */
         if (value != 0) { flush_queue_add(app, value, g, false); }
         app_request_more_locked(app);
     }
@@ -733,36 +679,61 @@ firc_app_t *firc_app_create(const firc_app_deps_t *deps) {
     return app;
 }
 
+static firc_err_t firc_app_stage_pool_reject_one(firc_app_t *app, unsigned fam) {
+    firc_ipt_t *engine = fam == 0 ? app->ipt4 : app->ipt6;
+    if (engine == NULL || !app->reject_has[fam]) { return FIRC_OK; }
+    return firc_pool_reject_build_rules(engine, app->cfg->app.netfilter.iptables.chain_prefix, &app->reject_base[fam],
+                                        app->reject_len[fam]);
+}
+
+static firc_err_t stop_step(void *ud) {
+    firc_app_t *app = ud;
+    firc_ipt_t *engines[] = {app->ipt4, app->ipt6};
+    firc_err_t first = FIRC_OK;
+    for (unsigned i = 0; i < 2; i++) {
+        if (engines[i] == NULL) { continue; }
+        firc_ipt_discard(engines[i]);
+        firc_err_t err = firc_netfilter_register_base_chains(engines[i], NULL);
+        if (err == FIRC_OK) { err = firc_app_stage_pool_reject_one(app, i); }
+        if (err == FIRC_OK) {
+            err = firc_ipt_commit_full(engines[i]);
+        } else {
+            firc_ipt_discard(engines[i]);
+        }
+        if (err != FIRC_OK && first == FIRC_OK) { first = err; }
+    }
+    return first;
+}
+
+static firc_err_t write_stop_state(firc_app_t *app) {
+    firc_err_t err = firc_netfilter_retry_races(stop_step, app);
+    if (err != FIRC_OK) {
+        FIRC_WARN("netfilter not cleaned at stop (%s): the groups keep their ip rules and routes, so a rewritten "
+                  "packet still leaves by its group; the next start sweeps them", firc_err_str(err));
+    }
+    return err;
+}
+
 void firc_app_destroy(firc_app_t *app) {
     if (!app) { return; }
     firc_app_stop_netfilter_committer(app); /* nothing below is safe while a rebuild can still read the registry */
     if (app->retry_timer != 0) { (void)firc_loop_del_timer(app->loop, app->retry_timer); }
     app->retry_timer = 0;
     firc_app_stop_list_worker(app); /* before the config it reports about goes: a result it posts could reach a loop whose app no longer exists */
-    write_tombstones_now(app); /* no pass will run again, so write directly; before the flushes, so a flushed flow meets no chain to re-mark it */
+    (void)firc_app_capture_stop(app, NULL);
+    firc_err_t stopped = write_stop_state(app); /* no pass will run again, so write directly; before the flushes, so a flushed flow meets no chain to re-mark it */
+    for (size_t i = 0; stopped != FIRC_OK && i < app->n_held; i++) { firc_ipset_to_link_free(app->held[i].link); }
+    if (stopped != FIRC_OK) { app->n_held = 0; }
     pay_flushes(app, UINT64_MAX); /* before the groups go, so an owner routed again is still recognised */
     for (size_t i = 0; i < app->n_rulesets; i++) {
-        firc_ruleset_disable(app->rulesets[i], FIRC_FLOWS_KEEP, FIRC_NF_WRITE_NOW); /* pool is saved/restored, same names/addrs/marks, so in-flight flows stay correct across a restart */
+        if (stopped == FIRC_OK) {
+            firc_ruleset_disable(app->rulesets[i]); /* pool is saved/restored, same names/addrs/marks, so in-flight flows stay correct across a restart */
+        }
         firc_ruleset_free(app->rulesets[i]);
     }
     free(app->rulesets);
-    free(app->tombs);
     free(app->flushes);
-    /* stops (not merely unregisters) first, or the commit below reinstalls NFLOG rules nobody binds */
-    (void)firc_app_capture_stop(app, NULL);
-
-    /* a fake address no longer routed must not be rewritten to the real one, or a client is sent out the WAN in the clear */
-    const char *prefix = app->cfg->app.netfilter.iptables.chain_prefix;
-    firc_ipt_t *engines[] = {app->ipt4, app->ipt6};
-    for (size_t i = 0; i < 2; i++) {
-        if (engines[i] == NULL) { continue; }
-        firc_err_t err = firc_dnat_delete_rules(engines[i], prefix, app->pool_snap);
-        if (err == FIRC_OK) { err = firc_ipt_commit(engines[i]); } else { firc_ipt_discard(engines[i]); }
-        if (err != FIRC_OK) {
-            FIRC_WARN("dnat chain not removed (%s): a client still holding a fake address is rewritten "
-                      "to the real one until the next start sweeps it", firc_err_str(err));
-        }
-    }
+    free(app->held);
     firc_fakeip_snapshot_free(app->pool_snap);
     app->pool_snap = NULL;
     for (size_t i = 0; i < app->n_retired; i++) { firc_fakeip_snapshot_free(app->retired[i]); }
@@ -783,7 +754,7 @@ firc_err_t firc_app_start_groups(firc_app_t *app) {
     for (size_t i = 0; i < app->n_rulesets; i++) {
         firc_ruleset_t *rs = app->rulesets[i];
         const char *step = NULL;
-        firc_err_t err = firc_ruleset_enable(rs, FIRC_NF_WRITE_BY_COMMITTER, &step);
+        firc_err_t err = firc_ruleset_enable(rs, &step);
         if (err != FIRC_OK) {
             const char *name = firc_ruleset_group(rs)->name;
             FIRC_ERROR("failed to enable group \"%s\": %s: %s", name != NULL ? name : "",
@@ -821,7 +792,7 @@ static firc_err_t activate_group_at(firc_app_t *app, size_t idx, char *why, size
     firc_err_t err = app_group_up(app, rs, why, why_len); /* carries the prefixes already */
     if (err == FIRC_OK) { hold_if_newly_routed(app, rs, false); } /* defensive: an id re-added after a delete may have parked mappings */
     if (err != FIRC_OK) {
-        rulesets_remove_at(app, idx); /* the enable rolled itself back; its tombstone is app_group_up's */
+        rulesets_remove_at(app, idx); /* the enable rolled itself back; the next pass drops its chain */
         firc_ruleset_free(rs);
         /* no snapshot release: it borrows nothing of this group, built before the group existed */
         end_sync_in_flight(app, app->cfg->groups[idx], "group removed");
@@ -970,14 +941,7 @@ static firc_err_t sync_group_ruleset_locked(firc_app_t *app, firc_ruleset_t *rs)
     bool chain_changed = false;
     firc_err_t r = firc_ruleset_sync(rs, &chain_changed);
     /* asked for even on error: a failed devices render already handed the link new prefixes the next sync would miss */
-    if (chain_changed) {
-        if (app->committer) {
-            app_request_more_locked(app);
-        } else {
-            firc_err_t w = firc_ruleset_rewrite_chains(rs);
-            if (r == FIRC_OK) { r = w; }
-        }
-    }
+    if (chain_changed) { app_request_more_locked(app); }
     if (firc_ruleset_devices_narrowed(rs)) { note_narrowed(app, rs); } /* a render that narrowed resets its flows exactly as a narrowing edit does */
     return r;
 }
@@ -996,17 +960,6 @@ static bool id_among(firc_id_t id, firc_group_t *const *keep, size_t n_keep) {
     return false;
 }
 
-/* true only when the group is among keep AND comes back out of the same interface */
-static bool keeps_its_routing(const firc_group_t *g, firc_group_t *const *keep, size_t n_keep) {
-    for (size_t i = 0; i < n_keep; i++) {
-        if (keep[i] == NULL || !firc_id_equal(keep[i]->id, g->id)) { continue; }
-        const char *was = g->iface != NULL ? g->iface : "";
-        const char *will = keep[i]->iface != NULL ? keep[i]->iface : "";
-        return keep[i]->enable && strcmp(was, will) == 0; /* a group turned off routes nothing, so its flows must stop too */
-    }
-    return false;
-}
-
 /* keep: groups about to be re-added under the same ids, whose mappings must survive the replace */
 static void clear_groups_keeping(firc_app_t *app, firc_group_t *const *keep, size_t n_keep) {
     release_dns_snapshot(app); /* the snapshot borrows the lists freed below */
@@ -1015,8 +968,7 @@ static void clear_groups_keeping(firc_app_t *app, firc_group_t *const *keep, siz
     firc_id_t *gone = app->n_rulesets ? calloc(app->n_rulesets, sizeof(*gone)) : NULL;
     for (size_t i = 0; i < app->n_rulesets; i++) {
         const firc_group_t *g = firc_ruleset_group(app->rulesets[i]);
-        (void)app_group_down(app, app->rulesets[i],
-                             keeps_its_routing(g, keep, n_keep) ? FIRC_FLOWS_KEEP : FIRC_FLOWS_DROP);
+        (void)app_group_down(app, app->rulesets[i]);
         if (!id_among(g->id, keep, n_keep)) {
             if (g->list != NULL) {
                 sync_end_for_removed_list(app, g->id, g->list, "group removed");
@@ -1205,12 +1157,7 @@ firc_err_t firc_app_update_group(firc_app_t *app, firc_id_t id, firc_group_t *bu
     bool narrowed = was_routed && firc_devsel_spec_narrows(&live->devices, &built->devices); /* read before the move takes the old selector away */
     devices_before_t before = devices_before(rs);
     if (firc_ruleset_runtime_enabled(rs)) {
-        const char *was = live->iface != NULL ? live->iface : "";
-        const char *will = built->iface != NULL ? built->iface : "";
-        /* flows are only wrong if the update changed where packets go, not a rename or rule edit */
-        firc_flows_t flows =
-            (built->enable && strcmp(was, will) == 0) ? FIRC_FLOWS_KEEP : FIRC_FLOWS_DROP;
-        (void)app_group_down(app, rs, flows); /* an rtnetlink error does not stop the update; the enable below deletes a stale rule before adding its own */
+        (void)app_group_down(app, rs); /* an rtnetlink error does not stop the update; the enable below deletes a stale rule before adding its own */
     }
     release_dns_snapshot(app); /* it borrows the list freed by the move */
     group_move_into(app, live, built);
@@ -1359,7 +1306,6 @@ uint64_t firc_app_nf_last_completed_pass_for_test(const firc_app_t *app) {
 
 uint64_t firc_app_nf_change_for_test(const firc_app_t *app) { return app->nf_change; }
 void firc_app_pay_flushes_for_test(firc_app_t *app, uint64_t ticket) { pay_flushes(app, ticket); }
-size_t firc_app_tombstones_for_test(const firc_app_t *app) { return app->n_tombs; }
 
 /* forgets a group that is gone: its mappings, its chunks (parked for the quarantine window) */
 static void pool_forget_group_id(firc_app_t *app, firc_id_t gid) {
@@ -1375,9 +1321,9 @@ static void pool_forget_group_id(firc_app_t *app, firc_id_t gid) {
 
 static void firc_app_remove_group_by_index_unlocked(firc_app_t *app, size_t idx) {
     if (idx >= app->n_rulesets) { return; }
-    /* out of the kernel before the config: ip rules/routes now, chain by tombstone next pass */
+    /* out of the kernel before the config: ip rules/routes now, the chain with the next pass */
     if (firc_ruleset_runtime_enabled(app->rulesets[idx])) {
-        (void)app_group_down(app, app->rulesets[idx], FIRC_FLOWS_DROP);
+        (void)app_group_down(app, app->rulesets[idx]);
     }
     firc_group_t *g = app->cfg->groups[idx];
     firc_id_t gid = g->id;
@@ -2241,16 +2187,7 @@ static bool routed_has(const char *group_id, void *ud) {
 }
 
 static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cancel, bool full) {
-    firc_err_t err = FIRC_OK;
-    if (full) {
-        /* everything of ours out first, so the result depends only on the current group set, not on what was left behind */
-        err = firc_netfilter_clean_iptables(app->ipt4, app->ipt6,
-                                            app->cfg->app.netfilter.iptables.chain_prefix);
-        if (err != FIRC_OK) { return err; }
-        if (firc_cancel_raised(cancel)) { return FIRC_ERR_CANCELED; }
-    } /* otherwise every chain is an override, replaced whole inside one iptables-restore transaction */
-
-    err = firc_netfilter_register_base_chains(app->ipt4, app->ipt6);
+    firc_err_t err = firc_netfilter_register_base_chains(app->ipt4, app->ipt6);
     if (err != FIRC_OK) { return err; }
 
     err = firc_port_remap_prepare_iptables(app->port_remap);
@@ -2260,13 +2197,6 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
 
     err = firc_app_stage_tap(app); /* every pass while a capture runs: the pass after a rewrite puts its rules back */
     if (err != FIRC_OK) { return err; }
-
-    /* tombstones before the groups: staged first, a delete can never replace a chain registration being written */
-    for (size_t i = 0; i < app->n_tombs; i++) {
-        err = stage_tombstone(app->ipt4, &app->tombs[i]);
-        if (err == FIRC_OK) { err = stage_tombstone(app->ipt6, &app->tombs[i]); }
-        if (err != FIRC_OK) { return err; }
-    }
 
     for (size_t i = 0; i < app->n_rulesets; i++) {
         err = firc_ruleset_prepare_iptables(app->rulesets[i]);
@@ -2298,11 +2228,11 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
     if (firc_cancel_raised(cancel)) { return FIRC_ERR_CANCELED; }
 
     if (app->ipt4) {
-        err = firc_ipt_commit(app->ipt4);
+        err = full ? firc_ipt_commit_full(app->ipt4) : firc_ipt_commit(app->ipt4);
         if (err != FIRC_OK) { return err; }
     }
     if (app->ipt6) {
-        err = firc_ipt_commit(app->ipt6);
+        err = full ? firc_ipt_commit_full(app->ipt6) : firc_ipt_commit(app->ipt6);
         if (err != FIRC_OK) { return err; }
     }
     return FIRC_OK;
@@ -2501,7 +2431,6 @@ void firc_app_devices_changed(firc_app_t *app) {
         }
         if (!changed) { continue; }
         moved = true;
-        if (app->committer == NULL) { (void)firc_ruleset_rewrite_chains(rs); }
         /* a device no longer matched by a narrowed chain keeps its flows unless flushed */
         if (firc_ruleset_devices_narrowed(rs)) { note_narrowed(app, rs); }
     }
@@ -2542,7 +2471,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     if (app == NULL) { return FIRC_ERR_INVAL; }
     /* checked first: a running capture is the answer regardless of a cleared link/pool since it started */
     if (app->tap_open) { return FIRC_ERR_EXIST; }
-    /* syntax only: this is written verbatim into an iptables-restore transcript, where a newline is a line of its own */
+    /* syntax only: the name goes into an -i match */
     const firc_app_config_t *ac = &app->cfg->app;
     if (ac->n_link == 0) { return FIRC_ERR_INVAL; }
     for (size_t i = 0; i < ac->n_link; i++) {
@@ -2591,7 +2520,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
         return FIRC_ERR_EXIST;
     }
 
-    /* probed under the lock: it forks iptables-restore, whose cancel token the committer attaches under this same mutex */
+    /* probed under the lock: the probe writes mangle, which the committer writes under this same mutex */
     const char *prefix = ac->netfilter.iptables.chain_prefix;
     /* firmware ships xt_NFLOG/xt_string but may not load them after a reboot; root-only so tests avoid the host's modules */
     if ((app->ipt4 != NULL || app->ipt6 != NULL) && geteuid() == 0) {
@@ -2600,15 +2529,24 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     for (unsigned fam = 0; fam < 2; fam++) {
         firc_ipt_t *engine = fam == 0 ? app->ipt4 : app->ipt6;
         if (engine == NULL) { continue; }
-        firc_err_t asked = firc_tap_rules_supported(engine, prefix, app->pool,
-                                                    (const char *const *)lan, n_lan);
-        if (asked == FIRC_ERR_NOSYS) {
+        firc_err_t probed = firc_ipt_probe_capture(engine);
+        firc_err_t asked = probed;
+        if (asked == FIRC_OK) {
+            asked = firc_tap_rules_supported(engine, prefix, app->pool, (const char *const *)lan, n_lan);
+        }
+        if (asked == FIRC_ERR_NOSYS || probed != FIRC_OK) {
             app_nf_leave(app);
             tap_reader_down(app);
             tap_lan_free(lan, n_lan);
-            FIRC_ERROR("capture refused: this kernel will not take the capture rules. They need "
-                       FIRC_TAP_LAN_MODULES "; the line it refused is in the log above");
-            return FIRC_ERR_NOSYS;
+            if (asked == FIRC_ERR_NOSYS) {
+                FIRC_ERROR("capture refused: this kernel will not take the capture rules. They need "
+                           FIRC_TAP_LAN_MODULES "; the log above names what it lacks");
+                return FIRC_ERR_NOSYS;
+            }
+            FIRC_ERROR("capture refused: the kernel could not be asked which capture extensions it has (%s); "
+                       "the log above names the errno",
+                       firc_err_str(probed));
+            return FIRC_ERR_AGAIN;
         }
         if (asked != FIRC_OK) {
             FIRC_WARN("could not ask whether this kernel takes the capture rules (%s): starting "
@@ -2623,21 +2561,6 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     app->tap_ends_at = now_unix + app->tap_seconds;
     app->tap_ends_mono = mono_secs() + app->tap_seconds;
     app->tap_open = true;
-
-    err = firc_app_stage_tap(app);
-    if (err != FIRC_OK) {
-        /* unregister, not merely unstage: an uncleared registration is written again by the next commit */
-        app->tap_open = false;
-        (void)firc_tap_rules_remove_all(app);
-        memset(app->tap_token, 0, sizeof(app->tap_token));
-        app->tap_lan = NULL;
-        app->n_tap_lan = 0;
-        app_nf_leave(app);
-        tap_reader_down(app);
-        tap_lan_free(lan, n_lan);
-        FIRC_ERROR("capture could not be staged, and is not running: %s", firc_err_str(err));
-        return err;
-    }
     app_nf_leave(app);
 
     /* one-shot deadline; without a loop (tests, the pre-loop window) a capture has no deadline and runs until stopped */
@@ -2652,12 +2575,9 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
             memset(app->tap_token, 0, sizeof(app->tap_token));
             app->tap_lan = NULL;
             app->n_tap_lan = 0;
-            (void)firc_tap_rules_remove_all(app);
             app_nf_leave(app);
             tap_reader_down(app);
             tap_lan_free(lan, n_lan);
-            /* only unregisters; a pass may already have written the rules for real, so ask for one now */
-            if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
             FIRC_ERROR("capture refused: its deadline could not be armed");
             return FIRC_ERR_NOMEM;
         }
@@ -2682,19 +2602,6 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
     if (token_out != NULL) { memcpy(token_out, token, sizeof(token)); }
     return FIRC_OK;
-}
-
-/* takes the capture's chain out of both engines; caller holds nf_mu */
-static firc_err_t firc_tap_rules_remove_all(firc_app_t *app) {
-    const char *prefix = app->cfg->app.netfilter.iptables.chain_prefix;
-    firc_ipt_t *engines[] = {app->ipt4, app->ipt6};
-    firc_err_t first = FIRC_OK;
-    for (unsigned fam = 0; fam < 2; fam++) {
-        if (engines[fam] == NULL) { continue; }
-        firc_err_t err = firc_tap_rules_remove(engines[fam], prefix); /* both families attempted whatever the first does */
-        if (err != FIRC_OK && first == FIRC_OK) { first = err; }
-    }
-    return first;
 }
 
 static void on_tap_deadline(firc_loop_t *loop, void *ud) {
@@ -2726,20 +2633,15 @@ firc_err_t firc_app_capture_stop(firc_app_t *app, const char *token) {
     app->n_tap_lan = 0;
     int timer = app->tap_timer; /* noted here, cancelled below the unlock; safe since every caller is the loop thread */
     app->tap_timer = 0;
-    firc_err_t first = firc_tap_rules_remove_all(app);
     app_nf_leave(app);
 
     if (timer != 0 && app->loop != NULL) { (void)firc_loop_del_timer(app->loop, timer); }
 
-    if (first != FIRC_OK) { /* the capture is over either way; what is left is a chain only the next full pass's cleaner removes */
-        FIRC_ERROR("capture stopped, but its chain could not be unstaged: %s",
-                   firc_err_str(first));
-    }
     capture_say("capture stopped");
     firc_tap_report_sentences(app->tap_report, true, say_sentence, NULL); /* one sentence per line; nothing of the capture is kept after this */
     tap_reader_down(app);
     if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
-    return first;
+    return FIRC_OK;
 }
 
 void firc_app_capture_status(const firc_app_t *app, firc_capture_status_t *out) {
@@ -2759,11 +2661,8 @@ void firc_app_capture_status(const firc_app_t *app, firc_capture_status_t *out) 
 }
 
 firc_err_t firc_app_stage_pool_reject(firc_app_t *app) {
-    const char *prefix = app->cfg->app.netfilter.iptables.chain_prefix;
-    firc_ipt_t *engines[] = {app->ipt4, app->ipt6};
     for (unsigned fam = 0; fam < 2; fam++) {
-        if (engines[fam] == NULL || !app->reject_has[fam]) { continue; }
-        firc_err_t err = firc_pool_reject_build_rules(engines[fam], prefix, &app->reject_base[fam], app->reject_len[fam]);
+        firc_err_t err = firc_app_stage_pool_reject_one(app, fam);
         if (err != FIRC_OK) { return err; }
     }
     return FIRC_OK;
@@ -2794,16 +2693,24 @@ static firc_err_t firc_app_rebuild_netfilter_locked(firc_app_t *app, firc_cancel
     if (app->ipt4) { firc_ipt_set_cancel(app->ipt4, cancel); }
     if (app->ipt6) { firc_ipt_set_cancel(app->ipt6, cancel); }
 
+    char report4[512], report6[512];
+    firc_ipt_take_report(app->ipt4, report4, sizeof(report4));
+    firc_ipt_take_report(app->ipt6, report6, sizeof(report6));
+    struct timespec pass_t0, pass_t1;
+    clock_gettime(CLOCK_MONOTONIC, &pass_t0);
     uint64_t gen = pass_snapshot_begin(app);
     firc_err_t err = rebuild_netfilter_locked(app, cancel, full);
     pass_snapshot_end(app);
+    clock_gettime(CLOCK_MONOTONIC, &pass_t1);
+    firc_ipt_take_report(app->ipt4, report4, sizeof(report4));
+    firc_ipt_take_report(app->ipt6, report6, sizeof(report6));
+    FIRC_DEBUG("netfilter pass (%s): %lld ms (%s); ipv4: %s; ipv6: %s", full ? "full" : "incremental",
+               (long long)((pass_t1.tv_sec - pass_t0.tv_sec) * 1000 + (pass_t1.tv_nsec - pass_t0.tv_nsec) / 1000000),
+               firc_err_str(err), app->ipt4 ? report4 : "off", app->ipt6 ? report6 : "off");
 
-    if (err != FIRC_OK) { /* discard, or the next commit on this engine (a loop-thread group enable) would carry out what was only staged */
+    if (err != FIRC_OK) { /* discard, or the next commit on this engine would carry out what was only staged */
         firc_ipt_discard(app->ipt4);
         firc_ipt_discard(app->ipt6);
-        (void)firc_netfilter_register_base_chains(app->ipt4, app->ipt6); /* the discard took base-chain registrations with it */
-    } else {
-        app->n_tombs = 0; /* all carried: the loop writes the list only under nf_mu, held since before this pass staged them */
     }
 
     if (app->ipt4) { firc_ipt_set_cancel(app->ipt4, NULL); }
@@ -2989,12 +2896,5 @@ firc_err_t firc_app_force_commit_iptables(firc_app_t *app) {
         firc_nfcommit_request(app->committer);
         return FIRC_OK;
     }
-
-    /* only before the committer has started, or after it failed; commits on the caller's thread, blocking what it serves */
-    app_nf_enter(app);
-    firc_err_t err = FIRC_OK;
-    if (app->ipt4) { err = firc_ipt_commit(app->ipt4); }
-    if (err == FIRC_OK && app->ipt6) { err = firc_ipt_commit(app->ipt6); }
-    app_nf_leave(app);
-    return err;
+    return FIRC_ERR_STATE;
 }

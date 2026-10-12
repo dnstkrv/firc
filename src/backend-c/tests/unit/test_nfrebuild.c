@@ -8,10 +8,12 @@
 
 #include "fake_conntrack.h"
 #include "fake_iptables.h"
+#include "fake_xtables.h"
 
 #include "firc/app.h"
 #include "firc/fakeip.h"
 #include "firc/netfilter_cleaner.h"
+#include "firc/pool_reject.h"
 #include "firc/port_remap.h"
 
 typedef struct {
@@ -27,7 +29,7 @@ static void seed_foreign_rules(firc_fake_ipt_t *f) {
     static const char *fwd[] = {"-i", "eth0", "-j", "ACCEPT"};
     static const char *pre[] = {"-i", "eth0", "-j", "ACCEPT"};
     static const char *post[] = {"-o", "eth0", "-j", "MASQUERADE"};
-    static const char *mangle[] = {"-i", "eth0", "-j", "MARK", "--set-mark", "7"};
+    static const char *mangle[] = {"-i", "eth0", "-j", "MARK", "--set-xmark", "0x7/0xffffffff"};
 
     const char *const *rules[1];
     size_t lens[1];
@@ -52,7 +54,7 @@ static void fixture_up(fixture_t *fx) {
 
     fx->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     seed_foreign_rules(fx->fake);
-    fx->ipt = firc_ipt_new(firc_fake_ipt_as_executable(fx->fake));
+    fx->ipt = firc_ipt_new(firc_fake_ipt_as_xt(fx->fake), "FIRC_");
     firc_netfilter_register_base_chains(fx->ipt, NULL);
 
     firc_app_deps_t deps = {.cfg = &fx->cfg, .ipt4 = fx->ipt};
@@ -72,10 +74,10 @@ static void fixture_down(fixture_t *fx) {
 }
 
 static void seed_stale_chain(firc_fake_ipt_t *f) {
-    static const char *rule[] = {"-m", "set", "--match-set", "firc_old_4", "dst", "-j", "MASQUERADE"};
+    static const char *rule[] = {"-j", "MASQUERADE"};
     static const char *jump[] = {"-j", "FIRC_old"};
     const char *const *rules[1] = {rule};
-    size_t lens[1] = {7};
+    size_t lens[1] = {2};
     firc_fake_ipt_set_initial_rules(f, "nat", "FIRC_old", rules, lens, 1);
 
     const char *const *keep[2];
@@ -215,32 +217,6 @@ TEST rebuild_aborts_on_a_raised_cancel(void) {
     PASS();
 }
 
-/* Catches: an aborted pass leaving deletes staged for the next commit to carry out. */
-TEST an_aborted_pass_stages_nothing_for_the_next_commit(void) {
-    fixture_t fx;
-    fixture_up(&fx);
-    static const char *rule[] = {"-j", "ACCEPT"};
-    const char *const *rules[1] = {rule};
-    size_t lens[1] = {2};
-    firc_fake_ipt_set_initial_rules(fx.fake, "mangle", "FIRC_live", rules, lens, 1);
-
-    firc_cancel_t *cancel = firc_cancel_new();
-    firc_cancel_raise(cancel);
-    ASSERT_EQ(FIRC_ERR_CANCELED, firc_app_rebuild_netfilter(fx.app, cancel));
-    ASSERT(firc_fake_ipt_chain_exists(fx.fake, "mangle", "FIRC_live"));
-
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(fx.ipt));
-    ASSERTm("the aborted pass's staged delete must not fire here",
-            firc_fake_ipt_chain_exists(fx.fake, "mangle", "FIRC_live"));
-    static const char *jump[] = {"-j", "FIRC_live"};
-    ASSERT_EQ_FMTm("a jump into a base chain after an aborted pass", (int)FIRC_OK,
-                   (int)firc_ipt_append(fx.ipt, "filter", "FORWARD", jump, 2), "%d");
-
-    firc_cancel_free(cancel);
-    fixture_down(&fx);
-    PASS();
-}
-
 /* Catches: a pass not writing the DNAT chain from its snapshot, or not committing the pool. */
 TEST a_pass_writes_the_dnat_chain_and_commits_the_pool(void) {
     firc_fakeip_cfg_t c = {0};
@@ -265,9 +241,9 @@ TEST a_pass_writes_the_dnat_chain_and_commits_the_pool(void) {
     firc_config_init_defaults(&cfg);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     seed_foreign_rules(fake);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     firc_fake_ipt_t *fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    firc_ipt_t *ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(fake6));
+    firc_ipt_t *ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(fake6), "FIRC_");
     firc_netfilter_register_base_chains(ipt, ipt6);
     firc_app_deps_t deps = {.cfg = &cfg, .ipt4 = ipt, .ipt6 = ipt6, .pool = pool};
     firc_app_t *app = firc_app_create(&deps);
@@ -322,7 +298,7 @@ static void up_with_conntrack_and_loop(firc_config_t *cfg, firc_fake_ipt_t **fak
     if (firc_fakeip_new(&c, pool) != FIRC_OK) { return; }
     firc_config_init_defaults(cfg);
     *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    *ipt = firc_ipt_new(firc_fake_ipt_as_executable(*fake));
+    *ipt = firc_ipt_new(firc_fake_ipt_as_xt(*fake), "FIRC_");
     firc_netfilter_register_base_chains(*ipt, NULL);
     *kernel = fake_ct_start(ct);
     firc_app_deps_t deps = {.cfg = cfg, .ipt4 = *ipt, .pool = *pool, .ct = *ct, .loop = loop};
@@ -541,8 +517,7 @@ static size_t forward_jumps(firc_fake_ipt_t *f, const char *chain) {
     return count_rule(f, "filter", "FORWARD", jump, 2);
 }
 
-/* Catches: the pool reject barrier missing from FORWARD, or behind the firmware's accepts. */
-TEST a_pass_puts_the_pool_reject_barrier_first_in_forward(void) {
+static firc_fakeip_t *new_pool(void) {
     firc_fakeip_cfg_t c = {0};
     c.v4.base.len = 4;
     c.v4.base.b[0] = 198;
@@ -559,18 +534,138 @@ TEST a_pass_puts_the_pool_reject_barrier_first_in_forward(void) {
     c.idle_secs = 86400;
     c.clamp_secs = 300;
     firc_fakeip_t *pool = NULL;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &pool));
+    return firc_fakeip_new(&c, &pool) == FIRC_OK ? pool : NULL;
+}
+
+typedef struct {
     firc_config_t cfg;
-    firc_config_init_defaults(&cfg);
-    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    seed_foreign_rules(fake);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
-    firc_fake_ipt_t *fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    seed_foreign_rules(fake6);
-    firc_ipt_t *ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(fake6));
-    firc_netfilter_register_base_chains(ipt, ipt6);
-    firc_app_deps_t deps = {.cfg = &cfg, .ipt4 = ipt, .ipt6 = ipt6, .pool = pool};
-    firc_app_t *app = firc_app_create(&deps);
+    firc_fakeip_t *pool;
+    firc_fake_ipt_t *fake, *fake6;
+    firc_ipt_t *ipt, *ipt6;
+    firc_app_t *app;
+} pooled_t;
+
+static bool pooled_up(pooled_t *p) {
+    memset(p, 0, sizeof(*p));
+    p->pool = new_pool();
+    if (p->pool == NULL) { return false; }
+    firc_config_init_defaults(&p->cfg);
+    p->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(p->fake);
+    p->ipt = firc_ipt_new(firc_fake_ipt_as_xt(p->fake), "FIRC_");
+    p->fake6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
+    seed_foreign_rules(p->fake6);
+    p->ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(p->fake6), "FIRC_");
+    firc_app_deps_t deps = {.cfg = &p->cfg, .ipt4 = p->ipt, .ipt6 = p->ipt6, .pool = p->pool};
+    p->app = firc_app_create(&deps);
+    return p->ipt != NULL && p->ipt6 != NULL && p->app != NULL && firc_app_refresh_pool_snapshot(p->app) == FIRC_OK;
+}
+
+static void pooled_down(pooled_t *p) {
+    firc_app_destroy(p->app);
+    firc_ipt_free(p->ipt);
+    firc_ipt_free(p->ipt6);
+    firc_fakeip_free(p->pool);
+    firc_config_clear(&p->cfg);
+}
+
+static size_t writes_of(firc_fake_ipt_t *f, const char *table, size_t from) {
+    char *order = firc_fake_xt_write_order(firc_fake_ipt_xt(f));
+    size_t n = 0, len = strlen(table);
+    for (const char *q = order + from; (q = strstr(q, table)) != NULL; q += len) {
+        if ((q == order || q[-1] == '\n') && q[len] == '\n') { n++; }
+    }
+    free(order);
+    return n;
+}
+
+static size_t order_len(firc_fake_ipt_t *f) {
+    char *order = firc_fake_xt_write_order(firc_fake_ipt_xt(f));
+    size_t n = strlen(order);
+    free(order);
+    return n;
+}
+
+/* Catches: a full pass writing a table twice (the stage 1 clean-then-refill window) or leaving one unwritten. */
+TEST a_full_pass_is_one_write_per_table(void) {
+    pooled_t p;
+    ASSERT(pooled_up(&p));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(p.app, NULL, true));
+    static const char *stray[] = {"-j", "RETURN"};
+    const char *const *rules[1] = {stray};
+    size_t lens[1] = {2};
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(p.fake, "filter", "FIRC_x", rules, lens, 1));
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(p.fake, "mangle", "FIRC_x", rules, lens, 1));
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(p.fake, "nat", "FIRC_x", rules, lens, 1));
+    size_t from = order_len(p.fake);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(p.app, NULL, true));
+    ASSERT_EQ_FMT((size_t)1, writes_of(p.fake, "filter", from), "%zu");
+    ASSERT_EQ_FMT((size_t)1, writes_of(p.fake, "mangle", from), "%zu");
+    ASSERT_EQ_FMT((size_t)1, writes_of(p.fake, "nat", from), "%zu");
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(p.fake, "mangle", "FIRC_x"));
+    pooled_down(&p);
+    PASS();
+}
+
+/* Catches: a script's rule left above the pool barrier after a full pass (a full pass places our jumps afresh). */
+TEST a_full_pass_puts_the_barrier_back_first(void) {
+    pooled_t p;
+    ASSERT(pooled_up(&p));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(p.app, NULL, true));
+    static const char *script[] = {"-i", "br0", "-j", "ACCEPT"};
+    static const char *barrier[] = {"-j", "FIRC_POOLREJECT"};
+    const char *const *rules[2] = {script, barrier};
+    size_t lens[2] = {4, 2};
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(p.fake, "filter", "FORWARD", rules, lens, 2));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(p.app, NULL, true));
+    firc_ipt_rule_t *const *got = NULL;
+    size_t n = 0;
+    ASSERT(firc_fake_ipt_get_rules(p.fake, "filter", "FORWARD", &got, &n));
+    ASSERT(n >= 2);
+    ASSERT_STR_EQ("FIRC_POOLREJECT", got[0]->parts[got[0]->n_parts - 1]);
+    pooled_down(&p);
+    PASS();
+}
+
+/* Catches: the stop leaving a chain of ours behind, or taking the barrier the next start relies on. */
+TEST the_stop_keeps_only_the_barrier(void) {
+    pooled_t p;
+    ASSERT(pooled_up(&p));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(p.app, NULL, true));
+    ASSERT(firc_fake_ipt_chain_exists(p.fake, "nat", "FIRC_DNAT"));
+    firc_app_destroy(p.app);
+    p.app = NULL;
+    ASSERT(firc_fake_ipt_chain_exists(p.fake, "filter", "FIRC_POOLREJECT"));
+    char *nat = firc_fake_ipt_print(p.fake, "nat"), *mangle = firc_fake_ipt_print(p.fake, "mangle");
+    ASSERT(nat != NULL && strstr(nat, "FIRC_") == NULL);
+    ASSERT(mangle != NULL && strstr(mangle, "FIRC_") == NULL);
+    free(nat);
+    free(mangle);
+    pooled_down(&p);
+    PASS();
+}
+
+static bool first_rule_is_unmarked_drop(firc_fake_ipt_t *f) {
+    static const char *const want[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark",
+                                       "0x40000000/0x40000000", "-m", "mark", "!", "--mark", "0x40000000/0x40000000",
+                                       "-j", "DROP"};
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    if (!firc_fake_ipt_get_rules(f, "filter", "FIRC_POOLREJECT", &rules, &n) || n == 0 || rules[0]->n_parts != 15) {
+        return false;
+    }
+    for (size_t i = 0; i < 15; i++) {
+        if (strcmp(rules[0]->parts[i], want[i]) != 0) { return false; }
+    }
+    return true;
+}
+
+/* Catches: the pool reject barrier missing from FORWARD, or behind the firmware's accepts. */
+TEST a_pass_puts_the_pool_reject_barrier_first_in_forward(void) {
+    pooled_t p;
+    ASSERT(pooled_up(&p));
+    firc_fake_ipt_t *fake = p.fake, *fake6 = p.fake6;
+    firc_app_t *app = p.app;
 
     ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(app, NULL));
     ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(app, NULL));
@@ -587,25 +682,28 @@ TEST a_pass_puts_the_pool_reject_barrier_first_in_forward(void) {
     static const char *rest4[] = {"-d", "198.18.0.0/15", "-j", "REJECT", "--reject-with", "icmp-host-unreachable"};
     ASSERT(chain_has_rule(fake, "filter", "FIRC_POOLREJECT", tcp4, 8));
     ASSERT(chain_has_rule(fake, "filter", "FIRC_POOLREJECT", rest4, 6));
-    ASSERT_EQ_FMT((size_t)2, rule_count(fake, "filter", "FIRC_POOLREJECT"), "%zu");
+    ASSERT_EQ_FMT((size_t)3, rule_count(fake, "filter", "FIRC_POOLREJECT"), "%zu");
+    ASSERTm("the established-flow drop comes before the rejects", first_rule_is_unmarked_drop(fake));
     static const char *tcp6[] = {"-d", "fd37:9a00::/48", "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"};
     static const char *rest6[] = {"-d", "fd37:9a00::/48", "-j", "REJECT", "--reject-with", "icmp6-addr-unreachable"};
     ASSERT(chain_has_rule(fake6, "filter", "FIRC_POOLREJECT", tcp6, 8));
     ASSERT(chain_has_rule(fake6, "filter", "FIRC_POOLREJECT", rest6, 6));
+    ASSERT_EQ_FMT((size_t)3, rule_count(fake6, "filter", "FIRC_POOLREJECT"), "%zu");
+    ASSERTm("in both families", first_rule_is_unmarked_drop(fake6));
     ASSERT_EQ_FMT((size_t)1, forward_jumps(fake6, "FIRC_POOLREJECT"), "%zu");
 
     firc_app_destroy(app);
+    p.app = NULL;
     ASSERTm("a clean stop leaves the barrier, like the main-table routes",
             firc_fake_ipt_chain_exists(fake, "filter", "FIRC_POOLREJECT") && forward_jumps(fake, "FIRC_POOLREJECT") == 1);
-    firc_ipt_free(ipt);
-    firc_ipt_free(ipt6);
-    firc_config_clear(&cfg);
-    firc_fakeip_free(pool);
+    pooled_down(&p);
     PASS();
 }
 
-/* Catches: a sweep removing the barrier, opening a window before the refill. */
-TEST the_sweep_leaves_the_barrier_in_place(void) {
+/* Catches: the start's clean given the pool writing filter without the barrier. */
+TEST the_clean_with_the_pool_keeps_the_barrier(void) {
+    firc_fakeip_t *pool = new_pool();
+    ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     seed_foreign_rules(fake);
     static const char *tcp[] = {"-d", "198.18.0.0/15", "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"};
@@ -618,14 +716,15 @@ TEST the_sweep_leaves_the_barrier_in_place(void) {
     size_t fwd_lens[2] = {2, 4};
     firc_fake_ipt_set_initial_rules(fake, "filter", "FORWARD", fwd, fwd_lens, 2);
     seed_stale_chain(fake);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     firc_netfilter_register_base_chains(ipt, NULL);
 
-    ASSERT_EQ(FIRC_OK, firc_netfilter_clean_iptables(ipt, NULL, "FIRC_"));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean(ipt, NULL, pool));
     ASSERT_FALSEm("the stale chain went", firc_fake_ipt_chain_exists(fake, "nat", "FIRC_old"));
     ASSERTm("the barrier stayed", firc_fake_ipt_chain_exists(fake, "filter", "FIRC_POOLREJECT"));
     ASSERT_EQ_FMTm("and its jump", (size_t)1, forward_jumps(fake, "FIRC_POOLREJECT"), "%zu");
     firc_ipt_free(ipt);
+    firc_fakeip_free(pool);
     PASS();
 }
 
@@ -643,10 +742,10 @@ TEST the_purge_takes_the_barrier_as_well(void) {
     size_t fwd_lens[2] = {2, 4};
     firc_fake_ipt_set_initial_rules(fake, "filter", "FORWARD", fwd, fwd_lens, 2);
     seed_stale_chain(fake);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     firc_netfilter_register_base_chains(ipt, NULL);
 
-    ASSERT_EQ(FIRC_OK, firc_netfilter_purge_iptables(ipt, NULL, "FIRC_"));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean(ipt, NULL, NULL));
     ASSERT_FALSEm("the stale chain went", firc_fake_ipt_chain_exists(fake, "nat", "FIRC_old"));
     ASSERT_FALSEm("and so did the barrier", firc_fake_ipt_chain_exists(fake, "filter", "FIRC_POOLREJECT"));
     ASSERT_EQ_FMTm("and its jump", (size_t)0, forward_jumps(fake, "FIRC_POOLREJECT"), "%zu");
@@ -678,7 +777,7 @@ TEST destroying_the_app_takes_the_dnat_chain_back(void) {
     firc_config_init_defaults(&cfg);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     seed_foreign_rules(fake);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     firc_netfilter_register_base_chains(ipt, NULL);
     firc_app_deps_t deps = {.cfg = &cfg, .ipt4 = ipt, .pool = pool};
     firc_app_t *app = firc_app_create(&deps);
@@ -703,43 +802,45 @@ TEST destroying_the_app_takes_the_dnat_chain_back(void) {
     PASS();
 }
 
-/* Catches: an incremental pass wiping before it writes, or sweeping a previous instance's chain. */
-TEST an_incremental_pass_writes_ours_and_sweeps_nothing(void) {
+/* Catches: an incremental pass skipping a table that moved since its last write, so what another writer left in it stays. */
+TEST an_incremental_pass_sweeps_a_table_moved_since_its_write(void) {
     fixture_t fx;
     fixture_up(&fx);
-    seed_stale_chain(fx.fake);
-    firc_fake_ipt_reset(fx.fake);
-    seed_foreign_rules(fx.fake);
     seed_stale_chain(fx.fake);
     ASSERT(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_old"));
 
     ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, false));
-    ASSERTm("ours is written", firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
-    ASSERTm("the stale chain is not this pass's business",
-            firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_old"));
-
-    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, true));
-    ASSERT_FALSEm("a full pass sweeps it", firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_old"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_old"));
     ASSERT(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
 
     fixture_down(&fx);
     PASS();
 }
 
-/* Catches: a forced commit without a committer not committing at once. */
-TEST force_commit_without_a_committer_commits_in_place(void) {
-    fixture_t fx;
-    fixture_up(&fx);
-
-    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(fx.app));
-
-    fixture_down(&fx);
+/* Catches: the DNS remap at start finding nat PREROUTING unregistered after the clean and the barrier used it up. */
+TEST the_remap_enables_after_the_start_clean_and_the_barrier(void) {
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    ASSERT_EQ(FIRC_OK, firc_netfilter_register_base_chains(ipt, NULL));
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean(ipt, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipt_register_chain_patch(ipt, "filter", "FORWARD"));
+    firc_ip_t base = {{198, 18}, 4};
+    ASSERT_EQ(FIRC_OK, firc_pool_reject_build_rules(ipt, "FIRC_", &base, 15));
+    ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
+    firc_remap_addr_t addr = {AF_INET, {192, 168, 1, 1}, 4};
+    firc_port_remap_t *remap = firc_port_remap_new("FIRC_", 53, 3553, &addr, 1, ipt, NULL);
+    ASSERT(remap != NULL);
+    ASSERT_EQ_FMT(FIRC_OK, firc_port_remap_enable(remap), "%d");
+    ASSERT(firc_fake_ipt_chain_exists(fake, "nat", "FIRC_DNSOR"));
+    ASSERT(chain_has_rule(fake, "nat", "PREROUTING", k_remap_jump, 2));
+    firc_port_remap_free(remap);
+    firc_ipt_free(ipt);
     PASS();
 }
 
 TEST port_remap_uses_the_configured_chain_prefix(void) {
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_executable(fake));
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "XX_");
     firc_netfilter_register_base_chains(ipt, NULL);
 
     firc_port_remap_t *remap = firc_port_remap_new("XX_", 53, 3553, NULL, 0, ipt, NULL);
@@ -755,6 +856,155 @@ TEST port_remap_uses_the_configured_chain_prefix(void) {
     PASS();
 }
 
+/* Catches: an incremental pass with nothing new reading nat, or a full pass not reading it. */
+TEST a_full_pass_reads_every_table_again(void) {
+    fixture_t fx;
+    fixture_up(&fx);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, true));
+    size_t reads = firc_fake_xt_reads(firc_fake_ipt_xt(fx.fake));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, false));
+    ASSERT_EQ_FMTm("an incremental pass with nothing new reads nothing", reads,
+                   firc_fake_xt_reads(firc_fake_ipt_xt(fx.fake)), "%zu");
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, true));
+    ASSERT_GT(firc_fake_xt_reads(firc_fake_ipt_xt(fx.fake)), reads);
+    fixture_down(&fx);
+    PASS();
+}
+
+/* Catches: an incremental pass trusting its last write of a nat the firmware rewrote unheard, or a full pass then writing the jump twice. */
+TEST a_pass_after_the_firmware_rewrote_nat_writes_it_back(void) {
+    fixture_t fx;
+    fixture_up(&fx);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, true));
+    ASSERT(chain_has_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2));
+
+    static const char *pre[] = {"-i", "eth0", "-j", "ACCEPT"};
+    const char *const *rules[1] = {pre};
+    size_t lens[1] = {4};
+    ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(fx.fake, "nat", "PREROUTING", rules, lens, 1));
+    ASSERT_FALSE(chain_has_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2));
+
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, false));
+    ASSERT(chain_has_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2));
+
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(fx.app, NULL, true));
+    ASSERT_EQ_FMT((size_t)1, count_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2), "%zu");
+    ASSERT(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
+    fixture_down(&fx);
+    PASS();
+}
+
+/* Catches: a full pass skipping filter as last written although the firmware's rewrite took the barrier's jump away. */
+TEST a_full_pass_after_the_firmware_rewrote_filter_puts_the_barrier_back(void) {
+    firc_fakeip_cfg_t c = {0};
+    c.v4.base.len = 4;
+    c.v4.base.b[0] = 198;
+    c.v4.base.b[1] = 18;
+    c.v4.pool_cidr = 15;
+    c.v4.chunk_cidr = 24;
+    c.v6.base.len = 16;
+    c.v6.base.b[0] = 0xfd;
+    c.v6.base.b[1] = 0x37;
+    c.v6.base.b[2] = 0x9a;
+    c.v6.pool_cidr = 48;
+    c.v6.chunk_cidr = 64;
+    c.max_names = 64;
+    c.idle_secs = 86400;
+    c.clamp_secs = 300;
+    firc_fakeip_t *pool = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &pool));
+    firc_config_t cfg;
+    firc_config_init_defaults(&cfg);
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(fake);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    firc_app_deps_t deps = {.cfg = &cfg, .ipt4 = ipt, .pool = pool};
+    firc_app_t *app = firc_app_create(&deps);
+
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(app, NULL, true));
+    ASSERT_EQ_FMT((size_t)1, forward_jumps(fake, "FIRC_POOLREJECT"), "%zu");
+    static const char *foreign[] = {"-i", "eth0", "-j", "ACCEPT"};
+    const char *const *fwd[1] = {foreign};
+    size_t fwd_lens[1] = {4};
+    firc_fake_ipt_set_initial_rules(fake, "filter", "FORWARD", fwd, fwd_lens, 1);
+    ASSERT_EQ_FMT((size_t)0, forward_jumps(fake, "FIRC_POOLREJECT"), "%zu");
+
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(app, NULL, true));
+    ASSERT_EQ_FMT((size_t)1, forward_jumps(fake, "FIRC_POOLREJECT"), "%zu");
+
+    firc_app_destroy(app);
+    firc_ipt_free(ipt);
+    firc_config_clear(&cfg);
+    firc_fakeip_free(pool);
+    PASS();
+}
+
+static void seed_stale_mark(firc_fake_ipt_t *f) {
+    static const char *mark[] = {"-d", "198.18.0.0/24", "-j", "MARK", "--set-xmark", "0x10000/0xff0000"};
+    const char *const *rules[1] = {mark};
+    size_t lens[1] = {6};
+    firc_fake_ipt_set_initial_rules(f, "mangle", "FIRC_gone", rules, lens, 1);
+    static const char *jump[] = {"-j", "FIRC_gone"};
+    static const char *foreign[] = {"-i", "eth0", "-j", "MARK", "--set-xmark", "0x7/0xffffffff"};
+    const char *const *pre[2] = {foreign, jump};
+    size_t pre_lens[2] = {6, 2};
+    firc_fake_ipt_set_initial_rules(f, "mangle", "PREROUTING", pre, pre_lens, 2);
+}
+
+static const char *const k_gone_jump[] = {"-j", "FIRC_gone"};
+
+/* Catches: a refused nat sweep after the marks went, so a fake address is rewritten and leaves unmarked. */
+TEST a_refused_nat_sweep_leaves_the_marks(void) {
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(fake);
+    seed_stale_mark(fake);
+    seed_stale_chain(fake);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    firc_fake_xt_fail_next_replace(firc_fake_ipt_xt(fake), EINVAL);
+
+    ASSERT(firc_netfilter_clean(ipt, NULL, NULL) != FIRC_OK);
+    ASSERTm("the nat chain is still there", firc_fake_ipt_chain_exists(fake, "nat", "FIRC_old"));
+    ASSERTm("so the mark stayed", firc_fake_ipt_chain_exists(fake, "mangle", "FIRC_gone"));
+    ASSERTm("and the jump into it", chain_has_rule(fake, "mangle", "PREROUTING", k_gone_jump, 2));
+    firc_ipt_free(ipt);
+    PASS();
+}
+
+/* Catches: the start's clean giving up on one lost race, so fircd exits with a killed instance's rules in place. */
+TEST the_start_clean_retries_a_lost_race(void) {
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(fake);
+    seed_stale_mark(fake);
+    seed_stale_chain(fake);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    firc_fake_xt_fail_next_replace(firc_fake_ipt_xt(fake), EAGAIN);
+
+    ASSERT_EQ(FIRC_OK, firc_netfilter_clean_retrying(ipt, NULL, NULL));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "nat", "FIRC_old"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(fake, "mangle", "FIRC_gone"));
+    ASSERT_FALSE(chain_has_rule(fake, "mangle", "PREROUTING", k_gone_jump, 2));
+    firc_ipt_free(ipt);
+    PASS();
+}
+
+/* Catches: a refusal retried as if it were a lost race. */
+TEST the_start_clean_does_not_retry_a_refusal(void) {
+    firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(fake);
+    seed_stale_chain(fake);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    firc_fake_xt_fail_next_replace(firc_fake_ipt_xt(fake), EINVAL);
+
+    ASSERT(firc_netfilter_clean_retrying(ipt, NULL, NULL) != FIRC_OK);
+    ASSERTm("one refused write, no second", firc_fake_ipt_chain_exists(fake, "nat", "FIRC_old"));
+    firc_ipt_free(ipt);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -764,19 +1014,27 @@ int main(int argc, char **argv) {
     RUN_TEST(rebuild_drops_chains_left_by_a_previous_run);
     RUN_TEST(rebuild_keeps_other_writers_rules);
     RUN_TEST(rebuild_aborts_on_a_raised_cancel);
-    RUN_TEST(an_aborted_pass_stages_nothing_for_the_next_commit);
     RUN_TEST(a_pass_writes_the_dnat_chain_and_commits_the_pool);
-    RUN_TEST(an_incremental_pass_writes_ours_and_sweeps_nothing);
-    RUN_TEST(force_commit_without_a_committer_commits_in_place);
+    RUN_TEST(an_incremental_pass_sweeps_a_table_moved_since_its_write);
     RUN_TEST(port_remap_uses_the_configured_chain_prefix);
+    RUN_TEST(the_remap_enables_after_the_start_clean_and_the_barrier);
     RUN_TEST(destroying_the_app_takes_the_dnat_chain_back);
     RUN_TEST(a_pass_puts_the_pool_reject_barrier_first_in_forward);
-    RUN_TEST(the_sweep_leaves_the_barrier_in_place);
+    RUN_TEST(a_full_pass_is_one_write_per_table);
+    RUN_TEST(a_full_pass_puts_the_barrier_back_first);
+    RUN_TEST(the_stop_keeps_only_the_barrier);
+    RUN_TEST(the_clean_with_the_pool_keeps_the_barrier);
     RUN_TEST(the_purge_takes_the_barrier_as_well);
     RUN_TEST(a_full_pass_clears_the_flows_of_the_window_it_opened);
     RUN_TEST(an_incremental_pass_opens_no_window_and_clears_nothing);
     RUN_TEST(the_sweep_also_happens_when_the_pass_is_reported_through_the_loop);
+    RUN_TEST(a_full_pass_reads_every_table_again);
+    RUN_TEST(a_pass_after_the_firmware_rewrote_nat_writes_it_back);
+    RUN_TEST(a_full_pass_after_the_firmware_rewrote_filter_puts_the_barrier_back);
     RUN_TEST(a_sweep_that_could_not_finish_waits_for_the_next_full_pass);
     RUN_TEST(an_incremental_pass_reported_through_the_loop_clears_nothing);
+    RUN_TEST(a_refused_nat_sweep_leaves_the_marks);
+    RUN_TEST(the_start_clean_retries_a_lost_race);
+    RUN_TEST(the_start_clean_does_not_retry_a_refusal);
     GREATEST_MAIN_END();
 }

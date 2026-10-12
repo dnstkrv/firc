@@ -92,6 +92,8 @@ static firc_err_t build_rules(firc_port_remap_t *p, firc_ipt_t *ipt) {
         if (err != FIRC_OK) { return err; }
     }
 
+    err = firc_ipt_register_chain_patch(ipt, "nat", "PREROUTING");
+    if (err != FIRC_OK) { return err; }
     const char *pre_args[] = {"-j", p->chain_name};
     err = firc_ipt_insert(ipt, "nat", "PREROUTING", 1, pre_args, 2);
     if (err != FIRC_OK) { return err; }
@@ -116,16 +118,15 @@ firc_err_t firc_port_remap_prepare_iptables(firc_port_remap_t *p) {
 }
 
 static firc_err_t delete_rules(firc_port_remap_t *p, firc_ipt_t *ipt) {
+    (void)p;
     if (!ipt) { return FIRC_OK; }
-    firc_err_t first_err = firc_ipt_register_chain_delete(ipt, "nat", p->chain_name);
-
-    const char *pre_args[] = {"-j", p->chain_name};
-    firc_err_t err = firc_ipt_delete(ipt, "nat", "PREROUTING", pre_args, 2);
-    if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-
-    err = firc_ipt_commit(ipt);
-    if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-    return first_err;
+    firc_err_t err = firc_ipt_register_chain_patch(ipt, "nat", "PREROUTING");
+    if (err == FIRC_OK) { err = firc_ipt_register_chain_patch(ipt, "nat", "POSTROUTING"); }
+    if (err != FIRC_OK) {
+        firc_ipt_discard(ipt);
+        return err;
+    }
+    return firc_ipt_commit(ipt);
 }
 
 firc_err_t firc_port_remap_enable(firc_port_remap_t *p) {

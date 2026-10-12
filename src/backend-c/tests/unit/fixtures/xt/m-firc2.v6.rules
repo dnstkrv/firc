@@ -1,0 +1,14 @@
+*mangle
+:FIRC_g3 - [0:0]
+:FIRC_g3D - [0:0]
+-A FIRC_g3 -m conntrack --ctdir REPLY -j RETURN
+-A FIRC_g3 -d fd37:9a00:0:2::/64 -j FIRC_g3D
+-A FIRC_g3 -d 2001:db8:50::/48 -p tcp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -j FIRC_g3D
+-A FIRC_g3 -p udp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -j FIRC_g3D
+-A FIRC_g3 -d 2001:db8:60::/48 -p tcp -m conntrack --ctdir ORIGINAL -m mark ! --mark 0x40000000/0x40000000 -m multiport --dports 80,443,8443 -j FIRC_g3D
+-A FIRC_g3D -m mark --mark 0xf00fbbb/0xbf00ffff -j RETURN
+-A FIRC_g3D -s fd00:2::7/128 -j RETURN
+-A FIRC_g3D -j MARK --set-xmark 0x40030000/0x40ff0000
+-A FIRC_g3D -m mark --mark 0x40030000/0x40ff0000 -j CONNMARK --save-mark --nfmask 0x40ff0000 --ctmask 0x40ff0000
+-A PREROUTING -j FIRC_g3
+COMMIT

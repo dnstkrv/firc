@@ -30,7 +30,7 @@ firc_ruleset_retry_t *firc_ruleset_retry(firc_ruleset_t *rs) { return &rs->retry
 static firc_err_t subnets_apply(firc_ruleset_t *rs, bool *changed);
 static firc_err_t devices_apply(firc_ruleset_t *rs, bool *changed);
 
-/* A newline or empty interface name would break the whole restore transcript. */
+/* The encoder takes 1-15 characters and no wildcard; anything else would fail the whole pass. */
 static bool iface_usable(const firc_ruleset_t *rs) {
     return firc_is_interface_name(rs->group->iface);
 }
@@ -88,7 +88,7 @@ void firc_ruleset_chain_name_for(const char *prefix, firc_id_t id, char *out, si
     snprintf(out, cap, "%s%s", prefix != NULL ? prefix : "", id_buf);
 }
 
-static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, firc_nf_write_t mode, const char **step) {
+static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, const char **step) {
     if (rs->enabled) { return FIRC_OK; }
     rs->enabled = true;
     if (rs->group->enable && !iface_usable(rs)) {
@@ -114,9 +114,8 @@ static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, firc_nf_write_t mode
         if (step) { *step = "memory"; }
         return FIRC_ERR_NOMEM;
     }
-    firc_ipset_to_link_set_conntrack(link, rs->deps.ct);
 
-    /* Set before enable writes the chain, so the first commit carries prefixes and devices. */
+    /* Set before enable, so the first pass after it stages the prefixes and devices. */
     rs->ipset_to_link = link;
     firc_err_t err = subnets_apply(rs, NULL);
     if (err == FIRC_OK) { err = devices_apply(rs, NULL); }
@@ -128,7 +127,7 @@ static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, firc_nf_write_t mode
         return err;
     }
 
-    err = firc_ipset_to_link_enable(link, mode, step);
+    err = firc_ipset_to_link_enable(link, step);
     if (err != FIRC_OK) {
         firc_ipset_to_link_free(link);
         return err;
@@ -137,17 +136,17 @@ static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, firc_nf_write_t mode
     return FIRC_OK;
 }
 
-firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, firc_nf_write_t mode, const char **step) {
-    firc_err_t err = ruleset_enable_locked(rs, mode, step);
+firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, const char **step) {
+    firc_err_t err = ruleset_enable_locked(rs, step);
     if (err != FIRC_OK) {
         /* The routing never came up, so nothing is steering by its mark. */
-        firc_ruleset_disable(rs, FIRC_FLOWS_KEEP, mode);
+        firc_ruleset_disable(rs);
         return err;
     }
     return FIRC_OK;
 }
 
-firc_err_t firc_ruleset_disable(firc_ruleset_t *rs, firc_flows_t flows, firc_nf_write_t mode) {
+firc_err_t firc_ruleset_disable(firc_ruleset_t *rs) {
     if (!rs->enabled) { return FIRC_OK; }
     rs->enabled = false;
     if (!configured_enabled(rs)) { return FIRC_OK; }
@@ -155,12 +154,25 @@ firc_err_t firc_ruleset_disable(firc_ruleset_t *rs, firc_flows_t flows, firc_nf_
     firc_err_t e1 = FIRC_OK;
     firc_err_t e2 = FIRC_OK;
     if (rs->ipset_to_link) {
-        e1 = firc_ipset_to_link_disable(rs->ipset_to_link, flows, mode);
+        e1 = firc_ipset_to_link_disable(rs->ipset_to_link);
         firc_ipset_to_link_free(rs->ipset_to_link);
         rs->ipset_to_link = NULL;
     }
 
     return e1 != FIRC_OK ? e1 : e2;
+}
+
+bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs) {
+    return firc_ruleset_routed(rs) && firc_ipset_to_link_has_reply_rule(rs->ipset_to_link);
+}
+
+firc_ipset_to_link_t *firc_ruleset_disable_hold(firc_ruleset_t *rs) {
+    if (!rs->enabled) { return NULL; }
+    rs->enabled = false;
+    if (!configured_enabled(rs)) { return NULL; }
+    firc_ipset_to_link_t *l = rs->ipset_to_link;
+    rs->ipset_to_link = NULL;
+    return l;
 }
 
 firc_err_t firc_ruleset_prepare_iptables(firc_ruleset_t *rs) {
@@ -317,7 +329,6 @@ static void refuse(render_t *r, bool deny) {
     }
 }
 
-/* Host bits cleared: iptables-save echoes the network, and a mismatch rewrites the chain every pass. */
 static bool addr_source(const firc_ip_t *a, uint8_t prefix, firc_nf_source_t *s) {
     if ((a->len != 4 && a->len != 16) || prefix > a->len * 8u) { return false; }
     memset(s, 0, sizeof(*s));
@@ -517,11 +528,6 @@ firc_err_t firc_ruleset_refresh_devices(firc_ruleset_t *rs, bool *changed) {
     rs->dev_narrowed = false;
     if (!firc_ruleset_routed(rs) || !firc_ruleset_devices_follow_table(rs)) { return FIRC_OK; }
     return devices_apply(rs, changed);
-}
-
-firc_err_t firc_ruleset_rewrite_chains(firc_ruleset_t *rs) {
-    if (!rs->enabled || !configured_enabled(rs) || !rs->ipset_to_link) { return FIRC_OK; }
-    return firc_ipset_to_link_rewrite_chains(rs->ipset_to_link);
 }
 
 firc_err_t firc_ruleset_plan_subnets(const firc_group_t *g, firc_ruleset_plan_fn fn, void *ud) {

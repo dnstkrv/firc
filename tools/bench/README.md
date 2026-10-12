@@ -37,6 +37,7 @@ firc needs a figure from a script here.
 - `run_matcher_bench.sh` (`matcherbench.c`) — building and matching a
   namespace ruleset.
 - `run_devsel_bench.sh` (`devselbench.c`) — a device check on the DNS path.
+- `run_pass_bench.sh` (`passbench.c`) — one netfilter pass over the fake kernel at 2000 and 20000 mappings, split by step and by codec stage.
 - `run_hello_positions.sh` — where a ClientHello lands in a packet.
 - `run_nflog_family.sh` (`nflog_family.c`) — one NFLOG group, both
   families; runs in a user and network namespace.

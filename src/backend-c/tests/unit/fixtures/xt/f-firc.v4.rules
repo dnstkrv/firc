@@ -1,0 +1,12 @@
+*filter
+:FIRC_POOLREJECT - [0:0]
+:FIRC_bh - [0:0]
+:FIRC_g1 - [0:0]
+-A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP
+-A FIRC_POOLREJECT -d 198.18.0.0/15 -p tcp -j REJECT --reject-with tcp-reset
+-A FIRC_POOLREJECT -d 198.18.0.0/15 -j REJECT --reject-with icmp-host-unreachable
+-A FIRC_g1 -o nwg1 -m mark --mark 0x10000/0xff0000 -j ACCEPT
+-I FORWARD 1 -j FIRC_POOLREJECT
+-A FORWARD -j FIRC_g1
+-A FORWARD -j FIRC_bh
+COMMIT

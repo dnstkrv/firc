@@ -72,9 +72,6 @@ firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char 
                                              void *snap_ud);
 void firc_ipset_to_link_free(firc_ipset_to_link_t *l);
 
-/* Optional: where to drop the group's flows when its routing goes away. */
-void firc_ipset_to_link_set_conntrack(firc_ipset_to_link_t *l, firc_ct_t *ct);
-
 /* Drops flows whose mark has group_value plus the handled bit; no-op for NULL ct or zero value. */
 void firc_ipset_to_link_flush_mark(firc_ct_t *ct, uint32_t group_value, const char *who);
 
@@ -101,9 +98,6 @@ firc_err_t firc_ipset_to_link_set_devices(firc_ipset_to_link_t *l, const firc_nf
 /* The copy set_devices last took; the loop thread may read it without the lock. */
 const firc_nf_devices_t *firc_ipset_to_link_devices(const firc_ipset_to_link_t *l);
 
-/* Re-stages and commits the group's chains; no-op unless enabled. Loop thread, under the netfilter lock. */
-firc_err_t firc_ipset_to_link_rewrite_chains(firc_ipset_to_link_t *l);
-
 /* Test seam: stages the rules as a rebuild would, without enable. */
 firc_err_t firc_ipset_to_link_stage_for_test(firc_ipset_to_link_t *l);
 
@@ -119,27 +113,14 @@ firc_err_t firc_ipset_to_link_build_subnet_rules_dev(firc_ipt_t *ipt, const char
                                                      const firc_ipv6_subnet_t *v6, size_t n6,
                                                      const firc_nf_devices_t *dev);
 
-/* Whether the group's flows survive its routing coming down. Callers must choose. */
-typedef enum {
-    FIRC_FLOWS_KEEP = 0,
-    FIRC_FLOWS_DROP = 1,
-} firc_flows_t;
-
-/* NOW commits chains on this thread; BY_COMMITTER leaves chains to the committer but writes routes and rules. */
-typedef enum {
-    FIRC_NF_WRITE_NOW = 0,
-    FIRC_NF_WRITE_BY_COMMITTER = 1,
-} firc_nf_write_t;
-
-/* On failure *step (nullable) names what failed; everything put in is taken back. */
-firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, firc_nf_write_t mode, const char **step);
-firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l, firc_flows_t flows, firc_nf_write_t mode);
-
-/* Stages (no commit) removal of the chain, its devices chain and their jumps. ipt NULL is FIRC_OK. */
-firc_err_t firc_ipset_to_link_stage_delete(firc_ipt_t *ipt, const char *chain_name);
-
-/* Stages removal of a devices chain alone. ipt NULL is FIRC_OK. */
-firc_err_t firc_ipset_to_link_stage_delete_devices(firc_ipt_t *ipt, const char *devices_chain);
+/* Routes and ip rules only; the chains are the next pass's. On failure *step (nullable) names what failed and everything put in is taken back. */
+firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, const char **step);
+/* Takes the ip rule, then the routes; flows and chains are the caller's. */
+firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l);
+/* Disables l, leaving its reply rule when keep_reply (a newer link put in the same one), and frees it. */
+firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, bool keep_reply);
+/* Whether l put in the reply rule of its mark field. */
+bool firc_ipset_to_link_has_reply_rule(const firc_ipset_to_link_t *l);
 
 /* Re-stages the group's chains for a full rebuild without committing; no-op unless enabled. */
 firc_err_t firc_ipset_to_link_prepare_iptables(firc_ipset_to_link_t *l);

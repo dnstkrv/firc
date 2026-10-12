@@ -6,6 +6,7 @@
 #include "firc/netfilter_cleaner.h"
 
 #include "fake_iptables.h"
+#include "xt_golden.h"
 #include "fake_rtnl.h"
 
 #include "firc/log.h"
@@ -571,7 +572,7 @@ static bool devices_chain_has(firc_fake_ipt_t *fipt, const char *chain, const ch
     size_t n = 0;
     if (!firc_fake_ipt_get_rules(fipt, "mangle", chain, &rules, &n)) { return false; }
     for (size_t i = 0; i < n; i++) {
-        if (firc_ipt_rule_contains(rules[i], text)) { return true; }
+        if (firc_test_rule_contains(rules[i], text)) { return true; }
     }
     return false;
 }
@@ -591,7 +592,7 @@ static bool nf_up_sel(nf_fx_t *f, char **allow, size_t na, char **deny, size_t n
     memset(f, 0, sizeof(*f));
     g_other_octet = 61;
     f->fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    f->ipt = f->fipt != NULL ? firc_ipt_new(firc_fake_ipt_as_executable(f->fipt)) : NULL;
+    f->ipt = f->fipt != NULL ? firc_ipt_new(firc_fake_ipt_as_xt(f->fipt), "FIRC_") : NULL;
     if (f->ipt == NULL || firc_netfilter_register_base_chains(f->ipt, NULL) != FIRC_OK) { return false; }
     f->kernel = fake_rtnl_start(&f->rtnl);
     if (f->kernel == NULL) { return false; }
@@ -609,8 +610,14 @@ static bool nf_up_sel(nf_fx_t *f, char **allow, size_t na, char **deny, size_t n
 
 static bool nf_up(nf_fx_t *f, char **allow, size_t na) { return nf_up_sel(f, allow, na, NULL, 0); }
 
+static firc_err_t nf_pass(nf_fx_t *f) {
+    firc_err_t err = firc_netfilter_register_base_chains(f->ipt, NULL);
+    if (err == FIRC_OK) { err = firc_ruleset_prepare_iptables(f->rs); }
+    return err == FIRC_OK ? firc_ipt_commit(f->ipt) : err;
+}
+
 static void nf_down(nf_fx_t *f) {
-    if (f->rs != NULL) { firc_ruleset_disable(f->rs, FIRC_FLOWS_KEEP, FIRC_NF_WRITE_NOW); }
+    if (f->rs != NULL) { firc_ruleset_disable(f->rs); }
     firc_ruleset_free(f->rs);
     firc_group_free(f->g);
     if (f->rtnl != NULL) { firc_rtnl_close(f->rtnl); }
@@ -629,7 +636,8 @@ TEST sync_renders_the_selector_again_and_says_when_it_moved(void) {
     firc_ruleset_devices_chain_name_for("FIRC_", f.g->id, dchain, sizeof(dchain));
     ASSERT_STR_EQ("FIRC_0a0b0c0dD", dchain);
 
-    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(rs, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(rs, NULL));
+    ASSERT_EQ(FIRC_OK, nf_pass(&f));
     ASSERTm("enable writes the host's other address",
             devices_chain_has(fipt, dchain, "-s 192.168.1.61/32 -j MARK"));
 
@@ -640,7 +648,7 @@ TEST sync_renders_the_selector_again_and_says_when_it_moved(void) {
     g_other_octet = 62;
     ASSERT_EQ(FIRC_OK, firc_ruleset_sync(rs, &changed));
     ASSERTm("the host's address moved", changed);
-    ASSERT_EQ(FIRC_OK, firc_ruleset_rewrite_chains(rs));
+    ASSERT_EQ(FIRC_OK, nf_pass(&f));
     ASSERT(devices_chain_has(fipt, dchain, "-s 192.168.1.62/32 -j MARK"));
     ASSERT_FALSE(devices_chain_has(fipt, dchain, "192.168.1.61"));
     ASSERT(devices_chain_has(fipt, dchain, "-s 192.168.1.60/32 -j MARK"));
@@ -696,13 +704,13 @@ TEST a_table_refresh_renders_only_a_routed_group(void) {
     ASSERT_FALSEm("not enabled: nothing to render into", changed);
 
     g_other_octet = 61;
-    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(f.rs, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(f.rs, NULL));
     ASSERT_EQ(FIRC_OK, firc_ruleset_refresh_devices(f.rs, &changed));
     ASSERT_FALSEm("the same table", changed);
     g_other_octet = 62;
     ASSERT_EQ(FIRC_OK, firc_ruleset_refresh_devices(f.rs, &changed));
     ASSERTm("the host's address moved", changed);
-    ASSERT_EQ(FIRC_OK, firc_ruleset_rewrite_chains(f.rs));
+    ASSERT_EQ(FIRC_OK, nf_pass(&f));
     ASSERT(devices_chain_has(f.fipt, dchain, "-s 192.168.1.62/32 -j MARK"));
     nf_down(&f);
     PASS();
@@ -849,7 +857,7 @@ static char *log_of_enable_and_syncs(nf_fx_t *f) {
     unlink(path);
     firc_log_set_fd(fd);
     bool changed = false;
-    firc_err_t e1 = firc_ruleset_enable(f->rs, FIRC_NF_WRITE_NOW, NULL);
+    firc_err_t e1 = firc_ruleset_enable(f->rs, NULL);
     firc_err_t e2 = firc_ruleset_sync(f->rs, &changed);
     firc_err_t e3 = firc_ruleset_sync(f->rs, &changed);
     firc_log_set_fd(1);

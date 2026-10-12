@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "fake_conntrack.h"
 #include "fake_iptables.h"
 #include "fake_rtnl.h"
 #include "firc/ipset_to_link.h"
@@ -27,7 +26,7 @@ typedef struct {
 static bool up(fixture_t *f, unsigned link_flags) {
     memset(f, 0, sizeof(*f));
     f->fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
-    f->ipt = f->fipt ? firc_ipt_new(firc_fake_ipt_as_executable(f->fipt)) : NULL;
+    f->ipt = f->fipt ? firc_ipt_new(firc_fake_ipt_as_xt(f->fipt), "FIRC_") : NULL;
     if (f->ipt == NULL) { return false; }
     firc_netfilter_register_base_chains(f->ipt, NULL);
     f->kernel = fake_rtnl_start(&f->rtnl);
@@ -42,6 +41,12 @@ static void down(fixture_t *f) {
     firc_rtnl_close(f->rtnl);
     fake_rtnl_stop(f->kernel);
     firc_ipt_free(f->ipt);
+}
+
+static firc_err_t pass_with(fixture_t *f, bool group) {
+    firc_err_t err = firc_netfilter_register_base_chains(f->ipt, NULL);
+    if (err == FIRC_OK && group) { err = firc_ipset_to_link_stage_for_test(f->link); }
+    return err == FIRC_OK ? firc_ipt_commit(f->ipt) : err;
 }
 
 static size_t iface_routes(fixture_t *f, uint16_t type) {
@@ -60,7 +65,7 @@ static size_t iface_routes(fixture_t *f, uint16_t type) {
 TEST link_up_reinstalls_the_interface_route_even_when_nothing_changed(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     ASSERT_EQ_FMTm("enable installs the route once", (size_t)1, iface_routes(&f, RTM_NEWROUTE), "%zu");
 
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
@@ -75,7 +80,7 @@ TEST link_up_reinstalls_the_interface_route_even_when_nothing_changed(void) {
 TEST a_groups_own_routes_replace_what_sits_at_the_key(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     size_t seen = 0;
@@ -96,7 +101,7 @@ TEST a_changed_gateway_replaces_the_route(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1}, gw_b[4] = {10, 0, 0, 2};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_set_gateway(f.kernel, 1, gw_b, 4);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
 
@@ -123,10 +128,10 @@ TEST the_teardown_deletes_the_route_by_the_gateway_it_last_wrote(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1}, gw_b[4] = {10, 0, 0, 2};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_set_gateway(f.kernel, 1, gw_b, 4);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     size_t dels = 0;
@@ -147,7 +152,7 @@ TEST a_failed_gateway_lookup_keeps_the_gateway_last_written(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_fail_next_of(f.kernel, RTM_GETROUTE, EPERM);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
     fake_rtnl_msg_t m[64];
@@ -180,7 +185,7 @@ TEST the_gateway_is_the_interfaces_default_from_main_at_its_lowest_metric(void) 
     fake_rtnl_route_via(f.kernel, 1, gw_spare, 4);
     fake_rtnl_add_route(f.kernel, AF_INET, RT_TABLE_MAIN, RTN_UNICAST, RTPROT_BOOT, corner, 8, 1);
     fake_rtnl_route_via(f.kernel, 1, gw_corner, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -204,7 +209,7 @@ TEST the_lookup_never_reads_the_groups_own_default_back(void) {
     fake_rtnl_route_via(f.kernel, 1, gw_ours, 4);
     fake_rtnl_add_route(f.kernel, AF_INET, 4096, RTN_UNICAST, RTPROT_BOOT, any, 0, 1024);
     fake_rtnl_route_via(f.kernel, 1, gw_real, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -224,7 +229,7 @@ TEST a_default_that_lost_its_gateway_for_good_is_followed(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t any[4] = {0, 0, 0, 0}, gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_set_gateway(f.kernel, 1, NULL, 0);
     fake_rtnl_add_route(f.kernel, AF_INET, RT_TABLE_MAIN, RTN_UNICAST, RTPROT_BOOT, any, 0, 10);
     fake_rtnl_route_via(f.kernel, 1, NULL, 0);
@@ -249,7 +254,7 @@ TEST a_reject_default_on_the_interface_is_not_a_gatewayless_one(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t any[4] = {0, 0, 0, 0}, gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_set_gateway(f.kernel, 1, NULL, 0);
     fake_rtnl_add_route(f.kernel, AF_INET, RT_TABLE_MAIN, RTN_UNREACHABLE, RTPROT_BOOT, any, 0, 10);
     fake_rtnl_route_via(f.kernel, 1, NULL, 0);
@@ -275,7 +280,7 @@ TEST an_event_while_the_link_is_down_writes_nothing(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     size_t before = fake_rtnl_count(f.kernel, RTM_NEWROUTE, RTN_UNICAST);
     fake_rtnl_set_link_flags(f.kernel, 0);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
@@ -292,8 +297,8 @@ TEST one_familys_failure_does_not_cost_the_other_its_refresh(void) {
     f.fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     firc_fake_ipt_t *fipt6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
     ASSERT(f.fipt != NULL && fipt6 != NULL);
-    f.ipt = firc_ipt_new(firc_fake_ipt_as_executable(f.fipt));
-    firc_ipt_t *ipt6 = firc_ipt_new(firc_fake_ipt_as_executable(fipt6));
+    f.ipt = firc_ipt_new(firc_fake_ipt_as_xt(f.fipt), "FIRC_");
+    firc_ipt_t *ipt6 = firc_ipt_new(firc_fake_ipt_as_xt(fipt6), "FIRC_");
     ASSERT(f.ipt != NULL && ipt6 != NULL);
     firc_netfilter_register_base_chains(f.ipt, ipt6);
     f.kernel = fake_rtnl_start(&f.rtnl);
@@ -303,7 +308,7 @@ TEST one_familys_failure_does_not_cost_the_other_its_refresh(void) {
     ASSERT(f.link != NULL);
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
 
     size_t before = fake_rtnl_messages(f.kernel, NULL, 0);
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWROUTE, EPERM);
@@ -328,7 +333,7 @@ TEST an_enodev_skip_does_not_forget_the_gateway(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWROUTE, ENODEV);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
     fake_rtnl_fail_next_of(f.kernel, RTM_GETROUTE, EPERM);
@@ -352,7 +357,7 @@ TEST a_default_route_that_vanished_keeps_the_gateway_last_written(void) {
     ASSERT(up(&f, IFF_UP));
     const uint8_t gw_a[4] = {10, 0, 0, 1};
     fake_rtnl_set_gateway(f.kernel, 1, gw_a, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_set_gateway(f.kernel, 1, NULL, 0);
     ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
 
@@ -376,7 +381,7 @@ TEST a_default_route_that_vanished_keeps_the_gateway_last_written(void) {
 TEST a_group_that_never_saw_a_gateway_writes_a_device_route(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -396,7 +401,7 @@ TEST a_default_only_in_a_policy_table_is_still_the_gateway(void) {
     const uint8_t any[4] = {0, 0, 0, 0}, gw_policy[4] = {10, 0, 0, 9};
     fake_rtnl_add_route(f.kernel, AF_INET, 4096, RTN_UNICAST, RTPROT_BOOT, any, 0, 5);
     fake_rtnl_route_via(f.kernel, 1, gw_policy, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -419,7 +424,7 @@ TEST a_gatewayless_default_in_main_does_not_shadow_a_gatewayed_one(void) {
     fake_rtnl_route_via(f.kernel, 1, NULL, 0);
     fake_rtnl_add_route(f.kernel, AF_INET, 4096, RTN_UNICAST, RTPROT_BOOT, any, 0, 5);
     fake_rtnl_route_via(f.kernel, 1, gw_policy, 4);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -441,7 +446,7 @@ TEST the_gateway_of_a_multipath_default_is_read_from_its_nexthops(void) {
     fake_rtnl_add_route(f.kernel, AF_INET, RT_TABLE_MAIN, RTN_UNICAST, RTPROT_BOOT, any, 0, 10);
     fake_rtnl_route_via(f.kernel, 1, gw_mp, 4);
     fake_rtnl_route_multipath(f.kernel);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0;
     for (size_t i = 0; i < n; i++) {
@@ -451,98 +456,6 @@ TEST the_gateway_of_a_multipath_default_is_read_from_its_nexthops(void) {
         ASSERT_EQ(0, memcmp(m[i].gw, gw_mp, 4));
     }
     ASSERT_EQ_FMT((size_t)1, adds, "%zu");
-    down(&f);
-    PASS();
-}
-
-TEST withdrawing_a_group_drops_the_flows_it_was_steering(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP));
-    firc_ct_t *ct = NULL;
-    fake_ct_t *ctk = fake_ct_start(&ct);
-    ASSERT(ctk != NULL);
-    firc_ipset_to_link_set_conntrack(f.link, ct);
-    const uint8_t src[4] = {192, 168, 1, 10}, dst[4] = {198, 18, 0, 5};
-    const uint8_t ours[4] = {198, 18, 0, 5}, theirs[4] = {8, 8, 8, 8};
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
-    uint32_t field = firc_ipset_to_link_mark_field(f.link);
-    ASSERTm("the group got a mark field", field != 0);
-    fake_ct_add(ctk, AF_INET, src, dst, ours, firc_mark_group_value(field) | FIRC_MARK_HANDLED);
-    fake_ct_add(ctk, AF_INET, src, dst, theirs, 0);
-
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
-    ASSERTm("the group's flow went", fake_ct_deleted(ctk, ours, 4));
-    ASSERTm("somebody else's flow stayed", !fake_ct_deleted(ctk, theirs, 4));
-    firc_ct_close(ct);
-    fake_ct_stop(ctk);
-    down(&f);
-    PASS();
-}
-
-/* Catches: a group flush matching its field without the handled bit, resetting the firmware's flows. */
-TEST withdrawing_a_group_leaves_the_firmwares_flows_alone(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP));
-    firc_ct_t *ct = NULL;
-    fake_ct_t *ctk = fake_ct_start(&ct);
-    ASSERT(ctk != NULL);
-    firc_ipset_to_link_set_conntrack(f.link, ct);
-    const uint8_t src[4] = {192, 168, 1, 10}, dst[4] = {198, 18, 0, 5};
-    const uint8_t ours[4] = {198, 18, 0, 5}, theirs[4] = {8, 8, 8, 8};
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
-    uint32_t field = firc_ipset_to_link_mark_field(f.link);
-    ASSERTm("the group got a mark field", field != 0);
-    fake_ct_add(ctk, AF_INET, src, dst, ours, firc_mark_group_value(field) | FIRC_MARK_HANDLED);
-    fake_ct_add(ctk, AF_INET, src, dst, theirs, firc_mark_group_value(field) | 0x00000989u);
-
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
-    ASSERTm("the group's flow went", fake_ct_deleted(ctk, ours, 4));
-    ASSERTm("the firmware's policy-routed flow stayed", !fake_ct_deleted(ctk, theirs, 4));
-    firc_ct_close(ct);
-    fake_ct_stop(ctk);
-    down(&f);
-    PASS();
-}
-
-/* Catches: a teardown for a routing that comes straight back flushing its flows. */
-TEST disabling_a_group_that_comes_back_keeps_its_flows(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP));
-    firc_ct_t *ct = NULL;
-    fake_ct_t *ctk = fake_ct_start(&ct);
-    ASSERT(ctk != NULL);
-    firc_ipset_to_link_set_conntrack(f.link, ct);
-    const uint8_t src[4] = {192, 168, 1, 10}, dst[4] = {198, 18, 0, 5};
-    const uint8_t ours[4] = {198, 18, 0, 5};
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
-    uint32_t field = firc_ipset_to_link_mark_field(f.link);
-    ASSERTm("the group got a mark field", field != 0);
-    fake_ct_add(ctk, AF_INET, src, dst, ours, firc_mark_group_value(field) | FIRC_MARK_HANDLED);
-
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_KEEP, FIRC_NF_WRITE_NOW));
-    ASSERT_EQ_FMTm("the kernel was not asked to delete anything", (size_t)0, fake_ct_deletes(ctk), "%zu");
-    ASSERT_EQ_FMTm("the flow is still there", (size_t)1, fake_ct_remaining(ctk), "%zu");
-    firc_ct_close(ct);
-    fake_ct_stop(ctk);
-    down(&f);
-    PASS();
-}
-
-/* Catches: disabling a never-enabled link opening a conntrack conversation or changing anything. */
-TEST disabling_a_link_that_was_never_enabled_does_nothing(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP));
-    firc_ct_t *ct = NULL;
-    fake_ct_t *ctk = fake_ct_start(&ct);
-    ASSERT(ctk != NULL);
-    firc_ipset_to_link_set_conntrack(f.link, ct);
-    const uint8_t src[4] = {192, 168, 1, 10}, dst[4] = {8, 8, 8, 8}, reply[4] = {8, 8, 8, 8};
-    fake_ct_add(ctk, AF_INET, src, dst, reply, 0);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
-    ASSERT_EQ_FMTm("the kernel was not even asked", (size_t)0, fake_ct_deletes(ctk), "%zu");
-    ASSERT_EQ_FMT((size_t)1, fake_ct_remaining(ctk), "%zu");
-    firc_ct_close(ct);
-    fake_ct_stop(ctk);
     down(&f);
     PASS();
 }
@@ -560,7 +473,7 @@ TEST the_reject_routes_land_in_the_groups_own_table(void) {
     firc_ipset_to_link_free(f.link);
     f.link = firc_ipset_to_link_new("FIRC_g1", "lo", f.ipt, NULL, f.rtnl, 100, pool, "g1", NULL, NULL);
     ASSERT(f.link != NULL);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     uint32_t table = 0;
@@ -599,7 +512,7 @@ TEST the_reject_routes_precede_the_rule(void) {
     firc_ipset_to_link_free(f.link);
     f.link = firc_ipset_to_link_new("FIRC_g1", "lo", f.ipt, NULL, f.rtnl, 100, pool, "g1", NULL, NULL);
     ASSERT(f.link != NULL);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     int first_reject = -1, first_rule = -1;
@@ -614,7 +527,7 @@ TEST the_reject_routes_precede_the_rule(void) {
     ASSERTm("the rule is the last thing enable adds", last_route < first_rule);
 
     size_t before = n;
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
     n = fake_rtnl_messages(f.kernel, m, 64);
     int del_rule = -1, first_del_route = -1;
     for (size_t i = before; i < n; i++) {
@@ -636,11 +549,13 @@ TEST disable_takes_back_the_rule_the_routes_and_the_chains(void) {
     const char *const *rules[] = {foreign};
     const size_t lens[] = {4};
     ASSERT_EQ(FIRC_OK, firc_fake_ipt_set_initial_rules(f.fipt, "filter", "FORWARD", rules, lens, 1));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, pass_with(&f, true));
     ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
     size_t dels_before = fake_rtnl_count(f.kernel, RTM_DELRULE, 0);
 
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
+    ASSERT_EQ(FIRC_OK, pass_with(&f, false));
     ASSERT_EQ_FMTm("the ip rule and its reply twin are gone", dels_before + 2, fake_rtnl_count(f.kernel, RTM_DELRULE, 0), "%zu");
     ASSERT_EQ_FMTm("the blackhole is gone", (size_t)1, fake_rtnl_count(f.kernel, RTM_DELROUTE, RTN_BLACKHOLE), "%zu");
     ASSERT_EQ_FMTm("the interface route is gone", (size_t)1, iface_routes(&f, RTM_DELROUTE), "%zu");
@@ -660,7 +575,7 @@ TEST disable_takes_back_the_rule_the_routes_and_the_chains(void) {
 TEST a_group_s_rule_has_a_reply_twin_ahead_of_it_in_main(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     int twin = -1, rule = -1;
@@ -684,7 +599,7 @@ TEST a_group_s_rule_has_a_reply_twin_ahead_of_it_in_main(void) {
     ASSERTm("installed before the rule it guards", twin < rule);
 
     size_t before = n;
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_DROP, FIRC_NF_WRITE_NOW));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
     n = fake_rtnl_messages(f.kernel, m, 64);
     int del_twin = -1, del_rule = -1;
     for (size_t i = before; i < n; i++) {
@@ -710,7 +625,7 @@ TEST a_refused_group_rule_takes_its_twin_back(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     fake_rtnl_fail_after_of(f.kernel, RTM_NEWRULE, EPERM, 1);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, NULL) != FIRC_OK);
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     int refused = nth_of(m, n, RTM_NEWRULE, 1);
@@ -730,7 +645,7 @@ TEST a_refused_twin_fails_the_enable(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWRULE, EPERM);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, NULL) != FIRC_OK);
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64);
     for (size_t i = 0; i < n; i++) {
@@ -749,7 +664,7 @@ TEST no_twin_for_a_blackhole_group_or_for_ipv6(void) {
     f.link = firc_ipset_to_link_new("FIRC_g1", FIRC_IPSET_TO_LINK_BLACKHOLE, f.ipt, NULL, f.rtnl, 100, NULL, "g1",
                                     NULL, NULL);
     ASSERT(f.link != NULL);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), group = 0;
     for (size_t i = 0; i < n; i++) {
@@ -762,13 +677,13 @@ TEST no_twin_for_a_blackhole_group_or_for_ipv6(void) {
 
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     firc_fake_ipt_t *fipt6 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
-    firc_ipt_t *ipt6 = fipt6 ? firc_ipt_new(firc_fake_ipt_as_executable(fipt6)) : NULL;
+    firc_ipt_t *ipt6 = fipt6 ? firc_ipt_new(firc_fake_ipt_as_xt(fipt6), "FIRC_") : NULL;
     ASSERT(ipt6 != NULL);
     firc_netfilter_register_base_chains(ipt6, NULL);
     firc_ipset_to_link_free(f.link);
     f.link = firc_ipset_to_link_new("FIRC_g1", "lo", f.ipt, ipt6, f.rtnl, 100, NULL, "g1", NULL, NULL);
     ASSERT(f.link != NULL);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
     n = fake_rtnl_messages(f.kernel, m, 64);
     size_t v6_group = 0, v4_twin = 0;
     for (size_t i = 0; i < n; i++) {
@@ -801,13 +716,13 @@ static bool jumps_to_g1(fixture_t *f, const char *table, const char *base) {
     return found;
 }
 
-/* Catches: a committer-mode enable writing iptables, or leaving the object disabled. */
-TEST enable_by_the_committer_writes_the_rules_and_leaves_the_chain_to_the_pass(void) {
+/* Catches: an enable writing iptables, or leaving the object disabled. */
+TEST enable_writes_the_rules_and_leaves_the_chain_to_the_pass(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    size_t restores = firc_fake_ipt_restore_calls(f.fipt);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_BY_COMMITTER, NULL));
-    ASSERT_EQ_FMTm("no iptables write", restores, firc_fake_ipt_restore_calls(f.fipt), "%zu");
+    size_t restores = firc_fake_ipt_writes(f.fipt);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ_FMTm("no iptables write", restores, firc_fake_ipt_writes(f.fipt), "%zu");
     ASSERT_EQ_FMTm("the ip rule and its reply twin are in", (size_t)2,
                    fake_rtnl_count(f.kernel, RTM_NEWRULE, 0), "%zu");
     ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
@@ -820,93 +735,21 @@ TEST enable_by_the_committer_writes_the_rules_and_leaves_the_chain_to_the_pass(v
     PASS();
 }
 
-/* Catches: a committer-mode disable deleting the chain, or keeping the ip rules. */
-TEST disable_by_the_committer_takes_the_rules_and_leaves_the_chain(void) {
+/* Catches: a disable deleting the chain, or keeping the ip rules. */
+TEST disable_takes_the_rules_and_leaves_the_chain(void) {
     fixture_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, pass_with(&f, true));
     ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    size_t restores = firc_fake_ipt_restore_calls(f.fipt);
+    size_t restores = firc_fake_ipt_writes(f.fipt);
     size_t dels_before = fake_rtnl_count(f.kernel, RTM_DELRULE, 0);
 
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_KEEP, FIRC_NF_WRITE_BY_COMMITTER));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
     ASSERT_EQ_FMTm("the ip rule and its twin are gone", dels_before + 2,
                    fake_rtnl_count(f.kernel, RTM_DELRULE, 0), "%zu");
-    ASSERT_EQ_FMTm("no iptables write", restores, firc_fake_ipt_restore_calls(f.fipt), "%zu");
+    ASSERT_EQ_FMTm("no iptables write", restores, firc_fake_ipt_writes(f.fipt), "%zu");
     ASSERTm("the chain is the pass's to delete", firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    down(&f);
-    PASS();
-}
-
-/* Catches: a tombstone missing a table or jump, or a restore staged for a chain already gone. */
-TEST stage_delete_takes_the_chain_and_its_three_jumps(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
-    ASSERT(jumps_to_g1(&f, "filter", "FORWARD") && jumps_to_g1(&f, "mangle", "PREROUTING") &&
-           jumps_to_g1(&f, "nat", "POSTROUTING"));
-
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete(f.ipt, "FIRC_g1"));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(f.ipt));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "filter", "FIRC_g1"));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "nat", "FIRC_g1"));
-    ASSERT_FALSE(jumps_to_g1(&f, "filter", "FORWARD"));
-    ASSERT_FALSE(jumps_to_g1(&f, "mangle", "PREROUTING"));
-    ASSERT_FALSE(jumps_to_g1(&f, "nat", "POSTROUTING"));
-
-    size_t restores = firc_fake_ipt_restore_calls(f.fipt);
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete(f.ipt, "FIRC_g1"));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(f.ipt));
-    ASSERT_EQ_FMTm("a tombstone for a chain that is gone writes nothing", restores,
-                   firc_fake_ipt_restore_calls(f.fipt), "%zu");
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete(NULL, "FIRC_g1"));
-    down(&f);
-    PASS();
-}
-
-/* Seeds PREROUTING -> group chain -> devices chain in mangle; false if the fake refused a seed. */
-static bool seed_selector_chains(fixture_t *f) {
-    static const char *pre[] = {"-j", "FIRC_g1"};
-    static const char *jump[] = {"-d", "198.18.0.0/24", "-j", "FIRC_g1D"};
-    static const char *ret[] = {"-j", "RETURN"};
-    const char *const *r1[] = {pre}, *const *r2[] = {jump}, *const *r3[] = {ret};
-    size_t l1[] = {2}, l2[] = {4}, l3[] = {2};
-    return firc_fake_ipt_set_initial_rules(f->fipt, "mangle", "PREROUTING", r1, l1, 1) == FIRC_OK &&
-           firc_fake_ipt_set_initial_rules(f->fipt, "mangle", "FIRC_g1", r2, l2, 1) == FIRC_OK &&
-           firc_fake_ipt_set_initial_rules(f->fipt, "mangle", "FIRC_g1D", r3, l3, 1) == FIRC_OK;
-}
-
-/* Catches: a group's tombstone leaving its devices chain, or the group chain's jump to it. */
-TEST stage_delete_takes_the_devices_chain_too(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT(seed_selector_chains(&f));
-    ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1D"));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete(f.ipt, "FIRC_g1"));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(f.ipt));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1D"));
-    ASSERT_FALSE(jumps_to_g1(&f, "mangle", "PREROUTING"));
-    down(&f);
-    PASS();
-}
-
-/* Catches: the devices tombstone taking the group chain or its jump, or leaving the devices chain. */
-TEST stage_delete_devices_takes_only_the_devices_chain(void) {
-    fixture_t f;
-    ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT(seed_selector_chains(&f));
-    ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1D"));
-    ASSERT_EQ(FIRC_OK, firc_ipt_register_chain_override(f.ipt, "mangle", "FIRC_g1"));
-    static const char *mk[] = {"-d", "198.18.0.0/24", "-j", "MARK", "--set-xmark", "0x40050000/0x40ff0000"};
-    ASSERT_EQ(FIRC_OK, firc_ipt_append(f.ipt, "mangle", "FIRC_g1", mk, 6));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete_devices(f.ipt, "FIRC_g1D"));
-    ASSERT_EQ(FIRC_OK, firc_ipt_commit(f.ipt));
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1D"));
-    ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    ASSERT(jumps_to_g1(&f, "mangle", "PREROUTING"));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_stage_delete_devices(NULL, "FIRC_g1D"));
     down(&f);
     PASS();
 }
@@ -918,50 +761,44 @@ TEST a_failed_enable_names_its_step(void) {
 
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     fake_rtnl_fail_next_of(f.kernel, RTM_GETRULE, EIO);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_BY_COMMITTER, &step) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, &step) != FIRC_OK);
     ASSERT_STR_EQ("routing table", step);
     down(&f);
 
     step = NULL;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWROUTE, EPERM);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_BY_COMMITTER, &step) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, &step) != FIRC_OK);
     ASSERT_STR_EQ("route", step);
     down(&f);
 
     step = NULL;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWRULE, EPERM);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_BY_COMMITTER, &step) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, &step) != FIRC_OK);
     ASSERT_STR_EQ("ip rule", step);
-    down(&f);
-
-    step = NULL;
-    ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    firc_fake_ipt_fail_next_restore(f.fipt, FIRC_ERR_IO);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, &step) != FIRC_OK);
-    ASSERT_STR_EQ("iptables", step);
     down(&f);
     PASS();
 }
 
-/* Catches: a committer-mode enable's rollback committing a chain delete. */
-TEST a_by_committer_enable_that_rolls_back_writes_no_iptables(void) {
+/* Catches: an enable's rollback committing a chain delete. */
+TEST an_enable_that_rolls_back_writes_no_iptables(void) {
     fixture_t f;
     const char *step = NULL;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_NOW, NULL));
-    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link, FIRC_FLOWS_KEEP, FIRC_NF_WRITE_BY_COMMITTER));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, pass_with(&f, true));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
     ASSERTm("fixture: the chain outlived the teardown", firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
-    size_t restores = firc_fake_ipt_restore_calls(f.fipt);
+    size_t restores = firc_fake_ipt_writes(f.fipt);
     size_t route_dels = fake_rtnl_count(f.kernel, RTM_DELROUTE, 0);
 
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWRULE, EPERM);
-    ASSERT(firc_ipset_to_link_enable(f.link, FIRC_NF_WRITE_BY_COMMITTER, &step) != FIRC_OK);
+    ASSERT(firc_ipset_to_link_enable(f.link, &step) != FIRC_OK);
     ASSERT_STR_EQm("it failed after the route", "ip rule", step);
     ASSERTm("the rollback ran: it took the route back",
             fake_rtnl_count(f.kernel, RTM_DELROUTE, 0) > route_dels);
-    ASSERT_EQ_FMTm("and wrote no iptables", restores, firc_fake_ipt_restore_calls(f.fipt), "%zu");
+    ASSERT_EQ_FMTm("and wrote no iptables", restores, firc_fake_ipt_writes(f.fipt), "%zu");
     ASSERT(firc_fake_ipt_chain_exists(f.fipt, "mangle", "FIRC_g1"));
     ASSERT(jumps_to_g1(&f, "mangle", "PREROUTING"));
     down(&f);
@@ -989,10 +826,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_default_only_in_a_policy_table_is_still_the_gateway);
     RUN_TEST(a_gatewayless_default_in_main_does_not_shadow_a_gatewayed_one);
     RUN_TEST(the_gateway_of_a_multipath_default_is_read_from_its_nexthops);
-    RUN_TEST(withdrawing_a_group_drops_the_flows_it_was_steering);
-    RUN_TEST(withdrawing_a_group_leaves_the_firmwares_flows_alone);
-    RUN_TEST(disabling_a_group_that_comes_back_keeps_its_flows);
-    RUN_TEST(disabling_a_link_that_was_never_enabled_does_nothing);
     RUN_TEST(the_reject_routes_land_in_the_groups_own_table);
     RUN_TEST(the_reject_routes_precede_the_rule);
     RUN_TEST(a_group_s_rule_has_a_reply_twin_ahead_of_it_in_main);
@@ -1000,12 +833,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_refused_twin_fails_the_enable);
     RUN_TEST(no_twin_for_a_blackhole_group_or_for_ipv6);
     RUN_TEST(disable_takes_back_the_rule_the_routes_and_the_chains);
-    RUN_TEST(enable_by_the_committer_writes_the_rules_and_leaves_the_chain_to_the_pass);
-    RUN_TEST(disable_by_the_committer_takes_the_rules_and_leaves_the_chain);
-    RUN_TEST(stage_delete_takes_the_chain_and_its_three_jumps);
-    RUN_TEST(stage_delete_takes_the_devices_chain_too);
-    RUN_TEST(stage_delete_devices_takes_only_the_devices_chain);
+    RUN_TEST(enable_writes_the_rules_and_leaves_the_chain_to_the_pass);
+    RUN_TEST(disable_takes_the_rules_and_leaves_the_chain);
     RUN_TEST(a_failed_enable_names_its_step);
-    RUN_TEST(a_by_committer_enable_that_rolls_back_writes_no_iptables);
+    RUN_TEST(an_enable_that_rolls_back_writes_no_iptables);
     GREATEST_MAIN_END();
 }

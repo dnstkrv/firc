@@ -39,7 +39,7 @@ define Package/firc
   CATEGORY:=Network
   TITLE:=DNS-based routing application
   URL:=https://github.com/hoaxisr/firc
-  DEPENDS:=+iptables +libyaml +libpcre2 +libmnl +libcurl +cJSON +socat +ca-bundle
+  DEPENDS:=+libyaml +libpcre2 +libmnl +libcurl +cJSON +socat +ca-bundle
   CONFLICTS:=tunvless
 endef
 

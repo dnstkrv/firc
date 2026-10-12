@@ -67,8 +67,13 @@ static void handle_start(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     case FIRC_ERR_NOSYS:
         firc_http_res_write_error(res, 501,
                                   "this kernel will not take the capture rules: they need "
-                                  FIRC_TAP_LAN_MODULES ". The line it refused is in the "
-                                  "daemon's log");
+                                  FIRC_TAP_LAN_MODULES ". The daemon's log names what it "
+                                  "lacks");
+        return;
+    case FIRC_ERR_AGAIN:
+        firc_http_res_write_error(res, 503,
+                                  "the kernel could not be asked which capture extensions it has; "
+                                  "the daemon's log names the error. Routing is not affected");
         return;
     case FIRC_ERR_IO:
         firc_http_res_write_error(res, 503,
