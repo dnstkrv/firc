@@ -105,6 +105,18 @@ export function landed(res: UpdateRes): boolean {
   );
 }
 
+const RELEASE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/;
+
+export function resultCurrent(res: UpdateRes): boolean {
+  const target = res.result === null ? null : tagRelease(res.result.version);
+  const installed = RELEASE.exec(res.installed.version);
+  if (target === null || installed === null) return true;
+  const have = [...installed.slice(1).map(Number), res.installed.revision];
+  const want = [...target.version.split(".").map(Number), target.revision];
+  const i = want.findIndex((n, k) => n !== have[k]);
+  return i === -1 || want[i] > have[i];
+}
+
 export function running(res: UpdateRes | null): boolean {
   return res?.state === "downloading" || res?.state === "verifying" || res?.state === "installing";
 }

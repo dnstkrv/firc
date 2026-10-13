@@ -4,7 +4,7 @@
   import { checkUpdate, installUpdate, update } from "./update.svelte";
 
   import { CloudDownload, Refresh } from "../../components/ui/icons";
-  import { landed, reasonText, running } from "./update";
+  import { landed, reasonText, resultCurrent, running } from "./update";
 
   const res = $derived(update.res);
   const check = $derived(res?.check ?? null);
@@ -25,7 +25,7 @@
         ? t("Checking the package…")
         : t("Installing…"),
   );
-  const result = $derived(res?.result ?? null);
+  const result = $derived(res !== null && resultCurrent(res) ? res.result : null);
   const done = $derived(res !== null && landed(res));
 
   const date = (iso: string) => {

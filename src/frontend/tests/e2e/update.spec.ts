@@ -556,6 +556,21 @@ test("the_result_line_says_an_install_did_not_land", async ({ page }) => {
   await expect(line).toHaveClass(/error/);
 });
 
+// Catches a failed install of an older release kept on screen after a newer one was installed by hand.
+test("an_older_releases_result_is_not_shown", async ({ page }) => {
+  await openSettings(page, settingsAnswer, {
+    onUpdate: (r) =>
+      r.fulfill({
+        json: {
+          ...installed030,
+          result: { version: "0.2.0", opkgExit: 255, finishedAt: 1791800000 },
+        },
+      }),
+  });
+  await expect(page.getByTestId("update-block")).toContainText("0.3.0");
+  await expect(page.getByTestId("update-result")).toHaveCount(0);
+});
+
 // Catches a page opened mid-install that freezes its progress and offers Install again.
 test("a_page_opened_mid_install_follows_it", async ({ page }) => {
   const mode = { value: "downloading" as Mode };

@@ -8,6 +8,7 @@ import {
   landed,
   needsCheck,
   reasonText,
+  resultCurrent,
   running,
   tagRelease,
   UPDATE_LIMIT_MS,
@@ -233,6 +234,34 @@ describe("landed", () => {
   it("needs opkg's exit 0 and a result", () => {
     assert.strictEqual(landed(after("0.3.0", 1, r("0.3.0", 255))), false);
     assert.strictEqual(landed(after("0.3.0", 1, null)), false);
+  });
+});
+
+describe("resultCurrent", () => {
+  const at = (version: string, revision: number, tag: string): UpdateRes => ({
+    ...res(null),
+    installed: { version, revision, target: "mipsel-3.4_kn" },
+    result: { version: tag, opkgExit: 255, finishedAt: 1791832000 },
+  });
+
+  // Catches a failed install of an older release still shown after a newer one was installed by hand.
+  it("hides a result older than the installed release", () => {
+    assert.strictEqual(resultCurrent(at("0.3.0", 1, "0.2.0")), false);
+    assert.strictEqual(resultCurrent(at("0.3.0", 2, "0.3.0")), false);
+    assert.strictEqual(resultCurrent(at("0.10.0", 1, "0.9.9")), false);
+  });
+
+  // Catches a failed upgrade, or this release's own result, hidden.
+  it("keeps a result for the installed release or a newer one", () => {
+    assert.strictEqual(resultCurrent(at("0.3.0", 1, "0.4.0")), true);
+    assert.strictEqual(resultCurrent(at("0.3.0", 1, "0.3.0-rev2")), true);
+    assert.strictEqual(resultCurrent(at("0.3.0", 1, "v0.3.0")), true);
+  });
+
+  // Catches a dev build or an unreadable tag hiding what opkg said.
+  it("keeps a result it cannot compare", () => {
+    assert.strictEqual(resultCurrent(at("0.2.1~git20261013152446.24cf8cc", 1, "0.2.0")), true);
+    assert.strictEqual(resultCurrent(at("0.3.0", 1, "latest")), true);
   });
 });
 
