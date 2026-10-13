@@ -263,6 +263,8 @@ jobs:
               if [ "$bin_name" = fircd ]; then
                 strings "$binary" | grep -q 'firc-flavour=entware_kn' \
                   || { echo "the binary is not the Keenetic flavour (no firc-flavour=entware_kn in it)" >&2; exit 1; }
+                strings "$binary" | grep -qE " firc-flavour=entware_kn target=${{ matrix.name }} revision=${PKG_REVISION}$" \
+                  || { echo "fircd was not built for ${{ matrix.name }} revision ${PKG_REVISION}" >&2; exit 1; }
               fi
             done
             control_archive=$(mktemp)
@@ -292,6 +294,7 @@ jobs:
                   printf '%s\n' "$text" | grep -q 'fircd --purge' || { echo "$member does not purge" >&2; exit 1; }
                   printf '%s\n' "$text" | grep -qF 'case "$ACTION" in' || { echo "$member lost its action guard" >&2; exit 1; }
                   printf '%s\n' "$text" | grep -qF 'rm -rf /opt/var/lib/firc/tunnels' || { echo "$member leaves the tunnel cache behind" >&2; exit 1; }
+                  printf '%s\n' "$text" | grep -qF 'rm -rf /opt/var/lib/firc/update' || { echo "$member leaves the update download behind" >&2; exit 1; }
                   ;;
                 postinst)
                   printf '%s\n' "$text" | grep -q 'S99firc restart' || { echo "$member does not restart the daemon" >&2; exit 1; }

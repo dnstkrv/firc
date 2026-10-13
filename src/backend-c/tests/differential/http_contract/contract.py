@@ -298,6 +298,8 @@ def run_tcp_door(base_host, base_port, out):
     t.step("GET", "/api/v1/auth")
     t.step("GET", "/api/v1/groups")
     t.step("POST", "/api/v1/auth", json.dumps({"login": "nobody", "password": "nothing"}))
+    t.step("GET", "/api/v1/system/update")
+    t.step("POST", "/api/v1/system/update/install", json.dumps({"version": "9.9.9"}))
     conn.close()
 
 
@@ -374,6 +376,8 @@ def run_api_sequence(conn, out):
     t.step("GET", "/api/v1/system/interfaces", normalize=_normalize_host_interfaces)
     t.step("POST", "/api/v1/system/hooks/netfilterd", json.dumps({"type": "iptables", "table": "nat"}))
     t.step("POST", "/api/v1/system/config/save")
+    t.step("GET", "/api/v1/system/update")
+    t.step("POST", "/api/v1/system/update/install", json.dumps({"version": "9.9.9"}))
 
     # enable:false: a disabled group syncs nothing and builds no netfilter state on "eth0".
     t.step("GET", "/api/v1/groups")

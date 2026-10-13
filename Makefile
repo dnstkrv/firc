@@ -78,7 +78,7 @@ DEPS_IPK := libatomic, libyaml, libpcre2, libmnl, libcurl, zlib, ca-bundle
 
 BACKEND_DEPENDENCIES :=
 BACKEND_SOURCES := $(shell find ./src/backend-c/src ./src/backend-c/include ./src/tunvless/src ./src/tunvless/build -type f \( -name '*.c' -o -name '*.h' -o -name '*.sh' -o -name Makefile \) 2>/dev/null)
-BACKEND_BUILD_PROPERTIES := PLATFORM=\"$(PLATFORM)\" TARGET=\"$(TARGET)\" PKG_VERSION=\"$(PKG_VERSION)\" CROSS_COMPILE=\"$(CROSS_COMPILE)\" SYSROOT=\"$(SYSROOT)\" ENTWARE_KN=\"$(ENTWARE_KN)\"
+BACKEND_BUILD_PROPERTIES := PLATFORM=\"$(PLATFORM)\" TARGET=\"$(TARGET)\" PKG_VERSION=\"$(PKG_VERSION)\" PKG_REVISION=\"$(PKG_REVISION)\" CROSS_COMPILE=\"$(CROSS_COMPILE)\" SYSROOT=\"$(SYSROOT)\" ENTWARE_KN=\"$(ENTWARE_KN)\"
 
 FRONTEND_DEPENDENCIES := ./src/frontend/package.json ./src/frontend/package-lock.json
 FRONTEND_SOURCES := $(shell find ./src/frontend/src -type f 2>/dev/null)
@@ -133,6 +133,7 @@ $(STAMPS_DIR)/build-properties-backend-$(UNIQUE_NAME): FORCE
 $(STAMPS_DIR)/build-backend-$(UNIQUE_NAME): $(STAMPS_DIR)/download-backend $(BACKEND_SOURCES) $(STAMPS_DIR)/build-properties-backend-$(UNIQUE_NAME) Makefile
 	mkdir -p "$(COMPILE_DIR)"
 	$(MAKE) -C ./src/backend-c BUILD="$(UNIQUE_NAME)" FIRC_VERSION="$(PKG_VERSION)" \
+	    FIRC_TARGET="$(TARGET)" FIRC_REVISION="$(PKG_REVISION)" \
 	    $(if $(PLATFORM),PLATFORM="$(PLATFORM)") \
 	    $(if $(CROSS_COMPILE),CROSS_COMPILE="$(CROSS_COMPILE)") \
 	    $(if $(SYSROOT),SYSROOT="$(SYSROOT)") \

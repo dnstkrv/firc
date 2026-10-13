@@ -944,6 +944,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
   "app.logLevel": "info",
+  "app.update.check": false,
 };
 const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.address",
@@ -952,6 +953,7 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.unmatchedTtl",
   "app.showAllInterfaces",
   "app.logLevel",
+  "app.update.check",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
 let RUNNING: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -1032,10 +1034,110 @@ app.put(`${API_BASE}/system/settings`, async (c) => {
 });
 
 app.post(`${API_BASE}/system/restart`, (c) => {
+  if (updateBusy()) return c.json({ error: "an update is being installed" }, 409);
   if (RESTARTING) return c.json({ error: "a restart is already under way" }, 409);
   RESTART_UNTIL = Date.now() + 3000;
   RESTARTING = true;
   return c.json({ restarting: true }, 202);
+});
+
+const UPDATE_LATEST = {
+  version: "0.3.0",
+  revision: 1,
+  tag: "0.3.0",
+  publishedAt: "2026-10-12T10:00:00Z",
+  notes: "добавлена проверка обновлений\nисправлено окно устройств",
+  asset: { name: "firc_0.3.0-1_entware_mipsel-3.4_kn.ipk", size: 830112 },
+};
+let UPDATE_CHECKED_AT: number | null = null;
+let UPDATE_INSTALLED = { version: "0.2.0", revision: 1 };
+let UPDATE_STATE: "idle" | "downloading" | "verifying" | "installing" | "failed" = "idle";
+let UPDATE_STARTED = 0;
+let UPDATE_CHECKING = false;
+const updateBusy = () =>
+  UPDATE_STATE === "downloading" || UPDATE_STATE === "verifying" || UPDATE_STATE === "installing";
+let UPDATE_RESULT: { version: string; opkgExit: number; finishedAt: number } | null = null;
+
+function updateProgress() {
+  if (UPDATE_STATE !== "downloading") return null;
+  const total = UPDATE_LATEST.asset.size;
+  return {
+    bytes: Math.min(total, Math.floor(((Date.now() - UPDATE_STARTED) / 2000) * total)),
+    total,
+  };
+}
+
+function updateStatus() {
+  const now = Math.floor(Date.now() / 1000);
+  const newer = UPDATE_INSTALLED.version !== UPDATE_LATEST.version;
+  return {
+    installed: { ...UPDATE_INSTALLED, target: "mipsel-3.4_kn" },
+    canInstall: true,
+    reason: null,
+    check:
+      UPDATE_CHECKED_AT === null
+        ? null
+        : {
+            checkedAt: UPDATE_CHECKED_AT,
+            ageS: now - UPDATE_CHECKED_AT,
+            latest: UPDATE_LATEST,
+            newer,
+            installable: true,
+            reason: null,
+            error: null,
+          },
+    state: UPDATE_STATE,
+    progress: updateProgress(),
+    error: null,
+    result: UPDATE_RESULT,
+  };
+}
+
+app.get(`${API_BASE}/system/update`, (c) => c.json(updateStatus()));
+
+app.post(`${API_BASE}/system/update/check`, async (c) => {
+  if (updateBusy()) return c.json({ error: "an install is under way" }, 409);
+  UPDATE_CHECKING = true;
+  await new Promise((r) => setTimeout(r, 700));
+  UPDATE_CHECKING = false;
+  UPDATE_CHECKED_AT = Math.floor(Date.now() / 1000);
+  return c.json(updateStatus());
+});
+
+app.post(`${API_BASE}/system/update/install`, async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { version?: unknown } | null;
+  if (typeof body?.version !== "string")
+    return c.json({ error: 'body must be {"version": "<tag>"}' }, 400);
+  if (RESTARTING) return c.json({ error: "a restart is under way" }, 409);
+  if (updateBusy()) return c.json({ error: "an install is under way" }, 409);
+  if (UPDATE_CHECKING) return c.json({ error: "a check is under way; try again in a moment" }, 409);
+  if (UPDATE_CHECKED_AT === null || body.version !== UPDATE_LATEST.tag)
+    return c.json({ error: `check again: the last check did not offer ${body.version}` }, 409);
+  if (UPDATE_INSTALLED.version === UPDATE_LATEST.version)
+    return c.json({ error: `${body.version} is not newer than ${UPDATE_INSTALLED.version}` }, 400);
+  UPDATE_STATE = "downloading";
+  UPDATE_STARTED = Date.now();
+  setTimeout(() => (UPDATE_STATE = "verifying"), 2000);
+  setTimeout(() => (UPDATE_STATE = "installing"), 2500);
+  setTimeout(() => {
+    RESTART_UNTIL = Date.now() + 3000;
+    RESTARTING = true;
+    UPDATE_STATE = "idle";
+    UPDATE_INSTALLED = { version: UPDATE_LATEST.version, revision: UPDATE_LATEST.revision };
+    UPDATE_RESULT = {
+      version: UPDATE_LATEST.version,
+      opkgExit: 0,
+      finishedAt: Math.floor(Date.now() / 1000) + 3,
+    };
+  }, 3500);
+  return c.json(
+    {
+      version: UPDATE_LATEST.version,
+      asset: UPDATE_LATEST.asset.name,
+      size: UPDATE_LATEST.asset.size,
+    },
+    202,
+  );
 });
 
 const CAPTURE_SECONDS = 300;

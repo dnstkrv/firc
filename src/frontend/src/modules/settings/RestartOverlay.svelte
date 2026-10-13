@@ -29,19 +29,26 @@
   let filled = $derived(phase === "back" ? 3 : current - 1);
 
   let text = $derived(
-    settings.restartFailure === "not-started"
-      ? t("The restart did not start")
-      : settings.restartFailure === "not-restarted"
-        ? t("The daemon did not restart")
-        : settings.restartFailure === "timeout"
-          ? t("The daemon did not come back")
-          : phase === "moving"
-            ? t("Moving to the new port…")
-            : phase === "back"
-              ? t("Done")
-              : current === 1
-                ? t("Stopping the daemon…")
-                : t("Waiting for it to start…"),
+    settings.restartFailure === "not-installed"
+      ? settings.updateExit !== null
+        ? t("Not installed, opkg exit {code}, see logread").replace(
+            "{code}",
+            String(settings.updateExit),
+          )
+        : t("Not installed, see logread")
+      : settings.restartFailure === "not-started"
+        ? t("The restart did not start")
+        : settings.restartFailure === "not-restarted"
+          ? t("The daemon did not restart")
+          : settings.restartFailure === "timeout"
+            ? t("The daemon did not come back")
+            : phase === "moving"
+              ? t("Moving to the new port…")
+              : phase === "back"
+                ? t("Done")
+                : current === 1
+                  ? t("Stopping the daemon…")
+                  : t("Waiting for it to start…"),
   );
 
   let slow = $derived(!failed && phase === "no-answer" && elapsed >= HINT_AFTER_S);

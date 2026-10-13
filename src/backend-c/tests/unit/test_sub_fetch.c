@@ -3,6 +3,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 
 #include "firc/loop.h"
 #include "firc/httpd.h"
@@ -71,6 +73,118 @@ static void h_ua(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     firc_http_res_write(res, 200, "text/plain", (const uint8_t *)body, strlen(body));
 }
 
+static int g_hits_target;
+static int g_hits_counted;
+
+static void h_target(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    g_hits_target++;
+    firc_http_res_write(res, 200, "text/plain", (const uint8_t *)"target", 6);
+}
+
+static void h_counted(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    g_hits_counted++;
+    firc_http_res_write(res, 200, "text/plain", (const uint8_t *)"counted", 7);
+}
+
+static void h_payload(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    firc_http_res_write(res, 200, "text/plain", (const uint8_t *)"payload", 7);
+}
+
+static void h_moved(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    char loc[128];
+    snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/payload", TEST_PORT);
+    firc_http_res_set_header(res, "Location", loc);
+    firc_http_res_write(res, 302, "text/html", (const uint8_t *)"MOVED", 5);
+}
+
+static void h_accept(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)ud;
+    const char *v = firc_http_req_header(req, "Accept");
+    const char *body = v != NULL ? v : "";
+    firc_http_res_write(res, 200, "text/plain", (const uint8_t *)body, strlen(body));
+}
+
+static void h_limited(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    firc_http_res_set_header(res, "X-RateLimit-Remaining", "0");
+    firc_http_res_set_header(res, "X-RateLimit-Reset", "1791831689");
+    firc_http_res_write(res, 403, "text/plain", (const uint8_t *)"rate limited", 12);
+}
+
+static void h_big_refusal(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    firc_http_res_write(res, 403, "text/plain", (const uint8_t *)g_big_body, sizeof(g_big_body));
+}
+
+static void h_big_redirect(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    char loc[128];
+    snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/payload", TEST_PORT);
+    firc_http_res_set_header(res, "Location", loc);
+    firc_http_res_write(res, 302, "text/html", (const uint8_t *)g_big_body, sizeof(g_big_body));
+}
+
+static firc_http_deferred_t *g_deferred;
+
+static void on_deferred_close(void *ud) {
+    (void)ud;
+    firc_http_deferred_drop(g_deferred);
+    g_deferred = NULL;
+}
+
+static void h_never(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    g_deferred = firc_http_res_defer(res, on_deferred_close, NULL);
+}
+
+static void on_chunked_close(void *ud) { (void)ud; }
+
+static void h_chunked(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    firc_http_stream_t *st = firc_http_res_hold(res, on_chunked_close, NULL);
+    if (st == NULL) { return; }
+    firc_http_stream_write(st, "abc", 3);
+    firc_http_stream_close(st);
+}
+
+static firc_http_stream_t *g_trickle;
+static int g_trickle_timer;
+static firc_loop_t *g_trickle_loop;
+
+static void on_trickle_close(void *ud) {
+    (void)ud;
+    g_trickle = NULL;
+    firc_loop_del_timer(g_trickle_loop, g_trickle_timer);
+}
+
+static void trickle_tick(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    (void)ud;
+    if (g_trickle != NULL) { firc_http_stream_write(g_trickle, "x", 1); }
+}
+
+static void h_trickle(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    g_trickle_loop = firc_http_res_loop(res);
+    g_trickle = firc_http_res_hold(res, on_trickle_close, NULL);
+    if (g_trickle == NULL) { return; }
+    firc_loop_add_timer(g_trickle_loop, 100, 100, trickle_tick, NULL, &g_trickle_timer);
+}
+
 typedef struct redirect_ud {
     int status;
     char location[128];
@@ -121,6 +235,19 @@ static harness_t *harness_start(void) {
     firc_httpd_route(h->srv, "GET", "/big", h_big, NULL);
     firc_httpd_route(h->srv, "GET", "/big300k", h_big300k, NULL);
     firc_httpd_route(h->srv, "GET", "/ua", h_ua, NULL);
+    firc_httpd_route(h->srv, "GET", "/target", h_target, NULL);
+    firc_httpd_route(h->srv, "GET", "/counted", h_counted, NULL);
+    firc_httpd_route(h->srv, "GET", "/payload", h_payload, NULL);
+    firc_httpd_route(h->srv, "GET", "/moved", h_moved, NULL);
+    firc_httpd_route(h->srv, "GET", "/accept", h_accept, NULL);
+    firc_httpd_route(h->srv, "GET", "/limited", h_limited, NULL);
+    firc_httpd_route(h->srv, "GET", "/never", h_never, NULL);
+    firc_httpd_route(h->srv, "GET", "/trickle", h_trickle, NULL);
+    firc_httpd_route(h->srv, "GET", "/chunked", h_chunked, NULL);
+    firc_httpd_route(h->srv, "GET", "/big_refusal", h_big_refusal, NULL);
+    firc_httpd_route(h->srv, "GET", "/big_redirect", h_big_redirect, NULL);
+    add_redirect(h, "/to_target", 302, "/target");
+    add_redirect(h, "/redirect_accept", 302, "/accept");
 
     add_redirect(h, "/redirect301", 301, "/list");
     add_redirect(h, "/redirect302", 302, "/list");
@@ -409,6 +536,232 @@ TEST connection_refused_is_io_error(void) {
     PASS();
 }
 
+typedef struct collect {
+    char data[512];
+    size_t len;
+    int calls;
+    bool stop;
+} collect_t;
+
+static bool collect_sink(void *ud, const uint8_t *data, size_t len) {
+    collect_t *c = ud;
+    c->calls++;
+    if (c->stop) { return false; }
+    size_t room = sizeof(c->data) - 1 - c->len;
+    size_t n = len < room ? len : room;
+    memcpy(c->data + c->len, data, n);
+    c->len += n;
+    c->data[c->len] = '\0';
+    return true;
+}
+
+static bool refuse_target(void *ud, const char *url) {
+    int *calls = ud;
+    (*calls)++;
+    return strstr(url, "/target") == NULL;
+}
+
+static bool refuse_all(void *ud, const char *url) {
+    (void)url;
+    int *calls = ud;
+    (*calls)++;
+    return false;
+}
+
+typedef struct seen_headers {
+    char remaining[32];
+    char reset[32];
+} seen_headers_t;
+
+static void note_header(void *ud, const char *name, const char *value) {
+    seen_headers_t *s = ud;
+    if (strcasecmp(name, "x-ratelimit-remaining") == 0) { snprintf(s->remaining, sizeof(s->remaining), "%s", value); }
+    if (strcasecmp(name, "x-ratelimit-reset") == 0) { snprintf(s->reset, sizeof(s->reset), "%s", value); }
+}
+
+static double now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Catches: a redirect's HTML landing at the head of the downloaded ipk. */
+TEST a_redirects_body_never_reaches_the_sink(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {0};
+    collect_t c = {0};
+    long status = 0;
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/moved"), &o, collect_sink, &c, &status));
+    ASSERT_EQ(200L, status);
+    ASSERT_STR_EQ("payload", c.data);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the policy checked after fetching, a request already sent off the allowlist. */
+TEST a_refused_redirect_is_never_fetched(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    g_hits_target = 0;
+    int calls = 0;
+    firc_sub_fetch_opts_t o = {.url_ok = refuse_target, .url_ud = &calls};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_sub_fetch_to(url_for("/to_target"), &o, collect_sink, &c, NULL));
+    ASSERT_EQ(0, g_hits_target);
+    ASSERT_EQ(2, calls);
+    ASSERT_EQ(0u, c.len);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: url_ok consulted only for redirect targets, the first URL sent unjudged. */
+TEST the_first_url_is_judged_too(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    g_hits_counted = 0;
+    int calls = 0;
+    firc_sub_fetch_opts_t o = {.url_ok = refuse_all, .url_ud = &calls};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_sub_fetch_to(url_for("/counted"), &o, collect_sink, &c, NULL));
+    ASSERT_EQ(0, g_hits_counted);
+    ASSERT_EQ(1, calls);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: request headers never set, or set on the first hop only. */
+TEST request_headers_are_sent(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    const char *const hdrs[] = {"Accept: application/vnd.github+json", NULL};
+    firc_sub_fetch_opts_t o = {.headers = hdrs};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/accept"), &o, collect_sink, &c, NULL));
+    ASSERT_STR_EQ("application/vnd.github+json", c.data);
+    collect_t r = {0};
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/redirect_accept"), &o, collect_sink, &r, NULL));
+    ASSERT_STR_EQ("application/vnd.github+json", r.data);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the rate-limit reset lost, which would make every 403 a 502. */
+TEST a_refusals_headers_reach_the_caller(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    seen_headers_t seen = {0};
+    firc_sub_fetch_opts_t o = {.on_header = note_header, .header_ud = &seen};
+    collect_t c = {0};
+    long status = 0;
+    ASSERT_EQ(FIRC_ERR_PROTO, firc_sub_fetch_to(url_for("/limited"), &o, collect_sink, &c, &status));
+    ASSERT_EQ(403L, status);
+    ASSERT_STR_EQ("0", seen.remaining);
+    ASSERT_STR_EQ("1791831689", seen.reset);
+    ASSERT_EQ(0u, c.len);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a sink's stop ignored or reported as an I/O error. */
+TEST a_sink_saying_stop_is_canceled(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {0};
+    collect_t c = {.stop = true};
+    ASSERT_EQ(FIRC_ERR_CANCELED, firc_sub_fetch_to(url_for("/big300k"), &o, collect_sink, &c, NULL));
+    ASSERT_EQ(1, c.calls);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the operator seeing "I/O error" instead of libcurl's reason. */
+TEST a_transport_failure_carries_libcurls_words(void) {
+    char err[256] = "unset";
+    firc_sub_fetch_opts_t o = {.errbuf = err, .errbuf_cap = sizeof(err)};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to("http://127.0.0.1:1/list", &o, collect_sink, &c, NULL));
+    ASSERT(err[0] != '\0');
+    ASSERT(strcmp(err, "unset") != 0);
+    ASSERT(strcmp(err, firc_err_str(FIRC_ERR_IO)) != 0);
+    ASSERT(strstr(err, "127.0.0.1") != NULL);
+    PASS();
+}
+
+/* Catches: max_redirects ignored in favour of the fixed cap of five. */
+TEST the_redirect_cap_is_per_call(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {.max_redirects = 4};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/chain_ok1"), &o, collect_sink, &c, NULL));
+    ASSERT_STR_EQ("example.com\nexample.org", c.data);
+    collect_t d = {0};
+    ASSERT_EQ(FIRC_ERR_LIMIT, firc_sub_fetch_to(url_for("/chain_ok0"), &o, collect_sink, &d, NULL));
+    ASSERT_EQ(0u, d.len);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: timeout_s ignored, the fixed 15 s left in charge. */
+TEST the_timeout_is_per_call(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {.timeout_s = 1};
+    collect_t c = {0};
+    double t0 = now_s();
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to(url_for("/never"), &o, collect_sink, &c, NULL));
+    ASSERT(now_s() - t0 < 3.0);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: CURLOPT_LOW_SPEED_* never set, the 300 s timeout left the only guard. */
+TEST a_transfer_below_the_floor_is_given_up(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char err[256] = "";
+    firc_sub_fetch_opts_t o = {.low_speed_bytes = 100000, .low_speed_s = 1, .errbuf = err, .errbuf_cap = sizeof(err)};
+    collect_t c = {0};
+    double t0 = now_s();
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to(url_for("/trickle"), &o, collect_sink, &c, NULL));
+    ASSERT(now_s() - t0 < 3.0);
+    ASSERT(strstr(err, "too slow") != NULL);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: no closing progress call, an undeclared length left reported as total 0. */
+TEST the_last_progress_call_names_the_whole_body(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    prog_t p = {0};
+    firc_sub_fetch_opts_t o = {.progress = note_progress, .progress_ud = &p};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/chunked"), &o, collect_sink, &c, NULL));
+    ASSERT_STR_EQ("abc", c.data);
+    ASSERT_EQ(3u, p.last_bytes);
+    ASSERT_EQ(3u, p.last_total);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a refusal's or redirect's body drained without a cap, a flood read until the timeout. */
+TEST a_refusal_or_redirect_body_past_the_cap_is_limit(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {0};
+    collect_t c = {0};
+    long status = 0;
+    ASSERT_EQ(FIRC_ERR_LIMIT, firc_sub_fetch_to(url_for("/big_refusal"), &o, collect_sink, &c, &status));
+    ASSERT_EQ(403L, status);
+    ASSERT_EQ(FIRC_ERR_LIMIT, firc_sub_fetch_to(url_for("/big_redirect"), &o, collect_sink, &c, &status));
+    ASSERT_EQ(302L, status);
+    ASSERT_EQ(0, c.calls);
+    harness_stop(h);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -432,5 +785,17 @@ int main(int argc, char **argv) {
     RUN_TEST(a_404_reports_its_status);
     RUN_TEST(fetch_aborted_by_the_callback_is_canceled_and_leaves_no_body);
     RUN_TEST(the_cap_beats_a_live_progress_callback);
+    RUN_TEST(a_redirects_body_never_reaches_the_sink);
+    RUN_TEST(a_refused_redirect_is_never_fetched);
+    RUN_TEST(the_first_url_is_judged_too);
+    RUN_TEST(request_headers_are_sent);
+    RUN_TEST(a_refusals_headers_reach_the_caller);
+    RUN_TEST(a_sink_saying_stop_is_canceled);
+    RUN_TEST(a_transport_failure_carries_libcurls_words);
+    RUN_TEST(the_redirect_cap_is_per_call);
+    RUN_TEST(the_timeout_is_per_call);
+    RUN_TEST(a_transfer_below_the_floor_is_given_up);
+    RUN_TEST(the_last_progress_call_names_the_whole_body);
+    RUN_TEST(a_refusal_or_redirect_body_past_the_cap_is_limit);
     GREATEST_MAIN_END();
 }

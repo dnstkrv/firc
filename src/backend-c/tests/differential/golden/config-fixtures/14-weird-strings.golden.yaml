@@ -37,6 +37,8 @@ app:
   - br0
   showAllInterfaces: false
   logLevel: info
+  update:
+    check: false
 groups:
 - id: 0a0b0c0d
   name: "123"

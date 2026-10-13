@@ -1,10 +1,12 @@
 <script lang="ts">
   import { token } from "../../data/auth.svelte";
   import { locale, locales, t } from "../../data/locale.svelte";
+  import { update } from "../../modules/settings/update.svelte";
   import InfoDialog from "../InfoDialog.svelte";
   import Button from "../ui/Button.svelte";
   import Tooltip from "../ui/Tooltip.svelte";
 
+  import { hasNewer } from "../../modules/settings/update";
   import { Info, Locale, LogOut } from "../ui/icons";
 
   const version = import.meta.env.VITE_PKG_VERSION || "0.0.0";
@@ -30,6 +32,11 @@
     <Tooltip value={`${t("build")}: ${version}`}>
       <span class="version-text">{version}</span>
     </Tooltip>
+    {#if hasNewer(update.res)}
+      <Tooltip value={t("A newer release is available")}>
+        <span class="update-dot" data-testid="update-dot"></span>
+      </Tooltip>
+    {/if}
     {#if isDev}
       <div class="under-construction">dev</div>
     {/if}
@@ -79,6 +86,8 @@
     flex: 0 0 auto;
     margin-left: 0.5rem;
     white-space: nowrap;
+    grid-column: 3;
+    justify-self: end;
   }
 
   .container {
@@ -92,10 +101,19 @@
 
   .version {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, max-content) auto 1fr;
     align-items: center;
     flex: 1;
     min-width: 0;
+  }
+
+  .update-dot {
+    display: block;
+    width: 8px;
+    height: 8px;
+    margin-left: 0.4rem;
+    border-radius: 50%;
+    background: var(--accent);
   }
 
   .version :global(> *:first-child) {

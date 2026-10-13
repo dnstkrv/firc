@@ -574,6 +574,7 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
     c->netfilter.disable_ipv6 = false;
     c->netfilter.start_mark_table_index = UINT32_C(0x66697263); /* "firc" */
     c->show_all_interfaces = false;
+    c->update.check = false;
 
     firc_err_t err;
     if ((err = firc_strset(&c->http_web.host.address, "[::]")) != FIRC_OK ||

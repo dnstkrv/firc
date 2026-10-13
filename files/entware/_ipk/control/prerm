@@ -29,6 +29,7 @@ case "$ACTION" in
     fi
     rm -rf /tmp/firc-init
     rm -rf /opt/var/lib/firc/tunnels
+    rm -rf /opt/var/lib/firc/update
     rmdir /opt/var/lib/firc 2>/dev/null
     ;;
   upgrade) ;;

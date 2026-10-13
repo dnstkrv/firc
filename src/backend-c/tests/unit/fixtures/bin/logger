@@ -1,0 +1,3 @@
+#!/bin/sh
+{ printf '%s\n' "$*"; cat; } >> "${FAKE_LOGGER_LOG:-/dev/null}"
+echo "logger: noise on stdout"

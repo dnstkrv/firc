@@ -149,6 +149,29 @@ TEST a_put_writes_firc_conf_and_not_groups_yaml(void) {
     PASS();
 }
 
+/* Catches: the flag not copied saved to running (the timer never sees it) or shown as pending restart. */
+TEST turning_the_update_check_on_reaches_the_running_copy(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT_FALSE(firc_app_running_settings(r.app)->update.check);
+    firc_app_config_t next;
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(r.app)));
+    next.update.check = true;
+    bool applied[FIRC_SETTINGS_COUNT];
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(r.app, &next, NULL, "0.7.0", applied, NULL));
+    firc_app_config_clear(&next);
+    ASSERT(firc_app_running_settings(r.app)->update.check);
+    ASSERT(firc_app_saved_settings(r.app)->update.check);
+    for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
+        ASSERT_EQm(firc_settings[i].path, i == row("app.update.check"), applied[i]);
+    }
+    bool pending[FIRC_SETTINGS_COUNT];
+    ASSERT_EQ((size_t)0, firc_app_pending_restart(r.app, pending));
+    rig_down(&r);
+    PASS();
+}
+
 /* Catches: firc.conf written on a PUT that changes nothing. */
 TEST a_put_that_changes_nothing_writes_nothing(void) {
     rig_t r;
@@ -250,6 +273,7 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(a_put_applies_the_live_settings_and_holds_the_rest);
+    RUN_TEST(turning_the_update_check_on_reaches_the_running_copy);
     RUN_TEST(a_put_writes_firc_conf_and_not_groups_yaml);
     RUN_TEST(a_put_that_changes_nothing_writes_nothing);
     RUN_TEST(a_put_whose_file_cannot_be_written_changes_nothing);

@@ -33,6 +33,7 @@ export const settings = $state({
   restartStartedAt: 0,
   restartFailure: null as RestartFailure | null,
   overlay: false,
+  updateExit: null as number | null,
   boot: "",
 });
 
@@ -136,13 +137,13 @@ async function refreshSaved(): Promise<void> {
   }
 }
 
-const POLL_MS = 1000;
-const POLL_TIMEOUT_MS = 3000;
+export const POLL_MS = 1000;
+export const POLL_TIMEOUT_MS = 3000;
 /* S99firc gives a stop 60 s and a start 60 s; past both, it is not coming. */
 export const restartLimit = { ms: 120_000 };
 const OVERLAY_LINGER_MS = 800;
 let lingerTimer: ReturnType<typeof setTimeout> | undefined;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function waitForDaemon(bootBefore: string): Promise<void> {
   const started = Date.now();
@@ -187,6 +188,16 @@ async function waitForDaemon(bootBefore: string): Promise<void> {
   settings.restarting = false;
 }
 
+export function openRestartOverlay() {
+  clearTimeout(lingerTimer);
+  settings.restarting = true;
+  settings.restartPhase = "requested";
+  settings.restartStartedAt = Date.now();
+  settings.restartFailure = null;
+  settings.updateExit = null;
+  settings.overlay = true;
+}
+
 export function closeRestartOverlay() {
   settings.overlay = false;
 }
@@ -213,19 +224,18 @@ async function waitForPage(url: string): Promise<void> {
   settings.restarting = false;
 }
 
+const RESTART_UNDER_WAY = "a restart is already under way";
+
 export async function restartDaemon(): Promise<void> {
   const target = followUrl(location, settings.saved, settings.pendingRestart);
   const bootBefore = settings.boot;
-  clearTimeout(lingerTimer);
-  settings.restarting = true;
-  settings.restartPhase = "requested";
-  settings.restartStartedAt = Date.now();
-  settings.restartFailure = null;
-  settings.overlay = true;
+  openRestartOverlay();
   try {
     await fetcher.post("/system/restart", undefined, { quiet: true });
   } catch (error) {
-    if (!(error instanceof HttpError && error.status === 409)) {
+    if (
+      !(error instanceof HttpError && error.status === 409 && reason(error) === RESTART_UNDER_WAY)
+    ) {
       settings.restarting = false;
       settings.overlay = false;
       toast.error(`${t("Request failed")}: ${reason(error)}`);

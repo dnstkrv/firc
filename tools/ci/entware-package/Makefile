@@ -203,6 +203,7 @@ case "$$ACTION" in
     fi
     rm -rf /tmp/firc-init
     rm -rf /opt/var/lib/firc/tunnels
+    rm -rf /opt/var/lib/firc/update
     rmdir /opt/var/lib/firc 2>/dev/null
     ;;
   upgrade) ;;
@@ -216,6 +217,7 @@ define Build/Compile
 	$(MAKE) -C $(PKG_BUILD_DIR)/src/backend-c \
 		BUILD=entware-$(FIRC_TARGET) \
 		FIRC_VERSION="$(PKG_VERSION)" \
+		FIRC_TARGET="$(FIRC_TARGET)" FIRC_REVISION="$(PKG_RELEASE)" \
 		CROSS_COMPILE="$(TARGET_CROSS)" \
 		PLATFORM=entware \
 		ENTWARE_KN=1 \

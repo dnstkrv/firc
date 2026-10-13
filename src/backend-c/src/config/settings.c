@@ -50,6 +50,7 @@ const firc_setting_t firc_settings[] = {
     {"app.httpWeb.host.address", FIRC_SK_ADDR, RESTART, AT(http_web.host.address), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.port", FIRC_SK_PORT, RESTART, AT(http_web.host.port), 0, FIRC_APPLY_NONE},
     {"app.logLevel", FIRC_SK_STRING, LIVE, AT(log_level), 0, FIRC_APPLY_LOG_LEVEL},
+    {"app.update.check", FIRC_SK_BOOL, LIVE, AT(update.check), 0, FIRC_APPLY_NONE},
 };
 _Static_assert(sizeof(firc_settings) / sizeof(firc_settings[0]) == FIRC_SETTINGS_COUNT,
                "FIRC_SETTINGS_COUNT is the number of rows");

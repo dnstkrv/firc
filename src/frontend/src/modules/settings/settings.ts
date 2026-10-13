@@ -56,7 +56,7 @@ export { pluralForm, type PluralForm } from "../../utils/plural";
 
 export type RestartPhase = "requested" | "old-daemon" | "no-answer" | "back" | "failed" | "moving";
 
-export type RestartFailure = "not-started" | "not-restarted" | "timeout";
+export type RestartFailure = "not-started" | "not-restarted" | "timeout" | "not-installed";
 
 export function restartPhase(bootBefore: string, res: SettingsRes | null): RestartPhase {
   if (res === null) return "no-answer";

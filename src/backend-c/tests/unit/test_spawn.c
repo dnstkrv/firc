@@ -159,6 +159,46 @@ TEST a_script_that_cannot_run_is_an_error(void) {
     PASS();
 }
 
+TEST every_argument_reaches_the_program_in_order(void) {
+    /* Catches argv shifted, cut after two, or $0 lost. */
+    char dir[] = "/tmp/firc_spawn_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    char *const argv[] = {"/bin/sh", "-c", "printf \"%s|%s|%s|%s\" \"$0\" \"$1\" \"$2\" \"$3\" > \"$1/args\"",
+                          "firc-update", dir, "b", "c", NULL};
+    ASSERT_EQ(FIRC_OK, firc_spawn_argv("/bin/sh", argv));
+    char path[160], text[512], want[512];
+    snprintf(path, sizeof(path), "%s/args", dir);
+    ASSERT(wait_file(path, text, sizeof(text)));
+    snprintf(want, sizeof(want), "firc-update|%s|b|c", dir);
+    ASSERT_STR_EQ(want, text);
+    unlink(path);
+    rmdir(dir);
+    PASS();
+}
+
+TEST seventeen_arguments_are_refused_before_anything_runs(void) {
+    /* Catches an off-by-one cap or a child started before the count check. */
+    char dir[] = "/tmp/firc_spawn_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    char mark[160];
+    snprintf(mark, sizeof(mark), "touch %s/ran", dir);
+    char *argv[18] = {"/bin/sh", "-c", mark};
+    for (int i = 3; i < 17; i++) { argv[i] = "x"; }
+    argv[17] = NULL;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_spawn_argv("/bin/sh", argv));
+    char ran[160];
+    snprintf(ran, sizeof(ran), "%s/ran", dir);
+    struct timespec ts = {0, 200 * 1000000L};
+    nanosleep(&ts, NULL);
+    ASSERT_EQ(-1, access(ran, F_OK));
+    argv[16] = NULL;
+    ASSERT_EQ(FIRC_OK, firc_spawn_argv("/bin/sh", argv));
+    ASSERT(wait_file(ran, mark, sizeof(mark)));
+    unlink(ran);
+    rmdir(dir);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -169,5 +209,7 @@ int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(a_detached_child_is_on_its_own);
     RUN_TEST(a_script_that_cannot_run_is_an_error);
+    RUN_TEST(every_argument_reaches_the_program_in_order);
+    RUN_TEST(seventeen_arguments_are_refused_before_anything_runs);
     GREATEST_MAIN_END();
 }

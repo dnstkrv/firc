@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,6 +22,8 @@
 #include "firc/log.h"
 #include "firc/loop.h"
 #include "firc/system.h"
+#include "firc/update.h"
+#include "firc/update_handoff.h"
 
 /* One port per test binary, never reused: 18086 is test_auth.c's. */
 #define TEST_PORT 18087
@@ -37,6 +40,7 @@ typedef struct harness {
     char conf[128];
     char groups[128];
     pthread_t thread;
+    bool joined;
 } harness_t;
 
 static void *loop_thread(void *ud) {
@@ -101,9 +105,15 @@ static harness_t *harness_start_dns(const char *dns_addr, uint16_t dns_port) {
 
 static harness_t *harness_start(void) { return harness_start_dns(NULL, 0); }
 
-static void harness_stop(harness_t *h) {
+static void harness_join(harness_t *h) {
+    if (h->joined) { return; }
     firc_loop_stop(h->loop);
     pthread_join(h->thread, NULL);
+    h->joined = true;
+}
+
+static void harness_stop(harness_t *h) {
+    harness_join(h);
     firc_httpd_destroy(h->tcp);
     firc_app_destroy(h->app);
     firc_dns_pipeline_destroy(h->pipeline);
@@ -233,7 +243,9 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(25, cJSON_GetArraySize(s));
+    ASSERT_EQ(26, cJSON_GetArraySize(s));
+    ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
+    ASSERT_STR_EQ("live", item(c, "app.update.check")->valuestring);
     ASSERT_EQ(NULL, item(s, "app.httpWeb.enabled"));
     ASSERT_EQ(5000, (int)item(s, "app.dnsProxy.timeout")->valuedouble);
     ASSERT_EQ(300, (int)item(s, "app.addressPool.ttlClamp")->valuedouble);
@@ -255,7 +267,7 @@ TEST get_answers_every_setting_typed(void) {
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(6, live);
+    ASSERT_EQ(7, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);
@@ -286,6 +298,7 @@ TEST a_put_with_one_bad_key_writes_nothing(void) {
     ASSERT(text != NULL);
     ASSERT_STR_EQ(before, text);
     free(text);
+    harness_join(h);
     ASSERT_EQ(FIRC_LOG_INFO, firc_log_level());
     ASSERT_STR_EQ("info", firc_app_saved_settings(h->app)->log_level);
     harness_stop(h);
@@ -375,11 +388,6 @@ TEST a_live_put_changes_the_upstream_and_the_log_level(void) {
     ASSERT(strings_are(item(out, "pendingRestart"), pending, 1));
     cJSON_Delete(out);
 
-    uint16_t port = 0;
-    ASSERT_STR_EQ("9.9.9.9", firc_dnsproxy_upstream(h->proxy, &port));
-    ASSERT_EQ(53, port);
-    ASSERT_EQ(FIRC_LOG_DEBUG, firc_log_level());
-    ASSERT_EQ(65536u, firc_app_running_settings(h->app)->fakeip.max_names);
     char *text = slurp(h->conf);
     ASSERT(text != NULL);
     ASSERT(strstr(text, "maxNames: 4096\n") != NULL);
@@ -391,6 +399,12 @@ TEST a_live_put_changes_the_upstream_and_the_log_level(void) {
     ASSERT_EQ(4096, (int)item(item(out, "settings"), "app.addressPool.maxNames")->valuedouble);
     ASSERT(strings_are(item(out, "pendingRestart"), pending, 1));
     cJSON_Delete(out);
+    harness_join(h);
+    uint16_t port = 0;
+    ASSERT_STR_EQ("9.9.9.9", firc_dnsproxy_upstream(h->proxy, &port));
+    ASSERT_EQ(53, port);
+    ASSERT_EQ(FIRC_LOG_DEBUG, firc_log_level());
+    ASSERT_EQ(65536u, firc_app_running_settings(h->app)->fakeip.max_names);
     harness_stop(h);
     PASS();
 }
@@ -435,6 +449,7 @@ TEST a_live_put_applies_unmatched_ttl(void) {
     ASSERT(strings_are(item(out, "applied"), applied, 1));
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
+    harness_join(h);
     ASSERT_EQ_FMT((long long)(90 * FIRC_DURATION_SEC),
                   (long long)firc_app_running_settings(h->app)->dns_proxy.unmatched_ttl, "%lld");
     char *text = slurp(h->conf);
@@ -467,6 +482,7 @@ TEST pending_restart_is_the_whole_list_after_each_save(void) {
     ASSERT(strings_are(item(out, "applied"), applied, 1));
     ASSERT(strings_are(item(out, "pendingRestart"), pending, 1));
     cJSON_Delete(out);
+    harness_join(h);
     ASSERT_EQ(4096u, firc_app_saved_settings(h->app)->fakeip.max_names);
     harness_stop(h);
     PASS();
@@ -874,6 +890,69 @@ TEST a_restart_that_did_not_stop_the_daemon_lapses(void) {
     PASS();
 }
 
+static firc_update_t *updater_in(harness_t *h, const char *dir) {
+    firc_update_deps_t deps = {.loop = h->loop, .dir = dir, .version = "0.1.3", .target = "mipsel-3.4_kn"};
+    return firc_update_new(&deps);
+}
+
+static void write_marker(const char *path, pid_t pid, uint64_t start) {
+    FILE *f = fopen(path, "w");
+    if (f == NULL) { return; }
+    fprintf(f, "0.3.0 %lld\n%ld %llu\n", (long long)time(NULL), (long)pid, (unsigned long long)start);
+    fclose(f);
+}
+
+/* Catches a second outage, and a restart that kills opkg's postinst, while an update installs. */
+TEST a_restart_is_refused_while_an_update_installs(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char script[160], marker[160], udir[160], installing[200];
+    stand_in(h, script, sizeof(script), RECORDER);
+    snprintf(marker, sizeof(marker), "%s/restarted", h->dir);
+    snprintf(udir, sizeof(udir), "%s/update", h->dir);
+    snprintf(installing, sizeof(installing), "%s/installing", udir);
+    ASSERT_EQ(0, mkdir(udir, 0700));
+    pid_t child = fork();
+    if (child == 0) {
+        for (;;) { pause(); }
+    }
+    ASSERT(child > 0);
+    uint64_t start = 0;
+    bool started = firc_proc_starttime(child, &start);
+    write_marker(installing, child, start);
+    h->ctx.update = updater_in(h, udir);
+    cJSON *out = NULL;
+    int status = started && h->ctx.update != NULL ? do_request("POST", "/api/v1/system/restart", NULL, &out) : -1;
+    const cJSON *e = item(out, "error");
+    bool said = cJSON_IsString(e) && strcmp(e->valuestring, "an update is being installed") == 0;
+    cJSON_Delete(out);
+    struct timespec ts = {0, 300 * 1000000L};
+    nanosleep(&ts, NULL);
+    bool ran = access(marker, F_OK) == 0;
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    unlink(installing);
+    int after = do_request("POST", "/api/v1/system/restart", NULL, NULL);
+    for (int i = 0; i < 300 && access(marker, F_OK) != 0; i++) {
+        struct timespec t = {0, 10 * 1000000L};
+        nanosleep(&t, NULL);
+    }
+    bool ran_after = access(marker, F_OK) == 0;
+    harness_join(h);
+    firc_update_free(h->ctx.update);
+    h->ctx.update = NULL;
+    unlink(marker);
+    unlink(script);
+    rmdir(udir);
+    harness_stop(h);
+    ASSERT_EQ(409, status);
+    ASSERT(said);
+    ASSERT_FALSE(ran);
+    ASSERT_EQ(202, after);
+    ASSERT(ran_after);
+    PASS();
+}
+
 TEST get_says_no_restart_is_under_way_at_rest(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
@@ -1095,6 +1174,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_second_restart_is_refused_while_one_is_under_way);
     RUN_TEST(a_restart_that_could_not_start_can_be_asked_again);
     RUN_TEST(a_restart_that_did_not_stop_the_daemon_lapses);
+    RUN_TEST(a_restart_is_refused_while_an_update_installs);
     RUN_TEST(get_says_no_restart_is_under_way_at_rest);
     RUN_TEST(get_says_a_restart_is_under_way_after_the_post);
     RUN_TEST(get_drops_restart_pending_when_the_script_cannot_start);

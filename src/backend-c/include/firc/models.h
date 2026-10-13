@@ -194,6 +194,9 @@ typedef struct firc_app_config {
     size_t n_link;
     bool show_all_interfaces;
     char *log_level;
+    struct {
+        bool check;
+    } update;
 } firc_app_config_t;
 
 /* Whole-application state produced by config load (defaults + overlay). */

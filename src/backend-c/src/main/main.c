@@ -58,6 +58,8 @@
 #include "firc/tunnels_api.h"
 #include "firc/tunrun.h"
 #include "firc/tunsubs.h"
+#include "firc/update.h"
+#include "firc/update_api.h"
 #include "firc/version.h"
 #include "firc/yamlio.h"
 
@@ -68,6 +70,8 @@
 
 #define FIRC_POOL_SWEEP_INTERVAL_MS 30000
 #define FIRC_LIST_AUTO_UPDATE_INTERVAL_MS 60000
+#define FIRC_UPDATE_FIRST_CHECK_MS 600000
+#define FIRC_UPDATE_CHECK_INTERVAL_MS 3600000
 
 struct daemon {
     firc_loop_t *loop;
@@ -99,6 +103,8 @@ struct daemon {
     firc_app_t *app;
     firc_tunrun_t *tunrun;
     firc_tunsubs_t *tunsubs;
+    firc_update_t *update;
+    int update_timer;
     firc_httpd_t *http_tcp;
     firc_httpd_t *http_unix;
 
@@ -108,6 +114,7 @@ struct daemon {
     /* Not owned: open list-sync streams hang off it and teardown ends them before the servers go. */
     firc_groups_ctx_t *groups_ctx;
     firc_tunnels_ctx_t *tunnels_ctx;
+    firc_update_api_ctx_t *update_ctx;
 };
 
 static int64_t now_unix(void)
@@ -176,6 +183,7 @@ static bool tunnel_down(void *ud, const char *iface)
 
 static void daemon_teardown(struct daemon *d)
 {
+    firc_update_cancel(d->update);
     firc_tunnels_api_close(d->tunnels_ctx);
     firc_app_set_tunnel_down(d->app, NULL, NULL);
     if (d->tunrun != NULL) { firc_tunrun_set_subs(d->tunrun, NULL); }
@@ -191,6 +199,13 @@ static void daemon_teardown(struct daemon *d)
     }
     /* Committer first: it drives the iptables engines from its own thread; stopping it aborts a write in flight. */
     firc_app_stop_netfilter_committer(d->app);
+    if (d->update_timer != 0 && d->loop != NULL) {
+        (void)firc_loop_del_timer(d->loop, d->update_timer);
+        d->update_timer = 0;
+    }
+    firc_update_api_close(d->update_ctx);
+    firc_update_free(d->update);
+    d->update = NULL;
     /* List worker next: it posts results onto a loop that is about to go. */
     firc_app_stop_list_worker(d->app);
 
@@ -467,6 +482,21 @@ static void forget_groups_not_in_config(firc_fakeip_t *pool, const firc_config_t
         firc_fakeip_drop_group(pool, ids[i], now);
     }
     if (u.n == u.cap) { FIRC_WARN("pool: more than %zu groups vanished from the config; the rest stay until they idle out", u.cap); }
+}
+
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void on_update_timer(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    struct daemon *d = ud;
+    if (d->update == NULL) { return; }
+    firc_update_auto_check(d->update, firc_app_running_settings(d->app)->update.check, mono_ms());
 }
 
 static void on_list_auto_update_timer(firc_loop_t *loop, void *ud)
@@ -794,12 +824,7 @@ int main(int argc, char **argv)
     firc_log_level_t out_floor = FIRC_LOG_TRACE;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
-            /* the flavour string is what CI greps the shipped binary for */
-#ifdef FIRC_ENTWARE_KN
-            printf("%s firc-flavour=entware_kn\n", FIRC_VERSION);
-#else
-            printf("%s firc-flavour=host\n", FIRC_VERSION);
-#endif
+            puts(FIRC_VERSION_LINE);
             return 0;
         } else if (strcmp(argv[i], "--purge") == 0) {
             purge = true;
@@ -1351,6 +1376,33 @@ int main(int argc, char **argv)
         .state_dir = auth_state_dir_fn,
         .ud = &cfg,
     };
+    firc_update_api_ctx_t update_ctx = {
+        .sys = &system_ctx,
+    };
+    const char *update_dir = getenv("FIRC_UPDATE_DIR");
+    firc_update_deps_t update_deps = {
+        .loop = d.loop,
+        .dir = update_dir != NULL && update_dir[0] != 0 ? update_dir : FIRC_UPDATE_DIR,
+        .api_url = FIRC_UPDATE_API_URL,
+        .download_prefix = FIRC_UPDATE_DOWNLOAD_PREFIX,
+        .version = FIRC_VERSION,
+        .revision = FIRC_REVISION,
+        .target = FIRC_TARGET,
+        .sh = FIRC_SH_BIN,
+        .opkg = FIRC_OPKG_BIN,
+        .checked = firc_update_api_checked,
+        .ud = &update_ctx,
+    };
+    d.update = firc_update_new(&update_deps);
+    if (d.update == NULL) { FIRC_ERROR("update: the checker could not be created; running without it"); }
+    update_ctx.update = d.update;
+    system_ctx.update = d.update;
+    d.update_ctx = &update_ctx;
+    if (d.update != NULL && firc_loop_add_timer(d.loop, FIRC_UPDATE_FIRST_CHECK_MS, FIRC_UPDATE_CHECK_INTERVAL_MS,
+                                                on_update_timer, &d, &d.update_timer) != FIRC_OK) {
+        FIRC_ERROR("update: the daily check could not be scheduled; checks run only on request");
+        d.update_timer = 0;
+    }
 
     if (firc_httpd_create(d.loop, &d.http_unix) != FIRC_OK) {
         FIRC_ERROR("failed to create Unix socket server");
@@ -1363,6 +1415,7 @@ int main(int argc, char **argv)
     firc_tunnels_register_routes(d.http_unix, &tunnels_ctx);
     /* Capture routes on both sockets: a browser cannot reach the Unix socket. */
     firc_capture_register_routes(d.http_unix, &capture_ctx);
+    firc_update_register_routes(d.http_unix, &update_ctx);
     firc_httpd_route(d.http_unix, "GET", "/api/v1/auth", firc_auth_status_handler, &auth_ctx);
     firc_httpd_route(d.http_unix, "POST", "/api/v1/auth", firc_auth_login_handler, &auth_ctx);
     err = firc_httpd_listen_unix(d.http_unix, FIRC_SOCK_PATH);
@@ -1386,6 +1439,7 @@ int main(int argc, char **argv)
         firc_groups_register_routes(d.http_tcp, &groups_ctx);
         firc_tunnels_register_routes(d.http_tcp, &tunnels_ctx);
         firc_capture_register_routes(d.http_tcp, &capture_ctx);
+        firc_update_register_routes(d.http_tcp, &update_ctx);
         firc_httpd_route(d.http_tcp, "GET", "/api/v1/auth", firc_auth_status_handler, &auth_ctx);
         firc_httpd_route(d.http_tcp, "POST", "/api/v1/auth", firc_auth_login_handler, &auth_ctx);
         firc_httpd_set_middleware(d.http_tcp, firc_auth_middleware, &auth_ctx);
@@ -1415,6 +1469,20 @@ int main(int argc, char **argv)
         daemon_teardown(&d);
         firc_config_clear(&cfg);
         return 1;
+    }
+    if (d.update != NULL) {
+        err = firc_update_start(d.update);
+        if (err != FIRC_OK) {
+            FIRC_ERROR("update: the checker could not be started (%s); running without it", firc_err_str(err));
+            if (d.update_timer != 0) {
+                (void)firc_loop_del_timer(d.loop, d.update_timer);
+                d.update_timer = 0;
+            }
+            firc_update_free(d.update);
+            d.update = NULL;
+            update_ctx.update = NULL;
+            system_ctx.update = NULL;
+        }
     }
     /* Boot sweep: no list body is kept on flash, so every enabled list needs a first fetch. */
     firc_app_request_sync_missing(d.app);

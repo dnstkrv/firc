@@ -35,7 +35,8 @@ static const char EVERY_FIELD[] =
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
     "  showAllInterfaces: true\n"
-    "  logLevel: debug\n";
+    "  logLevel: debug\n"
+    "  update: {check: true}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -273,6 +274,7 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
         {"app.logLevel", FIRC_APPLY_LOG_LEVEL},
         {"app.showAllInterfaces", FIRC_APPLY_NONE},
+        {"app.update.check", FIRC_APPLY_NONE},
     };
     size_t n_live = 0;
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
@@ -289,6 +291,20 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         }
     }
     ASSERT_EQ(sizeof(live) / sizeof(live[0]), n_live);
+    PASS();
+}
+
+/* Catches: a missing row, the restart class, or a default of true (a router phoning GitHub unasked). */
+TEST the_update_check_is_live_off_by_default_and_applies_nothing(void) {
+    const firc_setting_t *s = firc_setting_find("app.update.check");
+    ASSERT(s != NULL);
+    ASSERT_EQ(FIRC_SK_BOOL, s->kind);
+    ASSERT_EQ(FIRC_SETTING_LIVE, s->cls);
+    ASSERT_EQ(FIRC_APPLY_NONE, s->apply);
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_FALSE(cfg.app.update.check);
+    firc_config_clear(&cfg);
     PASS();
 }
 
@@ -317,6 +333,7 @@ static const field_t NUMERIC[] = {
     FIELD("app.netfilter.disableIPv6", netfilter.disable_ipv6),
     FIELD("app.netfilter.startMarkTableIndex", netfilter.start_mark_table_index),
     FIELD("app.showAllInterfaces", show_all_interfaces),
+    FIELD("app.update.check", update.check),
     FIELD("app.httpWeb.host.port", http_web.host.port),
 };
 
@@ -366,6 +383,7 @@ int main(int argc, char **argv) {
     RUN_TEST(the_check_passes_what_the_daemon_accepts);
     RUN_TEST(a_disabled_webui_host_is_not_checked);
     RUN_TEST(each_row_has_the_specs_class_and_apply);
+    RUN_TEST(the_update_check_is_live_off_by_default_and_applies_nothing);
     RUN_TEST(every_numeric_setting_copies_exactly_the_bytes_of_its_field);
     GREATEST_MAIN_END();
 }

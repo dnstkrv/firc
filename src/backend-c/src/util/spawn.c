@@ -15,9 +15,17 @@ extern char **environ;
 firc_err_t firc_spawn_detached(const char *path, const char *arg)
 {
     if (path == NULL || arg == NULL) { return FIRC_ERR_INVAL; }
+    return firc_spawn_argv(path, (char *const[]){(char *)path, (char *)arg, NULL});
+}
+
+firc_err_t firc_spawn_argv(const char *path, char *const argv[])
+{
+    if (path == NULL || argv == NULL) { return FIRC_ERR_INVAL; }
+    size_t argc = 0;
+    while (argc <= FIRC_SPAWN_MAX_ARGS && argv[argc] != NULL) { argc++; }
+    if (argc == 0 || argc > FIRC_SPAWN_MAX_ARGS) { return FIRC_ERR_INVAL; }
 
     /* Compute everything before fork: the child may call only async-signal-safe functions (sysconf is not one). */
-    char *const argv[] = {(char *)path, (char *)arg, NULL};
     long max_fd = sysconf(_SC_OPEN_MAX);
     if (max_fd < 0 || max_fd > 65536) { max_fd = 65536; }
     static const int reset[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE,

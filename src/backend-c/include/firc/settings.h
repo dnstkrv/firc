@@ -40,10 +40,10 @@ typedef struct firc_setting {
     firc_setting_class_t cls;
     size_t off;   /* offsetof(firc_app_config_t, ...) */
     size_t off_n; /* FIRC_SK_LIST only: where the count is */
-    firc_setting_apply_t apply; /* FIRC_APPLY_NONE for showAllInterfaces and every restart row */
+    firc_setting_apply_t apply; /* FIRC_APPLY_NONE for showAllInterfaces, update.check and every restart row */
 } firc_setting_t;
 
-#define FIRC_SETTINGS_COUNT 25
+#define FIRC_SETTINGS_COUNT 26
 extern const firc_setting_t firc_settings[FIRC_SETTINGS_COUNT];
 
 const firc_setting_t *firc_setting_find(const char *path); /* NULL if path names no setting */

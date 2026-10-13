@@ -29,6 +29,7 @@ export const DEFAULTS: Record<string, unknown> = {
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
   "app.logLevel": "info",
+  "app.update.check": false,
 };
 
 const LIVE = new Set([
@@ -38,6 +39,7 @@ const LIVE = new Set([
   "app.dnsProxy.unmatchedTtl",
   "app.showAllInterfaces",
   "app.logLevel",
+  "app.update.check",
 ]);
 
 export const CLASSES: Record<string, string> = Object.fromEntries(
@@ -59,10 +61,42 @@ export const oldDaemon = (pendingRestart: string[] = []) =>
 
 export type Handler = (route: Route) => Promise<void> | void;
 
+export const upToDate = {
+  installed: { version: "0.2.0", revision: 1, target: "mipsel-3.4_kn" },
+  canInstall: true,
+  reason: null,
+  check: {
+    checkedAt: 1791831000,
+    ageS: 10,
+    latest: {
+      version: "0.2.0",
+      revision: 1,
+      tag: "0.2.0",
+      publishedAt: "2026-10-07T20:27:40Z",
+      notes: "",
+      asset: { name: "firc_0.2.0-1_entware_mipsel-3.4_kn.ipk", size: 829104 },
+    },
+    newer: false,
+    installable: true,
+    reason: null,
+    error: null,
+  },
+  state: "idle",
+  progress: null,
+  error: null,
+  result: null,
+};
+
 export async function openSettings(
   page: Page,
   onSettings: Handler,
-  opts: { onRestart?: Handler; locale?: string } = {},
+  opts: {
+    onRestart?: Handler;
+    onUpdate?: Handler;
+    onCheck?: Handler;
+    onInstall?: Handler;
+    locale?: string;
+  } = {},
 ) {
   await signedIn(page);
   if (opts.locale) {
@@ -85,6 +119,9 @@ export async function openSettings(
   );
   await page.route("**/system/settings", onSettings);
   if (opts.onRestart) await page.route("**/system/restart", opts.onRestart);
+  await page.route("**/system/update", opts.onUpdate ?? ((r) => r.fulfill({ json: upToDate })));
+  if (opts.onCheck) await page.route("**/system/update/check", opts.onCheck);
+  if (opts.onInstall) await page.route("**/system/update/install", opts.onInstall);
   await page.goto("/");
   await page.getByRole("tab", { name: opts.locale === "ru" ? "Настройки" : "Settings" }).click();
 }

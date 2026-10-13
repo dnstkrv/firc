@@ -20,7 +20,7 @@ C_PID=
 cleanup() {
     [ -n "$C_PID" ] && kill "$C_PID" 2>/dev/null || true
     rm -f "$OUT/groups.yaml" "$OUT/tunnels.yaml"
-    rm -rf "$OUT/tunnels-cache"
+    rm -rf "$OUT/tunnels-cache" "$OUT/update"
     rm -f "$SOCK" "$PIDFILE"
 }
 trap cleanup EXIT
@@ -77,7 +77,7 @@ wait_for_port() {
 echo "== running contract against C daemon"
 rm -f "$SOCK" "$PIDFILE" "$OUT/groups.yaml" "$OUT/tunnels.yaml"
 rm -rf "$OUT/tunnels-cache"
-FIRC_TUNNELS_PATH="$OUT/tunnels.yaml" FIRC_TUNNELS_CACHE_DIR="$OUT/tunnels-cache" \
+FIRC_TUNNELS_PATH="$OUT/tunnels.yaml" FIRC_TUNNELS_CACHE_DIR="$OUT/tunnels-cache" FIRC_UPDATE_DIR="$OUT/update" \
     FIRC_TUNVLESS_BIN="$BACKEND_C_DIR/tests/unit/fixtures/fake_tunvless.sh" \
     "$C_BIN" --config "$SCRATCH_CONFIG" > "$OUT/c_daemon.log" 2>&1 &
 C_PID=$!
@@ -114,7 +114,7 @@ sed 's/disableRemap53: true/disableRemap53: false/' "$SCRATCH_CONFIG" > "$REMAP_
 rm -rf /run/firc 2>/dev/null || true
 rm -f "$SOCK" "$PIDFILE" "$OUT/groups.yaml" "$OUT/tunnels.yaml"
 rm -rf "$OUT/tunnels-cache"
-FIRC_TUNNELS_PATH="$OUT/tunnels.yaml" FIRC_TUNNELS_CACHE_DIR="$OUT/tunnels-cache" \
+FIRC_TUNNELS_PATH="$OUT/tunnels.yaml" FIRC_TUNNELS_CACHE_DIR="$OUT/tunnels-cache" FIRC_UPDATE_DIR="$OUT/update" \
     FIRC_TUNVLESS_BIN="$BACKEND_C_DIR/tests/unit/fixtures/fake_tunvless.sh" \
     "$C_BIN" --config "$REMAP_CONFIG" > "$OUT/c_remap.log" 2>&1 &
 C_PID=$!

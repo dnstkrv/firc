@@ -15,11 +15,14 @@
     saveSettings,
     settings,
   } from "./settings.svelte";
+  import { checkUpdate, loadUpdate, update } from "./update.svelte";
+  import UpdateBlock from "./UpdateBlock.svelte";
 
   import { CircleCheck, RotateCw, Save, Undo2 } from "../../components/ui/icons";
   import { counted as countedIn } from "../../utils/plural";
   import { SECTIONS, type Row, type Section } from "./catalogue";
   import { changedKeys, groupChanges } from "./settings";
+  import { needsCheck, running } from "./update";
 
   let { active }: { active: boolean } = $props();
 
@@ -28,6 +31,15 @@
       void loadSettings();
     }
   });
+
+  $effect(() => {
+    if (active) void untrack(openUpdate);
+  });
+
+  async function openUpdate() {
+    await loadUpdate();
+    if (needsCheck(update.res)) void checkUpdate();
+  }
 
   const changed = $derived(changedKeys(settings.saved, settings.draft));
   const grouped = $derived(groupChanges(changed, settings.classes));
@@ -59,6 +71,7 @@
   const wholeRestart = (section: Section) => rowsOf(section, "live").length === 0;
 
   let dialogOpen = $state(false);
+  const installing = $derived(update.installing || running(update.res));
 
   async function save(restart: boolean) {
     if (!(await saveSettings())) return; /* a refusal keeps the dialog, the field marked */
@@ -112,11 +125,17 @@
           <Tooltip value={t("Save or reset your changes first")}>
             <Button small general inactive aria-label={t("Restart")}>{t("Restart")}</Button>
           </Tooltip>
+        {:else if installing}
+          <Tooltip value={t("An update is being installed")}>
+            <Button small general inactive aria-label={t("Restart")}>{t("Restart")}</Button>
+          </Tooltip>
         {:else}
           <Button small general onclick={() => void restartDaemon()}>{t("Restart")}</Button>
         {/if}
       </div>
     {/if}
+
+    <UpdateBlock />
 
     {#each SECTIONS as section (section.id)}
       <section class="panel" data-section={section.id}>
@@ -159,6 +178,7 @@
   <SaveDialog
     open={dialogOpen}
     keys={changed}
+    noRestart={installing}
     onclose={() => (dialogOpen = false)}
     onsave={(r) => void save(r)}
   />

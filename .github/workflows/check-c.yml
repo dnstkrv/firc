@@ -43,7 +43,10 @@ jobs:
         working-directory: src/backend-c
         run: |
           # every shipped binary is built with ENTWARE_KN=1; own build dir keeps build/host intact
-          make -s BUILD=kn ENTWARE_KN=1 CFLAGS_EXTRA=-Werror all
+          make -s BUILD=kn ENTWARE_KN=1 CFLAGS_EXTRA=-Werror FIRC_TARGET=mipsel-3.4_kn FIRC_REVISION=3 all
+          want="unattached firc-flavour=entware_kn target=mipsel-3.4_kn revision=3"
+          test "$(build/kn/fircd --version)" = "$want"
+          strings build/kn/fircd | grep -qxF "$want"
 
       - name: The netfilter.d hook posts to the daemon's socket path
         run: |

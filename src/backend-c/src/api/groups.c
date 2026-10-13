@@ -95,14 +95,6 @@ static firc_err_t list_from_req(const cJSON *list_j, const firc_group_list_t *ex
 
 #define FIRC_RULE_WHERE_MAX 384
 
-int firc_api_utf8_clamp(const char *s, int max_bytes) {
-    int n = 0;
-    while (n < max_bytes && s[n] != '\0') { n++; } /* "scan at most max_bytes"; cppcheck arrayIndexThenCheck */
-    if (s[n] == '\0') { return n; }
-    while (n > 0 && ((unsigned char)s[n] & 0xc0) == 0x80) { n--; } /* step back to the lead byte of a split char */
-    return n;
-}
-
 static const char *locate_rule(char *buf, size_t len, const char *group_name, const char *type,
                                const char *pattern, int index, const char *why) {
     char num[16]; /* empty pattern identifies nothing, so the 1-based index is used instead */

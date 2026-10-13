@@ -38,6 +38,8 @@ app:
   - br1
   showAllInterfaces: true
   logLevel: debug
+  update:
+    check: true
 groups:
 - id: d663876a
   name: Example

@@ -450,6 +450,8 @@ TEST save_shape_matches_committed_fixture(void)
         "  - br0\n"
         "  showAllInterfaces: false\n"
         "  logLevel: info\n"
+        "  update:\n"
+        "    check: false\n"
         "groups:\n"
         "- id: d663876a\n"
         "  name: Example\n"
@@ -730,6 +732,32 @@ TEST a_later_load_cannot_launder_a_refused_geometry(void)
     ASSERT_EQ_FMTm("the geometry is still the refused one, so this must refuse too",
                    (int)FIRC_ERR_INVAL,
                    (int)load_str(&cfg, "configVersion: 0.1.0\napp:\n  logLevel: info\n"), "%d");
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: the saver omitting the key, so the next page save turns the daily check off. */
+TEST the_update_check_survives_load_and_save(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_FALSE(cfg.app.update.check);
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update:\n    check: true\n"));
+    ASSERT(cfg.app.update.check);
+    char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.7.0", FIRC_CFG_SETTINGS, &out, &out_len));
+    ASSERT(strstr(out, "  update:\n    check: true\n") != NULL);
+    firc_config_t back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, firc_config_load_buffer(&back, out, out_len));
+    ASSERT(back.app.update.check);
+    free(out);
+    firc_config_clear(&back);
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  logLevel: info\n"));
+    ASSERTm("an absent key keeps the earlier value", cfg.app.update.check);
+    ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update:\n    check: [1]\n"));
+    ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update: 3\n"));
     firc_config_clear(&cfg);
     PASS();
 }
@@ -1753,6 +1781,7 @@ int main(int argc, char **argv)
     RUN_TEST(an_old_idle_window_is_dropped_by_the_next_save);
     RUN_TEST(a_later_load_cannot_launder_a_refused_geometry);
     RUN_TEST(a_log_level_the_daemon_does_not_have_is_refused);
+    RUN_TEST(the_update_check_survives_load_and_save);
     RUN_TEST(an_upstream_that_is_not_an_address_is_refused);
     RUN_TEST(a_conf_that_still_names_a_skin_loads_and_drops_it);
     RUN_TEST(a_conf_that_still_names_the_fake_ptr_switch_loads_and_drops_it);

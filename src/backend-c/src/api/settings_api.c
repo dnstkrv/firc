@@ -22,6 +22,7 @@
 #include "firc/settings.h"
 #include "firc/spawn.h"
 #include "firc/system.h"
+#include "firc/update.h"
 
 static void must_route(firc_httpd_t *h, const char *method, const char *pattern,
                        firc_http_handler_fn fn, void *ud) {
@@ -280,8 +281,6 @@ firc_err_t firc_settings_probe_listeners(const firc_app_config_t *next,
     return err == FIRC_OK ? probe_one(&dns, field, why, why_cap) : err;
 }
 
-static bool restart_under_way(firc_system_ctx_t *ctx);
-
 static void link_ipv4(const char *name, char *out, size_t cap) {
     struct ifaddrs *list = NULL;
     if (name == NULL || getifaddrs(&list) != 0) { return; }
@@ -370,7 +369,7 @@ static void handle_get_settings(firc_http_req_t *req, firc_http_res_t *res, void
     cJSON *classes = cJSON_AddObjectToObject(out, "classes");
     if (values == NULL || classes == NULL ||
         cJSON_AddStringToObject(out, "boot", firc_event_boot()) == NULL ||
-        cJSON_AddBoolToObject(out, "restarting", restart_under_way(ctx)) == NULL ||
+        cJSON_AddBoolToObject(out, "restarting", firc_system_restart_under_way(ctx)) == NULL ||
         !cJSON_AddItemToObject(out, "pendingRestart", pending_json(ctx->app)) ||
         !cJSON_AddItemToObject(out, "webUi", web_ui_json(ctx))) {
         cJSON_Delete(out);
@@ -478,7 +477,7 @@ static void spawn_restart(void *ud) {
     FIRC_INFO("restart: %s restart is under way", script);
 }
 
-static bool restart_under_way(firc_system_ctx_t *ctx) {
+bool firc_system_restart_under_way(firc_system_ctx_t *ctx) {
     if (ctx->restart_started_ms == 0) { return false; }
     int64_t limit = ctx->restart_timeout_ms > 0 ? ctx->restart_timeout_ms : FIRC_RESTART_TIMEOUT_MS;
     if (mono_ms() - ctx->restart_started_ms < limit) { return true; }
@@ -491,7 +490,11 @@ static bool restart_under_way(firc_system_ctx_t *ctx) {
 static void handle_restart(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)req;
     firc_system_ctx_t *ctx = ud;
-    if (restart_under_way(ctx)) {
+    if (ctx->update != NULL && firc_update_busy(ctx->update)) {
+        firc_http_res_write_error(res, 409, "an update is being installed");
+        return;
+    }
+    if (firc_system_restart_under_way(ctx)) {
         firc_http_res_write_error(res, 409, "a restart is already under way");
         return;
     }

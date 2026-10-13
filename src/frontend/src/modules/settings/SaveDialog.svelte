@@ -13,8 +13,9 @@
     keys: string[];
     onclose: () => void;
     onsave: (restart: boolean) => void;
+    noRestart?: boolean;
   };
-  let { open, keys, onclose, onsave }: Props = $props();
+  let { open, keys, onclose, onsave, noRestart = false }: Props = $props();
 
   const grouped = $derived(groupChanges(keys, settings.classes));
   const portMoves = $derived(grouped.restart.includes(WEB_PORT));
@@ -80,7 +81,12 @@
       <Button small type="button" onclick={onclose}>
         <span class="btn-label">{t("Cancel")}</span>
       </Button>
-      <Button class="accent" type="button" disabled={settings.saving} onclick={() => onsave(true)}>
+      <Button
+        class="accent"
+        type="button"
+        disabled={settings.saving || noRestart}
+        onclick={() => onsave(true)}
+      >
         <span class="icon-slot">
           {#if settings.saving}
             <LoaderCircle class="spin" size={16} />

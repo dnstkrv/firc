@@ -449,6 +449,13 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
                          &c->show_all_interfaces, &err));
     GET_OR_FAIL(get_string(map_get(doc, app, "logLevel"), &c->log_level,
                            &err));
+    node_t *upd = map_get(doc, app, "update");
+    if (upd != NULL && !node_is_null(upd)) {
+        if (upd->type != YAML_MAPPING_NODE) {
+            return FIRC_ERR_INVAL;
+        }
+        GET_OR_FAIL(get_bool(map_get(doc, upd, "check"), &c->update.check, &err));
+    }
     /* runs unconditionally: a later overlay that omits a block must not leave an earlier value unchecked */
     const char *field = NULL, *why = NULL;
     firc_err_t chk = firc_app_config_check(c, &field, &why);

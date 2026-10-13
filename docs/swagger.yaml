@@ -164,6 +164,226 @@ definitions:
         example: true
         type: boolean
     type: object
+  types.UpdateRelease:
+    properties:
+      version:
+        description: 'X.Y.Z from the tag; the tag itself when it is not a version'
+        example: 0.2.0
+        type: string
+      revision:
+        description: 'The package revision from a -revN tag, 1 when absent; 0 when the tag is not a version'
+        example: 1
+        type: integer
+      tag:
+        example: 0.2.0
+        type: string
+      publishedAt:
+        example: '2026-10-07T20:27:40Z'
+        type: string
+      notes:
+        description: 'The release notes, at most 16 KiB, cut on a character boundary'
+        type: string
+      asset:
+        description: >-
+          The package for this router's target; null when the tag is not a
+          version, the release is a prerelease or draft, the build has no
+          target, or the release has no such package or more than one
+        properties:
+          name:
+            example: firc_0.2.0-1_entware_mipsel-3.4_kn.ipk
+            type: string
+          size:
+            example: 829104
+            type: integer
+        type: object
+        x-nullable: true
+    type: object
+  types.UpdateCheck:
+    properties:
+      checkedAt:
+        description: 'Unix time of the last attempt, seconds'
+        example: 1791831000
+        type: integer
+      ageS:
+        description: >-
+          Seconds since the last attempt, on the router's monotonic clock;
+          judge staleness by this, not by checkedAt against another clock
+        example: 12
+        type: integer
+      latest:
+        allOf:
+        - $ref: '#/definitions/types.UpdateRelease'
+        description: >-
+          The latest release from the last successful check; null when no
+          check has succeeded since start or the repository has no release.
+          A failed check keeps it.
+        x-nullable: true
+      newer:
+        description: 'latest is newer than the installed build'
+        type: boolean
+      installable:
+        description: 'latest has exactly one usable package for this target'
+        type: boolean
+      reason:
+        description: 'Why latest is not installable; null when it is'
+        enum:
+        - unknown-version
+        - prerelease
+        - no-target
+        - no-asset
+        - many-assets
+        - not-uploaded
+        - no-digest
+        - bad-size
+        - bad-url
+        type: string
+        x-nullable: true
+      error:
+        description: 'Why the last attempt failed; null when it succeeded'
+        type: string
+        x-nullable: true
+    type: object
+  types.UpdateStatus:
+    properties:
+      installed:
+        properties:
+          version:
+            example: 0.2.0
+            type: string
+          revision:
+            example: 1
+            type: integer
+          target:
+            description: 'The Entware target this build is for; empty for a build with none'
+            example: mipsel-3.4_kn
+            type: string
+        type: object
+      canInstall:
+        description: 'This build could install a release'
+        type: boolean
+      reason:
+        description: >-
+          Why it cannot: no-target (built without one), unknown-version (a
+          version that is not X.Y.Z), dev-build (a ~git build); null when it
+          can
+        enum:
+        - no-target
+        - unknown-version
+        - dev-build
+        type: string
+        x-nullable: true
+      check:
+        allOf:
+        - $ref: '#/definitions/types.UpdateCheck'
+        description: 'The last check; null before the first attempt since start'
+        x-nullable: true
+      state:
+        description: >-
+          installing while an installer is alive, also one this daemon did not
+          start (the daemon that comes up during opkg's upgrade reports it);
+          failed when the last install's installer is gone and left no result;
+          idle once opkg has finished, whatever its exit -- then result says
+          how it ended
+        enum:
+        - idle
+        - checking
+        - downloading
+        - verifying
+        - installing
+        - failed
+        type: string
+      progress:
+        description: 'Bytes downloaded so far; null unless state is downloading'
+        properties:
+          bytes:
+            type: integer
+          total:
+            type: integer
+        type: object
+        x-nullable: true
+      error:
+        description: 'Why the last install failed; null when none did'
+        type: string
+        x-nullable: true
+      result:
+        description: >-
+          How opkg ended the last install, kept until the next install starts;
+          null when no install has finished
+        properties:
+          version:
+            description: 'The tag that was installed'
+            example: 0.3.0
+            type: string
+          opkgExit:
+            description: 'opkg install exit status; 0 is installed, anything else see logread'
+            example: 0
+            type: integer
+          finishedAt:
+            description: 'Unix time opkg ended, seconds'
+            example: 1791831900
+            type: integer
+        type: object
+        x-nullable: true
+    type: object
+  types.UpdateInstallReq:
+    properties:
+      version:
+        description: 'The tag of the release the last check offered'
+        example: 0.3.0
+        type: string
+    required:
+    - version
+    type: object
+  types.UpdateInstallRes:
+    properties:
+      version:
+        example: 0.3.0
+        type: string
+      asset:
+        example: firc_0.3.0-1_entware_mipsel-3.4_kn.ipk
+        type: string
+      size:
+        example: 829104
+        type: integer
+    type: object
+  types.UpdateRefusal:
+    properties:
+      error:
+        example: 'this build cannot install updates: no-target'
+        type: string
+      reason:
+        description: >-
+          On 403 why this build cannot install (as UpdateStatus.reason); on 400
+          why the release is not installable (as UpdateCheck.reason); absent
+          otherwise
+        example: no-target
+        type: string
+    type: object
+  types.UpdateNoSpace:
+    properties:
+      error:
+        example: "the update directory's filesystem has 1048576 bytes free; the install needs 10875920"
+        type: string
+      free:
+        description: 'Bytes free on the update directory''s filesystem'
+        example: 1048576
+        type: integer
+      need:
+        description: 'Three times the package plus 8 MiB'
+        example: 10875920
+        type: integer
+    type: object
+  types.UpdateRateLimited:
+    properties:
+      error:
+        example: GitHub refuses more checks from this address until 2026-10-12T19:01:29Z
+        type: string
+      resetAt:
+        description: 'Unix time GitHub accepts checks again; null when GitHub named none'
+        example: 1791831689
+        type: integer
+        x-nullable: true
+    type: object
   types.Event:
     properties:
       at:
@@ -1985,9 +2205,11 @@ paths:
         `/opt/etc/init.d/S99firc restart` detached from itself. The script
         stops the daemon (SIGTERM; the pool is saved) and starts it again --
         DNS does not answer for those seconds. While a restart is in progress
-        (at most 90 s), a repeated request is 409. If the script did not start
-        or did not stop the daemon, the journal says so and the request can be
-        repeated.
+        (at most 90 s), a repeated request is 409; so is a restart while an
+        update is downloaded, checked or installed (opkg restarts the daemon
+        itself). If the
+        script did not start or did not stop the daemon, the journal says so
+        and the request can be repeated.
       produces:
       - application/json
       responses:
@@ -1996,7 +2218,9 @@ paths:
           schema:
             $ref: '#/definitions/types.RestartRes'
         "409":
-          description: 'Conflict -- a restart is already in progress'
+          description: >-
+            Conflict -- a restart is already in progress, or an update is
+            being downloaded, checked or installed
           schema:
             $ref: '#/definitions/types.ErrorRes'
         "500":
@@ -2006,6 +2230,134 @@ paths:
           schema:
             $ref: '#/definitions/types.ErrorRes'
       summary: 'Restart the daemon'
+      tags:
+      - config
+  /api/v1/system/update:
+    get:
+      description: >-
+        The installed build, whether it could install a release, and the
+        last check for a newer release on GitHub. Asks nothing of GitHub:
+        the check is the one held since the last POST
+        /system/update/check or daily check, and is gone after a restart.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.UpdateStatus'
+        "500":
+          description: 'Internal Server Error -- not enough memory for the answer'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "503":
+          description: >-
+            Service Unavailable -- the update checker is not running (it could
+            not be created or started; routing and DNS run on without it)
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+      summary: 'Update status'
+      tags:
+      - config
+  /api/v1/system/update/check:
+    post:
+      description: >-
+        Asks GitHub for the latest firc release now and answers once it has
+        (up to 15 s). A check already running is joined, not repeated. A
+        failed check keeps the last release found. No body is read.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'OK -- the refreshed status, as GET /system/update'
+          schema:
+            $ref: '#/definitions/types.UpdateStatus'
+        "409":
+          description: 'Conflict -- an install is under way'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "429":
+          description: >-
+            Too Many Requests -- GitHub refuses more checks from this address
+            (60 an hour, shared by every device behind it) until resetAt
+          schema:
+            $ref: '#/definitions/types.UpdateRateLimited'
+        "500":
+          description: 'Internal Server Error -- not enough memory'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "502":
+          description: >-
+            Bad Gateway -- GitHub could not be reached, answered with an
+            error, or sent something that is not a release; `error` says why,
+            in libcurl's words for a transport failure
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "503":
+          description: >-
+            Service Unavailable -- the update checker is not running, or 8
+            checks are already waiting
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+      summary: 'Check for a newer release'
+      tags:
+      - config
+  /api/v1/system/update/install:
+    post:
+      consumes:
+      - application/json
+      description: >-
+        Downloads the package of the release the last check offered, checks
+        its size and SHA-256 against the release, and hands it to opkg
+        install, which stops this daemon and starts the new one. Answers 202
+        at once; GET /system/update follows it through downloading,
+        verifying and installing to result. Only the version is read from the
+        request: the URL, the digest and the file name are the check's.
+      parameters:
+      - description: 'Request body'
+        in: body
+        name: json
+        required: true
+        schema:
+          $ref: '#/definitions/types.UpdateInstallReq'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: 'Accepted -- the download has started'
+          schema:
+            $ref: '#/definitions/types.UpdateInstallRes'
+        "400":
+          description: >-
+            Bad Request -- the body is not {"version": "<tag>"}, the version is
+            not newer than the installed one, or the release cannot be
+            installed (reason says why)
+          schema:
+            $ref: '#/definitions/types.UpdateRefusal'
+        "403":
+          description: 'Forbidden -- this build cannot install updates; reason says why'
+          schema:
+            $ref: '#/definitions/types.UpdateRefusal'
+        "409":
+          description: >-
+            Conflict -- an install is under way, a check is under way, a
+            restart is under way, or the last check did not offer this version
+            (check again)
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "500":
+          description: 'Internal Server Error -- the update directory could not be made, or not enough memory'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "503":
+          description: 'Service Unavailable -- the update checker is not running'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "507":
+          description: 'Insufficient Storage -- the update directory''s filesystem has too little room'
+          schema:
+            $ref: '#/definitions/types.UpdateNoSpace'
+      summary: 'Install a newer release'
       tags:
       - config
   /api/v1/system/hooks/netfilterd:

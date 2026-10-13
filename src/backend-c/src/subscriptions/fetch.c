@@ -76,54 +76,78 @@ bool firc_sub_url_is_supported(const char *url) {
     return ok;
 }
 
-typedef struct fetch_buf {
-    char *data;
-    size_t len;
-    size_t cap;
-    bool truncated;
-    firc_sub_fetch_progress_fn progress;
-    void *progress_ud;
+typedef struct xfer {
+    CURL *curl;
+    firc_sub_fetch_sink_fn sink;
+    void *sink_ud;
+    const firc_sub_fetch_opts_t *o;
+    size_t delivered;
+    size_t drained;
+    bool drain_over_cap;
+    bool sink_stopped;
     bool aborted;
-} fetch_buf_t;
+} xfer_t;
 
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
-    fetch_buf_t *buf = ud;
+    xfer_t *x = ud;
     size_t n = size * nmemb;
-    if (buf->len + n > FIRC_SUB_FETCH_MAX_BODY_BYTES) {
-        buf->truncated = true;
-        return 0; /* abort the transfer */
+    long status = 0;
+    curl_easy_getinfo(x->curl, CURLINFO_RESPONSE_CODE, &status);
+    if (status < 200 || status > 299) {
+        if (n > FIRC_SUB_FETCH_MAX_BODY_BYTES - x->drained) {
+            x->drain_over_cap = true;
+            return 0;
+        }
+        x->drained += n;
+        return n;
     }
-    if (buf->len + n + 1 > buf->cap) {
-        size_t new_cap = buf->cap ? buf->cap * 2 : 4096;
-        while (new_cap < buf->len + n + 1) { new_cap *= 2; }
-        char *na = realloc(buf->data, new_cap);
-        if (!na) { return 0; }
-        buf->data = na;
-        buf->cap = new_cap;
+    if (!x->sink(x->sink_ud, (const uint8_t *)ptr, n)) {
+        x->sink_stopped = true;
+        return 0;
     }
-    memcpy(buf->data + buf->len, ptr, n);
-    buf->len += n;
-    buf->data[buf->len] = '\0';
+    x->delivered += n;
     return n;
 }
 
-/* called periodically during the transfer; returning non-zero aborts with CURLE_ABORTED_BY_CALLBACK */
+static size_t header_cb(char *ptr, size_t size, size_t nitems, void *ud) {
+    xfer_t *x = ud;
+    size_t n = size * nitems;
+    char *colon = memchr(ptr, ':', n);
+    if (colon == NULL || colon == ptr) { return n; }
+    char *line = malloc(n + 1);
+    if (line == NULL) { return n; }
+    memcpy(line, ptr, n);
+    line[n] = '\0';
+    char *sep = line + (colon - ptr);
+    *sep = '\0';
+    char *value = sep + 1;
+    while (*value == ' ' || *value == '\t') { value++; }
+    size_t vlen = strlen(value);
+    while (vlen > 0 && (value[vlen - 1] == '\r' || value[vlen - 1] == '\n' || value[vlen - 1] == ' ' ||
+                        value[vlen - 1] == '\t')) {
+        value[--vlen] = '\0';
+    }
+    x->o->on_header(x->o->header_ud, line, value);
+    free(line);
+    return n;
+}
+
 static int xferinfo_cb(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     (void)ultotal;
     (void)ulnow;
-    fetch_buf_t *b = ud;
-    if (b->progress == NULL) { return 0; }
-    if (!b->progress(b->progress_ud, (size_t)(dlnow < 0 ? 0 : dlnow), (size_t)(dltotal < 0 ? 0 : dltotal))) {
-        b->aborted = true;
+    xfer_t *x = ud;
+    if (x->o->progress == NULL) { return 0; }
+    if (!x->o->progress(x->o->progress_ud, (size_t)(dlnow < 0 ? 0 : dlnow), (size_t)(dltotal < 0 ? 0 : dltotal))) {
+        x->aborted = true;
         return 1;
     }
     return 0;
 }
 
-/* fixed array, not a hash set: bounded by FIRC_SUB_FETCH_MAX_REDIRECTS+1 entries, simpler at this size */
 typedef struct visited_set {
-    char *urls[FIRC_SUB_FETCH_MAX_REDIRECTS + 1];
+    char **urls;
     size_t n;
+    size_t cap;
 } visited_set_t;
 
 static bool visited_contains(const visited_set_t *v, const char *url) {
@@ -134,7 +158,7 @@ static bool visited_contains(const visited_set_t *v, const char *url) {
 }
 
 static firc_err_t visited_add(visited_set_t *v, const char *url) {
-    if (v->n >= sizeof(v->urls) / sizeof(v->urls[0])) { return FIRC_ERR_LIMIT; }
+    if (v->n >= v->cap) { return FIRC_ERR_LIMIT; }
     char *copy = strdup(url);
     if (!copy) { return FIRC_ERR_NOMEM; }
     v->urls[v->n++] = copy;
@@ -143,30 +167,57 @@ static firc_err_t visited_add(visited_set_t *v, const char *url) {
 
 static void visited_clear(visited_set_t *v) {
     for (size_t i = 0; i < v->n; i++) { free(v->urls[i]); }
+    free(v->urls);
+    v->urls = NULL;
     v->n = 0;
 }
 
-static firc_err_t fetch(const char *url, uint32_t mark, char **out_body, size_t *out_len,
-                        firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status) {
-    *out_body = NULL;
-    *out_len = 0;
-    if (out_http_status) { *out_http_status = 0; }
+static bool url_allowed(const firc_sub_fetch_opts_t *o, const char *url) {
+    if (!firc_sub_url_is_supported(url)) { return false; }
+    return o->url_ok == NULL || o->url_ok(o->url_ud, url);
+}
 
-    visited_set_t visited = {0};
+static void set_err(const firc_sub_fetch_opts_t *o, const char *msg) {
+    if (o->errbuf != NULL && o->errbuf_cap > 0) { snprintf(o->errbuf, o->errbuf_cap, "%s", msg); }
+}
+
+static struct curl_slist *build_headers(const char *const *headers, bool *ok) {
+    struct curl_slist *list = NULL;
+    *ok = true;
+    for (size_t i = 0; headers != NULL && headers[i] != NULL; i++) {
+        struct curl_slist *next = curl_slist_append(list, headers[i]);
+        if (next == NULL) {
+            *ok = false;
+            break;
+        }
+        list = next;
+    }
+    return list;
+}
+
+firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, firc_sub_fetch_sink_fn sink,
+                             void *sink_ud, long *out_status) {
+    if (out_status) { *out_status = 0; }
+    set_err(o, "");
+    if (url == NULL || !url_allowed(o, url)) { return FIRC_ERR_INVAL; }
+
+    int max_redirects = o->max_redirects > 0 ? o->max_redirects : FIRC_SUB_FETCH_MAX_REDIRECTS;
+    long timeout_s = o->timeout_s > 0 ? o->timeout_s : (long)FIRC_SUB_FETCH_TIMEOUT_SECONDS;
+    bool headers_ok = true;
+    struct curl_slist *headers = build_headers(o->headers, &headers_ok);
+    visited_set_t visited = {.urls = calloc((size_t)max_redirects + 1, sizeof(char *)),
+                             .cap = (size_t)max_redirects + 1};
     char *current = strdup(url);
-    if (!current) { return FIRC_ERR_NOMEM; }
+    if (!headers_ok || visited.urls == NULL || current == NULL) {
+        curl_slist_free_all(headers);
+        visited_clear(&visited);
+        free(current);
+        return FIRC_ERR_NOMEM;
+    }
 
     firc_err_t result = FIRC_ERR_SYS;
     int redirects = 0;
     for (;;) {
-        if (!firc_sub_url_is_supported(current)) {
-            result = FIRC_ERR_INVAL;
-            break;
-        }
-        if (visited_contains(&visited, current)) {
-            result = FIRC_ERR_INVAL; /* redirect loop detected */
-            break;
-        }
         firc_err_t verr = visited_add(&visited, current);
         if (verr != FIRC_OK) {
             result = verr;
@@ -178,70 +229,65 @@ static firc_err_t fetch(const char *url, uint32_t mark, char **out_body, size_t 
             result = FIRC_ERR_NOMEM;
             break;
         }
-        fetch_buf_t buf = {0};
-        sock_cfg_t sock = {.mark = mark};
-        buf.progress = progress;
-        buf.progress_ud = ud;
+        char curl_err[CURL_ERROR_SIZE] = "";
+        xfer_t x = {.curl = curl, .sink = sink, .sink_ud = sink_ud, .o = o};
+        sock_cfg_t sock = {.mark = o->mark};
         curl_easy_setopt(curl, CURLOPT_URL, current);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "firc/" FIRC_VERSION);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)FIRC_SUB_FETCH_TIMEOUT_SECONDS);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+        if (o->low_speed_bytes > 0 && o->low_speed_s > 0) {
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, o->low_speed_bytes);
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, o->low_speed_s);
+        }
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_err);
+        if (headers != NULL) { curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers); }
+        if (o->on_header != NULL) {
+            curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+            curl_easy_setopt(curl, CURLOPT_HEADERDATA, &x);
+        }
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &x);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, cloexec_cb);
         curl_easy_setopt(curl, CURLOPT_SOCKOPTDATA, &sock);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
-        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &buf);
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, progress ? 0L : 1L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &x);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, o->progress ? 0L : 1L);
 
         CURLcode rc = curl_easy_perform(curl);
-        if (rc != CURLE_OK) {
-            long fail_status = 0;
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &fail_status);
-            if (out_http_status) { *out_http_status = fail_status; }
-            free(buf.data);
-            curl_easy_cleanup(curl);
-            result = sock.mark_refused ? FIRC_ERR_SYS
-                     : buf.aborted     ? FIRC_ERR_CANCELED
-                     : buf.truncated   ? FIRC_ERR_LIMIT
-                                       : FIRC_ERR_IO;
-            break;
-        }
-
         long status = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-        if (out_http_status) { *out_http_status = status; }
+        if (out_status) { *out_status = status; }
+        if (rc != CURLE_OK) {
+            curl_easy_cleanup(curl);
+            if (sock.mark_refused) {
+                result = FIRC_ERR_SYS;
+            } else if (x.drain_over_cap) {
+                result = FIRC_ERR_LIMIT;
+            } else if (x.aborted || x.sink_stopped) {
+                result = FIRC_ERR_CANCELED;
+            } else {
+                set_err(o, curl_err[0] != '\0' ? curl_err : curl_easy_strerror(rc));
+                result = FIRC_ERR_IO;
+            }
+            break;
+        }
 
         if (status == 301 || status == 302) {
             char *location = NULL;
             curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &location);
-            if (!location) {
-                free(buf.data);
-                curl_easy_cleanup(curl);
-                result = FIRC_ERR_INVAL; /* bad/missing redirect location */
-                break;
-            }
-            if (!firc_sub_url_is_supported(location)) {
-                free(buf.data);
+            if (!location || !url_allowed(o, location) || visited_contains(&visited, location)) {
                 curl_easy_cleanup(curl);
                 result = FIRC_ERR_INVAL;
                 break;
             }
-            if (visited_contains(&visited, location)) {
-                free(buf.data);
+            if (redirects >= max_redirects) {
                 curl_easy_cleanup(curl);
-                result = FIRC_ERR_INVAL; /* redirect loop detected */
-                break;
-            }
-            if (redirects >= FIRC_SUB_FETCH_MAX_REDIRECTS) {
-                free(buf.data);
-                curl_easy_cleanup(curl);
-                result = FIRC_ERR_LIMIT; /* too many redirects */
+                result = FIRC_ERR_LIMIT;
                 break;
             }
             char *next = strdup(location);
-            free(buf.data);
             curl_easy_cleanup(curl);
             if (!next) {
                 result = FIRC_ERR_NOMEM;
@@ -255,40 +301,80 @@ static firc_err_t fetch(const char *url, uint32_t mark, char **out_body, size_t 
 
         curl_easy_cleanup(curl);
         if (status < 200 || status >= 300) {
-            free(buf.data);
             result = FIRC_ERR_PROTO;
             break;
         }
-
-        if (!buf.data) {
-            /* 0-byte body: write_cb was never called, so hand back an allocated empty string, not NULL */
-            buf.data = calloc(1, 1);
-            if (!buf.data) {
-                result = FIRC_ERR_NOMEM;
-                break;
-            }
-        }
-        /* a NUL in the body would be invisible to the const-char* parser and silently truncate what gets saved */
-        if (!firc_sub_body_is_srs(buf.data, buf.len) && memchr(buf.data, '\0', buf.len) != NULL) {
-            char shown[160];
-            firc_sub_url_redact(current, shown, sizeof shown);
-            FIRC_WARN("the list at %s holds a NUL byte and is not text; refused rather "
-                      "than read up to it",
-                      shown);
-            free(buf.data);
-            result = FIRC_ERR_PROTO;
-            break;
-        }
-        if (progress) { progress(ud, buf.len, buf.len); }
-        *out_body = buf.data;
-        *out_len = buf.len;
+        if (o->progress) { o->progress(o->progress_ud, x.delivered, x.delivered); }
         result = FIRC_OK;
         break;
     }
 
     free(current);
     visited_clear(&visited);
+    curl_slist_free_all(headers);
     return result;
+}
+
+typedef struct mem_sink {
+    char *data;
+    size_t len;
+    size_t cap;
+    bool over_cap;
+    bool nomem;
+} mem_sink_t;
+
+static bool mem_sink_write(void *ud, const uint8_t *data, size_t n) {
+    mem_sink_t *m = ud;
+    if (m->len + n > FIRC_SUB_FETCH_MAX_BODY_BYTES) {
+        m->over_cap = true;
+        return false;
+    }
+    if (m->len + n + 1 > m->cap) {
+        size_t new_cap = m->cap ? m->cap * 2 : 4096;
+        while (new_cap < m->len + n + 1) { new_cap *= 2; }
+        char *na = realloc(m->data, new_cap);
+        if (!na) {
+            m->nomem = true;
+            return false;
+        }
+        m->data = na;
+        m->cap = new_cap;
+    }
+    memcpy(m->data + m->len, data, n);
+    m->len += n;
+    m->data[m->len] = '\0';
+    return true;
+}
+
+static firc_err_t fetch(const char *url, uint32_t mark, char **out_body, size_t *out_len,
+                        firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status) {
+    *out_body = NULL;
+    *out_len = 0;
+    firc_sub_fetch_opts_t o = {.mark = mark, .progress = progress, .progress_ud = ud};
+    mem_sink_t m = {0};
+    firc_err_t err = firc_sub_fetch_to(url, &o, mem_sink_write, &m, out_http_status);
+    if (err == FIRC_ERR_CANCELED && m.over_cap) { err = FIRC_ERR_LIMIT; }
+    if (err == FIRC_ERR_CANCELED && m.nomem) { err = FIRC_ERR_NOMEM; }
+    if (err != FIRC_OK) {
+        free(m.data);
+        return err;
+    }
+    if (!m.data) {
+        m.data = calloc(1, 1);
+        if (!m.data) { return FIRC_ERR_NOMEM; }
+    }
+    if (!firc_sub_body_is_srs(m.data, m.len) && memchr(m.data, '\0', m.len) != NULL) {
+        char shown[160];
+        firc_sub_url_redact(url, shown, sizeof shown);
+        FIRC_WARN("the list at %s holds a NUL byte and is not text; refused rather "
+                  "than read up to it",
+                  shown);
+        free(m.data);
+        return FIRC_ERR_PROTO;
+    }
+    *out_body = m.data;
+    *out_len = m.len;
+    return FIRC_OK;
 }
 
 firc_err_t firc_sub_fetch_list(const char *url, char **out_body, size_t *out_len) {
@@ -312,3 +398,4 @@ firc_err_t firc_sub_fetch_list_mark(const char *url, uint32_t mark, char **out_b
                                     int *out_http_status) {
     return firc_sub_fetch_list_mark_ex(url, mark, out_body, out_len, out_http_status, NULL, NULL);
 }
+

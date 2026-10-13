@@ -1,12 +1,15 @@
 #ifndef FIRC_SYSTEM_H
 #define FIRC_SYSTEM_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "firc/app.h"
 #include "firc/httpd.h"
 #include "firc/tunnels.h"
+
+typedef struct firc_update firc_update_t;
 
 typedef struct firc_system_ctx {
     void *policies; /* Keenetic policy resolver; NULL before main starts it, empty before its first read */
@@ -20,6 +23,7 @@ typedef struct firc_system_ctx {
     uint16_t web_port; /* the WebUI's listening port, 0 if none */
     uint16_t web_moved_from; /* the port it was configured on when that one was busy, else 0 */
     const firc_tunnels_t *tunnels; /* the running tunnels, read on the loop thread; NULL if none */
+    firc_update_t *update; /* the updater, whose install refuses a restart; NULL if none */
 } firc_system_ctx_t;
 
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx);
@@ -35,6 +39,9 @@ firc_err_t firc_system_listen_web(firc_system_ctx_t *ctx, firc_httpd_t *h, const
                                   size_t n);
 
 void firc_settings_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx);
+
+/* a POST /system/restart was answered and has not stopped this daemon within its timeout; loop thread */
+bool firc_system_restart_under_way(firc_system_ctx_t *ctx);
 
 /* whether next's listeners could be bound now (one matching running's is skipped); FIRC_ERR_INVAL sets *field/why */
 firc_err_t firc_settings_probe_listeners(const firc_app_config_t *next,

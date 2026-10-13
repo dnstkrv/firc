@@ -301,6 +301,23 @@ export const SECTIONS: Section[] = [
       ),
     ],
   },
+  {
+    id: "updates",
+    title: () => t("Updates"),
+    rows: [
+      row(
+        () => t("Check for updates daily"),
+        () => t("Asks GitHub once a day; off by default"),
+        [
+          {
+            key: "app.update.check",
+            label: () => t("Check for updates daily"),
+            control: { kind: "switch" },
+          },
+        ],
+      ),
+    ],
+  },
 ];
 
 export const FIELDS: Record<string, Field> = Object.fromEntries(

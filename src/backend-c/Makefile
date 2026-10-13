@@ -5,6 +5,8 @@ CC       := $(CROSS_COMPILE)gcc
 BUILD    ?= $(if $(CROSS_COMPILE),cross-$(patsubst %-,%,$(CROSS_COMPILE)),host)
 BUILDDIR := build/$(BUILD)
 FIRC_VERSION ?= unattached
+FIRC_TARGET ?=
+FIRC_REVISION ?= 1
 
 ENTWARE_KN ?=
 
@@ -21,7 +23,8 @@ TUNVLESS_DIR := ../tunvless
 TUNVLESS_HDR := -I$(TUNVLESS_DIR)/src/proto/vless
 CFLAGS   += $(CSTD) $(OPT) $(WARNINGS) -Iinclude $(TUNVLESS_HDR) -MMD -MP \
             -D_POSIX_C_SOURCE=200809L \
-            -DFIRC_VERSION=\"$(FIRC_VERSION)\" -fno-common \
+            -DFIRC_VERSION=\"$(FIRC_VERSION)\" \
+            -DFIRC_TARGET=\"$(FIRC_TARGET)\" -DFIRC_REVISION=$(FIRC_REVISION) -fno-common \
             $(if $(ENTWARE_KN),-DFIRC_ENTWARE_KN) \
             $(if $(filter entware,$(PLATFORM)),-DFIRC_PLATFORM_ENTWARE)
 # CI passes CFLAGS_EXTRA=-Werror.
@@ -132,6 +135,7 @@ API_SRCS := \
     src/api/staticfiles.c \
     src/api/group_lists.c \
     src/api/tunnels.c \
+    src/api/update_api.c \
     src/crypto/jwt.c
 
 # Needs libyaml.
@@ -162,6 +166,11 @@ SUBSCRIPTIONS_SRCS := \
     src/subscriptions/fetch.c \
     src/subscriptions/worker.c
 
+# Needs cJSON and libcurl.
+UPDATE_SRCS := src/update/release.c \
+    src/update/handoff.c \
+    src/update/update.c
+
 # The capture's readers; CI fails the build if a routing layer references a symbol from these.
 TAP_SRCS := \
     src/tap/clienthello.c \
@@ -185,7 +194,8 @@ INTERFACES_SRCS := \
     src/interfaces/keenetic_resolvers.c
 
 LIB_SRCS := $(CORE_SRCS) $(CONFIG_SRCS) $(NETFILTER_SRCS) $(API_SRCS) $(SUBSCRIPTIONS_SRCS) \
-            $(TUNNELS_SRCS) $(INTERFACES_SRCS) $(TAP_RULES_SRCS) $(TAP_SRCS) $(TAP_CFG_SRCS)
+            $(TUNNELS_SRCS) $(INTERFACES_SRCS) $(TAP_RULES_SRCS) $(TAP_SRCS) $(TAP_CFG_SRCS) \
+            $(UPDATE_SRCS)
 
 MAIN_SRC := src/main/main.c
 CONFIGTOOL_SRC := src/tools/configtool.c
@@ -196,13 +206,14 @@ CONFIG_OBJS := $(CONFIG_SRCS:%.c=$(BUILDDIR)/%.o)
 NETFILTER_OBJS := $(NETFILTER_SRCS:%.c=$(BUILDDIR)/%.o)
 API_OBJS := $(API_SRCS:%.c=$(BUILDDIR)/%.o)
 SUBSCRIPTIONS_OBJS := $(SUBSCRIPTIONS_SRCS:%.c=$(BUILDDIR)/%.o)
+UPDATE_OBJS := $(UPDATE_SRCS:%.c=$(BUILDDIR)/%.o)
 TUNNELS_OBJS := $(TUNNELS_SRCS:%.c=$(BUILDDIR)/%.o) \
     $(TUNVLESS_PARSER_SRCS:$(TUNVLESS_DIR)/%.c=$(BUILDDIR)/tunvless/%.o)
 INTERFACES_OBJS := $(INTERFACES_SRCS:%.c=$(BUILDDIR)/%.o)
 TAP_RULES_OBJS := $(TAP_RULES_SRCS:%.c=$(BUILDDIR)/%.o)
 TAP_OBJS := $(TAP_SRCS:%.c=$(BUILDDIR)/%.o) $(TAP_CFG_SRCS:%.c=$(BUILDDIR)/%.o)
 LIB_OBJS := $(CORE_OBJS) $(CONFIG_OBJS) $(NETFILTER_OBJS) $(API_OBJS) $(SUBSCRIPTIONS_OBJS) \
-            $(TUNNELS_OBJS) $(INTERFACES_OBJS) $(TAP_RULES_OBJS) $(TAP_OBJS)
+            $(TUNNELS_OBJS) $(INTERFACES_OBJS) $(TAP_RULES_OBJS) $(TAP_OBJS) $(UPDATE_OBJS)
 MAIN_OBJ := $(MAIN_SRC:%.c=$(BUILDDIR)/%.o)
 CONFIGTOOL_OBJ := $(CONFIGTOOL_SRC:%.c=$(BUILDDIR)/%.o)
 DNSTOOL_OBJ := $(DNSTOOL_SRC:%.c=$(BUILDDIR)/%.o)
@@ -279,6 +290,13 @@ $(BUILDDIR)/tests/test_app: tests/unit/test_app.c $(LIB_OBJS) $(TEST_SUPPORT_OBJ
 	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(APP_WRAP) -o $@ $< \
 	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
 
+UPDATE_WRAP := -Wl,--wrap=calloc
+
+$(BUILDDIR)/tests/test_update: tests/unit/test_update.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(UPDATE_WRAP) -o $@ $< \
+	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
+
 SYSTEM_WRAP := -Wl,--wrap=firc_app_netfilter_health,--wrap=firc_kn_get_iface_aliases
 
 $(BUILDDIR)/tests/test_system: tests/unit/test_system.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
@@ -304,7 +322,7 @@ sanitize:
 	    LDFLAGS="-fsanitize=$(SAN)" test
 
 # Own build dir: TSan and ASan objects do not mix.
-TSAN_TESTS := test_keenetic_policy test_keenetic_resolvers test_loop test_queue test_nfcommit test_sub_worker test_app
+TSAN_TESTS := test_keenetic_policy test_keenetic_resolvers test_loop test_queue test_nfcommit test_sub_worker test_app test_update test_update_api test_settings_api
 TSAN_BINS := $(TSAN_TESTS:%=build/tsan/tests/%)
 tsan:
 	$(MAKE) BUILD=tsan \
@@ -351,6 +369,13 @@ $(BUILDDIR)/fuzz/fuzz_singbox $(BUILDDIR)/fuzz/fuzz_srs: $(BUILDDIR)/fuzz/%: tes
 	@mkdir -p $(dir $@)
 	$(FUZZ_CC) -std=c11 -g -O1 -Iinclude -D_POSIX_C_SOURCE=200809L \
 	    -fsanitize=fuzzer,address,undefined -o $@ $< $(CORE_SRCS) $(CONFIG_SRCS) $(DEP_LIBS)
+
+$(BUILDDIR)/fuzz/fuzz_release: tests/fuzz/fuzz_release.c src/update/release.c src/api/json.c $(CORE_SRCS) \
+                               $(CONFIG_SRCS)
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) -std=c11 -g -O1 -Iinclude -D_POSIX_C_SOURCE=200809L \
+	    -fsanitize=fuzzer,address,undefined -o $@ $< src/update/release.c src/api/json.c $(CORE_SRCS) \
+	    $(CONFIG_SRCS) $(DEP_LIBS)
 
 $(BUILDDIR)/fuzz/%: tests/fuzz/%.c $(CORE_SRCS) $(TAP_SRCS)
 	@mkdir -p $(dir $@)
