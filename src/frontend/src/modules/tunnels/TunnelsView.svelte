@@ -49,7 +49,7 @@
     ready={store.canAdd}
     onAdd={addTunnel}
     onSave={() => void store.saveChanges()}
-    saveLabel={t("Save")}
+    saveLabel={t("Save Changes")}
   >
     {#snippet search()}
       {#if restarting.length > 0}

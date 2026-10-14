@@ -1491,6 +1491,44 @@ TEST device_down_is_every_status_but_up(void)
     PASS();
 }
 
+TEST device_starting_is_a_start_or_a_wait_with_its_since(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    setenv("FAKE_MODE", "noread", 1);
+    apply_yaml(&f, AB_LINKS "  - id: off\n    device: tunvless1\n    enable: false\n" WAIT_TUN);
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
+    ASSERT_EQ(FIRC_TUN_ST_STARTING, status_of(&f, "a"));
+    firc_tun_state_t st[FIRC_TUN_MAX];
+    size_t n = firc_tunrun_states(f.run, st, FIRC_TUN_MAX);
+    int64_t want_a = 0, want_wait = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(st[i].device, "tunvless0") == 0) { want_a = st[i].since_ms; }
+        if (strcmp(st[i].device, "tunvless3") == 0) { want_wait = st[i].since_ms; }
+    }
+    int64_t since = -1;
+    ASSERT(firc_tunrun_device_starting(f.run, "tunvless0", &since));
+    ASSERT(want_a != 0 && want_a == since);
+    since = -1;
+    ASSERTm("waiting for its first nodes", firc_tunrun_device_starting(f.run, "tunvless3", &since));
+    ASSERT(want_wait != 0 && want_wait == since);
+    ASSERT_FALSEm("off", firc_tunrun_device_starting(f.run, "tunvless1", &since));
+    ASSERT_FALSEm("no tunnel names it", firc_tunrun_device_starting(f.run, "tunvless7", &since));
+    ASSERT_FALSEm("no device", firc_tunrun_device_starting(f.run, NULL, &since));
+
+    setenv("FAKE_MODE", "ok", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    ASSERT_FALSEm("up", firc_tunrun_device_starting(f.run, "tunvless0", &since));
+
+    setenv("FAKE_MODE", "crash", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_BACKOFF, run_until_status(&f, "a", FIRC_TUN_ST_BACKOFF, 3000));
+    ASSERT_FALSEm("backoff", firc_tunrun_device_starting(f.run, "tunvless0", &since));
+    fx_down(&f);
+    PASS();
+}
+
 static int64_t g_watch_now;
 static int64_t watch_now(void) { return g_watch_now; }
 
@@ -1680,6 +1718,7 @@ SUITE(tunrun)
     RUN_TEST(the_built_rows_are_kept_without_links);
     RUN_TEST(mark_of_reports_the_uplink_mark_and_whether_a_child_holds_it);
     RUN_TEST(device_down_is_every_status_but_up);
+    RUN_TEST(device_starting_is_a_start_or_a_wait_with_its_since);
     RUN_TEST(five_minutes_without_a_node_is_an_error_for_the_device);
     RUN_TEST(twenty_no_node_retries_leave_one_warning);
     RUN_TEST(the_watch_follows_the_childs_events);

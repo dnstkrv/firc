@@ -17,6 +17,9 @@
 /* A group's devices chain is `<prefix><id>` + this. */
 #define FIRC_DEVICES_CHAIN_SUFFIX "D"
 
+/* A list group's egress sub-chain is `<prefix><id>` + this. */
+#define FIRC_EGRESS_LIST_SUFFIX "E"
+
 /* The egress dispatch chain, shared by every routed group, is `<prefix>` + this. */
 #define FIRC_EGRESS_CHAIN_SUFFIX "EGRESS"
 

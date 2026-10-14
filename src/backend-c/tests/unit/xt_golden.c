@@ -19,7 +19,7 @@ const firc_test_xt_fixture_t firc_test_xt_all[] = {
     {"empty", "nat"}, {"firmware", "nat"}, {"firmware-firc", "nat"}, {"firmware-firc-remove", "nat"},
     {"sweep", "nat"}, {"dedupe-seed", "nat"}, {"dedupe", "nat"}, {"kept-seed", "nat"}, {"dnat2000-mark", "nat"},
     {"tiny", "nat"}, {"dnat-mark", "nat"}, {"f-empty", "filter"}, {"f-firmware", "filter"}, {"f-firc", "filter"},
-    {"f-egress", "filter"}, {"m-empty", "mangle"}, {"m-firmware", "mangle"}, {"m-firc", "mangle"}, {"m-tap", "mangle"}, {"m-firc2", "mangle"},
+    {"f-egress", "filter"}, {"f-egress-list", "filter"}, {"m-empty", "mangle"}, {"m-firmware", "mangle"}, {"m-firc", "mangle"}, {"m-tap", "mangle"}, {"m-firc2", "mangle"},
 };
 const size_t firc_test_xt_n_all = sizeof(firc_test_xt_all) / sizeof(firc_test_xt_all[0]);
 

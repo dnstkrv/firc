@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Select } from "bits-ui";
+  import type { Snippet } from "svelte";
 
   import Tooltip from "./Tooltip.svelte";
 
@@ -11,39 +12,52 @@
     description?: string;
     disabled?: boolean;
     hint?: string;
+    ariaDescription?: string;
   };
   type Props = {
     options?: Option[];
     selected?: string;
+    shown?: string;
     onValueChange?: (v: string) => void;
+    onItemPointerUp?: (v: string) => void;
     ariaLabel?: string;
     disabled?: boolean;
     showSelectedDescription?: boolean;
+    lead?: Snippet<[Option]>;
+    closed?: Snippet;
+    footer?: Snippet;
     [key: string]: any;
   };
 
   let {
     options = [],
     selected = $bindable<string>(),
+    shown,
     onValueChange,
+    onItemPointerUp,
     ariaLabel = "Select",
     disabled = false,
     showSelectedDescription = true,
+    lead,
+    closed,
+    footer,
     ...rest
   }: Props = $props();
 
-  const selected_option = $derived(options.find((o) => o.value === selected));
-  const selected_label = $derived(selected_option?.label ?? selected ?? "");
+  const shown_value = $derived(shown ?? selected);
+  const selected_option = $derived(options.find((o) => o.value === shown_value));
+  const selected_label = $derived(selected_option?.label ?? shown_value ?? "");
   const selected_description = $derived(
     showSelectedDescription ? (selected_option?.description ?? "") : "",
   );
   const missing_selection = $derived(
-    Boolean(selected) && !options.some((o) => o.value === selected),
+    Boolean(shown_value) && !options.some((o) => o.value === shown_value),
   );
 </script>
 
 {#snippet body(option: Option, selected: boolean)}
   <div class="option">
+    {#if lead}{@render lead(option)}{/if}
     <div class="option-text">
       <span class="option-label">{option.label}</span>
       {#if option.description}
@@ -61,7 +75,9 @@
     <Select.Trigger aria-label={ariaLabel}>
       <div class="selected" class:has-description={selected_description}>
         <div class="selected-text">
-          <div class="selected-value">{selected_label}</div>
+          <div class="selected-value">
+            {#if closed}{@render closed()}{:else}{selected_label}{/if}
+          </div>
           {#if selected_description}
             <div class="selected-description" title={selected_description}>
               {selected_description}
@@ -77,7 +93,13 @@
     <Select.Portal>
       <Select.Content align="start" sideOffset={4} collisionPadding={8}>
         {#each options as option}
-          <Select.Item value={option.value} label={option.label} disabled={option.disabled}>
+          <Select.Item
+            value={option.value}
+            label={option.label}
+            disabled={option.disabled}
+            onpointerup={() => onItemPointerUp?.(option.value)}
+            {...option.ariaDescription ? { "aria-description": option.ariaDescription } : {}}
+          >
             {#snippet children({ selected })}
               {#if option.hint}
                 <Tooltip value={option.hint}>
@@ -89,6 +111,7 @@
             {/snippet}
           </Select.Item>
         {/each}
+        {#if footer}{@render footer()}{/if}
       </Select.Content>
     </Select.Portal>
   </Select.Root>

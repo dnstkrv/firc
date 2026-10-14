@@ -1,0 +1,12 @@
+configVersion: 0.7.0
+groups:
+  - id: 0000ac01
+    name: Listed
+    interface: [nwg1, tunvless0]
+    enable: true
+    rules: []
+  - id: 0000ac02
+    name: One in a list
+    interface: [nwg2]
+    enable: true
+    rules: []

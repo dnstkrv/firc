@@ -451,6 +451,10 @@ TEST save_shape_matches_committed_fixture(void)
         "  showAllInterfaces: false\n"
         "  update:\n"
         "    check: false\n"
+        "  check:\n"
+        "    url: http://cp.cloudflare.com/generate_204\n"
+        "    interval: 30s\n"
+        "    timeout: 5s\n"
         "groups:\n"
         "- id: d663876a\n"
         "  name: Example\n"
@@ -1758,6 +1762,85 @@ TEST a_group_without_a_list_writes_no_list_key(void)
     PASS();
 }
 
+static char *save_groups(const firc_config_t *cfg)
+{
+    char *out = NULL;
+    size_t len = 0;
+    if (firc_config_save_buffer_part(cfg, "0.0.0", FIRC_CFG_GROUPS, &out, &len) != FIRC_OK) { return NULL; }
+    return out;
+}
+
+TEST an_interface_list_loads_in_order_and_saves_back_as_a_list(void)
+{
+    static const char doc[] = "groups:\n"
+                              "  - id: 0000ac01\n"
+                              "    name: G\n"
+                              "    interface: [nwg1, tunvless0, ppp0]\n"
+                              "    enable: true\n";
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
+    const firc_group_t *g = cfg.groups[0];
+    ASSERT_EQ_FMT((size_t)3, firc_group_n_ifaces(g), "%zu");
+    ASSERT_STR_EQ("nwg1", firc_group_iface_at(g, 0));
+    ASSERT_STR_EQ("tunvless0", firc_group_iface_at(g, 1));
+    ASSERT_STR_EQ("ppp0", firc_group_iface_at(g, 2));
+    char *out = save_groups(&cfg);
+    ASSERT(out != NULL);
+    ASSERT_EQ(NULL, strstr(out, "interface: nwg1"));
+    firc_config_t back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    ASSERT_EQ_FMT((size_t)3, firc_group_n_ifaces(back.groups[0]), "%zu");
+    ASSERT_STR_EQ("ppp0", firc_group_iface_at(back.groups[0], 2));
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST a_list_of_one_saves_as_a_string(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "groups:\n  - id: 0000ac01\n    interface: [nwg2]\n"));
+    ASSERT_EQ_FMT((size_t)1, firc_group_n_ifaces(cfg.groups[0]), "%zu");
+    char *out = save_groups(&cfg);
+    ASSERT(out != NULL);
+    ASSERT(strstr(out, "interface: nwg2\n") != NULL);
+    free(out);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST a_bad_interface_list_is_refused(void)
+{
+    static const char *const lists[] = {
+        "[]", "[nwg0, nwg0]", "[a0, a1, a2, a3, a4]", "[blackhole, nwg0]", "[nwg0, \"bad name\"]", "[nwg0, [x]]",
+    };
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        char doc[160];
+        snprintf(doc, sizeof(doc), "groups:\n  - id: 0000ac01\n    interface: %s\n", lists[i]);
+        firc_config_t cfg;
+        ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+        int rc = (int)load_str(&cfg, doc);
+        if (rc != FIRC_ERR_INVAL) { FAILm(lists[i]); }
+        firc_config_clear(&cfg);
+    }
+    PASS();
+}
+
+TEST a_string_interface_still_loads_as_before(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "groups:\n  - id: 0000ac01\n    interface: \"bad name\"\n"));
+    ASSERT_STR_EQ("bad name", firc_group_iface_at(cfg.groups[0], 0));
+    ASSERT_EQ_FMT((size_t)1, firc_group_n_ifaces(cfg.groups[0]), "%zu");
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -1766,6 +1849,10 @@ int main(int argc, char **argv)
     RUN_TEST(a_group_list_in_the_new_shape_loads_quietly);
     RUN_TEST(a_saved_group_list_carries_edits_not_rules);
     RUN_TEST(a_group_list_with_no_edits_writes_an_empty_list);
+    RUN_TEST(an_interface_list_loads_in_order_and_saves_back_as_a_list);
+    RUN_TEST(a_list_of_one_saves_as_a_string);
+    RUN_TEST(a_bad_interface_list_is_refused);
+    RUN_TEST(a_string_interface_still_loads_as_before);
     RUN_TEST(overrides_round_trip);
     RUN_TEST(an_override_with_a_full_key_round_trips);
     RUN_TEST(an_override_key_is_folded_like_the_rule_it_names);

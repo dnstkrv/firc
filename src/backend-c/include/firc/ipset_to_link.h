@@ -14,6 +14,8 @@
 
 #define FIRC_IPSET_TO_LINK_BLACKHOLE "blackhole"
 
+#define FIRC_IPSET_TO_LINK_IFACES_MAX 4
+
 typedef struct firc_ipset_to_link firc_ipset_to_link_t;
 
 #define FIRC_IFACE_ROUTE_METRIC 10u
@@ -137,10 +139,17 @@ firc_err_t firc_ipset_to_link_build_subnet_rules_dev(firc_ipt_t *ipt, const char
 firc_err_t firc_ipset_to_link_enable(firc_ipset_to_link_t *l, const char **step);
 /* Takes the ip rule, then the routes; flows and chains are the caller's. */
 firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l);
-/* Disables l, leaving its reply rule when keep_reply (a newer link put in the same one), and frees it. */
-firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, bool keep_reply);
-/* Whether l put in the reply rule of its mark field. */
-bool firc_ipset_to_link_has_reply_rule(const firc_ipset_to_link_t *l);
+/* Disables l and frees it, leaving each reply rule newer (nullable) holds on the same field and iif. */
+firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, const firc_ipset_to_link_t *newer);
+
+/* Replaces the list (1..FIRC_IPSET_TO_LINK_IFACES_MAX) before enable; entry `active` carries the default unless blocked. */
+firc_err_t firc_ipset_to_link_set_ifaces(firc_ipset_to_link_t *l, const char *const *names, size_t n, size_t active,
+                                         bool blocked);
+/* Moves the default to entry `to`, deleting the old one before writing the new; blocked leaves only the blackhole. */
+firc_err_t firc_ipset_to_link_set_active(firc_ipset_to_link_t *l, size_t to, bool blocked);
+/* The active entry's index; *blocked (nullable) says whether the table is down to its blackhole. */
+size_t firc_ipset_to_link_active(const firc_ipset_to_link_t *l, bool *blocked);
+const char *firc_ipset_to_link_active_iface(const firc_ipset_to_link_t *l);
 
 /* Re-stages the group's chains for a full rebuild without committing; no-op unless enabled. */
 firc_err_t firc_ipset_to_link_prepare_iptables(firc_ipset_to_link_t *l);
@@ -157,6 +166,12 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
                                               uint32_t mark, uint32_t mark_field,
                                               const firc_fakeip_snapshot_t *snap, const char *group_id,
                                               const firc_nf_devices_t *dev);
+
+/* Same, for every entry of a list of 1..FIRC_IPSET_TO_LINK_IFACES_MAX; a list of 2 or more guards through `<chain>E`. */
+firc_err_t firc_ipset_to_link_build_rules_list(firc_ipt_t *ipt, const char *chain_name, const char *const *ifaces,
+                                               size_t n, uint32_t mark, uint32_t mark_field,
+                                               const firc_fakeip_snapshot_t *snap, const char *group_id,
+                                               const firc_nf_devices_t *dev);
 
 /* Call for each link whose interface the netlink event was about. */
 firc_err_t firc_ipset_to_link_on_link_up(firc_ipset_to_link_t *l);

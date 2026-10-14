@@ -246,6 +246,20 @@ firc_err_t firc_rtnl_rule_add_reply(firc_rtnl_t *r, int family, uint32_t mark, u
     return rule_add(r, family, mark, mask, table, priority, iif);
 }
 
+firc_err_t firc_rtnl_rule_del_reply(firc_rtnl_t *r, int family, uint32_t mark, uint32_t mask, const char *iif,
+                                    uint32_t table, uint32_t priority) {
+    if (iif == NULL || iif[0] == '\0' || strlen(iif) >= IFNAMSIZ) { return FIRC_ERR_INVAL; }
+    uint8_t buf[FIRC_RTNL_REQBUF];
+    memset(buf, 0, sizeof(buf));
+    struct nlmsghdr *nlh = firc_rtnl_build_rule(buf, false, ++r->seq, family, mark, mask, table, priority);
+    mnl_attr_put_strz(nlh, FRA_IIFNAME, iif);
+    int code = 0;
+    firc_err_t err = nl_execute(r, nlh, &code, NULL, NULL);
+    if (err != FIRC_OK) { return err; }
+    if (code == 0 || code == ENOENT) { return FIRC_OK; }
+    return firc_err_from_errno(code);
+}
+
 firc_err_t firc_rtnl_rule_del(firc_rtnl_t *r, int family, uint32_t mark, uint32_t mask,
                               uint32_t table, uint32_t priority) {
     uint8_t buf[FIRC_RTNL_REQBUF];
@@ -490,11 +504,17 @@ static void link_msg_cb(const struct nlmsghdr *h, void *ud) {
     ctx->flags = ifi->ifi_flags;
 }
 
+static unsigned (*g_nametoindex)(const char *) = if_nametoindex;
+
+void firc_rtnl_set_nametoindex_for_test(unsigned (*fn)(const char *name)) {
+    g_nametoindex = fn != NULL ? fn : if_nametoindex;
+}
+
 firc_err_t firc_rtnl_link_by_name(firc_rtnl_t *r, const char *name, firc_link_info_t *out, bool *found) {
     *found = false;
     memset(out, 0, sizeof(*out));
 
-    unsigned idx = if_nametoindex(name);
+    unsigned idx = g_nametoindex(name);
     if (idx == 0) { return FIRC_OK; }
 
     uint8_t buf[FIRC_RTNL_REQBUF];

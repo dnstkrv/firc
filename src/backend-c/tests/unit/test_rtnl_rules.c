@@ -439,6 +439,23 @@ TEST the_table_is_handed_whole_on_demand(void) {
     PASS();
 }
 
+TEST the_reply_delete_names_its_iif(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_rtnl_rule_del_reply(f.rtnl, AF_INET, 0x70000, FIRC_MARK_GROUP_MASK, "", RT_TABLE_MAIN, 49));
+    ASSERT_EQ(FIRC_OK, firc_rtnl_rule_del_reply(f.rtnl, AF_INET, 0x70000, FIRC_MARK_GROUP_MASK, "nwg1", RT_TABLE_MAIN, 49));
+    fake_rtnl_msg_t m[2];
+    ASSERT_EQ_FMT((size_t)1, fake_rtnl_messages(f.kernel, m, 2), "%zu");
+    ASSERT_EQ(RTM_DELRULE, m[0].type);
+    ASSERT_STR_EQ("nwg1", m[0].iif);
+    ASSERT_EQ_FMT(0x70000u, m[0].mark, "%x");
+    ASSERT_EQ_FMT(49u, m[0].priority, "%u");
+    ASSERT_EQ_FMT(FIRC_MARK_GROUP_MASK, m[0].mask, "%x");
+    ASSERT_EQ_FMT((uint32_t)RT_TABLE_MAIN, m[0].table, "%u");
+    down(&f);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -463,5 +480,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_seed_naming_a_field_or_owner_already_seeded_is_refused);
     RUN_TEST(the_store_is_told_at_every_change_and_only_then);
     RUN_TEST(the_table_is_handed_whole_on_demand);
+    RUN_TEST(the_reply_delete_names_its_iif);
     GREATEST_MAIN_END();
 }

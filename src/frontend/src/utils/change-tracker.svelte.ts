@@ -1,3 +1,14 @@
+function samePrimitives(a: unknown[], b: unknown[]): boolean {
+  return (
+    a.length === b.length && a.every((x, i) => (x === null || typeof x !== "object") && x === b[i])
+  );
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  return Array.isArray(a) && Array.isArray(b) && samePrimitives(a, b);
+}
+
 export class ChangeTracker<T extends object> {
   private state: T;
   private proxy: T;
@@ -110,7 +121,7 @@ export class ChangeTracker<T extends object> {
     const currentVal = target[prop];
 
     let props = this.dirtyObjectProps.get(id);
-    if (currentVal !== originalVal) {
+    if (!sameValue(currentVal, originalVal)) {
       if (!props) {
         props = new Set();
         this.dirtyObjectProps.set(id, props);
@@ -246,6 +257,15 @@ export class ChangeTracker<T extends object> {
   isDirtyWithin(node: any): boolean {
     if (!this.isDirty) return false;
     return this.dirtyUnder(this.reverseProxyCache.get(node) || node);
+  }
+
+  isFieldDirty(node: any, prop: string): boolean {
+    const _ = this.version;
+    const raw = this.reverseProxyCache.get(node) || node;
+    if (!raw?.id || !this.originalObjects.has(raw.id)) return true;
+    if (this.dirtyObjectProps.get(raw.id)?.has(prop)) return true;
+    const value = raw[prop];
+    return Array.isArray(value) && this.dirtyArrays.has(value);
   }
 
   private dirtyUnder(node: any): boolean {

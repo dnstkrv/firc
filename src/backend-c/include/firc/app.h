@@ -13,6 +13,7 @@
 #include "firc/nfcommit.h"
 #include "firc/err.h"
 #include "firc/id.h"
+#include "firc/ifchoose.h"
 #include "firc/iptables.h"
 #include "firc/models.h"
 #include "firc/sub_worker.h"
@@ -131,6 +132,25 @@ bool firc_app_group_live(const firc_app_t *app, firc_id_t id, const char **reaso
 /* down(ud, iface): iface is a tunnel's device and the tunnel carries no traffic; read on the loop thread; NULL: none */
 typedef bool (*firc_app_tunnel_down_fn)(void *ud, const char *iface);
 void firc_app_set_tunnel_down(firc_app_t *app, firc_app_tunnel_down_fn down, void *ud);
+
+typedef struct firc_app_ifaces {
+    firc_ifchoice_t (*pick)(void *ud, const firc_group_t *g);
+    bool (*view)(void *ud, const char *name, firc_if_view_t *out);
+    firc_err_t (*move_up)(void *ud, firc_id_t id);
+    void (*settings)(void *ud, const firc_app_config_t *run);
+    void *ud;
+} firc_app_ifaces_t;
+/* The interface-list watcher's hooks, copied; NULL detaches. pick is asked at every enable, settings after every
+ * live apply. */
+void firc_app_set_ifaces(firc_app_t *app, const firc_app_ifaces_t *h);
+/* The watcher's view of one interface; false when nothing watches it. */
+bool firc_app_iface_view(const firc_app_t *app, const char *name, firc_if_view_t *out);
+/* Moves a listed group back to its first entry: NOENT unknown group, INVAL one entry, NOSYS nothing checks it,
+ * AGAIN not routed, STATE first entry not alive; takes nf_mu through the move, so never call it holding nf_mu. */
+firc_err_t firc_app_move_up(firc_app_t *app, firc_id_t id);
+/* Points a routed group's table at entry `to` of its list, or at its blackhole when blocked; flushes its flows when
+ * the exit changed and republishes its resolver. NOENT when not routed, INVAL past the list. Loop thread. */
+firc_err_t firc_app_move_group(firc_app_t *app, firc_id_t id, size_t to, bool blocked);
 
 /* retries every group whose enable failed and is due, spaced 1s to 60s; true if one came up; no-op if not running */
 bool firc_app_retry_groups(firc_app_t *app, const char *iface);

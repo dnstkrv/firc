@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "firc/dnat.h"
 #include "firc/fakeip.h"
@@ -50,6 +51,9 @@ const firc_setting_t firc_settings[] = {
     {"app.httpWeb.host.address", FIRC_SK_ADDR, RESTART, AT(http_web.host.address), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.port", FIRC_SK_PORT, RESTART, AT(http_web.host.port), 0, FIRC_APPLY_NONE},
     {"app.update.check", FIRC_SK_BOOL, LIVE, AT(update.check), 0, FIRC_APPLY_NONE},
+    {"app.check.url", FIRC_SK_STRING, LIVE, AT(check.url), 0, FIRC_APPLY_CHECK},
+    {"app.check.interval", FIRC_SK_SEC, LIVE, AT(check.interval), 0, FIRC_APPLY_CHECK},
+    {"app.check.timeout", FIRC_SK_SEC, LIVE, AT(check.timeout), 0, FIRC_APPLY_CHECK},
 };
 _Static_assert(sizeof(firc_settings) / sizeof(firc_settings[0]) == FIRC_SETTINGS_COUNT,
                "FIRC_SETTINGS_COUNT is the number of rows");
@@ -202,6 +206,7 @@ static size_t longest_chain_suffix(void)
     static const size_t lens[] = {
         FIRC_ID_STR_LEN - 1,
         FIRC_ID_STR_LEN - 1 + sizeof(FIRC_DEVICES_CHAIN_SUFFIX) - 1,
+        FIRC_ID_STR_LEN - 1 + sizeof(FIRC_EGRESS_LIST_SUFFIX) - 1,
         sizeof(FIRC_EGRESS_CHAIN_SUFFIX) - 1,
         sizeof(FIRC_DNAT_CHAIN_SUFFIX) - 1,
         sizeof(FIRC_POOL_REJECT_CHAIN_SUFFIX) - 1,
@@ -233,6 +238,20 @@ static bool chain_prefix_ok(const char *s)
         *why = (w);           \
         return FIRC_ERR_INVAL; \
     } while (0)
+
+bool firc_check_url_ok(const char *u)
+{
+    if (u == NULL || strlen(u) > 512) { return false; }
+    size_t skip = strncasecmp(u, "http://", 7) == 0 ? 7 : strncasecmp(u, "https://", 8) == 0 ? 8 : 0;
+    if (skip == 0) { return false; }
+    char h = u[skip];
+    if (h == '\0' || h == '/' || h == '?' || h == '#' || h == ':') { return false; }
+    if (memchr(u + skip, '[', strcspn(u + skip, "/?#")) != NULL) { return false; }
+    for (const unsigned char *p = (const unsigned char *)u; *p != '\0'; p++) {
+        if (*p <= 0x20 || *p == 0x7f) { return false; }
+    }
+    return true;
+}
 
 firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
                                  const char **why)
@@ -337,6 +356,13 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
                 REFUSE("app.link", "an interface is named twice");
             }
         }
+    }
+    if (!firc_check_url_ok(c->check.url)) { REFUSE("app.check.url", "an http:// or https:// URL with a name or IPv4 host"); }
+    if (c->check.interval < 10 * FIRC_DURATION_SEC || c->check.interval > 3600 * FIRC_DURATION_SEC) {
+        REFUSE("app.check.interval", "10 to 3600 seconds");
+    }
+    if (c->check.timeout < 1 * FIRC_DURATION_SEC || c->check.timeout > 30 * FIRC_DURATION_SEC) {
+        REFUSE("app.check.timeout", "1 to 30 seconds");
     }
     return FIRC_OK;
 }

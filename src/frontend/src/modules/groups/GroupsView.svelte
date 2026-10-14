@@ -375,6 +375,9 @@
   store.groupFieldError.field.startsWith("resolve")
     ? store.groupFieldError.error
     : null}
+  live={groupDialog.mode === "edit" && groupDialog.groupIndex !== null
+    ? store.liveOf(store.data[groupDialog.groupIndex]?.id ?? "")
+    : undefined}
   on:close={closeGroupDialog}
   on:submit={(event) => handleGroupDialogSubmit(event.detail)}
 />

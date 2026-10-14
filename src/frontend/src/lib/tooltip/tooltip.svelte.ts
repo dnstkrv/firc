@@ -3,13 +3,15 @@ import { tick } from "svelte";
 export const tooltip = $state({
   visible: false,
   text: "",
+  keys: [] as string[],
   x: 0,
   y: 0,
   opacity: 0,
 });
 
-export async function show(anchor: HTMLElement, text: string) {
+export async function show(anchor: HTMLElement, text: string, keys: string[] = []) {
   tooltip.text = text;
+  tooltip.keys = keys;
   tooltip.visible = true;
   tooltip.opacity = 0;
 

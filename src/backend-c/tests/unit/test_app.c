@@ -24,6 +24,7 @@
 #include "firc/resolveroute.h"
 #include "firc/conntrack.h"
 #include "firc/fakeip.h"
+#include "firc/ifchoose.h"
 #include "firc/mark.h"
 #include "firc/iptables.h"
 #include "firc/netfilter_cleaner.h"
@@ -225,6 +226,7 @@ static unsigned test_iface_index(const char *name) {
 static int64_t g_capture_seconds;
 
 static firc_dnsproxy_t *g_app_proxy;
+static firc_kn_resolvers_t *g_app_resolvers;
 static uint64_t (*g_app_mono)(void);
 static char g_proxy_sentinel_byte;
 #define PROXY_SENTINEL ((firc_dnsproxy_t *)(void *)&g_proxy_sentinel_byte)
@@ -316,6 +318,7 @@ static bool locked_app_up_ex(locked_app_t *l, firc_loop_t *loop,
                             .pipeline = l->pipeline,
                             .router = l->router,
                             .proxy = g_app_proxy,
+                            .resolvers = g_app_resolvers,
                             .pool = l->pool,
                             .loop = loop,
                             .nflog_open = nflog_open,
@@ -350,6 +353,7 @@ static void locked_app_down_rest(locked_app_t *l) {
     g_iface_there = -1;
     g_capture_seconds = 0;
     g_app_proxy = NULL;
+    g_app_resolvers = NULL;
     g_app_mono = NULL;
     for (int w = 0; w < 2; w++) {
         fake_nflog_stop(g_tap_kernel[w]);
@@ -6961,6 +6965,374 @@ TEST the_clean_writes_nothing_left_staged_before_it(void) {
     PASS();
 }
 
+static unsigned up_links(const char *name) {
+    if (strcmp(name, "up0") == 0) { return 7; }
+    if (strcmp(name, "up1") == 0) { return 8; }
+    return if_nametoindex(name);
+}
+
+static firc_group_t *listed_group(uint8_t tag, const char *rule) {
+    firc_group_t *g = activation_group(tag, rule, NULL, NULL);
+    const char *const names[] = {"up0", "up1"};
+    firc_group_set_ifaces(g, names, 2);
+    return g;
+}
+
+static size_t routes_via(locked_app_t *l, uint16_t type, uint32_t oif) {
+    fake_rtnl_msg_t m[256];
+    size_t n = fake_rtnl_messages(l->kernel, m, 256), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type == type && m[i].rtm_type == RTN_UNICAST && m[i].oif == oif &&
+            m[i].priority == FIRC_IFACE_ROUTE_METRIC) {
+            c++;
+        }
+    }
+    return c;
+}
+
+static firc_ifchoice_t g_pick;
+static firc_ifchoice_t fixed_pick(void *ud, const firc_group_t *g) {
+    (void)ud;
+    (void)g;
+    return g_pick;
+}
+
+static bool listed_up(locked_app_t *l) {
+    if (!locked_app_up(l)) { return false; }
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    firc_app_set_running(l->app, true);
+    return firc_app_add_group(l->app, listed_group(1, "a.example")) == FIRC_OK && first_pass_done(l);
+}
+
+static void listed_down(locked_app_t *l) {
+    locked_app_down(l);
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    g_pick = (firc_ifchoice_t){0, false};
+}
+
+static const firc_id_t k_g1 = {{1, 1, 1, 1}};
+
+TEST a_move_replaces_the_default_and_writes_no_rule(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    ASSERT_EQ_FMT((size_t)1, routes_via(&l, RTM_NEWROUTE, 7), "%zu");
+    size_t writes = firc_fake_ipt_writes(l.fake);
+    firc_app_nf_enter(l.app);
+    uint64_t change = firc_app_nf_change_for_test(l.app);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT_EQ_FMT((size_t)1, routes_via(&l, RTM_DELROUTE, 7), "%zu");
+    ASSERT_EQ_FMT((size_t)1, routes_via(&l, RTM_NEWROUTE, 8), "%zu");
+    ASSERT_EQ_FMTm("no rule written", writes, firc_fake_ipt_writes(l.fake), "%zu");
+    firc_app_nf_enter(l.app);
+    uint64_t after = firc_app_nf_change_for_test(l.app);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQm("no pass asked for", change, after);
+    const uint8_t one[4] = {198, 18, 0, 5};
+    fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_move_group(l.app, k_g1, 2, false));
+    ASSERT_FALSEm("a refused move leaves the flows", fake_ct_deleted(l.ctk, one, 4));
+    ASSERT_EQ(FIRC_ERR_NOENT, firc_app_move_group(l.app, (firc_id_t){{9, 9, 9, 9}}, 0, false));
+    firc_group_t *off = listed_group(3, "c.example");
+    off->enable = false;
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, off));
+    ASSERT_EQm("not routed", FIRC_ERR_NOENT, firc_app_move_group(l.app, (firc_id_t){{3, 3, 3, 3}}, 1, false));
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_move_whose_route_was_refused_is_written_on_the_next_ask(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWROUTE, ENETUNREACH);
+    ASSERT(firc_app_move_group(l.app, k_g1, 1, false) != FIRC_OK);
+    ASSERT_FALSEm("fixture: the insert met the refusal", fake_rtnl_failure_armed(l.kernel));
+    ASSERT_FALSE(firc_ruleset_has_iface_route(firc_app_find_group_by_id(l.app, k_g1), AF_INET));
+    size_t asked = routes_via(&l, RTM_NEWROUTE, 8);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT_EQ_FMTm("the second ask writes the default the first could not", asked + 1, routes_via(&l, RTM_NEWROUTE, 8),
+                   "%zu");
+    ASSERT(firc_ruleset_has_iface_route(firc_app_find_group_by_id(l.app, k_g1), AF_INET));
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_move_flushes_the_group_s_flows_by_mark(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT(fake_ct_deleted(l.ctk, one, 4));
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_move_drops_the_group_s_resolver_pools_and_cache(void) {
+    g_app_proxy = PROXY_SENTINEL;
+    g_closed.n = 0;
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, listed_group(1, "a.example")));
+    size_t before = id_log_count(&g_closed, k_g1);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT(id_log_count(&g_closed, k_g1) > before);
+    before = id_log_count(&g_closed, k_g1);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, true));
+    ASSERTm("a block on the same entry closes them too", id_log_count(&g_closed, k_g1) > before);
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_refused_rewrite_of_the_same_route_keeps_the_resolver_pools(void) {
+    g_app_proxy = PROXY_SENTINEL;
+    g_closed.n = 0;
+    locked_app_t l;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, listed_group(1, "a.example")));
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWROUTE, ENETUNREACH);
+    ASSERT(firc_app_move_group(l.app, k_g1, 1, false) != FIRC_OK);
+    size_t closed = id_log_count(&g_closed, k_g1);
+    ASSERT(closed > 0);
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWROUTE, ENETUNREACH);
+    ASSERT(firc_app_move_group(l.app, k_g1, 1, false) != FIRC_OK);
+    ASSERT_FALSEm("fixture: the rewrite met the refusal", fake_rtnl_failure_armed(l.kernel));
+    ASSERT_EQ_FMT(closed, id_log_count(&g_closed, k_g1), "%zu");
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_move_drops_the_teardown_flush_queued_on_the_entry_it_left(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    firc_app_nf_enter(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, k_g1, listed_group(1, "a.example")));
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
+    firc_app_pay_flushes_for_test(l.app, firc_app_nf_change_for_test(l.app));
+    firc_app_nf_leave(l.app);
+    ASSERT_FALSEm("a flow opened on up1 after the move", fake_ct_deleted(l.ctk, one, 4));
+    listed_down(&l);
+    PASS();
+}
+
+TEST a_moved_group_resolves_through_its_active_entry_s_firmware_resolvers(void) {
+    firc_kn_iface_resolvers_t *items = calloc(1, sizeof(*items));
+    ASSERT(items != NULL);
+    snprintf(items[0].iface, sizeof(items[0].iface), "%s", "up1");
+    ASSERT_EQ(FIRC_RESOLVER_ADDR_OK, firc_resolver_addr_parse("9.9.9.9", &items[0].servers[0]));
+    items[0].n = 1;
+    firc_kn_resolver_map_t m = {.items = items, .n = 1};
+    firc_kn_resolvers_t *resolvers = firc_kn_resolvers_start(NULL, 30, NULL, NULL);
+    ASSERT(resolvers != NULL);
+    firc_kn_resolvers_swap(resolvers, &m);
+    g_app_resolvers = resolvers;
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    firc_resolve_route_t r;
+    ASSERT(firc_resolve_router_route(l.router, k_g1, &r));
+    ASSERT_STR_EQ("up0", r.iface);
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_NONE, r.source);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT(firc_resolve_router_route(l.router, k_g1, &r));
+    ASSERT_STR_EQ("up1", r.iface);
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_FIRMWARE, r.source);
+    ASSERT_EQ((size_t)1, r.n_servers);
+    ASSERT_EQ(9, r.servers[0].ip.b[0]);
+    ASSERT(firc_resolve_route_usable(&r));
+    listed_down(&l);
+    firc_kn_resolvers_stop(resolvers);
+    PASS();
+}
+
+TEST a_blocked_group_has_no_resolver_until_it_is_unblocked(void) {
+    firc_kn_iface_resolvers_t *items = calloc(1, sizeof(*items));
+    ASSERT(items != NULL);
+    snprintf(items[0].iface, sizeof(items[0].iface), "%s", "up0");
+    ASSERT_EQ(FIRC_RESOLVER_ADDR_OK, firc_resolver_addr_parse("9.9.9.9", &items[0].servers[0]));
+    items[0].n = 1;
+    firc_kn_resolver_map_t m = {.items = items, .n = 1};
+    firc_kn_resolvers_t *resolvers = firc_kn_resolvers_start(NULL, 30, NULL, NULL);
+    ASSERT(resolvers != NULL);
+    firc_kn_resolvers_swap(resolvers, &m);
+    g_app_resolvers = resolvers;
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    const firc_group_t *g = firc_ruleset_group(firc_app_find_group_by_id(l.app, k_g1));
+    firc_app_resolver_info_t info;
+    firc_app_group_resolver(l.app, g, &info);
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_FIRMWARE, info.source);
+    ASSERT_EQ_FMT((size_t)1, info.n_servers, "%zu");
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 0, true));
+    firc_app_group_resolver(l.app, g, &info);
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_NONE, info.source);
+    ASSERT_EQ_FMT((size_t)0, info.n_servers, "%zu");
+    firc_resolve_route_t r;
+    ASSERT(firc_resolve_router_route(l.router, k_g1, &r));
+    ASSERTm("no leg is sent into the blackhole", r.blackhole);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 0, false));
+    firc_app_group_resolver(l.app, g, &info);
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_FIRMWARE, info.source);
+    ASSERT_EQ_FMT((size_t)1, info.n_servers, "%zu");
+    listed_down(&l);
+    firc_kn_resolvers_stop(resolvers);
+    PASS();
+}
+
+TEST every_entry_dead_leaves_the_blackhole_and_says_no_interface(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    ASSERT_STR_EQ("live", live_reason(&l, 1));
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 0, true));
+    ASSERT_EQ_FMT((size_t)1, routes_via(&l, RTM_DELROUTE, 7), "%zu");
+    ASSERT_STR_EQ("no-interface", live_reason(&l, 1));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 0, false));
+    ASSERT_EQ_FMT((size_t)2, routes_via(&l, RTM_NEWROUTE, 7), "%zu");
+    ASSERT_FALSEm("back on the same entry: its flows are its own", fake_ct_deleted(l.ctk, one, 4));
+    ASSERT_STR_EQ("live", live_reason(&l, 1));
+    listed_down(&l);
+    PASS();
+}
+
+TEST an_edit_on_the_second_entry_keeps_it_and_its_flows(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    firc_app_set_running(l.app, true);
+    firc_app_ifaces_t hooks = {.pick = fixed_pick};
+    g_pick = (firc_ifchoice_t){1, false};
+    firc_app_set_ifaces(l.app, &hooks);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, listed_group(1, "a.example")));
+    ASSERT(first_pass_done(&l));
+    ASSERT_EQ_FMT((size_t)0, routes_via(&l, RTM_NEWROUTE, 7), "%zu");
+    const uint8_t one[4] = {198, 18, 0, 5};
+    fake_ct_add(l.ctk, AF_INET, k_flow_src, k_flow_dst, one, field_of(&l, 1) | FIRC_MARK_HANDLED);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, k_g1, listed_group(1, "a.example")));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT_EQ_FMTm("the edit came back on up1", (size_t)0, routes_via(&l, RTM_NEWROUTE, 7), "%zu");
+    ASSERT_FALSEm("and kept the flows up1 carries", fake_ct_deleted(l.ctk, one, 4));
+    g_pick = (firc_ifchoice_t){0, false};
+    started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, k_g1, listed_group(1, "a.example")));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("an edit that lands on up0 pays the flush queued on up1", fake_ct_deleted(l.ctk, one, 4));
+    firc_app_set_ifaces(l.app, NULL);
+    listed_down(&l);
+    PASS();
+}
+
+TEST live_reads_the_active_entry_s_tunnel(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    firc_app_set_tunnel_down(l.app, fake_tunnel_down, NULL);
+    g_tun_down_iface = "up1";
+    ASSERT_STR_EQ("live", live_reason(&l, 1));
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT_STR_EQ("tunnel-down", live_reason(&l, 1));
+    g_tun_down_iface = NULL;
+    ASSERT_STR_EQ("live", live_reason(&l, 1));
+    firc_app_set_tunnel_down(l.app, NULL, NULL);
+    listed_down(&l);
+    PASS();
+}
+
+static unsigned up0_only(const char *name) {
+    return strcmp(name, "up1") == 0 ? 0 : up_links(name);
+}
+
+TEST live_reads_the_active_entry_s_link(void) {
+    locked_app_t l;
+    ASSERT(listed_up(&l));
+    firc_rtnl_set_nametoindex_for_test(up0_only);
+    ASSERT_STR_EQm("up1 gone, the group is on up0", "live", live_reason(&l, 1));
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    firc_rtnl_set_nametoindex_for_test(up0_only);
+    ASSERT_STR_EQ("no-interface", live_reason(&l, 1));
+    listed_down(&l);
+    PASS();
+}
+
+static int g_hooked;
+static int64_t g_hooked_interval;
+static int64_t g_hooked_timeout;
+static void record_settings(void *ud, const firc_app_config_t *run) {
+    (void)ud;
+    g_hooked++;
+    g_hooked_interval = run->check.interval;
+    g_hooked_timeout = run->check.timeout;
+}
+
+TEST a_live_check_setting_reaches_the_watcher(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    firc_app_ifaces_t hooks = {.settings = record_settings};
+    firc_app_set_ifaces(l.app, &hooks);
+    g_hooked = 0;
+    firc_app_config_t next;
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(l.app)));
+    next.check.interval = 45 * FIRC_DURATION_SEC;
+    bool applied[FIRC_SETTINGS_COUNT];
+    firc_err_t live = FIRC_OK;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(l.app, &next, NULL, "", applied, &live));
+    ASSERT_EQ(1, g_hooked);
+    ASSERT_EQ(45 * FIRC_DURATION_SEC, g_hooked_interval);
+    firc_app_config_t file;
+    memset(&file, 0, sizeof(file));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&file, firc_app_saved_settings(l.app)));
+    file.check.timeout = 3 * FIRC_DURATION_SEC;
+    ASSERT_EQ(FIRC_OK, firc_app_reload_settings(l.app, &file, applied));
+    firc_app_config_clear(&file);
+    ASSERT_EQ(2, g_hooked);
+    ASSERT_EQ(3 * FIRC_DURATION_SEC, g_hooked_timeout);
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(l.app)));
+    next.dns_proxy.upstream.port = (uint16_t)(next.dns_proxy.upstream.port + 1);
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(l.app, &next, NULL, "", applied, &live));
+    ASSERT_EQm("the check resolves through the common upstream", 3, g_hooked);
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(l.app)));
+    next.dns_proxy.unmatched_ttl = next.dns_proxy.unmatched_ttl + FIRC_DURATION_SEC;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(l.app, &next, NULL, "", applied, &live));
+    ASSERT_EQm("a setting the check does not read leaves it alone", 3, g_hooked);
+    firc_app_set_ifaces(l.app, NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+TEST a_failed_list_group_is_retried_when_its_second_entry_comes_up(void) {
+    g_now_ms = 100000;
+    g_app_mono = test_clock;
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(up_links);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, listed_group(2, "b.example")));
+    fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
+    ASSERT_EQ(FIRC_OK, firc_app_start_groups(l.app));
+    ASSERT_FALSEm("fixture: the refusal fired", fake_rtnl_failure_armed(l.kernel));
+    ASSERT_STR_EQ("not-enabled", live_reason(&l, 2));
+    g_now_ms += FIRC_APP_RETRY_MIN_MS;
+    ASSERT(firc_app_retry_groups(l.app, "up1"));
+    ASSERT(wait_written_after(&l, 0));
+    ASSERT_STR_EQ("live", live_reason(&l, 2));
+    listed_down(&l);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -7155,5 +7527,19 @@ int main(int argc, char **argv) {
     RUN_TEST(the_stop_rewrites_the_barrier_the_firmware_took_away);
     RUN_TEST(the_stop_writes_nothing_left_staged_before_it);
     RUN_TEST(the_clean_writes_nothing_left_staged_before_it);
+    RUN_TEST(a_move_replaces_the_default_and_writes_no_rule);
+    RUN_TEST(a_move_whose_route_was_refused_is_written_on_the_next_ask);
+    RUN_TEST(a_move_flushes_the_group_s_flows_by_mark);
+    RUN_TEST(a_move_drops_the_group_s_resolver_pools_and_cache);
+    RUN_TEST(a_refused_rewrite_of_the_same_route_keeps_the_resolver_pools);
+    RUN_TEST(a_move_drops_the_teardown_flush_queued_on_the_entry_it_left);
+    RUN_TEST(a_moved_group_resolves_through_its_active_entry_s_firmware_resolvers);
+    RUN_TEST(a_blocked_group_has_no_resolver_until_it_is_unblocked);
+    RUN_TEST(every_entry_dead_leaves_the_blackhole_and_says_no_interface);
+    RUN_TEST(an_edit_on_the_second_entry_keeps_it_and_its_flows);
+    RUN_TEST(live_reads_the_active_entry_s_tunnel);
+    RUN_TEST(live_reads_the_active_entry_s_link);
+    RUN_TEST(a_live_check_setting_reaches_the_watcher);
+    RUN_TEST(a_failed_list_group_is_retried_when_its_second_entry_comes_up);
     GREATEST_MAIN_END();
 }

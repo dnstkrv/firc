@@ -815,7 +815,7 @@ static cJSON *groups_of(firc_tunnels_ctx_t *ctx, const char *device)
     size_t n = ctx->app != NULL ? firc_app_user_group_count(ctx->app) : 0;
     for (size_t i = 0; a != NULL && i < n; i++) {
         const firc_group_t *g = firc_ruleset_group(firc_app_user_group_at(ctx->app, i));
-        if (g == NULL || g->iface == NULL || strcmp(g->iface, device) != 0) {
+        if (g == NULL || !firc_group_has_iface(g, device)) {
             continue;
         }
         cJSON *s = cJSON_CreateString(g->name != NULL ? g->name : "");

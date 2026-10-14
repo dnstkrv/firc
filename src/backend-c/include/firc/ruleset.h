@@ -70,8 +70,16 @@ firc_err_t firc_ruleset_enable(firc_ruleset_t *rs, const char **step);
 firc_err_t firc_ruleset_disable(firc_ruleset_t *rs);
 /* As firc_ruleset_disable, but its ip rules and routes stay: the link is handed back (NULL when none) to disable and free. */
 firc_ipset_to_link_t *firc_ruleset_disable_hold(firc_ruleset_t *rs);
-/* Whether the routed group put in the reply rule of its mark field. */
-bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs);
+/* The entry and block state the next enable starts a list on; out of range starts on entry 0. */
+void firc_ruleset_set_start(firc_ruleset_t *rs, size_t active, bool blocked);
+/* The link's active entry; 0 and not blocked while there is no link. */
+size_t firc_ruleset_active(const firc_ruleset_t *rs, bool *blocked);
+/* The link's active interface, else the group's entry 0. */
+const char *firc_ruleset_active_iface(const firc_ruleset_t *rs);
+/* See firc_ipset_to_link_set_active; FIRC_ERR_STATE while not routed. */
+firc_err_t firc_ruleset_set_active(firc_ruleset_t *rs, size_t to, bool blocked);
+/* The routed group's link, else NULL; loop thread only. */
+const firc_ipset_to_link_t *firc_ruleset_link(const firc_ruleset_t *rs);
 
 /* Re-stages the chains for a full rebuild; ip rule and routes are left alone. No-op unless enabled. */
 firc_err_t firc_ruleset_prepare_iptables(firc_ruleset_t *rs);

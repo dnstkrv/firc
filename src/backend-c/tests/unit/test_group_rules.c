@@ -1214,6 +1214,67 @@ TEST every_group_shares_one_dispatch_chain_and_one_jump(void)
     PASS();
 }
 
+static char *built_filter(const char *const *ifs, size_t n, char **nat)
+{
+    firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
+    firc_netfilter_register_base_chains(ipt, NULL);
+    uint32_t mark = 0;
+    (void)firc_mark_for_field(1, &mark);
+    char *text = NULL;
+    if (firc_ipset_to_link_build_rules_list(ipt, "FIRC_0000ac01", ifs, n, mark, 1, NULL, NULL, NULL) == FIRC_OK &&
+        firc_ipt_commit(ipt) == FIRC_OK) {
+        text = firc_fake_ipt_print(f, "filter");
+        if (nat != NULL) { *nat = firc_fake_ipt_print(f, "nat"); }
+    }
+    firc_ipt_free(ipt);
+    return text;
+}
+
+TEST a_list_group_accepts_and_masquerades_through_every_entry(void)
+{
+    const char *const ifs[] = {"nwg1", "tunvless0"};
+    char *nat = NULL;
+    char *flt = built_filter(ifs, 2, &nat);
+    ASSERT(flt != NULL && nat != NULL);
+    ASSERT(strstr(flt, "-A FIRC_0000ac01 -o nwg1 -m mark --mark 0x10000/0xff0000 -j ACCEPT\n") != NULL);
+    ASSERT(strstr(flt, "-A FIRC_0000ac01 -o tunvless0 -m mark --mark 0x10000/0xff0000 -j ACCEPT\n") != NULL);
+    ASSERT(strstr(nat, "-A FIRC_0000ac01 -o nwg1 -m mark --mark 0x10000/0xff0000 -j MASQUERADE\n") != NULL);
+    ASSERT(strstr(nat, "-A FIRC_0000ac01 -o tunvless0 -m mark --mark 0x10000/0xff0000 -j MASQUERADE\n") != NULL);
+    free(flt);
+    free(nat);
+    PASS();
+}
+
+TEST the_egress_subchain_returns_only_listed_interfaces(void)
+{
+    const char *const ifs[] = {"nwg1", "tunvless0"};
+    char *flt = built_filter(ifs, 2, NULL);
+    ASSERT(flt != NULL);
+    ASSERT(strstr(flt, "-A FIRC_EGRESS -m mark --mark 0x40010000/0x40ff0000 -m conntrack --ctdir ORIGINAL "
+                       "-j FIRC_0000ac01E\n") != NULL);
+    ASSERT(strstr(flt, "-A FIRC_0000ac01E -i nwg1 -j RETURN\n"
+                       "-A FIRC_0000ac01E -o nwg1 -j RETURN\n"
+                       "-A FIRC_0000ac01E -i tunvless0 -j RETURN\n"
+                       "-A FIRC_0000ac01E -o tunvless0 -j RETURN\n"
+                       "-A FIRC_0000ac01E -j DROP\n") != NULL);
+    ASSERT_EQ(NULL, strstr(flt, "! -i nwg1"));
+    free(flt);
+    PASS();
+}
+
+TEST a_one_entry_group_keeps_its_single_egress_rule(void)
+{
+    const char *const ifs[] = {"nwg1"};
+    char *flt = built_filter(ifs, 1, NULL);
+    ASSERT(flt != NULL);
+    ASSERT(strstr(flt, "-A FIRC_EGRESS ! -i nwg1 ! -o nwg1 -m mark --mark 0x40010000/0x40ff0000 -m conntrack "
+                       "--ctdir ORIGINAL -j DROP\n") != NULL);
+    ASSERT_EQ(NULL, strstr(flt, ":FIRC_0000ac01E "));
+    free(flt);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -1251,5 +1312,8 @@ int main(int argc, char **argv)
     RUN_TEST(push_doubles_its_room_and_keeps_the_duplicate_scan);
     RUN_TEST(a_subnet_set_narrows_only_when_a_prefix_loses_all_cover);
     RUN_TEST(a_link_reports_the_prefixes_it_holds);
+    RUN_TEST(a_list_group_accepts_and_masquerades_through_every_entry);
+    RUN_TEST(the_egress_subchain_returns_only_listed_interfaces);
+    RUN_TEST(a_one_entry_group_keeps_its_single_egress_rule);
     GREATEST_MAIN_END();
 }

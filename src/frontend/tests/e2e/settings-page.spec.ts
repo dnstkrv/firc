@@ -205,3 +205,37 @@ test("the LAN interface suggestions leave out uplink-only interfaces", async ({ 
   await expect(offered).toHaveCount(1);
   await expect(offered).toHaveAttribute("value", "br1");
 });
+
+test("the interface check shows its three fields and saves the interval as a live change", async ({
+  page,
+}) => {
+  const puts: unknown[] = [];
+  await openSettings(page, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(route.request().postDataJSON());
+      await route.fulfill({ json: { applied: ["app.check.interval"], pendingRestart: [] } });
+      return;
+    }
+    await route.fulfill({ json: answer() });
+  });
+  const section = page.locator('[data-section="check"]');
+  await expect(section.locator("header")).toContainText("Interface check");
+  await expect(section.getByRole("textbox", { name: "Check URL" })).toHaveValue(
+    "http://cp.cloudflare.com/generate_204",
+  );
+  await expect(section.getByRole("spinbutton", { name: "Check timeout" })).toHaveValue("5");
+  const interval = section.getByRole("spinbutton", { name: "Check interval" });
+  await expect(interval).toHaveValue("30");
+  await interval.fill("45");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Applies at once")).toBeVisible();
+  await expect(dialog.getByText("Needs a daemon restart")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Save and restart" })).toHaveCount(0);
+  await expect(dialog.locator('[data-key="app.check.interval"] .now')).toHaveText("45 s");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(page.getByRole("dialog")).toBeHidden();
+  expect(puts).toEqual([{ settings: { "app.check.interval": 45 } }]);
+});

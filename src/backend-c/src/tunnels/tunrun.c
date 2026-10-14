@@ -796,6 +796,26 @@ bool firc_tunrun_device_down(const firc_tunrun_t *t, const char *device)
     return false;
 }
 
+bool firc_tunrun_device_starting(const firc_tunrun_t *t, const char *device, int64_t *since_ms)
+{
+    if (device == NULL) {
+        return false;
+    }
+    firc_tun_state_t st[FIRC_TUN_MAX];
+    size_t n = firc_tunrun_states(t, st, FIRC_TUN_MAX);
+    for (size_t i = 0; i < n && i < FIRC_TUN_MAX; i++) {
+        if (strcmp(st[i].device, device) != 0) {
+            continue;
+        }
+        if (st[i].status != FIRC_TUN_ST_STARTING && st[i].status != FIRC_TUN_ST_WAITING) {
+            return false;
+        }
+        *since_ms = st[i].since_ms;
+        return true;
+    }
+    return false;
+}
+
 const firc_tunnels_t *firc_tunrun_config(const firc_tunrun_t *t)
 {
     return &t->cur;

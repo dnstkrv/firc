@@ -619,7 +619,7 @@ bool firc_dns_ptr_query_addr(const firc_dns_msg_t *query, firc_ip_t *out)
     return reverse_addr(q->name, q->name_len, out);
 }
 
-static bool name_from_text(const char *text, uint8_t *out, size_t *out_len)
+bool firc_dns_name_from_text(const char *text, uint8_t *out, size_t *out_len)
 {
     size_t len = 0;
     const char *p = text;
@@ -646,7 +646,7 @@ firc_err_t firc_dns_make_ptr_response(const firc_dns_msg_t *query, const char *t
     }
     uint8_t rdata[FIRC_DNS_MAX_NAME + 1];
     size_t rdata_len = 0;
-    if (target != NULL && !name_from_text(target, rdata, &rdata_len)) { return FIRC_ERR_INVAL; }
+    if (target != NULL && !firc_dns_name_from_text(target, rdata, &rdata_len)) { return FIRC_ERR_INVAL; }
     bool edns = false;
     for (size_t i = 0; i < query->n_additional; i++) {
         if (query->additional[i].rtype == FIRC_DNS_TYPE_OPT) { edns = true; }

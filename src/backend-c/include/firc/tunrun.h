@@ -36,6 +36,10 @@ size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t 
 /* True when device is a configured tunnel's and that tunnel carries no traffic: any status but UP. */
 bool firc_tunrun_device_down(const firc_tunrun_t *t, const char *device);
 
+/* True when device is a configured tunnel's that is starting or waiting for its first nodes; since_ms (monotonic)
+   is when that status began. */
+bool firc_tunrun_device_starting(const firc_tunrun_t *t, const char *device, int64_t *since_ms);
+
 /* The running configuration; valid until the next apply. */
 const firc_tunnels_t *firc_tunrun_config(const firc_tunrun_t *t);
 

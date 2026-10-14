@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "firc/devices.h"
+#include "firc/ifacename.h"
+#include "firc/ipset_to_link.h"
 
 firc_err_t firc_strset(char **dst, const char *src)
 {
@@ -140,6 +142,7 @@ void firc_group_free(firc_group_t *g)
     firc_group_list_free(g->list);
     free(g->name);
     free(g->iface);
+    for (size_t i = 0; i < g->n_iface_rest; i++) { free(g->iface_rest[i]); }
     free(g);
 }
 
@@ -575,6 +578,8 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
     c->netfilter.start_mark_table_index = UINT32_C(0x66697263); /* "firc" */
     c->show_all_interfaces = false;
     c->update.check = false;
+    c->check.interval = 30 * FIRC_DURATION_SEC;
+    c->check.timeout = 5 * FIRC_DURATION_SEC;
 
     firc_err_t err;
     if ((err = firc_strset(&c->http_web.host.address, "[::]")) != FIRC_OK ||
@@ -584,7 +589,8 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
         (err = firc_strset(&c->netfilter.iptables.chain_prefix, "FIRC_")) !=
             FIRC_OK ||
         (err = firc_strset(&c->fakeip.v4.pool, "198.18.0.0/15")) != FIRC_OK ||
-        (err = firc_strset(&c->fakeip.v6.pool, "")) != FIRC_OK) {
+        (err = firc_strset(&c->fakeip.v6.pool, "")) != FIRC_OK ||
+        (err = firc_strset(&c->check.url, "http://cp.cloudflare.com/generate_204")) != FIRC_OK) {
         firc_app_config_clear(c);
         return err;
     }
@@ -616,6 +622,7 @@ void firc_app_config_clear(firc_app_config_t *c)
     free(c->fakeip.v4.pool);
     free(c->fakeip.v6.pool);
     free(c->netfilter.iptables.chain_prefix);
+    free(c->check.url);
     for (size_t i = 0; i < c->n_link; i++) {
         free(c->link[i]);
     }
@@ -666,4 +673,47 @@ void firc_config_clear_groups(firc_config_t *c)
     free(c->groups);
     c->groups = NULL;
     c->n_groups = 0;
+}
+
+bool firc_group_has_iface(const firc_group_t *g, const char *name)
+{
+    if (name == NULL) { return false; }
+    for (size_t i = 0; i < firc_group_n_ifaces(g); i++) {
+        if (strcmp(firc_group_iface_at(g, i), name) == 0) { return true; }
+    }
+    return false;
+}
+
+const char *firc_group_ifaces_check(const char *const *names, size_t n, size_t *bad)
+{
+    *bad = 0;
+    if (n < 1 || n > FIRC_GROUP_IFACES_MAX) { return "a group names 1 to 4 interfaces"; }
+    for (size_t i = 0; i < n; i++) {
+        *bad = i;
+        if (names[i] == NULL || !firc_is_interface_name(names[i])) { return "not an interface name"; }
+        if (n > 1 && strcmp(names[i], FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) { return "blackhole cannot be one of several"; }
+        for (size_t k = 0; k < i; k++) {
+            if (strcmp(names[k], names[i]) == 0) { return "named twice"; }
+        }
+    }
+    return NULL;
+}
+
+firc_err_t firc_group_set_ifaces(firc_group_t *g, const char *const *names, size_t n)
+{
+    if (n < 1 || n > FIRC_GROUP_IFACES_MAX) { return FIRC_ERR_INVAL; }
+    char *copy[FIRC_GROUP_IFACES_MAX] = {NULL};
+    for (size_t i = 0; i < n; i++) {
+        copy[i] = strdup(names[i]);
+        if (copy[i] == NULL) {
+            for (size_t k = 0; k < i; k++) { free(copy[k]); }
+            return FIRC_ERR_NOMEM;
+        }
+    }
+    free(g->iface);
+    for (size_t i = 0; i < g->n_iface_rest; i++) { free(g->iface_rest[i]); }
+    g->iface = copy[0];
+    for (size_t i = 1; i < FIRC_GROUP_IFACES_MAX; i++) { g->iface_rest[i - 1] = copy[i]; }
+    g->n_iface_rest = n - 1;
+    return FIRC_OK;
 }

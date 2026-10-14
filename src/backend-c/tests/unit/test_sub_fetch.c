@@ -762,6 +762,47 @@ TEST a_refusal_or_redirect_body_past_the_cap_is_limit(void) {
     PASS();
 }
 
+static bool discard(void *ud, const uint8_t *p, size_t n) {
+    (void)ud;
+    (void)p;
+    (void)n;
+    return true;
+}
+
+TEST a_fetch_told_not_to_follow_answers_the_redirect(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {.no_redirects = true};
+    long status = 0;
+    ASSERT_EQ(FIRC_ERR_PROTO, firc_sub_fetch_to(url_for("/redirect302"), &o, discard, NULL, &status));
+    ASSERT_EQ(302, status);
+    harness_stop(h);
+    PASS();
+}
+
+TEST a_pinned_address_takes_a_name_no_resolver_knows(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char pin[64], url[96];
+    snprintf(pin, sizeof(pin), "check.test:%d:127.0.0.1", TEST_PORT);
+    snprintf(url, sizeof(url), "http://check.test:%d/list", TEST_PORT);
+    firc_sub_fetch_opts_t o = {.resolve = pin};
+    long status = 0;
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url, &o, discard, NULL, &status));
+    ASSERT_EQ(200, status);
+    harness_stop(h);
+    PASS();
+}
+
+TEST a_url_whose_authority_is_missing_is_refused(void) {
+    ASSERT_FALSE(firc_sub_url_is_supported("http:///x"));
+    ASSERT_FALSE(firc_sub_url_is_supported("http:/x"));
+    ASSERT_FALSE(firc_sub_url_is_supported("https:///list"));
+    ASSERT(firc_sub_url_is_supported("HTTPS://a.example/list"));
+    ASSERT(firc_sub_url_is_supported("http://[::1]:8080/list"));
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -797,5 +838,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_transfer_below_the_floor_is_given_up);
     RUN_TEST(the_last_progress_call_names_the_whole_body);
     RUN_TEST(a_refusal_or_redirect_body_past_the_cap_is_limit);
+    RUN_TEST(a_fetch_told_not_to_follow_answers_the_redirect);
+    RUN_TEST(a_pinned_address_takes_a_name_no_resolver_knows);
+    RUN_TEST(a_url_whose_authority_is_missing_is_refused);
     GREATEST_MAIN_END();
 }

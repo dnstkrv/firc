@@ -88,6 +88,9 @@ void firc_dns_msg_truncate(firc_dns_msg_t *msg);
  * the root, an escaped name, or one that does not fit `out`. */
 bool firc_dns_msg_queried_name(const firc_dns_msg_t *msg, char *out, size_t out_len);
 
+/* Wire form of a dotted name, no trailing dot; false for an empty label, a label over 63 or a name over 255. */
+bool firc_dns_name_from_text(const char *text, uint8_t *out, size_t *out_len);
+
 /* Caps answer-section TTLs at max_ttl; true only when one came down. */
 bool firc_dns_msg_clamp_ttl(firc_dns_msg_t *msg, uint32_t max_ttl);
 

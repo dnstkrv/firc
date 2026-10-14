@@ -25,15 +25,15 @@ LISTENER unix
 STEP 1 POST /api/v1/groups
 REQBODY {"enable":false,"id":"aabbccdd","interface":"eth0","name":"g1","rules":[{"enable":true,"rule":"example.com","type":"domain"}]}
 STATUS 200
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
+BODY {"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
 ---
 STEP 2 GET /api/v1/groups?with_rules=true
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}]}
 ---
 STEP 3 GET /api/v1/groups/aabbccdd?with_rules=true
 STATUS 200
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
+BODY {"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth0","live":false,"liveReason":"disabled","name":"g1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
 ---
 STEP 4 GET /api/v1/groups/nothex!
 STATUS 400
@@ -43,252 +43,256 @@ STEP 5 GET /api/v1/groups/deadbeef
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 6 PUT /api/v1/groups/aabbccdd
+STEP 6 POST /api/v1/groups/aabbccdd/move-up
+STATUS 400
+BODY {"error":"<ERR>"}
+---
+STEP 7 PUT /api/v1/groups/aabbccdd
 REQBODY {"enable":false,"interface":"eth1","name":"g1-renamed"}
 STATUS 200
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth1","live":false,"liveReason":"disabled","name":"g1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
+BODY {"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"aabbccdd","interface":"eth1","live":false,"liveReason":"disabled","name":"g1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
 ---
-STEP 7 POST /api/v1/groups/aabbccdd/rules
+STEP 8 POST /api/v1/groups/aabbccdd/rules
 REQBODY {"enable":true,"rule":"*.example.org","type":"wildcard"}
 STATUS 200
 BODY {"enable":true,"id":"<RULE-R2>","rule":"*.example.org","type":"wildcard"}
 ---
-STEP 8 GET /api/v1/groups/aabbccdd/rules
+STEP 9 GET /api/v1/groups/aabbccdd/rules
 STATUS 200
 BODY {"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"},{"enable":true,"id":"<RULE-R2>","rule":"*.example.org","type":"wildcard"}]}
 ---
-STEP 9 GET /api/v1/groups/aabbccdd/rules/<RULE-R2>
+STEP 10 GET /api/v1/groups/aabbccdd/rules/<RULE-R2>
 STATUS 200
 BODY {"enable":true,"id":"<RULE-R2>","rule":"*.example.org","type":"wildcard"}
 ---
-STEP 10 PUT /api/v1/groups/aabbccdd/rules/<RULE-R2>
+STEP 11 PUT /api/v1/groups/aabbccdd/rules/<RULE-R2>
 REQBODY {"enable":false,"rule":"*.example.net","type":"wildcard"}
 STATUS 200
 BODY {"enable":false,"id":"<RULE-R2>","rule":"*.example.net","type":"wildcard"}
 ---
-STEP 11 DELETE /api/v1/groups/aabbccdd/rules/<RULE-R2>
+STEP 12 DELETE /api/v1/groups/aabbccdd/rules/<RULE-R2>
 STATUS 200
 BODY <empty>
 ---
-STEP 12 GET /api/v1/groups/aabbccdd/rules
+STEP 13 GET /api/v1/groups/aabbccdd/rules
 STATUS 200
 BODY {"rules":[{"enable":true,"id":"<RULE-R1>","rule":"example.com","type":"domain"}]}
 ---
-STEP 13 GET /api/v1/groups/aabbccdd/rules/deadbeef
+STEP 14 GET /api/v1/groups/aabbccdd/rules/deadbeef
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 14 DELETE /api/v1/groups/aabbccdd
+STEP 15 DELETE /api/v1/groups/aabbccdd
 STATUS 200
 BODY <empty>
 ---
-STEP 15 GET /api/v1/groups
+STEP 16 GET /api/v1/groups
 STATUS 200
 BODY {"groups":[]}
 ---
-STEP 16 PUT /api/v1/groups
+STEP 17 PUT /api/v1/groups
 REQBODY {"groups":[{"enable":false,"id":"10101010","interface":"eth0","name":"bulk-1","rules":[{"enable":true,"rule":"bulk.example.com","type":"domain"}]},{"enable":false,"id":"30303030","interface":"eth1","name":"bulk-2"}]}
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
 ---
-STEP 17 GET /api/v1/groups?with_rules=true
+STEP 18 GET /api/v1/groups?with_rules=true
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
 ---
-STEP 18 PUT /api/v1/groups
+STEP 19 PUT /api/v1/groups
 REQBODY {}
 STATUS 400
 BODY {"error":"<ERR>"}
 ---
-STEP 19 GET /api/v1/system/interfaces
+STEP 20 GET /api/v1/system/interfaces
 STATUS 200
 BODY {"interfaces":[{"id":"blackhole"},{"id":"<HOST-INTERFACES>"}]}
 ---
-STEP 20 POST /api/v1/system/hooks/netfilterd
+STEP 21 POST /api/v1/system/hooks/netfilterd
 REQBODY {"table":"nat","type":"iptables"}
 STATUS 200
 BODY <empty>
 ---
-STEP 21 POST /api/v1/system/config/save
+STEP 22 POST /api/v1/system/config/save
 STATUS 200
 BODY <empty>
 ---
-STEP 22 GET /api/v1/system/update
+STEP 23 GET /api/v1/system/update
 STATUS 200
 BODY {"canInstall":false,"check":null,"error":null,"installed":{"revision":1,"target":"","version":"unattached"},"progress":null,"reason":"no-target","result":null,"state":"idle"}
 ---
-STEP 23 POST /api/v1/system/update/install
+STEP 24 POST /api/v1/system/update/install
 REQBODY {"version":"9.9.9"}
 STATUS 403
 BODY {"error":"this build cannot install updates: no-target","reason":"no-target"}
 ---
-STEP 24 GET /api/v1/groups
+STEP 25 GET /api/v1/groups
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
----
-STEP 25 POST /api/v1/groups
-REQBODY {"enable":false,"id":"40404040","interface":"eth0","list":{"url":"https://example.com/list.txt"},"name":"s1"}
-STATUS 200
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"eth0","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
 ---
 STEP 26 POST /api/v1/groups
+REQBODY {"enable":false,"id":"40404040","interface":"eth0","list":{"url":"https://example.com/list.txt"},"name":"s1"}
+STATUS 200
+BODY {"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"eth0","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}
+---
+STEP 27 POST /api/v1/groups
 REQBODY {"enable":false,"id":"40404040","interface":"eth0","list":{"url":"https://example.com/list.txt"},"name":"s1"}
 STATUS 409
 BODY {"error":"<ERR>"}
 ---
-STEP 27 POST /api/v1/groups
+STEP 28 POST /api/v1/groups
 REQBODY {"list":{},"name":"no-url"}
 STATUS 400
 BODY {"error":"<ERR>"}
 ---
-STEP 28 GET /api/v1/groups
+STEP 29 GET /api/v1/groups
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"eth0","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"eth0","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
 ---
-STEP 29 PUT /api/v1/groups
+STEP 30 PUT /api/v1/groups
 REQBODY {"groups":[{"enable":false,"id":"10101010","interface":"eth0","name":"bulk-1","rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"enable":false,"id":"30303030","interface":"eth1","name":"bulk-2"},{"enable":false,"id":"40404040","list":{"url":"https://example.com/list.txt"},"name":"s1-renamed"}]}
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[{"enable":true,"id":"<RULE-BR1>","rule":"bulk.example.com","type":"domain"}]},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]},{"active":"","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"},"rules":[]}]}
 ---
-STEP 30 GET /api/v1/groups
+STEP 31 GET /api/v1/groups
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":null,"state":"idle"},"url":"https://example.com/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
 ---
-STEP 31 PUT /api/v1/groups
+STEP 32 PUT /api/v1/groups
 REQBODY {}
 STATUS 400
 BODY {"error":"<ERR>"}
 ---
-STEP 32 GET /api/v1/groups/list/preview
+STEP 33 GET /api/v1/groups/list/preview
 STATUS 400
 BODY {"error":"<ERR>"}
 ---
-STEP 33 GET /api/v1/groups/list/preview?url=http://127.0.0.1:18099/list.txt
+STEP 34 GET /api/v1/groups/list/preview?url=http://127.0.0.1:18099/list.txt
 STATUS 200
 BODY {"byType":{"namespace":2},"dropped":0,"rules":[{"enable":true,"id":"<PREVIEWRULE-0>","rule":"one.example","type":"namespace"},{"enable":true,"id":"<PREVIEWRULE-1>","rule":"two.example","type":"namespace"}],"total":2,"unconstrained":0}
 ---
-STEP 34 GET /api/v1/groups/list/preview?url=http://127.0.0.1:1/nope
+STEP 35 GET /api/v1/groups/list/preview?url=http://127.0.0.1:1/nope
 STATUS 502
 BODY {"error":"<ERR>"}
 ---
-STEP 35 POST /api/v1/groups/deadbeef/list/sync
+STEP 36 POST /api/v1/groups/deadbeef/list/sync
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 36 POST /api/v1/groups/40404040/list/sync
+STEP 37 POST /api/v1/groups/40404040/list/sync
 REQBODY {"url":"http://127.0.0.1:18099/list.txt"}
 STATUS 202
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":{"bytes":0,"stage":"fetch","total":0},"state":"queued"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}
+BODY {"active":"","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":0,"rulesTotal":0,"sync":{"error":"","lastCheck":0,"progress":{"bytes":0,"stage":"fetch","total":0},"state":"queued"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}
 ---
-STEP 37 GET /api/v1/groups
+STEP 38 GET /api/v1/groups
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":"<TS>","rulesTotal":2,"sync":{"error":"","lastCheck":"<TS>","progress":null,"state":"idle"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":"<TS>","rulesTotal":2,"sync":{"error":"","lastCheck":"<TS>","progress":null,"state":"idle"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
 ---
-STEP 38 POST /api/v1/groups/40404040/list/sync
+STEP 39 POST /api/v1/groups/40404040/list/sync
 STATUS 202
-BODY {"devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":"<TS>","rulesTotal":2,"sync":{"error":"","lastCheck":"<TS>","progress":{"bytes":0,"stage":"fetch","total":0},"state":"queued"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}
+BODY {"active":"","devices":{"allow":[],"deny":[]},"enable":false,"id":"40404040","interface":"","list":{"interval":0,"lastUpdate":"<TS>","rulesTotal":2,"sync":{"error":"","lastCheck":"<TS>","progress":{"bytes":0,"stage":"fetch","total":0},"state":"queued"},"url":"http://127.0.0.1:18099/list.txt"},"live":false,"liveReason":"disabled","name":"s1-renamed","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}
 ---
-STEP 39 GET /api/v1/groups/40404040/list/sync/events
+STEP 40 GET /api/v1/groups/40404040/list/sync/events
 STATUS 200
 BODY {"events":["done"]}
 ---
-STEP 40 GET /api/v1/groups/deadbeef/list/sync/events
+STEP 41 GET /api/v1/groups/deadbeef/list/sync/events
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 41 DELETE /api/v1/groups/40404040
+STEP 42 DELETE /api/v1/groups/40404040
 STATUS 200
 BODY <empty>
 ---
-STEP 42 DELETE /api/v1/groups/40404040
+STEP 43 DELETE /api/v1/groups/40404040
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 43 GET /api/v1/groups
+STEP 44 GET /api/v1/groups
 STATUS 200
-BODY {"groups":[{"devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
+BODY {"groups":[{"active":"eth0","devices":{"allow":[],"deny":[]},"enable":false,"id":"10101010","interface":"eth0","live":false,"liveReason":"disabled","name":"bulk-1","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}},{"active":"eth1","devices":{"allow":[],"deny":[]},"enable":false,"id":"30303030","interface":"eth1","live":false,"liveReason":"disabled","name":"bulk-2","resolve":{"server":"","tunnel":true},"resolver":{"fallbacks":0,"servers":[],"source":"none"}}]}
 ---
-STEP 44 GET /api/v1/tunnels
+STEP 45 GET /api/v1/tunnels
 STATUS 200
 BODY {"tunnels":[]}
 ---
-STEP 45 PUT /api/v1/tunnels
+STEP 46 PUT /api/v1/tunnels
 REQBODY {}
 STATUS 400
 BODY {"error":"must be a list","field":"tunnels","tunnel":null}
 ---
-STEP 46 PUT /api/v1/tunnels
+STEP 47 PUT /api/v1/tunnels
 REQBODY {"tunnels":[{"device":"eth0","enable":false,"id":"t1"}]}
 STATUS 400
 BODY {"error":"must start with tunvless","field":"device","tunnel":"t1"}
 ---
-STEP 47 PUT /api/v1/tunnels
+STEP 48 PUT /api/v1/tunnels
 REQBODY {"tunnels":[{"description":"PRAW-1","device":"tunvless0","exclude":["0000000b:NL-1"],"filter":"^(A|NL-.*)$","id":"t1","order":["0000000b:NL-2"],"sources":[{"id":"0000000a","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"},{"id":"0000000b","interval":3600,"kind":"subscription","name":"Stub","url":"http://127.0.0.1:18099/tunnels-sub.txt?token=fake"}]},{"device":"tunvless1","enable":false,"id":"t2","sources":[{"id":"0000000c","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"}],"uplink":{"kind":"tunnel","ref":"t1"}}]}
 STATUS 200
 BODY {"restarted":["tunvless0"],"tunnels":[{"active":1,"advanced":{"ca":"","insecure":false,"timeout":8},"by":"connection","description":"PRAW-1","device":"tunvless0","enable":true,"exclude":["0000000b:NL-1"],"filter":"^(A|NL-.*)$","id":"t1","interval":60,"order":["0000000b:NL-2"],"silence":20,"sources":[{"id":"0000000a","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"},{"id":"0000000b","interval":3600,"kind":"subscription","name":"Stub","url":"http://127.0.0.1:18099/tunnels-sub.txt?token=fake"}],"uplink":{"kind":"auto","ref":""}},{"active":1,"advanced":{"ca":"","insecure":false,"timeout":8},"by":"connection","description":"","device":"tunvless1","enable":false,"exclude":[],"filter":"","id":"t2","interval":60,"order":[],"silence":20,"sources":[{"id":"0000000c","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"}],"uplink":{"kind":"tunnel","ref":"t1"}}],"updated":[]}
 ---
-STEP 48 GET /api/v1/tunnels
+STEP 49 GET /api/v1/tunnels
 STATUS 200
 BODY {"tunnels":[{"active":1,"advanced":{"ca":"","insecure":false,"timeout":8},"by":"connection","description":"PRAW-1","device":"tunvless0","enable":true,"exclude":["0000000b:NL-1"],"filter":"^(A|NL-.*)$","id":"t1","interval":60,"order":["0000000b:NL-2"],"silence":20,"sources":[{"id":"0000000a","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"},{"id":"0000000b","interval":3600,"kind":"subscription","name":"Stub","url":"http://127.0.0.1:18099/tunnels-sub.txt?token=fake"}],"uplink":{"kind":"auto","ref":""}},{"active":1,"advanced":{"ca":"","insecure":false,"timeout":8},"by":"connection","description":"","device":"tunvless1","enable":false,"exclude":[],"filter":"","id":"t2","interval":60,"order":[],"silence":20,"sources":[{"id":"0000000c","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"}],"uplink":{"kind":"tunnel","ref":"t1"}}]}
 ---
-STEP 49 GET /api/v1/tunnels/state
+STEP 50 GET /api/v1/tunnels/state
 STATUS 200
 BODY {"tunnels":[{"active":["A"],"backoffS":"<LIVE>","device":"tunvless0","groups":[],"id":"t1","lastExit":"<LIVE>","nodes":[{"key":"0000000b:NL-2","name":"NL-2","since":"<LIVE>","skipReason":"","source":"Stub","state":"reserve"},{"key":"0000000a:A","name":"A","since":"<LIVE>","skipReason":"","source":"link","state":"active"},{"key":"0000000b:NL-1","name":"NL-1","since":"<LIVE>","skipReason":"","source":"Stub","state":"excluded"}],"rxBps":"<LIVE>","since":"<LIVE>","status":"up","subscriptions":[{"error":"","fetching":false,"lastOk":"<LIVE>","lastTry":"<LIVE>","name":"Stub","nodes":3}],"txBps":"<LIVE>","uplinkOk":true},{"active":[],"backoffS":"<LIVE>","device":"tunvless1","groups":[],"id":"t2","lastExit":"<LIVE>","nodes":[{"key":"0000000c:A","name":"A","since":"<LIVE>","skipReason":"","source":"link","state":"reserve"}],"rxBps":"<LIVE>","since":"<LIVE>","status":"off","subscriptions":[],"txBps":"<LIVE>","uplinkOk":true}]}
 ---
-STEP 50 POST /api/v1/tunnels/preview
+STEP 51 POST /api/v1/tunnels/preview
 REQBODY {"tunnel":{"description":"PRAW-1","device":"tunvless0","exclude":[],"filter":"^(NL|DE)-","id":"t1","order":["0000000b:DE-1"],"sources":[{"id":"0000000a","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"},{"id":"0000000b","interval":3600,"kind":"subscription","name":"Stub","url":"http://127.0.0.1:18099/tunnels-sub.txt?token=fake"}]}}
 STATUS 200
 BODY {"matched":4,"nodes":[{"excluded":false,"isNew":false,"key":"0000000b:DE-1","missing":false,"name":"DE-1","overCap":false,"skipReason":"","source":"Stub"},{"excluded":false,"isNew":true,"key":"0000000a:A","missing":false,"name":"A","overCap":false,"skipReason":"","source":"link"},{"excluded":false,"isNew":true,"key":"0000000b:NL-1","missing":false,"name":"NL-1","overCap":false,"skipReason":"","source":"Stub"},{"excluded":false,"isNew":true,"key":"0000000b:NL-2","missing":false,"name":"NL-2","overCap":false,"skipReason":"","source":"Stub"}],"subscriptions":[{"cached":true,"name":"Stub"}],"total":4}
 ---
-STEP 51 POST /api/v1/tunnels/preview
+STEP 52 POST /api/v1/tunnels/preview
 REQBODY {"tunnel":{"description":"PRAW-1","device":"tunvless0","exclude":[],"filter":"(","id":"t1","order":["0000000b:DE-1"],"sources":[{"id":"0000000a","kind":"link","link":"vless://00000000-0000-4000-8000-000000000001@a.example.invalid:443?security=none#A"},{"id":"0000000b","interval":3600,"kind":"subscription","name":"Stub","url":"http://127.0.0.1:18099/tunnels-sub.txt?token=fake"}]}}
 STATUS 400
 BODY {"error":"a POSIX extended regular expression under 1024 bytes","field":"filter","tunnel":"t1"}
 ---
-STEP 52 POST /api/v1/tunnels/probe
+STEP 53 POST /api/v1/tunnels/probe
 REQBODY {"id":"t1"}
 STATUS 200
 BODY {"nodes":[{"firstByteMs":20,"handshakeMs":10,"key":"0000000b:NL-2","ok":true,"why":""},{"firstByteMs":21,"handshakeMs":11,"key":"0000000a:A","ok":true,"why":""},{"firstByteMs":22,"handshakeMs":12,"key":"0000000b:NL-1","ok":true,"why":""}]}
 ---
-STEP 53 POST /api/v1/tunnels/probe
+STEP 54 POST /api/v1/tunnels/probe
 REQBODY {"id":"zz"}
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 54 POST /api/v1/tunnels/t1/refresh
+STEP 55 POST /api/v1/tunnels/t1/refresh
 STATUS 202
 BODY {"queued":true}
 ---
-STEP 55 POST /api/v1/tunnels/t2/refresh
+STEP 56 POST /api/v1/tunnels/t2/refresh
 STATUS 202
 BODY {"queued":false}
 ---
-STEP 56 POST /api/v1/tunnels/zz/refresh
+STEP 57 POST /api/v1/tunnels/zz/refresh
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 57 POST /api/v1/tunnels/t2/restart
+STEP 58 POST /api/v1/tunnels/t2/restart
 STATUS 409
 BODY {"error":"<ERR>"}
 ---
-STEP 58 POST /api/v1/tunnels/zz/restart
+STEP 59 POST /api/v1/tunnels/zz/restart
 STATUS 404
 BODY {"error":"<ERR>"}
 ---
-STEP 59 POST /api/v1/tunnels/t1/restart
+STEP 60 POST /api/v1/tunnels/t1/restart
 STATUS 202
 BODY {"queued":true}
 ---
-STEP 60 PUT /api/v1/tunnels
+STEP 61 PUT /api/v1/tunnels
 REQBODY {"tunnels":[]}
 STATUS 200
 BODY {"restarted":[],"tunnels":[],"updated":[]}
 ---
-STEP 61 GET /api/v1/tunnels/state
+STEP 62 GET /api/v1/tunnels/state
 STATUS 200
 BODY {"tunnels":[]}
 ---
-STEP 62 GET /api/v1/auth
+STEP 63 GET /api/v1/auth
 STATUS 200
 BODY {"enabled":true}
 ---

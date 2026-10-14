@@ -4,6 +4,7 @@
   import Button from "../ui/Button.svelte";
   import Tooltip from "../ui/Tooltip.svelte";
 
+  import { MOD } from "../../utils/keys";
   import { Add, Export, Import, Save } from "../ui/icons";
 
   type Props = {
@@ -55,7 +56,7 @@
   </div>
 
   <div class={`page-controls-actions ${actionsClass}`}>
-    <Tooltip value={saveError ?? saveLabel}>
+    <Tooltip value={saveError ?? saveLabel} keys={saveError ? [] : [MOD, "S"]}>
       <Button
         onclick={onSave}
         id={saveButtonId}

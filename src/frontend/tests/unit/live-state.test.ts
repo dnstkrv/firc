@@ -3,6 +3,7 @@ import { describe, it } from "jsr:@std/testing@1.0.19/bdd";
 
 import {
   checkedText,
+  clockMinutes,
   LIVE_LOOK,
   liveKind,
   liveTooltip,
@@ -219,5 +220,12 @@ describe("a group's live state", () => {
     );
     assert.strictEqual(checkedText(10_000, 9_000, t), checkedText(10_000, 10_000, t));
     assert.match(checkedText(10_000, 9_000, t), /Checked 0 s ago/);
+  });
+});
+
+describe("clockMinutes", () => {
+  it("reads hours and minutes in the browser's zone, without seconds", () => {
+    assert.strictEqual(clockMinutes(new Date(2026, 9, 14, 18, 28, 45).getTime() / 1000), "18:28");
+    assert.strictEqual(clockMinutes(new Date(2026, 9, 14, 7, 5, 0).getTime() / 1000), "07:05");
   });
 });

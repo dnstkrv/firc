@@ -14,6 +14,7 @@
 
 #include <sys/socket.h>
 #include <linux/if.h>
+#include <linux/rtnetlink.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -927,6 +928,88 @@ TEST an_entry_that_cannot_be_written_is_warned_once(void) {
     PASS();
 }
 
+static unsigned list_links(const char *name) {
+    if (strcmp(name, "up0") == 0) { return 7; }
+    if (strcmp(name, "up1") == 0) { return 8; }
+    return strcmp(name, "lo") == 0 ? 1u : 0u;
+}
+
+static size_t defaults_via(nf_fx_t *f, uint16_t type, uint32_t oif) {
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f->kernel, m, 64), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type == type && m[i].rtm_type == RTN_UNICAST && m[i].oif == oif && m[i].table == 100) { c++; }
+    }
+    return c;
+}
+
+static bool nf_up_list(nf_fx_t *f) {
+    if (!nf_up(f, NULL, 0)) { return false; }
+    firc_rtnl_set_nametoindex_for_test(list_links);
+    const char *const names[] = {"up0", "up1"};
+    return firc_group_set_ifaces(f->g, names, 2) == FIRC_OK;
+}
+
+TEST a_ruleset_starts_its_list_on_the_entry_it_was_told(void) {
+    nf_fx_t f;
+    ASSERT(nf_up_list(&f));
+    ASSERT_STR_EQ("up0", firc_ruleset_active_iface(f.rs));
+    ASSERT_EQ(NULL, firc_ruleset_link(f.rs));
+    firc_ruleset_set_start(f.rs, 1, false);
+    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(f.rs, NULL));
+    ASSERT_STR_EQ("up1", firc_ruleset_active_iface(f.rs));
+    bool blocked = true;
+    ASSERT_EQ_FMT((size_t)1, firc_ruleset_active(f.rs, &blocked), "%zu");
+    ASSERT_FALSE(blocked);
+    ASSERT_EQ_FMT((size_t)1, defaults_via(&f, RTM_NEWROUTE, 8), "%zu");
+    ASSERT_EQ_FMT((size_t)0, defaults_via(&f, RTM_NEWROUTE, 7), "%zu");
+    ASSERT(firc_ruleset_link(f.rs) != NULL);
+    ASSERT_EQ(FIRC_OK, firc_ruleset_set_active(f.rs, 0, false));
+    ASSERT_EQ_FMT((size_t)1, defaults_via(&f, RTM_DELROUTE, 8), "%zu");
+    ASSERT_EQ_FMT((size_t)1, defaults_via(&f, RTM_NEWROUTE, 7), "%zu");
+    f.g->enable = false;
+    ASSERT_EQ(FIRC_ERR_STATE, firc_ruleset_set_active(f.rs, 1, false));
+    ASSERT_EQ(NULL, firc_ruleset_link(f.rs));
+    f.g->enable = true;
+    ASSERT_EQ(FIRC_OK, firc_ruleset_disable(f.rs));
+    ASSERT_STR_EQ("up0", firc_ruleset_active_iface(f.rs));
+    ASSERT_EQ(NULL, firc_ruleset_link(f.rs));
+    ASSERT_EQ(FIRC_ERR_STATE, firc_ruleset_set_active(f.rs, 1, false));
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    nf_down(&f);
+    PASS();
+}
+
+TEST a_ruleset_started_blocked_writes_no_default(void) {
+    nf_fx_t f;
+    ASSERT(nf_up_list(&f));
+    firc_ruleset_set_start(f.rs, 1, true);
+    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(f.rs, NULL));
+    bool blocked = false;
+    ASSERT_EQ_FMT((size_t)1, firc_ruleset_active(f.rs, &blocked), "%zu");
+    ASSERT(blocked);
+    ASSERT_EQ_FMT((size_t)0, defaults_via(&f, RTM_NEWROUTE, 7) + defaults_via(&f, RTM_NEWROUTE, 8), "%zu");
+    ASSERT_EQ(FIRC_OK, firc_ruleset_set_active(f.rs, 1, false));
+    ASSERT_EQ_FMT((size_t)1, defaults_via(&f, RTM_NEWROUTE, 8), "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    nf_down(&f);
+    PASS();
+}
+
+TEST a_list_with_an_unusable_entry_routes_nothing(void) {
+    nf_fx_t f;
+    ASSERT(nf_up(&f, NULL, 0));
+    firc_rtnl_set_nametoindex_for_test(list_links);
+    const char *const names[] = {"up0", "up 1"};
+    ASSERT_EQ(FIRC_OK, firc_group_set_ifaces(f.g, names, 2));
+    ASSERT_EQ(FIRC_OK, firc_ruleset_enable(f.rs, NULL));
+    ASSERT_FALSE(firc_ruleset_routed(f.rs));
+    ASSERT_EQ_FMT((size_t)0, defaults_via(&f, RTM_NEWROUTE, 7), "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    nf_down(&f);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
@@ -951,5 +1034,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_policy_renders_its_segments);
     RUN_TEST(a_segment_the_table_gets_wrong_is_not_written);
     RUN_TEST(an_entry_that_cannot_be_written_is_warned_once);
+    RUN_TEST(a_ruleset_starts_its_list_on_the_entry_it_was_told);
+    RUN_TEST(a_ruleset_started_blocked_writes_no_default);
+    RUN_TEST(a_list_with_an_unusable_entry_routes_nothing);
     GREATEST_MAIN_END();
 }

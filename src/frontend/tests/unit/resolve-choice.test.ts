@@ -55,6 +55,12 @@ describe("the dialog's DNS choice", () => {
     assert.strictEqual(isSavedAutoUnchanged(ownGroup, "edit", "nwg0", "auto"), false);
   });
 
+  it("reads a list group's saved auto state by the dialog's pick against its first entry", () => {
+    const listed = { interface: ["nwg0", "nwg1"], resolve: { tunnel: true, server: "" } };
+    assert.strictEqual(isSavedAutoUnchanged(listed, "edit", "nwg0", "auto"), true);
+    assert.strictEqual(isSavedAutoUnchanged(listed, "edit", "nwg1", "auto"), false);
+  });
+
   // Catches the raw firmware list shown instead of what the daemon resolved through.
   it("shows what the daemon actually resolved through, not the raw firmware list, while editing a group's untouched auto state", () => {
     const firmwareServers = ["2606:4700::1111"];

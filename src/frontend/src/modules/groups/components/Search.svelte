@@ -1,10 +1,13 @@
 <script lang="ts">
   import { getContext } from "svelte";
 
+  import Kbd from "../../../components/ui/Kbd.svelte";
   import { t } from "../../../data/locale.svelte";
+  import { hide, show } from "../../../lib/tooltip/tooltip.svelte";
   import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
 
   import { Search } from "../../../components/ui/icons";
+  import { MOD } from "../../../utils/keys";
 
   const store = getContext<GroupsStore>(GROUPS_STORE_CONTEXT);
   if (!store) {
@@ -12,6 +15,12 @@
   }
 
   let inputRef: HTMLInputElement;
+  let containerRef: HTMLDivElement;
+
+  function showHint() {
+    if (document.activeElement === inputRef || store.searchValue) return;
+    show(containerRef, t("Search"), [MOD, "F"]);
+  }
 
   function handleSearchShortcut(event: KeyboardEvent) {
     if (
@@ -51,9 +60,13 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    bind:this={containerRef}
     class="search-container"
     onclick={handleContainerClick}
     onpointerdown={handleContainerPointerDown}
+    onpointerenter={showHint}
+    onpointerleave={hide}
+    onfocusin={hide}
   >
     <span class="icon-wrapper">
       <Search />
@@ -67,6 +80,7 @@
         placeholder={t("Search groups and rules...")}
         bind:value={store.searchValue}
       />
+      <span class="search-keys" aria-hidden="true"><Kbd keys={[MOD, "F"]} /></span>
     </div>
   </div>
 </div>
@@ -133,6 +147,8 @@
   }
 
   .input-wrapper {
+    display: flex;
+    align-items: center;
     width: 0;
     margin-left: 0;
     overflow: hidden;
@@ -157,9 +173,33 @@
     font: inherit;
     color: inherit;
     width: 100%;
+    min-width: 0;
+    flex: 1;
     margin-left: 0.8rem;
     opacity: 0;
     transition: opacity 0.2s ease;
+  }
+
+  .search-keys {
+    display: inline-flex;
+    margin: 0 0.3rem 0 0.5rem;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .search-container:focus-within .search-keys {
+    opacity: 0.6;
+  }
+
+  .search-input:not(:placeholder-shown) + .search-keys {
+    display: none;
+  }
+
+  @media (hover: none) {
+    .search-keys {
+      display: none;
+    }
   }
 
   .search-input::-webkit-search-cancel-button {

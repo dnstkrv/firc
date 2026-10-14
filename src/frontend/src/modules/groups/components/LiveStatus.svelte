@@ -13,7 +13,15 @@
   import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
 
   import { type Group } from "../../../types";
-  import { checkedText, LIVE_LOOK, liveKind, liveTooltip, type LiveIcon } from "../live-state";
+  import { ifaceList } from "../iface-list";
+  import {
+    checkedText,
+    clockTime,
+    LIVE_LOOK,
+    liveKind,
+    liveTooltip,
+    type LiveIcon,
+  } from "../live-state";
 
   let { group }: { group: Group } = $props();
 
@@ -42,7 +50,7 @@
       ? liveTooltip(
           kind,
           {
-            iface: group.interface,
+            iface: store.liveOf(group.id)?.active ?? ifaceList(group)[0],
             netfilter: store.netfilter,
             silentFor: now - store.checkedAt,
           },
@@ -51,14 +59,6 @@
         )
       : null,
   );
-
-  /* The router's clock, read in the browser's zone: `since` is Unix time. */
-  function clockTime(unix: number) {
-    const d = new Date(unix * 1000);
-    return [d.getHours(), d.getMinutes(), d.getSeconds()]
-      .map((n) => String(n).padStart(2, "0"))
-      .join(":");
-  }
 
   const popoverId = `live-tip-${Math.random().toString(36).slice(2, 10)}`;
   let anchor = $state<HTMLButtonElement>();

@@ -15,14 +15,17 @@
 
 typedef struct family_state {
     bool rule_added;
-    bool reply_rule_added; /* IPv4 only */
     bool fallback_added;
     firc_iface_route_t route;
 } family_state_t;
 
 struct firc_ipset_to_link {
     char *chain_name;
-    char *iface_name;
+    char *ifaces[FIRC_IPSET_TO_LINK_IFACES_MAX];
+    size_t n_ifaces;
+    size_t active;
+    bool blocked;
+    bool reply_added[FIRC_IPSET_TO_LINK_IFACES_MAX];
     firc_ipt_t *ipt4;
     firc_ipt_t *ipt6;
     firc_rtnl_t *rtnl;
@@ -56,10 +59,11 @@ firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char 
     firc_ipset_to_link_t *l = calloc(1, sizeof(*l));
     if (!l) { return NULL; }
     l->chain_name = strdup(chain_name);
-    l->iface_name = strdup(iface_name);
-    if (!l->chain_name || !l->iface_name) {
+    l->ifaces[0] = strdup(iface_name);
+    l->n_ifaces = 1;
+    if (!l->chain_name || !l->ifaces[0]) {
         free(l->chain_name);
-        free(l->iface_name);
+        free(l->ifaces[0]);
         free(l);
         return NULL;
     }
@@ -72,7 +76,7 @@ firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char 
     l->group_id = group_id ? strdup(group_id) : NULL;
     if (group_id && !l->group_id) {
         free(l->chain_name);
-        free(l->iface_name);
+        free(l->ifaces[0]);
         free(l);
         return NULL;
     }
@@ -80,10 +84,16 @@ firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char 
     return l;
 }
 
+static const char *active_name(const firc_ipset_to_link_t *l) { return l->ifaces[l->active]; }
+
+static bool is_blackhole(const firc_ipset_to_link_t *l) {
+    return l->n_ifaces == 1 && strcmp(l->ifaces[0], FIRC_IPSET_TO_LINK_BLACKHOLE) == 0;
+}
+
 void firc_ipset_to_link_free(firc_ipset_to_link_t *l) {
     if (!l) { return; }
     free(l->chain_name);
-    free(l->iface_name);
+    for (size_t i = 0; i < l->n_ifaces; i++) { free(l->ifaces[i]); }
     free(l->group_id);
     free(l->sub4);
     free(l->sub6);
@@ -234,11 +244,35 @@ static firc_err_t append_guard(firc_ipt_t *ipt, const char *iface, const char *m
     return err != FIRC_OK ? err : firc_ipt_append(ipt, "filter", chain, rule, len);
 }
 
-firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain_name, const char *iface_name,
-                                              uint32_t mark, uint32_t mark_field,
-                                              const firc_fakeip_snapshot_t *snap, const char *group_id,
-                                              const firc_nf_devices_t *dev) {
+static firc_err_t append_guard_list(firc_ipt_t *ipt, const char *chain_name, const char *const *ifaces, size_t n,
+                                    const char *mark_str) {
+    char echain[128], chain[128];
+    int w = snprintf(echain, sizeof(echain), "%s%s", chain_name, FIRC_EGRESS_LIST_SUFFIX);
+    int v = snprintf(chain, sizeof(chain), "%s%s", firc_ipt_prefix(ipt), FIRC_EGRESS_CHAIN_SUFFIX);
+    if (w < 0 || (size_t)w >= sizeof(echain) || v < 0 || (size_t)v >= sizeof(chain)) { return FIRC_ERR_INVAL; }
+    firc_err_t err = firc_ipt_register_chain_override(ipt, "filter", echain);
+    for (size_t i = 0; err == FIRC_OK && i < n; i++) {
+        const char *in[] = {"-i", ifaces[i], "-j", "RETURN"};
+        const char *out[] = {"-o", ifaces[i], "-j", "RETURN"};
+        err = firc_ipt_append(ipt, "filter", echain, in, 4);
+        if (err == FIRC_OK) { err = firc_ipt_append(ipt, "filter", echain, out, 4); }
+    }
+    const char *drop[] = {"-j", "DROP"};
+    if (err == FIRC_OK) { err = firc_ipt_append(ipt, "filter", echain, drop, 2); }
+    if (err != FIRC_OK) { return err; }
+    const char *jump[] = {"-m", "mark", "--mark", mark_str, "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", echain};
+    err = firc_ipt_append(ipt, "filter", chain, jump, 10);
+    if (err != FIRC_ERR_STATE) { return err; }
+    err = open_egress(ipt, chain);
+    return err != FIRC_OK ? err : firc_ipt_append(ipt, "filter", chain, jump, 10);
+}
+
+firc_err_t firc_ipset_to_link_build_rules_list(firc_ipt_t *ipt, const char *chain_name, const char *const *ifaces,
+                                               size_t n, uint32_t mark, uint32_t mark_field,
+                                               const firc_fakeip_snapshot_t *snap, const char *group_id,
+                                               const firc_nf_devices_t *dev) {
     if (!ipt) { return FIRC_OK; }
+    if (n == 0 || n > FIRC_IPSET_TO_LINK_IFACES_MAX) { return FIRC_ERR_INVAL; }
     bool with_dev = dev != NULL && dev->active;
     char dchain[128];
     if (with_dev && firc_ipset_to_link_devices_chain_of(chain_name, dchain, sizeof(dchain)) != FIRC_OK) {
@@ -254,10 +288,10 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     snprintf(match_str, sizeof(match_str), "0x%x/0x%x", firc_mark_group_value(mark_field),
              FIRC_MARK_GROUP_MASK);
 
-    bool blackhole = strcmp(iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0;
-    if (!blackhole) {
-        /* FORWARD sees the real address, so match the mark, not the chunk. */
-        const char *acc[] = {"-o", iface_name, "-m", "mark", "--mark", match_str, "-j", "ACCEPT"};
+    bool blackhole = n == 1 && strcmp(ifaces[0], FIRC_IPSET_TO_LINK_BLACKHOLE) == 0;
+    /* FORWARD sees the real address, so match the mark, not the chunk. */
+    for (size_t i = 0; !blackhole && i < n; i++) {
+        const char *acc[] = {"-o", ifaces[i], "-m", "mark", "--mark", match_str, "-j", "ACCEPT"};
         err = firc_ipt_append(ipt, "filter", chain_name, acc, 8);
         if (err != FIRC_OK) { return err; }
     }
@@ -265,7 +299,8 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     err = firc_ipt_append(ipt, "filter", "FORWARD", fwd_args, 2);
     if (err != FIRC_OK) { return err; }
 
-    err = append_guard(ipt, blackhole ? NULL : iface_name, mark_str);
+    err = n > 1 ? append_guard_list(ipt, chain_name, ifaces, n, mark_str)
+                : append_guard(ipt, blackhole ? NULL : ifaces[0], mark_str);
     if (err != FIRC_OK) { return err; }
 
     err = firc_ipt_register_chain_override(ipt, "mangle", chain_name);
@@ -280,9 +315,8 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     err = firc_ipt_register_chain_override(ipt, "nat", chain_name);
     if (err != FIRC_OK) { return err; }
     /* POSTROUTING sees the real address: match the mark and the output interface. */
-    if (!blackhole) {
-        const char *nat1[] = {"-o", iface_name, "-m",          "mark",
-                              "--mark", match_str, "-j", "MASQUERADE"};
+    for (size_t i = 0; !blackhole && i < n; i++) {
+        const char *nat1[] = {"-o", ifaces[i], "-m", "mark", "--mark", match_str, "-j", "MASQUERADE"};
         err = firc_ipt_append(ipt, "nat", chain_name, nat1, 8);
         if (err != FIRC_OK) { return err; }
     }
@@ -308,6 +342,14 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
     return FIRC_OK;
 }
 
+firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain_name, const char *iface_name,
+                                              uint32_t mark, uint32_t mark_field,
+                                              const firc_fakeip_snapshot_t *snap, const char *group_id,
+                                              const firc_nf_devices_t *dev) {
+    return firc_ipset_to_link_build_rules_list(ipt, chain_name, &iface_name, 1, mark, mark_field, snap, group_id,
+                                               dev);
+}
+
 firc_err_t firc_ipset_to_link_build_rules(firc_ipt_t *ipt, const char *chain_name, const char *iface_name,
                                           uint32_t mark, uint32_t mark_field,
                                           const firc_fakeip_snapshot_t *snap, const char *group_id) {
@@ -316,10 +358,10 @@ firc_err_t firc_ipset_to_link_build_rules(firc_ipt_t *ipt, const char *chain_nam
 }
 
 static firc_err_t build_iptables_rules(firc_ipset_to_link_t *l, firc_ipt_t *ipt) {
-    firc_err_t err = firc_ipset_to_link_build_rules_dev(ipt, l->chain_name, l->iface_name,
-                                                        l->mark, l->mark_field,
-                                                        l->snap ? l->snap(l->snap_ud) : NULL,
-                                                        l->group_id, &l->dev);
+    firc_err_t err = firc_ipset_to_link_build_rules_list(ipt, l->chain_name, (const char *const *)l->ifaces,
+                                                         l->n_ifaces, l->mark, l->mark_field,
+                                                         l->snap ? l->snap(l->snap_ud) : NULL, l->group_id,
+                                                         &l->dev);
     if (err != FIRC_OK) { return err; }
     return firc_ipset_to_link_build_subnet_rules_dev(ipt, l->chain_name, l->mark, l->sub4, l->n_sub4,
                                                      l->sub6, l->n_sub6, &l->dev);
@@ -652,11 +694,19 @@ static firc_err_t insert_ip_rule(firc_ipset_to_link_t *l, const char **failed) {
                   l->chain_name);
     }
     /* The reply twin goes in before the rule it guards. */
-    if (l->ipt4 && strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) != 0) {
-        (void)firc_rtnl_rule_del(l->rtnl, AF_INET, firc_mark_group_value(l->mark_field), FIRC_MARK_GROUP_MASK, RT_TABLE_MAIN, FIRC_RULE_PRIORITY_REPLY);
-        firc_err_t rerr = firc_rtnl_rule_add_reply(l->rtnl, AF_INET, firc_mark_group_value(l->mark_field), FIRC_MARK_GROUP_MASK, l->iface_name, RT_TABLE_MAIN, FIRC_RULE_PRIORITY_REPLY);
-        if (rerr != FIRC_OK) { *failed = "ip rule"; return rerr; }
-        l->v4.reply_rule_added = true;
+    if (l->ipt4 && !is_blackhole(l)) {
+        uint32_t value = firc_mark_group_value(l->mark_field);
+        for (size_t i = 0; i < l->n_ifaces; i++) {
+            (void)firc_rtnl_rule_del_reply(l->rtnl, AF_INET, value, FIRC_MARK_GROUP_MASK, l->ifaces[i], RT_TABLE_MAIN,
+                                           FIRC_RULE_PRIORITY_REPLY);
+            firc_err_t rerr = firc_rtnl_rule_add_reply(l->rtnl, AF_INET, value, FIRC_MARK_GROUP_MASK, l->ifaces[i],
+                                                       RT_TABLE_MAIN, FIRC_RULE_PRIORITY_REPLY);
+            if (rerr != FIRC_OK) {
+                *failed = "ip rule";
+                return rerr;
+            }
+            l->reply_added[i] = true;
+        }
     }
     if (l->ipt4) {
         (void)firc_rtnl_rule_del(l->rtnl, AF_INET, firc_mark_group_value(l->mark_field), FIRC_MARK_GROUP_MASK, l->table, firc_rule_priority_for_field(l->mark_field));
@@ -682,10 +732,13 @@ static firc_err_t delete_ip_rule(firc_ipset_to_link_t *l) {
         if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
         l->v4.rule_added = false;
     }
-    if (l->v4.reply_rule_added) {
-        firc_err_t err = firc_rtnl_rule_del(l->rtnl, AF_INET, firc_mark_group_value(l->mark_field), FIRC_MARK_GROUP_MASK, RT_TABLE_MAIN, FIRC_RULE_PRIORITY_REPLY);
+    for (size_t i = 0; i < l->n_ifaces; i++) {
+        if (!l->reply_added[i]) { continue; }
+        firc_err_t err = firc_rtnl_rule_del_reply(l->rtnl, AF_INET, firc_mark_group_value(l->mark_field),
+                                                  FIRC_MARK_GROUP_MASK, l->ifaces[i], RT_TABLE_MAIN,
+                                                  FIRC_RULE_PRIORITY_REPLY);
         if (err != FIRC_OK && first_err == FIRC_OK) { first_err = err; }
-        l->v4.reply_rule_added = false;
+        l->reply_added[i] = false;
     }
     if (l->v6.rule_added) {
         firc_err_t err = firc_rtnl_rule_del(l->rtnl, AF_INET6, firc_mark_group_value(l->mark_field), FIRC_MARK_GROUP_MASK, l->table, firc_rule_priority_for_field(l->mark_field));
@@ -765,7 +818,7 @@ firc_err_t firc_iface_route_remove(firc_rtnl_t *r, int family, uint32_t table, c
 
 static firc_err_t update_iface_route(firc_ipset_to_link_t *l, int family, int ifindex,
                                    bool point_to_point, family_state_t *fs) {
-    return firc_iface_route_update(l->rtnl, family, l->table, l->iface_name, ifindex, point_to_point,
+    return firc_iface_route_update(l->rtnl, family, l->table, active_name(l), ifindex, point_to_point,
                                    &fs->route);
 }
 
@@ -780,13 +833,13 @@ static firc_err_t update_v6_route(firc_ipset_to_link_t *l, const firc_link_info_
     firc_err_t err = firc_rtnl_iface_carries_v6(l->rtnl, li->ifindex, &carries);
     if (err != FIRC_OK) { return err; }
     err = carries ? update_iface_route(l, AF_INET6, li->ifindex, li->point_to_point, &l->v6)
-                  : firc_iface_route_remove(l->rtnl, AF_INET6, l->table, l->iface_name, &l->v6.route);
+                  : firc_iface_route_remove(l->rtnl, AF_INET6, l->table, active_name(l), &l->v6.route);
     if (err != FIRC_OK) { return err; }
     if (carries != l->v6_carries || !l->v6_known) {
         if (!carries) {
-            FIRC_DEBUG("%s carries no IPv6: its group's names get no IPv6 address", l->iface_name);
+            FIRC_DEBUG("%s carries no IPv6: its group's names get no IPv6 address", active_name(l));
         } else if (l->v6_known) {
-            FIRC_DEBUG("%s carries IPv6 again: its group's names get IPv6 addresses", l->iface_name);
+            FIRC_DEBUG("%s carries IPv6 again: its group's names get IPv6 addresses", active_name(l));
         }
         l->v6_known = true;
         l->v6_carries = carries;
@@ -810,42 +863,41 @@ static firc_err_t add_fallback(firc_ipset_to_link_t *l, int family, family_state
 static bool say_missing(firc_ipset_to_link_t *l, bool found, const firc_link_info_t *li) {
     if (!found) {
         firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s not found, it can be caught later",
-                         l->iface_name);
+                         active_name(l));
         return true;
     }
     if (!li->up) {
-        firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s is down", l->iface_name);
+        firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s is down", active_name(l));
         return true;
     }
     return false;
+}
+
+static firc_err_t insert_iface_route(firc_ipset_to_link_t *l) {
+    firc_link_info_t li;
+    bool found;
+    firc_err_t err = firc_rtnl_link_by_name(l->rtnl, active_name(l), &li, &found);
+    if (err != FIRC_OK) { return err; }
+    if (say_missing(l, found, &li)) { return FIRC_OK; }
+    (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", active_name(l));
+    return update_iface_routes(l, &li);
 }
 
 static firc_err_t insert_ip_route(firc_ipset_to_link_t *l) {
     firc_err_t first = FIRC_OK;
     if (l->ipt4) { keep_first(&first, add_fallback(l, AF_INET, &l->v4)); }
     if (l->ipt6) { keep_first(&first, add_fallback(l, AF_INET6, &l->v6)); }
-
-    if (strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) { return first; }
-
-    firc_link_info_t li;
-    bool found;
-    firc_err_t err = firc_rtnl_link_by_name(l->rtnl, l->iface_name, &li, &found);
-    if (err != FIRC_OK) {
-        keep_first(&first, err);
-        return first;
-    }
-    if (say_missing(l, found, &li)) { return first; }
-    (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", l->iface_name);
-    keep_first(&first, update_iface_routes(l, &li));
+    if (is_blackhole(l) || l->blocked) { return first; }
+    keep_first(&first, insert_iface_route(l));
     return first;
 }
 
 static firc_err_t delete_ip_route(firc_ipset_to_link_t *l) {
     firc_err_t first_err = FIRC_OK;
 
-    firc_err_t e4 = firc_iface_route_remove(l->rtnl, AF_INET, l->table, l->iface_name, &l->v4.route);
+    firc_err_t e4 = firc_iface_route_remove(l->rtnl, AF_INET, l->table, active_name(l), &l->v4.route);
     if (e4 != FIRC_OK && first_err == FIRC_OK) { first_err = e4; }
-    firc_err_t e6 = firc_iface_route_remove(l->rtnl, AF_INET6, l->table, l->iface_name, &l->v6.route);
+    firc_err_t e6 = firc_iface_route_remove(l->rtnl, AF_INET6, l->table, active_name(l), &l->v6.route);
     if (e6 != FIRC_OK && first_err == FIRC_OK) { first_err = e6; }
     if (l->v4.fallback_added) {
         firc_err_t err = firc_rtnl_route_del_reject(l->rtnl, AF_INET, l->table, 20, fallback_type(AF_INET));
@@ -940,40 +992,97 @@ firc_err_t firc_ipset_to_link_disable(firc_ipset_to_link_t *l) {
     return teardown(l);
 }
 
-firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, bool keep_reply) {
-    if (keep_reply) { l->v4.reply_rule_added = false; }
+static bool holds_reply(const firc_ipset_to_link_t *l, const char *iif) {
+    for (size_t i = 0; i < l->n_ifaces; i++) {
+        if (l->reply_added[i] && strcmp(l->ifaces[i], iif) == 0) { return true; }
+    }
+    return false;
+}
+
+firc_err_t firc_ipset_to_link_release(firc_ipset_to_link_t *l, const firc_ipset_to_link_t *newer) {
+    if (newer != NULL && newer->mark_field == l->mark_field) {
+        for (size_t i = 0; i < l->n_ifaces; i++) {
+            if (l->reply_added[i] && holds_reply(newer, l->ifaces[i])) { l->reply_added[i] = false; }
+        }
+    }
     firc_err_t err = firc_ipset_to_link_disable(l);
     firc_ipset_to_link_free(l);
     return err;
 }
 
-bool firc_ipset_to_link_has_reply_rule(const firc_ipset_to_link_t *l) { return l != NULL && l->v4.reply_rule_added; }
+firc_err_t firc_ipset_to_link_set_ifaces(firc_ipset_to_link_t *l, const char *const *names, size_t n, size_t active,
+                                         bool blocked) {
+    if (l == NULL || l->enabled || n == 0 || n > FIRC_IPSET_TO_LINK_IFACES_MAX || active >= n) {
+        return FIRC_ERR_INVAL;
+    }
+    char *copy[FIRC_IPSET_TO_LINK_IFACES_MAX] = {NULL};
+    for (size_t i = 0; i < n; i++) {
+        copy[i] = strdup(names[i]);
+        if (copy[i] == NULL) {
+            for (size_t k = 0; k < i; k++) { free(copy[k]); }
+            return FIRC_ERR_NOMEM;
+        }
+    }
+    for (size_t i = 0; i < l->n_ifaces; i++) { free(l->ifaces[i]); }
+    memcpy(l->ifaces, copy, sizeof(copy));
+    l->n_ifaces = n;
+    l->active = active;
+    l->blocked = blocked;
+    return FIRC_OK;
+}
+
+firc_err_t firc_ipset_to_link_set_active(firc_ipset_to_link_t *l, size_t to, bool blocked) {
+    if (l == NULL || to >= l->n_ifaces) { return FIRC_ERR_INVAL; }
+    if (!l->enabled) {
+        l->active = to;
+        l->blocked = blocked;
+        return FIRC_OK;
+    }
+    firc_err_t first = FIRC_OK;
+    if (to != l->active || blocked) {
+        keep_first(&first, firc_iface_route_remove(l->rtnl, AF_INET, l->table, active_name(l), &l->v4.route));
+        keep_first(&first, firc_iface_route_remove(l->rtnl, AF_INET6, l->table, active_name(l), &l->v6.route));
+        memset(&l->v4.route, 0, sizeof(l->v4.route));
+        memset(&l->v6.route, 0, sizeof(l->v6.route));
+        l->v6_known = false;
+        firc_logrep_reset(&l->link_missing);
+    }
+    l->active = to;
+    l->blocked = blocked;
+    if (!blocked && !is_blackhole(l)) { keep_first(&first, insert_iface_route(l)); }
+    return first;
+}
+
+size_t firc_ipset_to_link_active(const firc_ipset_to_link_t *l, bool *blocked) {
+    if (blocked != NULL) { *blocked = l->blocked; }
+    return l->active;
+}
+
+const char *firc_ipset_to_link_active_iface(const firc_ipset_to_link_t *l) { return active_name(l); }
 
 firc_err_t firc_ipset_to_link_on_link_up(firc_ipset_to_link_t *l) {
-    if (!l->enabled) { return FIRC_OK; }
+    if (!l->enabled || l->blocked) { return FIRC_OK; }
     return insert_ip_route(l);
 }
 
 void firc_ipset_to_link_remind(firc_ipset_to_link_t *l) {
-    if (!l->enabled || l->link_missing.count == 0 || strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) {
-        return;
-    }
+    if (!l->enabled || l->blocked || l->link_missing.count == 0 || is_blackhole(l)) { return; }
     firc_link_info_t li;
     bool found;
-    if (firc_rtnl_link_by_name(l->rtnl, l->iface_name, &li, &found) != FIRC_OK) { return; }
+    if (firc_rtnl_link_by_name(l->rtnl, active_name(l), &li, &found) != FIRC_OK) { return; }
     if (found && li.up) {
-        (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", l->iface_name);
+        (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", active_name(l));
     } else if (firc_logrep_due(&l->link_missing, UINT64_MAX)) {
         (void)say_missing(l, found, &li);
     }
 }
 
 firc_err_t firc_ipset_to_link_on_addr_change(firc_ipset_to_link_t *l) {
-    if (!l->enabled || strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) { return FIRC_OK; }
+    if (!l->enabled || l->blocked || is_blackhole(l)) { return FIRC_OK; }
 
     firc_link_info_t li;
     bool found;
-    firc_err_t err = firc_rtnl_link_by_name(l->rtnl, l->iface_name, &li, &found);
+    firc_err_t err = firc_rtnl_link_by_name(l->rtnl, active_name(l), &li, &found);
     if (err != FIRC_OK) { return err; }
     if (!found) { return FIRC_OK; }
     /* A down link's routes would be refused; link-up puts them back. */

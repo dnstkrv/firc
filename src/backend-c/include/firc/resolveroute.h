@@ -38,6 +38,7 @@ bool firc_resolve_route_usable(const firc_resolve_route_t *r);
 
 typedef struct firc_resolve_input {
     const firc_group_t *group;
+    const char *iface;
     uint32_t mark;
     bool blackhole;
     bool v6_route;

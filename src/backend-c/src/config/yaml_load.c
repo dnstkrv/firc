@@ -454,6 +454,15 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
         }
         GET_OR_FAIL(get_bool(map_get(doc, upd, "check"), &c->update.check, &err));
     }
+    node_t *cn = map_get(doc, app, "check");
+    if (cn != NULL && !node_is_null(cn)) {
+        if (cn->type != YAML_MAPPING_NODE) {
+            return FIRC_ERR_INVAL;
+        }
+        GET_OR_FAIL(get_string(map_get(doc, cn, "url"), &c->check.url, &err));
+        GET_OR_FAIL(get_duration(map_get(doc, cn, "interval"), &c->check.interval, &err));
+        GET_OR_FAIL(get_duration(map_get(doc, cn, "timeout"), &c->check.timeout, &err));
+    }
     /* runs unconditionally: a later overlay that omits a block must not leave an earlier value unchecked */
     const char *field = NULL, *why = NULL;
     firc_err_t chk = firc_app_config_check(c, &field, &why);
@@ -646,6 +655,32 @@ static firc_err_t load_group_list(yaml_document_t *doc, node_t *n, firc_group_li
     return FIRC_OK;
 }
 
+static firc_err_t load_ifaces(yaml_document_t *doc, node_t *n, firc_group_t *g)
+{
+    if (n == NULL || node_is_null(n)) { return firc_strset(&g->iface, ""); }
+    if (n->type == YAML_SCALAR_NODE) { return firc_strset(&g->iface, scalar_text(n)); }
+    if (n->type != YAML_SEQUENCE_NODE) { return FIRC_ERR_INVAL; }
+    size_t count = (size_t)(n->data.sequence.items.top - n->data.sequence.items.start);
+    const char *names[FIRC_GROUP_IFACES_MAX];
+    size_t bad = 0;
+    const char *why = count < 1 || count > FIRC_GROUP_IFACES_MAX ? "a group names 1 to 4 interfaces" : NULL;
+    for (size_t i = 0; why == NULL && i < count; i++) {
+        node_t *item = node_of(doc, n->data.sequence.items.start[i]);
+        if (item == NULL || item->type != YAML_SCALAR_NODE) {
+            bad = i;
+            why = "not an interface name";
+            break;
+        }
+        names[i] = scalar_text(item);
+    }
+    if (why == NULL) { why = firc_group_ifaces_check(names, count, &bad); }
+    if (why != NULL) {
+        FIRC_ERROR("config: group \"%s\": interface %zu: %s", g->name != NULL ? g->name : "", bad + 1, why);
+        return FIRC_ERR_INVAL;
+    }
+    return firc_group_set_ifaces(g, names, count);
+}
+
 static firc_err_t load_group(yaml_document_t *doc, node_t *n, firc_group_t *g)
 {
     firc_err_t err = FIRC_OK;
@@ -654,12 +689,12 @@ static firc_err_t load_group(yaml_document_t *doc, node_t *n, firc_group_t *g)
     }
     GET_OR_FAIL(get_id(map_get(doc, n, "id"), &g->id, &err));
     GET_OR_FAIL(get_string(map_get(doc, n, "name"), &g->name, &err));
-    GET_OR_FAIL(get_string(map_get(doc, n, "interface"), &g->iface, &err));
     GET_OR_FAIL(get_bool(map_get(doc, n, "enable"), &g->enable, &err));
     if (g->name == NULL && (err = firc_strset(&g->name, "")) != FIRC_OK) {
         return err;
     }
-    if (g->iface == NULL && (err = firc_strset(&g->iface, "")) != FIRC_OK) {
+    err = load_ifaces(doc, map_get(doc, n, "interface"), g);
+    if (err != FIRC_OK) {
         return err;
     }
 

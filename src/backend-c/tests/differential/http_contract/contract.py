@@ -324,6 +324,7 @@ def run_api_sequence(conn, out):
     t.step("GET", "/api/v1/groups/aabbccdd?with_rules=true")
     t.step("GET", "/api/v1/groups/nothex!")
     t.step("GET", "/api/v1/groups/deadbeef")
+    t.step("POST", "/api/v1/groups/aabbccdd/move-up")
 
     put_group_body = json.dumps(
         {"name": "g1-renamed", "interface": "eth1", "enable": False}

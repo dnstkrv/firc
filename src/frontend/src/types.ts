@@ -12,6 +12,7 @@ import {
   pipe,
   regex,
   string,
+  union,
   type InferOutput,
 } from "valibot";
 
@@ -106,7 +107,7 @@ export type SystemResolvers = {
 export const GroupSchema = object({
   id: fallback(pipe(string(), length(8), regex(/^[0-9a-f]{8}/)), () => randomId()),
   name: fallback(string(), ""),
-  interface: string(),
+  interface: union([string(), array(string())]),
   enable: fallback(boolean(), true),
   devices: fallback(DeviceSelectorSchema, { allow: [], deny: [] }),
   rules: array(RuleSchema),

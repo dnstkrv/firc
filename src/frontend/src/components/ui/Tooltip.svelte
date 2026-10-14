@@ -5,7 +5,11 @@
 
   import { TOOLTIP_LABEL } from "./tooltip-label";
 
-  let { value, children }: { value: string; children: Snippet } = $props();
+  let {
+    value,
+    keys = [],
+    children,
+  }: { value: string; keys?: string[]; children: Snippet } = $props();
   let triggerEl: HTMLElement;
 
   let shown = $state(false);
@@ -14,7 +18,7 @@
 
   function open() {
     shown = true;
-    show(triggerEl, value);
+    show(triggerEl, value, keys);
   }
 
   function close() {

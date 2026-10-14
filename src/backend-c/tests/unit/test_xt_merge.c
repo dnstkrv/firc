@@ -337,7 +337,7 @@ TEST counters_follow_old_index(void) {
 /* Catches: a filter or mangle rule firc writes encoded unlike iptables-restore 1.4.21 wrote it. */
 TEST filter_and_mangle_fixtures_merge_as_iptables_restore_did(void) {
     static const struct { const char *base, *name; } cases[] = {
-        {"f-firmware", "f-firc"}, {"f-firmware", "f-egress"}, {"m-firmware", "m-firc"}, {"m-firmware", "m-firc2"}};
+        {"f-firmware", "f-firc"}, {"f-firmware", "f-egress"}, {"f-firmware", "f-egress-list"}, {"m-firmware", "m-firc"}, {"m-firmware", "m-firc2"}};
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         for (size_t f = 0; f < 2; f++) {
             firc_xt_info_t bi, wi, ni;

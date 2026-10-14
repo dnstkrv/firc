@@ -4,6 +4,7 @@ import {
   type GroupResolver,
   type SystemResolvers,
 } from "../../types";
+import { ifaceList } from "./iface-list";
 
 export type DnsMode = "auto" | "own" | "off";
 
@@ -35,14 +36,14 @@ export function serverSuggestions(list: SystemResolvers["resolvers"]): string[] 
 }
 
 export function isSavedAutoUnchanged(
-  group: { interface: string; resolve: GroupResolve } | null | undefined,
+  group: { interface: string | string[]; resolve: GroupResolve } | null | undefined,
   dialogMode: "create" | "edit",
   selectedInterface: string,
   dnsMode: DnsMode,
 ): boolean {
   if (dialogMode !== "edit" || !group) return false;
   if (modeOf(group.resolve) !== "auto") return false;
-  if (selectedInterface !== group.interface) return false;
+  if (selectedInterface !== ifaceList(group)[0]) return false;
   return dnsMode === "auto";
 }
 

@@ -243,7 +243,7 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(25, cJSON_GetArraySize(s));
+    ASSERT_EQ(28, cJSON_GetArraySize(s));
     ASSERT_EQ(NULL, item(s, "app.logLevel"));
     ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
     ASSERT_STR_EQ("live", item(c, "app.update.check")->valuestring);
@@ -267,7 +267,7 @@ TEST get_answers_every_setting_typed(void) {
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(6, live);
+    ASSERT_EQ(9, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);
@@ -462,6 +462,27 @@ TEST a_live_put_applies_unmatched_ttl(void) {
                    (int)firc_dns_pipeline_handle_message(h->pipeline, msg, 1000, NULL, NULL), "%d");
     ASSERT_EQ_FMT(90u, msg->answers[0].ttl, "%u");
     firc_dns_msg_free(msg);
+    harness_stop(h);
+    PASS();
+}
+
+TEST a_put_of_the_check_interval_answers_it_live(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("PUT", "/api/v1/system/settings",
+                              "{\"settings\":{\"app.check.interval\":45}}", &out));
+    static const char *const applied[] = {"app.check.interval"};
+    ASSERT(strings_are(item(out, "applied"), applied, 1));
+    ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
+    cJSON_Delete(out);
+    out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
+    ASSERT_EQ(45, (int)item(item(out, "settings"), "app.check.interval")->valuedouble);
+    ASSERT_STR_EQ("live", item(item(out, "classes"), "app.check.interval")->valuestring);
+    cJSON_Delete(out);
+    harness_join(h);
+    ASSERT_EQ(45 * FIRC_DURATION_SEC, firc_app_running_settings(h->app)->check.interval);
     harness_stop(h);
     PASS();
 }
@@ -1155,6 +1176,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_body_without_settings_is_refused);
     RUN_TEST(a_live_put_changes_the_upstream);
     RUN_TEST(a_live_put_applies_unmatched_ttl);
+    RUN_TEST(a_put_of_the_check_interval_answers_it_live);
     RUN_TEST(pending_restart_is_the_whole_list_after_each_save);
     RUN_TEST(a_value_equal_to_the_saved_one_is_not_a_change);
     RUN_TEST(a_web_port_another_program_holds_is_refused);

@@ -168,7 +168,7 @@ export class TunnelsPage {
   constructor(page: Page) {
     this.page = page;
     const pane = page.locator('[data-tabs-content][data-state="active"]');
-    this.save = pane.getByRole("button", { name: "Save", exact: true });
+    this.save = pane.getByRole("button", { name: "Save Changes", exact: true });
     this.add = pane.getByRole("button", { name: "Add tunnel", exact: true });
     this.note = page.getByRole("status").filter({ hasText: "restart on save" });
   }

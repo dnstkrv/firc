@@ -11,6 +11,7 @@
   import { locale, t } from "../../../data/locale.svelte";
   import { policies } from "../../../data/policies.svelte";
   import { fetchResolvers, resolvers } from "../../../data/resolvers.svelte";
+  import IfacePicker from "../components/IfacePicker.svelte";
   import { isValidListUrl, normalizeListUrl, type GroupDialogPayload } from "../groups.svelte";
 
   import { Globe, Link, LoaderCircle, Type } from "../../../components/ui/icons";
@@ -18,7 +19,9 @@
   import { coverageLabel } from "../../../utils/device-picker";
   import { fetcher, HttpError } from "../../../utils/fetcher";
   import { resolverAddrProblem } from "../../../utils/resolver-validators";
+  import { ifaceList, ifaceValue } from "../iface-list";
   import { intervalOptionsFor, parseIntervalSeconds } from "../intervals";
+  import type { GroupLive } from "../live-state";
   import {
     autoEffectiveServers,
     firmwareServersFor,
@@ -34,13 +37,15 @@
     mode: "create" | "edit";
     group?: Group | null;
     serverError?: string | null;
+    live?: GroupLive;
   };
 
-  let { open, mode, group = null, serverError = null }: DialogProps = $props();
+  let { open, mode, group = null, serverError = null, live }: DialogProps = $props();
   const dispatch = createEventDispatcher();
 
   let name = $state("");
-  let selectedInterface = $state("");
+  let draft = $state<{ interface: string | string[] }>({ interface: "" });
+  let selectedInterface = $derived(ifaceList(draft)[0]);
   let listEnabled = $state(false);
   let url = $state("");
   let interval = $state(86400);
@@ -85,7 +90,9 @@
     if (seededFor === key) return;
 
     name = group?.name ?? "";
-    selectedInterface = group?.interface ?? groupInterfaces()[0]?.id ?? "";
+    draft = {
+      interface: group ? ifaceValue(ifaceList(group)) : (groupInterfaces()[0]?.id ?? ""),
+    };
     devicesTarget = {
       id: group?.id ?? "draft",
       devices: group?.devices ? { ...group.devices } : { allow: [], deny: [] },
@@ -197,7 +204,7 @@
     if (!canSubmit) return;
     const payload: GroupDialogPayload = {
       name: name.trim(),
-      interface: selectedInterface,
+      interface: ifaceValue(ifaceList(draft)),
       devices: devicesTarget.devices,
       list: listEnabled ? { url: normalizeListUrl(url), interval } : null,
       resolve: submittedResolve(isBlackhole, group?.resolve, dnsMode, dnsServer),
@@ -225,15 +232,7 @@
       </div>
       <div class="field">
         <span class="lbl">{t("Interface")}</span>
-        <Select
-          options={groupInterfaces().map((item) => ({
-            value: item.id,
-            label: item.id,
-            description: item.name,
-          }))}
-          bind:selected={selectedInterface}
-          class="interface-select"
-        />
+        <IfacePicker bind:value={draft.interface} {live} closed="chain" class="interface-select" />
       </div>
     </div>
 

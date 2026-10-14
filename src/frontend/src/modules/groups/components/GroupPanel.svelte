@@ -6,15 +6,14 @@
   import Pagination from "../../../components/Pagination.svelte";
   import Button from "../../../components/ui/Button.svelte";
   import DropdownMenu from "../../../components/ui/DropdownMenu.svelte";
-  import Select from "../../../components/ui/Select.svelte";
   import Switch from "../../../components/ui/Switch.svelte";
   import Tooltip from "../../../components/ui/Tooltip.svelte";
   import { hosts } from "../../../data/hosts.svelte";
-  import { groupInterfaces } from "../../../data/interfaces.svelte";
   import { locale, t } from "../../../data/locale.svelte";
   import { policies } from "../../../data/policies.svelte";
   import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
   import GroupDuplicateMenu from "./GroupDuplicateMenu.svelte";
+  import IfacePicker from "./IfacePicker.svelte";
   import ListHeader from "./ListHeader.svelte";
   import ListRuleRow from "./ListRuleRow.svelte";
   import LiveStatus from "./LiveStatus.svelte";
@@ -86,6 +85,8 @@
 
   let placeNumber = $derived(group_index + 1);
   let selected = $derived(group ? store.isSelected(group.id) : false);
+
+  let ifaceUnsaved = $derived(group ? store.tracker.isFieldDirty(group, "interface") : false);
 
   let hasList = $derived(Boolean(group?.list));
   let resolverTagText = $derived(resolverTag(group?.resolver, t));
@@ -441,13 +442,11 @@
         </div>
 
         <div class="group-actions">
-          <Select
-            options={groupInterfaces().map((item) => ({
-              value: item.id,
-              label: item.id,
-              description: item.name,
-            }))}
-            bind:selected={group.interface}
+          <IfacePicker
+            bind:value={group.interface}
+            live={store.liveOf(group.id)}
+            unsaved={ifaceUnsaved}
+            closed="active"
             class="iface-select"
           />
 

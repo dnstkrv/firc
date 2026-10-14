@@ -5,6 +5,7 @@ import { logger } from "hono/logger";
 import { streamSSE } from "hono/streaming";
 
 import type { Interfaces } from "../src/types.ts";
+import { activeOf, listOf, moveUp, type MockIfaceState } from "./move-up.ts";
 
 const API_BASE = "/api/v1";
 
@@ -29,14 +30,14 @@ const RESOLVERS = {
 /* Fallbacks since "start", so the panel's count has something to show. */
 const FALLBACKS: Record<string, number> = {};
 
-function resolverOf(group: any) {
+function resolverOf(group: any, active: string) {
   const resolve = group.resolve ?? { tunnel: true, server: "" };
   const fallbacks = FALLBACKS[group.id] ?? 0;
   const live = (servers: string[]) => (group.enable === false ? [] : servers);
   if (!resolve.tunnel) return { source: "off", servers: [], fallbacks };
-  if (group.interface === "blackhole") return { source: "none", servers: [], fallbacks };
+  if (active === "blackhole") return { source: "none", servers: [], fallbacks };
   if (resolve.server) return { source: "group", servers: live([resolve.server]), fallbacks };
-  const fw = RESOLVERS.resolvers.find((r) => r.interface === group.interface)?.servers ?? [];
+  const fw = RESOLVERS.resolvers.find((r) => r.interface === active)?.servers ?? [];
   return fw.length
     ? { source: "firmware", servers: live(fw), fallbacks }
     : { source: "none", servers: [], fallbacks };
@@ -95,13 +96,16 @@ if (!DATA.groups.some((g: any) => g.id === "a1b2c3d4")) {
 const LIVE_REASONS: Record<string, string> = {};
 let NETFILTER: Record<string, unknown> = { ok: true };
 
-function liveOf(group: any): { live: boolean; liveReason?: string } {
+const IFACE_STATES: Record<string, MockIfaceState> = {};
+const ACTIVE: Record<string, number> = {};
+
+function liveOf(group: any, active: string): { live: boolean; liveReason?: string } {
   if (group.enable === false) return { live: false, liveReason: "disabled" };
   const forced = LIVE_REASONS[group.id];
   if (forced && forced !== "not-written") return { live: false, liveReason: forced };
-  const tunnel = TUNNELS.find((tn) => tn.device === group.interface);
+  const tunnel = TUNNELS.find((tn) => tn.device === active);
   if (tunnel && tunnelStatus(tunnel) !== "up") return { live: false, liveReason: "tunnel-down" };
-  if (group.interface === "longinterf") return { live: false, liveReason: "no-interface" };
+  if (active === "longinterf") return { live: false, liveReason: "no-interface" };
   if (forced === "not-written" || NETFILTER.ok === false) {
     return { live: false, liveReason: "not-written" };
   }
@@ -111,8 +115,16 @@ function liveOf(group: any): { live: boolean; liveReason?: string } {
 function groupRes({ list, rules: handRules, ...group }: any, withRules = false) {
   const withResolve = { ...group, resolve: group.resolve ?? { tunnel: true, server: "" } };
   const out: any = withRules ? { ...withResolve, rules: handRules } : { ...withResolve };
-  out.resolver = resolverOf(withResolve);
-  Object.assign(out, liveOf(withResolve));
+  const names = listOf(withResolve);
+  out.active = activeOf(withResolve, ACTIVE[group.id]);
+  out.resolver = resolverOf(withResolve, out.active);
+  Object.assign(out, liveOf(withResolve, out.active));
+  if (names.length > 1) {
+    out.interfaces = names.map((name: string) => ({
+      name,
+      ...(IFACE_STATES[name] ?? { state: "unknown", since: 0, error: "" }),
+    }));
+  }
   if (!list) return out;
   const { rules, syncProgress: _syncProgress, ...listMeta } = list;
   return { ...out, list: { ...listMeta, rulesTotal: rules?.length ?? 0 } };
@@ -577,6 +589,15 @@ app.get(`${API_BASE}/groups/list/preview`, (c) => {
   });
 });
 
+app.post(`${API_BASE}/groups/:id/move-up`, (c) => {
+  const group = DATA.groups.find((g: any) => g.id === c.req.param("id"));
+  const answer = moveUp(group, group ? ACTIVE[group.id] : undefined, IFACE_STATES);
+  if (answer.status !== 200)
+    return c.json({ error: answer.error }, answer.status as 400 | 404 | 409);
+  ACTIVE[group.id] = 0;
+  return c.json(groupRes(group));
+});
+
 app.post(`${API_BASE}/groups/:id/list/sync`, async (c) => {
   const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
@@ -948,6 +969,9 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
   "app.update.check": false,
+  "app.check.url": "http://cp.cloudflare.com/generate_204",
+  "app.check.interval": 30,
+  "app.check.timeout": 5,
 };
 const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.address",
@@ -956,6 +980,9 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.unmatchedTtl",
   "app.showAllInterfaces",
   "app.update.check",
+  "app.check.url",
+  "app.check.interval",
+  "app.check.timeout",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
 let RUNNING: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -1195,6 +1222,13 @@ app.put("/dev/live", async (c) => {
   }
   if (body?.netfilter && typeof body.netfilter.ok === "boolean") NETFILTER = body.netfilter;
   return c.json({ reasons: LIVE_REASONS, netfilter: NETFILTER });
+});
+
+app.put("/dev/ifaces", async (c) => {
+  const body = await c.req.json();
+  for (const [name, s] of Object.entries(body?.states ?? {})) IFACE_STATES[name] = s as any;
+  for (const [id, at] of Object.entries(body?.active ?? {})) ACTIVE[id] = at as number;
+  return c.json({ states: IFACE_STATES, active: ACTIVE });
 });
 
 app.get("*", serveStatic({ root: "./dist" }));

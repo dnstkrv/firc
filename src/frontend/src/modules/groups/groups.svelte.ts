@@ -31,7 +31,7 @@ import {
   sortGroupRules as sortGroupRulesData,
   toConfigPayload as toConfigPayloadData,
 } from "./groups-data";
-import { type GroupLive, type NetfilterState } from "./live-state";
+import { liveOfRecord, type GroupLive, type NetfilterState } from "./live-state";
 import { selectableIds, selectedInOrder, toggleId } from "./selection";
 
 export const GROUPS_STORE_CONTEXT = Symbol("groups-store");
@@ -116,7 +116,7 @@ export function groupRefusal(error: unknown): GroupFieldError | null {
 
 export type GroupDialogPayload = {
   name: string;
-  interface: string;
+  interface: string | string[];
   devices: DeviceSelector;
   list?: { url: string; interval: number } | null;
   resolve: GroupResolve;
@@ -421,11 +421,8 @@ export class GroupsStore {
     this.#liveTaken = ticket.seq;
     const next: Record<string, GroupLive> = {};
     for (const record of records) {
-      if (!record?.id || typeof record.live !== "boolean") continue;
-      next[record.id] = {
-        live: record.live,
-        liveReason: record.live ? undefined : record.liveReason,
-      };
+      const live = liveOfRecord(record);
+      if (live) next[record.id] = live;
     }
     this.#live = next;
     this.checkedAt = ticket.sentAt;
@@ -665,7 +662,10 @@ export class GroupsStore {
         .get<NetfilterState>("/system/netfilter", { quiet: true })
         .then((netfilter) => this.#takeNetfilter(netfilter, ticket))
         .catch((error) => console.error("Failed to read netfilter state:", error));
-      const fetched = records.map(({ live: _live, liveReason: _reason, ...group }: any) => group);
+      const fetched = records.map(
+        ({ live: _live, liveReason: _reason, active: _active, interfaces: _ifs, ...group }: any) =>
+          group,
+      );
       this.tracker = new ChangeTracker(fetched);
       this.dataRevision = 0;
       this.resetListMetaBaseline(fetched);
@@ -1604,7 +1604,7 @@ export class GroupsStore {
       group.name = payload.name;
       changed = true;
     }
-    if (group.interface !== payload.interface) {
+    if (JSON.stringify(group.interface) !== JSON.stringify(payload.interface)) {
       group.interface = payload.interface;
       changed = true;
     }

@@ -271,6 +271,56 @@ static void write_group_error(firc_http_res_t *res, const char *msg, const char 
     firc_http_res_write_json(res, 400, o);
 }
 
+static firc_err_t ifaces_from_req(const cJSON *req, firc_group_t *group, const char **err_msg, const char **err_field,
+                                  char *msgbuf, size_t msgbuf_len) {
+    const cJSON *j = cJSON_GetObjectItemCaseSensitive(req, "interface");
+    if (!cJSON_IsArray(j)) {
+        const char *iface = cJSON_IsString(j) ? j->valuestring : "";
+        if (iface[0] != '\0' && !firc_is_interface_name(iface)) {
+            *err_msg = "interface is not an interface name";
+            return FIRC_ERR_INVAL;
+        }
+        return firc_strset(&group->iface, iface);
+    }
+    int n = cJSON_GetArraySize(j);
+    const char *names[FIRC_GROUP_IFACES_MAX];
+    size_t bad = 0;
+    const char *why = NULL;
+    if (n < 1 || n > FIRC_GROUP_IFACES_MAX) {
+        snprintf(msgbuf, msgbuf_len, "interface: a group names 1 to 4 interfaces");
+    } else {
+        for (int i = 0; why == NULL && i < n; i++) {
+            const cJSON *it = cJSON_GetArrayItem(j, i);
+            if (!cJSON_IsString(it)) {
+                bad = (size_t)i;
+                why = "not an interface name";
+            } else {
+                names[i] = it->valuestring;
+            }
+        }
+        if (why == NULL) { why = firc_group_ifaces_check(names, (size_t)n, &bad); }
+        if (why == NULL) { return firc_group_set_ifaces(group, names, (size_t)n); }
+        snprintf(msgbuf, msgbuf_len, "interface %zu: %s", bad + 1, why);
+    }
+    *err_msg = msgbuf;
+    *err_field = "interface";
+    return FIRC_ERR_INVAL;
+}
+
+static cJSON *ifaces_json(const firc_group_t *g) {
+    if (g->n_iface_rest == 0) { return cJSON_CreateString(firc_group_iface_at(g, 0)); }
+    cJSON *a = cJSON_CreateArray();
+    for (size_t i = 0; a != NULL && i < firc_group_n_ifaces(g); i++) {
+        cJSON *s = cJSON_CreateString(firc_group_iface_at(g, i));
+        if (s == NULL || !cJSON_AddItemToArray(a, s)) {
+            cJSON_Delete(s);
+            cJSON_Delete(a);
+            return NULL;
+        }
+    }
+    return a;
+}
+
 /* builds a brand-new, independent firc_group_t; existing supplies the id to validate against and baseline rules
  * for lenient nested rule-id reuse; the caller transplants the result onto the live group itself */
 static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing, firc_group_t **out,
@@ -295,16 +345,8 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
     if (!group) { return FIRC_ERR_NOMEM; }
     group->id = existing ? existing->id : req_id;
 
-    /* the interface name goes into an -o match: only a valid kernel interface name */
-    const char *iface = get_string(req, "interface");
-    if (iface != NULL && iface[0] != '\0' && !firc_is_interface_name(iface)) {
-        firc_group_free(group);
-        *err_msg = "interface is not an interface name";
-        return FIRC_ERR_INVAL;
-    }
-
     firc_err_t err = firc_strset(&group->name, get_string(req, "name"));
-    if (err == FIRC_OK) { err = firc_strset(&group->iface, iface); }
+    if (err == FIRC_OK) { err = ifaces_from_req(req, group, err_msg, err_field, msgbuf, msgbuf_len); }
     if (err != FIRC_OK) {
         firc_group_free(group);
         return err;
@@ -465,6 +507,28 @@ static cJSON *list_to_json(const firc_group_list_t *l) {
     return obj;
 }
 
+static bool add_iface_states(firc_app_t *app, const firc_group_t *g, cJSON *obj) {
+    cJSON *ifs = cJSON_AddArrayToObject(obj, "interfaces");
+    if (ifs == NULL) { return false; }
+    for (size_t i = 0; i < firc_group_n_ifaces(g); i++) {
+        const char *name = firc_group_iface_at(g, i);
+        firc_if_view_t v;
+        if (!firc_app_iface_view(app, name, &v)) { memset(&v, 0, sizeof(v)); }
+        cJSON *e = cJSON_CreateObject();
+        if (e == NULL || !cJSON_AddItemToArray(ifs, e)) {
+            cJSON_Delete(e);
+            return false;
+        }
+        if (cJSON_AddStringToObject(e, "name", name) == NULL ||
+            cJSON_AddStringToObject(e, "state", firc_if_state_name(v.state)) == NULL ||
+            cJSON_AddNumberToObject(e, "since", (double)v.since_unix) == NULL ||
+            cJSON_AddStringToObject(e, "error", v.error) == NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* fails whole (NULL) rather than coming back with devices or list silently missing; app nullable omits resolver */
 cJSON *firc_groups_group_json(firc_app_t *app, const firc_group_t *g, bool with_rules) {
     char id_buf[FIRC_ID_STR_LEN];
@@ -473,13 +537,24 @@ cJSON *firc_groups_group_json(firc_app_t *app, const firc_group_t *g, bool with_
     if (obj == NULL) { return NULL; }
     cJSON_AddStringToObject(obj, "id", id_buf);
     cJSON_AddStringToObject(obj, "name", g->name ? g->name : "");
-    cJSON_AddStringToObject(obj, "interface", g->iface ? g->iface : "");
+    cJSON *ifs = ifaces_json(g);
+    if (ifs == NULL || !cJSON_AddItemToObject(obj, "interface", ifs)) {
+        cJSON_Delete(ifs);
+        cJSON_Delete(obj);
+        return NULL;
+    }
     cJSON_AddBoolToObject(obj, "enable", g->enable);
     if (app != NULL) {
         const char *reason = NULL;
         bool live = firc_app_group_live(app, g->id, &reason);
         cJSON_AddBoolToObject(obj, "live", live);
         if (!live) { cJSON_AddStringToObject(obj, "liveReason", reason); }
+        firc_ruleset_t *rs = firc_app_find_group_by_id(app, g->id);
+        cJSON_AddStringToObject(obj, "active", rs != NULL ? firc_ruleset_active_iface(rs) : firc_group_iface_at(g, 0));
+        if (firc_group_n_ifaces(g) > 1 && !add_iface_states(app, g, obj)) {
+            cJSON_Delete(obj);
+            return NULL;
+        }
     }
     cJSON *devices = firc_api_devices_to_json(&g->devices);
     if (devices == NULL) {
@@ -765,6 +840,37 @@ static void handle_delete_group(firc_http_req_t *req, firc_http_res_t *res, void
     firc_http_res_write(res, 200, NULL, NULL, 0);
 }
 
+static void handle_move_up(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    firc_groups_ctx_t *ctx = ud;
+    firc_ruleset_t *rs;
+    if (!firc_groups_resolve(ctx, req, res, &rs)) { return; }
+    const firc_group_t *g = firc_ruleset_group(rs);
+    firc_err_t err = firc_app_move_up(ctx->app, g->id);
+    if (err == FIRC_ERR_INVAL) {
+        firc_http_res_write_error(res, 400, "the group names one interface");
+        return;
+    }
+    if (err == FIRC_ERR_STATE) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%s is not alive", firc_group_iface_at(g, 0));
+        firc_http_res_write_error(res, 409, msg);
+        return;
+    }
+    if (err == FIRC_ERR_AGAIN) {
+        firc_http_res_write_error(res, 409, "the group is not routed");
+        return;
+    }
+    if (err == FIRC_ERR_NOSYS) {
+        firc_http_res_write_error(res, 409, "no check runs for the group");
+        return;
+    }
+    if (err != FIRC_OK) {
+        firc_http_res_write_error(res, 500, firc_err_str(err));
+        return;
+    }
+    firc_http_res_write_json(res, 200, firc_groups_group_json(ctx->app, g, false));
+}
+
 static void handle_get_rules(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     firc_groups_ctx_t *ctx = ud;
     firc_ruleset_t *rs;
@@ -986,6 +1092,7 @@ void firc_groups_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx) {
     must_route(h, "GET", "/api/v1/groups/{groupID}", handle_get_group, ctx);
     must_route(h, "PUT", "/api/v1/groups/{groupID}", handle_put_group, ctx);
     must_route(h, "DELETE", "/api/v1/groups/{groupID}", handle_delete_group, ctx);
+    must_route(h, "POST", "/api/v1/groups/{groupID}/move-up", handle_move_up, ctx);
     must_route(h, "GET", "/api/v1/groups/{groupID}/rules", handle_get_rules, ctx);
     must_route(h, "PUT", "/api/v1/groups/{groupID}/rules", handle_put_rules, ctx);
     must_route(h, "POST", "/api/v1/groups/{groupID}/rules", handle_create_rule, ctx);

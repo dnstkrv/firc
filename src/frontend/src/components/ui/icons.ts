@@ -35,6 +35,7 @@ export { default as X } from "@lucide/svelte/icons/x";
 export { default as LogOut } from "@lucide/svelte/icons/log-out";
 export { default as Password } from "@lucide/svelte/icons/key-round";
 export { default as Info } from "@lucide/svelte/icons/info";
+export { default as Keyboard } from "@lucide/svelte/icons/keyboard";
 export { default as Eye } from "@lucide/svelte/icons/eye";
 export { default as EyeOff } from "@lucide/svelte/icons/eye-off";
 export { default as TriangleAlert } from "@lucide/svelte/icons/triangle-alert";

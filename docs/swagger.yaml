@@ -80,6 +80,9 @@ definitions:
           app.dnsProxy.upstream.address: 127.0.0.1
           app.dnsProxy.upstream.port: 53
           app.dnsProxy.timeout: 5000
+          app.check.url: http://cp.cloudflare.com/generate_204
+          app.check.interval: 30
+          app.check.timeout: 5
         type: object
       classes:
         additionalProperties:
@@ -634,6 +637,22 @@ definitions:
         example: 0a1b2c3d
         type: string
     type: object
+  types.GroupInterface:
+    properties:
+      name:
+        example: nwg1
+        type: string
+      state:
+        description: 'alive -- the last check answered 204, or the tunnel is UP; dead -- two checks 3 s apart failed, the link is down or gone, or the tunnel carries no traffic; unknown -- not checked yet.'
+        enum: [alive, dead, unknown]
+        type: string
+      since:
+        description: 'Unix seconds when the entry entered its state; for unknown, when watching it started. 0 when nothing watches the entry (no check runs, or the group is off).'
+        type: integer
+      error:
+        description: 'Why the last check failed; empty when it passed.'
+        type: string
+    type: object
   types.GroupList:
     description: 'The list a group takes rules from in addition to its own. The rules themselves are not here -- they are read a page at a time through GET /api/v1/groups/{groupID}/list/rules.'
     properties:
@@ -689,8 +708,8 @@ definitions:
         example: 0a1b2c3d
         type: string
       interface:
+        description: 'The interface the group routes through, or its interface list: 1 to 4 names in order of preference, none twice, blackhole only alone. A list of one is saved and answered as a string.'
         example: nwg0
-        type: string
       list:
         $ref: '#/definitions/types.GroupList'
         description: 'The group''s list. Absent -- the list stays as it is, like devices and rules; null removes the list and keeps the manual rules; an object sets a new list or updates the current one -- url is required and must be http/https with a host, an absent interval keeps the current list''s (0 for a new one, no timer); lastUpdate and sync are never read from the body.'
@@ -710,6 +729,10 @@ definitions:
     type: object
   types.GroupRes:
     properties:
+      active:
+        description: 'The entry of the interface list the group routes through now. With every entry dead it is the last one chosen, and liveReason is no-interface.'
+        example: nwg1
+        type: string
       devices:
         $ref: '#/definitions/types.DeviceSelector'
       enable:
@@ -719,8 +742,13 @@ definitions:
         example: 0a1b2c3d
         type: string
       interface:
+        description: 'The interface the group routes through, or its interface list: 1 to 4 names in order of preference, none twice, blackhole only alone. A list of one is saved and answered as a string.'
         example: nwg0
-        type: string
+      interfaces:
+        description: 'Only for a list of two or more: each entry and its check state, in list order.'
+        items:
+          $ref: '#/definitions/types.GroupInterface'
+        type: array
       list:
         $ref: '#/definitions/types.GroupList'
         description: 'Present only on a group with a list; the group''s manual rules ("rules") are its own too.'
@@ -1675,6 +1703,44 @@ paths:
           schema:
             $ref: '#/definitions/types.ErrorRes'
       summary: 'Update a group'
+      tags:
+      - groups
+  /api/v1/groups/{groupID}/move-up:
+    post:
+      description: >-
+        Moves a group with an interface list back to its first entry at once,
+        without waiting for the hold, and answers the group record. A group
+        already on its first entry answers 200 unchanged.
+      parameters:
+      - description: 'Group ID'
+        in: path
+        name: groupID
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.GroupRes'
+        "400":
+          description: 'Bad Request -- "the group names one interface", or an invalid id'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "404":
+          description: 'Not Found -- "group not exist"'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "409":
+          description: 'Conflict -- "<first entry> is not alive": the first entry cannot take the group now; "the group is not routed": the group is off or not up; "no check runs for the group": nothing checks its interfaces'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+      summary: 'Move the group back to its first interface'
       tags:
       - groups
   /api/v1/groups/{groupID}/rules:

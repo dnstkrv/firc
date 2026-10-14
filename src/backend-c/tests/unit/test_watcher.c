@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <libmnl/libmnl.h>
 #include <linux/netlink.h>
+#include <linux/if.h>
 #include <linux/rtnetlink.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -93,6 +94,42 @@ TEST an_address_added_or_removed_names_its_interface(void) {
     struct nlmsghdr *bare = mnl_nlmsg_put_header(buf);
     bare->nlmsg_type = RTM_DELADDR;
     ASSERT_EQ_FMTm("a message too short for its header names nothing", 0, firc_nl_watcher_addr_ifindex(bare), "%d");
+    PASS();
+}
+
+static struct nlmsghdr *link_msg(uint8_t *buf, uint16_t type, unsigned flags, const char *name) {
+    memset(buf, 0, 256);
+    struct nlmsghdr *h = mnl_nlmsg_put_header(buf);
+    h->nlmsg_type = type;
+    struct ifinfomsg *ifi = mnl_nlmsg_put_extra_header(h, sizeof(*ifi));
+    ifi->ifi_flags = flags;
+    ifi->ifi_index = 7;
+    if (name != NULL) { mnl_attr_put_strz(h, IFLA_IFNAME, name); }
+    return h;
+}
+
+TEST a_link_without_iff_up_or_deleted_is_reported_down(void) {
+    uint8_t buf[256];
+    char name[16];
+    bool up = true;
+    ASSERT(firc_nl_watcher_link_event(link_msg(buf, RTM_NEWLINK, 0, "nwg9"), name, sizeof(name), &up));
+    ASSERT_STR_EQ("nwg9", name);
+    ASSERT_FALSE(up);
+    up = true;
+    ASSERT(firc_nl_watcher_link_event(link_msg(buf, RTM_DELLINK, IFF_UP, "nwg9"), name, sizeof(name), &up));
+    ASSERT_FALSEm("a deleted link is down whatever its last flags", up);
+    ASSERT(firc_nl_watcher_link_event(link_msg(buf, RTM_NEWLINK, IFF_UP, "nwg9"), name, sizeof(name), &up));
+    ASSERT(up);
+    ASSERT_FALSE(firc_nl_watcher_link_event(link_msg(buf, RTM_NEWADDR, IFF_UP, "nwg9"), name, sizeof(name), &up));
+    ASSERT_FALSEm("a link with no name is not reported",
+                  firc_nl_watcher_link_event(link_msg(buf, RTM_NEWLINK, IFF_UP, NULL), name, sizeof(name), &up));
+    struct nlmsghdr *exact = calloc(1, sizeof(*exact));
+    ASSERT(exact != NULL);
+    exact->nlmsg_len = sizeof(*exact);
+    exact->nlmsg_type = RTM_NEWLINK;
+    bool read = firc_nl_watcher_link_event(exact, name, sizeof(name), &up);
+    free(exact);
+    ASSERT_FALSEm("a message too short for its header is not read", read);
     PASS();
 }
 
@@ -558,6 +595,64 @@ TEST a_read_on_the_reopened_socket_resets_the_wait(void) {
     PASS();
 }
 
+static bool send_to_watcher(int fd, const struct nlmsghdr *h) {
+    struct sockaddr_nl me;
+    memset(&me, 0, sizeof(me));
+    socklen_t len = sizeof(me);
+    if (getsockname(fd, (struct sockaddr *)&me, &len) != 0) { return false; }
+    int s = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (s < 0) { return false; }
+    struct sockaddr_nl to;
+    memset(&to, 0, sizeof(to));
+    to.nl_family = AF_NETLINK;
+    to.nl_pid = me.nl_pid;
+    bool sent = sendto(s, h, h->nlmsg_len, 0, (struct sockaddr *)&to, sizeof(to)) == (ssize_t)h->nlmsg_len;
+    close(s);
+    return sent;
+}
+
+typedef struct {
+    firc_loop_t *loop;
+    char names[4][16];
+    bool ups[4];
+    int n;
+} links_seen_t;
+
+static void record_link(const char *name, bool up, void *ud) {
+    links_seen_t *s = ud;
+    if (s->n < 4) {
+        snprintf(s->names[s->n], sizeof(s->names[0]), "%s", name);
+        s->ups[s->n] = up;
+    }
+    if (++s->n == 3) { firc_loop_stop(s->loop); }
+}
+
+TEST a_link_going_down_or_away_reaches_the_listener(void) {
+    if (!can_poke()) { SKIPm("a netlink unicast needs CAP_NET_ADMIN; the gates run this in a user namespace"); }
+    links_seen_t s;
+    memset(&s, 0, sizeof(s));
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&s.loop));
+    firc_nl_watcher_t *w = NULL;
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(s.loop, record_link, &s, NULL, NULL, NULL, NULL, &w));
+    uint8_t buf[256];
+    int fd = firc_nl_watcher_fd(w);
+    ASSERT(send_to_watcher(fd, link_msg(buf, RTM_NEWLINK, 0, "nwg1")));
+    ASSERT(send_to_watcher(fd, link_msg(buf, RTM_DELLINK, IFF_UP, "nwg2")));
+    ASSERT(send_to_watcher(fd, link_msg(buf, RTM_NEWLINK, IFF_UP, "nwg3")));
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(s.loop, 3000, 0, give_up, NULL, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(s.loop));
+    ASSERT_EQ_FMT(3, s.n, "%d");
+    ASSERT_STR_EQ("nwg1", s.names[0]);
+    ASSERT_FALSE(s.ups[0]);
+    ASSERT_STR_EQ("nwg2", s.names[1]);
+    ASSERT_FALSE(s.ups[1]);
+    ASSERT_STR_EQ("nwg3", s.names[2]);
+    ASSERT(s.ups[2]);
+    firc_nl_watcher_destroy(w);
+    firc_loop_destroy(s.loop);
+    PASS();
+}
+
 /* Catches: a failure reported while a reopen already waits arming a second timer. */
 TEST a_second_failure_while_a_reopen_waits_adds_nothing(void) {
     firc_loop_t *loop = NULL;
@@ -579,6 +674,7 @@ int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(a_default_route_names_its_interface);
     RUN_TEST(an_address_added_or_removed_names_its_interface);
+    RUN_TEST(a_link_without_iff_up_or_deleted_is_reported_down);
     RUN_TEST(a_route_of_firc_s_own_names_nothing);
     RUN_TEST(only_default_routes_of_a_forwarding_type_name_an_interface);
     RUN_TEST(a_multipath_default_names_every_one_of_its_legs);
@@ -596,5 +692,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_socket_failing_again_before_it_reads_waits_longer);
     RUN_TEST(a_read_on_the_reopened_socket_resets_the_wait);
     RUN_TEST(a_second_failure_while_a_reopen_waits_adds_nothing);
+    RUN_TEST(a_link_going_down_or_away_reaches_the_listener);
     GREATEST_MAIN_END();
 }

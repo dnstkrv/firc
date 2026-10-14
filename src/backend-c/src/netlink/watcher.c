@@ -53,26 +53,26 @@ static void close_socket(firc_nl_watcher_t *w) {
 
 static void socket_failed(firc_nl_watcher_t *w);
 
-static void handle_link_msg(firc_nl_watcher_t *w, const struct nlmsghdr *h) {
-    if (h->nlmsg_type != RTM_NEWLINK || !w->link_cb) { return; }
-
+bool firc_nl_watcher_link_event(const struct nlmsghdr *h, char *name, size_t cap, bool *up) {
+    if (h->nlmsg_type != RTM_NEWLINK && h->nlmsg_type != RTM_DELLINK) { return false; }
+    if (mnl_nlmsg_get_payload_len(h) < sizeof(struct ifinfomsg)) { return false; }
     const struct ifinfomsg *ifi = mnl_nlmsg_get_payload(h);
-    bool up = (ifi->ifi_flags & IFF_UP) != 0;
-    if (!up) { return; }
-
-    char name[IFNAMSIZ] = {0};
-    firc_nlattr_iter_t attr_it;
-    const struct nlattr *attr;
-    if (!firc_nlattr_iter_init_nlmsg(&attr_it, h, sizeof(struct ifinfomsg))) { return; }
-    while (firc_nlattr_iter_next(&attr_it, &attr)) {
-        if (mnl_attr_get_type(attr) == IFLA_IFNAME) {
-            const char *v = mnl_attr_get_str(attr);
-            snprintf(name, sizeof(name), "%s", v);
-        }
+    *up = h->nlmsg_type == RTM_NEWLINK && (ifi->ifi_flags & IFF_UP) != 0;
+    name[0] = '\0';
+    firc_nlattr_iter_t it;
+    const struct nlattr *a;
+    if (!firc_nlattr_iter_init_nlmsg(&it, h, sizeof(struct ifinfomsg))) { return false; }
+    while (firc_nlattr_iter_next(&it, &a)) {
+        if (mnl_attr_get_type(a) == IFLA_IFNAME) { snprintf(name, cap, "%s", mnl_attr_get_str(a)); }
     }
-    if (name[0] == '\0') { return; }
+    return name[0] != '\0';
+}
 
-    w->link_cb(name, true, w->link_ud);
+static void handle_link_msg(firc_nl_watcher_t *w, const struct nlmsghdr *h) {
+    if (!w->link_cb) { return; }
+    char name[IFNAMSIZ];
+    bool up = false;
+    if (firc_nl_watcher_link_event(h, name, sizeof(name), &up)) { w->link_cb(name, up, w->link_ud); }
 }
 
 int firc_nl_watcher_addr_ifindex(const struct nlmsghdr *h) {
@@ -207,6 +207,7 @@ static void on_readable(firc_loop_t *loop, int fd, uint32_t events, void *ud) {
         struct nlmsghdr *nh = (struct nlmsghdr *)buf;
         while (mnl_nlmsg_ok(nh, len)) {
             switch (nh->nlmsg_type) {
+            case RTM_DELLINK:
             case RTM_NEWLINK:
                 handle_link_msg(w, nh);
                 break;

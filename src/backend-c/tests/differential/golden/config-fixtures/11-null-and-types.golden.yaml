@@ -38,4 +38,8 @@ app:
   showAllInterfaces: false
   update:
     check: false
+  check:
+    url: http://cp.cloudflare.com/generate_204
+    interval: 30s
+    timeout: 5s
 groups: []

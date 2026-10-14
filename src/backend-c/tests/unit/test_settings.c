@@ -35,7 +35,8 @@ static const char EVERY_FIELD[] =
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
     "  showAllInterfaces: true\n"
-    "  update: {check: true}\n";
+    "  update: {check: true}\n"
+    "  check: {url: 'https://check.example/204', interval: 45s, timeout: 3s}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -144,10 +145,29 @@ static void web_and_proxy_same_socket(firc_app_config_t *c) {
 static void mark_index_short_of_255(firc_app_config_t *c) { c->netfilter.start_mark_table_index = UINT32_C(0x7fffff00); }
 static void mark_index_past_the_loop(firc_app_config_t *c) { c->netfilter.start_mark_table_index = UINT32_C(0xffffffff); }
 
+static void check_url_ftp(firc_app_config_t *c) { firc_strset(&c->check.url, "ftp://check.example/"); }
+static void check_url_no_host(firc_app_config_t *c) { firc_strset(&c->check.url, "http:///generate_204"); }
+static void check_url_space(firc_app_config_t *c) { firc_strset(&c->check.url, "http://a b/"); }
+static void check_url_v6_literal(firc_app_config_t *c) { firc_strset(&c->check.url, "https://[2606:4700::1111]/generate_204"); }
+static void check_url_v6_behind_userinfo(firc_app_config_t *c) { firc_strset(&c->check.url, "http://u@[::1]:8080/204"); }
+static void check_interval_9s(firc_app_config_t *c) { c->check.interval = 9 * FIRC_DURATION_SEC; }
+static void check_interval_3601s(firc_app_config_t *c) { c->check.interval = 3601 * FIRC_DURATION_SEC; }
+static void check_timeout_0(firc_app_config_t *c) { c->check.timeout = 0; }
+static void check_timeout_31s(firc_app_config_t *c) { c->check.timeout = 31 * FIRC_DURATION_SEC; }
+
 static const struct {
     void (*spoil)(firc_app_config_t *c);
     const char *field;
 } CASES[] = {
+    {check_url_ftp, "app.check.url"},
+    {check_url_no_host, "app.check.url"},
+    {check_url_space, "app.check.url"},
+    {check_url_v6_literal, "app.check.url"},
+    {check_url_v6_behind_userinfo, "app.check.url"},
+    {check_interval_9s, "app.check.interval"},
+    {check_interval_3601s, "app.check.interval"},
+    {check_timeout_0, "app.check.timeout"},
+    {check_timeout_31s, "app.check.timeout"},
     {upstream_is_a_name, "app.dnsProxy.upstream.address"},
     {upstream_is_empty, "app.dnsProxy.upstream.address"},
     {upstream_port_zero, "app.dnsProxy.upstream.port"},
@@ -201,6 +221,30 @@ TEST the_check_names_the_field_that_broke(void) {
         ASSERT_STR_EQm(CASES[i].field, CASES[i].field, field);
         ASSERTm(CASES[i].field, why != NULL && why[0] != '\0');
     }
+    PASS();
+}
+
+TEST the_check_settings_default_to_the_spec_and_are_live(void) {
+    firc_app_config_t c;
+    ASSERT_EQ(FIRC_OK, firc_app_config_init_defaults(&c));
+    ASSERT_STR_EQ("http://cp.cloudflare.com/generate_204", c.check.url);
+    ASSERT_EQ(30 * FIRC_DURATION_SEC, c.check.interval);
+    ASSERT_EQ(5 * FIRC_DURATION_SEC, c.check.timeout);
+    const char *field = NULL, *why = NULL;
+    c.check.interval = 10 * FIRC_DURATION_SEC;
+    c.check.timeout = 30 * FIRC_DURATION_SEC;
+    ASSERT_EQm("the edges are in range", FIRC_OK, firc_app_config_check(&c, &field, &why));
+    c.check.interval = 3600 * FIRC_DURATION_SEC;
+    c.check.timeout = 1 * FIRC_DURATION_SEC;
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&c, &field, &why));
+    static const char *const live[] = {"app.check.url", "app.check.interval", "app.check.timeout"};
+    for (size_t i = 0; i < 3; i++) {
+        const firc_setting_t *s = firc_setting_find(live[i]);
+        ASSERT(s != NULL);
+        ASSERT_EQ(FIRC_SETTING_LIVE, s->cls);
+        ASSERT_EQ(FIRC_APPLY_CHECK, s->apply);
+    }
+    firc_app_config_clear(&c);
     PASS();
 }
 
@@ -265,6 +309,9 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
         {"app.showAllInterfaces", FIRC_APPLY_NONE},
         {"app.update.check", FIRC_APPLY_NONE},
+        {"app.check.url", FIRC_APPLY_CHECK},
+        {"app.check.interval", FIRC_APPLY_CHECK},
+        {"app.check.timeout", FIRC_APPLY_CHECK},
     };
     size_t n_live = 0;
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
@@ -324,6 +371,8 @@ static const field_t NUMERIC[] = {
     FIELD("app.netfilter.startMarkTableIndex", netfilter.start_mark_table_index),
     FIELD("app.showAllInterfaces", show_all_interfaces),
     FIELD("app.update.check", update.check),
+    FIELD("app.check.interval", check.interval),
+    FIELD("app.check.timeout", check.timeout),
     FIELD("app.httpWeb.host.port", http_web.host.port),
 };
 
@@ -371,6 +420,7 @@ int main(int argc, char **argv) {
     RUN_TEST(the_table_covers_every_field_but_enabled);
     RUN_TEST(the_check_names_the_field_that_broke);
     RUN_TEST(the_check_passes_what_the_daemon_accepts);
+    RUN_TEST(the_check_settings_default_to_the_spec_and_are_live);
     RUN_TEST(a_disabled_webui_host_is_not_checked);
     RUN_TEST(each_row_has_the_specs_class_and_apply);
     RUN_TEST(the_update_check_is_live_off_by_default_and_applies_nothing);

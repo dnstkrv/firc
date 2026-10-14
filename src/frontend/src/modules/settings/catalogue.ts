@@ -239,6 +239,45 @@ export const SECTIONS: Section[] = [
     ],
   },
   {
+    id: "check",
+    title: () => t("Interface check"),
+    rows: [
+      row(
+        () => t("Check URL"),
+        () => t("A GET through each interface of a list; only a 204 answer counts as alive"),
+        [
+          {
+            key: "app.check.url",
+            label: () => t("Check URL"),
+            control: { kind: "text", width: "22rem" },
+          },
+        ],
+      ),
+      row(
+        () => t("Check interval"),
+        () => t("Seconds between two checks of one interface, 10 to 3600"),
+        [
+          {
+            key: "app.check.interval",
+            label: () => t("Check interval"),
+            control: { kind: "number", unit: () => t("s") },
+          },
+        ],
+      ),
+      row(
+        () => t("Check timeout"),
+        () => t("Seconds a check may take, 1 to 30"),
+        [
+          {
+            key: "app.check.timeout",
+            label: () => t("Check timeout"),
+            control: { kind: "number", unit: () => t("s") },
+          },
+        ],
+      ),
+    ],
+  },
+  {
     id: "webui",
     title: () => t("WebUI"),
     rows: [

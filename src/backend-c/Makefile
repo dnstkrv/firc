@@ -120,6 +120,7 @@ NETFILTER_SRCS := \
     src/netfilter/ruleset.c \
     src/netfilter/pool_reject.c \
     src/netfilter/dnat.c \
+    src/netfilter/checkroute.c \
     src/netlink/rtnl.c \
     src/netlink/watcher.c
 
@@ -191,6 +192,9 @@ TAP_CFG_SRCS := \
     src/tap/window.c
 
 INTERFACES_SRCS := \
+    src/interfaces/ifchoose.c \
+    src/interfaces/ifcheck.c \
+    src/interfaces/ifwatch.c \
     src/interfaces/keenetic_rci.c \
     src/interfaces/keenetic_policy.c \
     src/interfaces/keenetic_resolvers.c
@@ -324,7 +328,7 @@ sanitize:
 	    LDFLAGS="-fsanitize=$(SAN)" test
 
 # Own build dir: TSan and ASan objects do not mix.
-TSAN_TESTS := test_keenetic_policy test_keenetic_resolvers test_loop test_queue test_nfcommit test_sub_worker test_app test_update test_update_api test_settings_api
+TSAN_TESTS := test_keenetic_policy test_keenetic_resolvers test_loop test_queue test_nfcommit test_sub_worker test_app test_update test_update_api test_settings_api test_ifcheck
 TSAN_BINS := $(TSAN_TESTS:%=build/tsan/tests/%)
 tsan:
 	$(MAKE) BUILD=tsan \

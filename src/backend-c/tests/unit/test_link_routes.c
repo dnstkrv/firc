@@ -1118,6 +1118,238 @@ TEST an_enable_that_rolls_back_writes_no_iptables(void) {
     PASS();
 }
 
+static unsigned two_links(const char *name) {
+    if (strcmp(name, "up0") == 0) { return 7; }
+    if (strcmp(name, "up1") == 0) { return 8; }
+    if (strcmp(name, "up2") == 0) { return 9; }
+    return strcmp(name, "lo") == 0 ? 1u : 0u;
+}
+
+static bool up_list(fixture_t *f, const char *const *names, size_t n, size_t active) {
+    if (!up(f, 0x1 | 0x10)) { return false; }
+    firc_rtnl_set_nametoindex_for_test(two_links);
+    return firc_ipset_to_link_set_ifaces(f->link, names, n, active, false) == FIRC_OK &&
+           firc_ipset_to_link_enable(f->link, NULL) == FIRC_OK;
+}
+
+static size_t count_of(fixture_t *f, uint16_t type, uint32_t priority, const char *iif, uint32_t oif) {
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f->kernel, m, 64), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool rule = type == RTM_NEWRULE || type == RTM_DELRULE;
+        if (m[i].type != type) { continue; }
+        if (rule && (m[i].priority != priority || strcmp(m[i].iif, iif) != 0)) { continue; }
+        if (!rule && (m[i].oif != oif || m[i].rtm_type != RTN_UNICAST)) { continue; }
+        c++;
+    }
+    return c;
+}
+
+TEST a_list_link_has_a_twin_per_entry_and_deletes_each_by_its_iif(void) {
+    fixture_t f;
+    const char *const names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, names, 2, 0));
+    ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_NEWRULE, 49, "up0", 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_NEWRULE, 49, "up1", 0), "%zu");
+    size_t del0 = count_of(&f, RTM_DELRULE, 49, "up0", 0), del1 = count_of(&f, RTM_DELRULE, 49, "up1", 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_disable(f.link));
+    ASSERT_EQ_FMT(del0 + 1, count_of(&f, RTM_DELRULE, 49, "up0", 0), "%zu");
+    ASSERT_EQ_FMT(del1 + 1, count_of(&f, RTM_DELRULE, 49, "up1", 0), "%zu");
+    ASSERT_EQ_FMTm("no plain delete that would take another iif's twin", (size_t)0,
+                   count_of(&f, RTM_DELRULE, 49, "", 0), "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST set_active_deletes_the_old_default_before_writing_the_new_one(void) {
+    fixture_t f;
+    const char *const names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, names, 2, 0));
+    ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_NEWROUTE, 0, "", 7), "%zu");
+    size_t rules = count_of(&f, RTM_NEWRULE, 50, "", 0) + count_of(&f, RTM_NEWRULE, 49, "up0", 0) +
+                   count_of(&f, RTM_NEWRULE, 49, "up1", 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 1, false));
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f.kernel, m, 64), del_at = n, new_at = n;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type == RTM_DELROUTE && m[i].oif == 7 && m[i].priority == 10 && m[i].table == 100) { del_at = i; }
+        if (m[i].type == RTM_NEWROUTE && m[i].oif == 8 && m[i].priority == 10 && m[i].table == 100) { new_at = i; }
+    }
+    ASSERT(del_at < n && new_at < n && del_at < new_at);
+    ASSERT_STR_EQ("up1", firc_ipset_to_link_active_iface(f.link));
+    ASSERT_EQ_FMTm("a move writes no rule", rules,
+                   count_of(&f, RTM_NEWRULE, 50, "", 0) + count_of(&f, RTM_NEWRULE, 49, "up0", 0) +
+                       count_of(&f, RTM_NEWRULE, 49, "up1", 0),
+                   "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST a_blocked_link_leaves_the_blackhole_and_ignores_link_up(void) {
+    fixture_t f;
+    const char *const names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, names, 2, 0));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 0, true));
+    ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_DELROUTE, 0, "", 7), "%zu");
+    fake_rtnl_msg_t m[64];
+    size_t before = fake_rtnl_messages(f.kernel, m, 64);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_addr_change(f.link));
+    ASSERT_EQ_FMT(before, fake_rtnl_messages(f.kernel, m, 64), "%zu");
+    ASSERT_EQ_FMTm("blocked: no default comes back by itself", (size_t)1, count_of(&f, RTM_NEWROUTE, 0, "", 7), "%zu");
+    ASSERT_FALSE(firc_ipset_to_link_has_iface_route(f.link, AF_INET));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 0, false));
+    ASSERT_EQ_FMT((size_t)2, count_of(&f, RTM_NEWROUTE, 0, "", 7), "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST a_release_keeps_the_twins_the_newer_link_holds(void) {
+    fixture_t f;
+    const char *const old_names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, old_names, 2, 0));
+    firc_ipset_to_link_t *newer = firc_ipset_to_link_new("FIRC_g1", "up1", f.ipt, NULL, f.rtnl, 100, NULL, "g1", NULL, NULL);
+    const char *const new_names[] = {"up1", "up2"};
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_ifaces(newer, new_names, 2, 0, false));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(newer, NULL));
+    size_t del0 = count_of(&f, RTM_DELRULE, 49, "up0", 0), del1 = count_of(&f, RTM_DELRULE, 49, "up1", 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_release(f.link, newer));
+    f.link = NULL;
+    ASSERT_EQ_FMT(del0 + 1, count_of(&f, RTM_DELRULE, 49, "up0", 0), "%zu");
+    ASSERT_EQ_FMTm("the newer link's twin on up1 stays", del1, count_of(&f, RTM_DELRULE, 49, "up1", 0), "%zu");
+    firc_ipset_to_link_release(newer, NULL);
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST a_move_never_carries_the_old_entry_s_gateway(void) {
+    fixture_t f;
+    ASSERT(up(&f, 0x1));
+    firc_rtnl_set_nametoindex_for_test(two_links);
+    const uint8_t gw[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 7, gw, 4);
+    const char *const names[] = {"up0", "up1"};
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_ifaces(f.link, names, 2, 0, false));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 1, false));
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f.kernel, m, 64), seen7 = 0, seen8 = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type != RTM_NEWROUTE || m[i].rtm_type != RTN_UNICAST) { continue; }
+        if (m[i].oif == 7) {
+            seen7++;
+            ASSERT_EQ_FMT(4, m[i].gw_len, "%d");
+        }
+        if (m[i].oif == 8) {
+            seen8++;
+            ASSERT_EQ_FMT(0, m[i].gw_len, "%d");
+        }
+    }
+    ASSERT_EQ_FMT((size_t)1, seen7, "%zu");
+    ASSERT_EQ_FMT((size_t)1, seen8, "%zu");
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST set_ifaces_refuses_a_bad_list_and_an_enabled_link(void) {
+    fixture_t f;
+    const char *const names[] = {"up0", "up1", "up2", "lo", "up0"};
+    ASSERT(up(&f, 0x1 | 0x10));
+    firc_rtnl_set_nametoindex_for_test(two_links);
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_ipset_to_link_set_ifaces(f.link, names, 0, 0, false));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_ipset_to_link_set_ifaces(f.link, names, 5, 0, false));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_ipset_to_link_set_ifaces(f.link, names, 2, 2, false));
+    ASSERT_STR_EQ("lo", firc_ipset_to_link_active_iface(f.link));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_ifaces(f.link, names, 4, 3, false));
+    ASSERT_STR_EQ("lo", firc_ipset_to_link_active_iface(f.link));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 1, true));
+    bool blocked = false;
+    ASSERT_EQ_FMT((size_t)1, firc_ipset_to_link_active(f.link, &blocked), "%zu");
+    ASSERT(blocked);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 2, false));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_NEWROUTE, 0, "", 9), "%zu");
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_ipset_to_link_set_ifaces(f.link, names, 2, 0, false));
+    ASSERT_STR_EQ("up2", firc_ipset_to_link_active_iface(f.link));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_ipset_to_link_set_active(f.link, 4, false));
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+TEST a_release_takes_every_twin_when_the_newer_link_has_another_field(void) {
+    fixture_t f;
+    const char *const old_names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, old_names, 2, 0));
+    firc_ipset_to_link_t *newer = firc_ipset_to_link_new("FIRC_g2", "up1", f.ipt, NULL, f.rtnl, 100, NULL, "g2", NULL, NULL);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(newer, NULL));
+    ASSERT(firc_ipset_to_link_mark_field(newer) != firc_ipset_to_link_mark_field(f.link));
+    size_t del1 = count_of(&f, RTM_DELRULE, 49, "up1", 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_release(f.link, newer));
+    f.link = NULL;
+    ASSERT_EQ_FMT(del1 + 1, count_of(&f, RTM_DELRULE, 49, "up1", 0), "%zu");
+    firc_ipset_to_link_release(newer, NULL);
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
+static firc_err_t link_pass(fixture_t *f) {
+    firc_err_t err = firc_netfilter_register_base_chains(f->ipt, NULL);
+    if (err == FIRC_OK) { err = firc_ipset_to_link_prepare_iptables(f->link); }
+    return err == FIRC_OK ? firc_ipt_commit(f->ipt) : err;
+}
+
+TEST a_list_link_s_own_pass_stages_every_entry_after_a_move(void) {
+    fixture_t f;
+    const char *const names[] = {"up0", "up1"};
+    ASSERT(up_list(&f, names, 2, 0));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_set_active(f.link, 1, false));
+    ASSERT_EQ(FIRC_OK, link_pass(&f));
+    char match[32], line[160];
+    snprintf(match, sizeof(match), "0x%x/0x%x", firc_mark_group_value(firc_ipset_to_link_mark_field(f.link)),
+             FIRC_MARK_GROUP_MASK);
+    char *flt = firc_fake_ipt_print(f.fipt, "filter");
+    char *nat = firc_fake_ipt_print(f.fipt, "nat");
+    ASSERT(flt != NULL && nat != NULL);
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(line, sizeof(line), "-A FIRC_g1 -o %s -m mark --mark %s -j ACCEPT\n", names[i], match);
+        ASSERTm(line, strstr(flt, line) != NULL);
+        snprintf(line, sizeof(line), "-A FIRC_g1 -o %s -m mark --mark %s -j MASQUERADE\n", names[i], match);
+        ASSERTm(line, strstr(nat, line) != NULL);
+        ASSERT_EQ_FMT((size_t)1, count_of(&f, RTM_NEWRULE, 49, names[i], 0), "%zu");
+    }
+    ASSERT(strstr(flt, ":FIRC_g1E ") != NULL);
+    ASSERT(strstr(flt, "-A FIRC_g1E -i up0 -j RETURN\n"
+                       "-A FIRC_g1E -o up0 -j RETURN\n"
+                       "-A FIRC_g1E -i up1 -j RETURN\n"
+                       "-A FIRC_g1E -o up1 -j RETURN\n"
+                       "-A FIRC_g1E -j DROP\n") != NULL);
+    ASSERT(strstr(flt, "-j FIRC_g1E\n") != NULL);
+    free(flt);
+    free(nat);
+
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_release(f.link, NULL));
+    f.link = firc_ipset_to_link_new("FIRC_g1", "up0", f.ipt, NULL, f.rtnl, 100, NULL, "g1", NULL, NULL);
+    ASSERT(f.link != NULL);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, link_pass(&f));
+    flt = firc_fake_ipt_print(f.fipt, "filter");
+    ASSERT(flt != NULL);
+    ASSERT_EQ(NULL, strstr(flt, ":FIRC_g1E "));
+    ASSERT_EQ(NULL, strstr(flt, "-o up1 "));
+    ASSERT(strstr(flt, "-A FIRC_EGRESS ! -i up0 ! -o up0 ") != NULL);
+    free(flt);
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    down(&f);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1163,5 +1395,13 @@ int main(int argc, char **argv) {
     RUN_TEST(disable_takes_the_rules_and_leaves_the_chain);
     RUN_TEST(a_failed_enable_names_its_step);
     RUN_TEST(an_enable_that_rolls_back_writes_no_iptables);
+    RUN_TEST(a_list_link_has_a_twin_per_entry_and_deletes_each_by_its_iif);
+    RUN_TEST(set_active_deletes_the_old_default_before_writing_the_new_one);
+    RUN_TEST(a_blocked_link_leaves_the_blackhole_and_ignores_link_up);
+    RUN_TEST(a_release_keeps_the_twins_the_newer_link_holds);
+    RUN_TEST(a_move_never_carries_the_old_entry_s_gateway);
+    RUN_TEST(set_ifaces_refuses_a_bad_list_and_an_enabled_link);
+    RUN_TEST(a_release_takes_every_twin_when_the_newer_link_has_another_field);
+    RUN_TEST(a_list_link_s_own_pass_stages_every_entry_after_a_move);
     GREATEST_MAIN_END();
 }

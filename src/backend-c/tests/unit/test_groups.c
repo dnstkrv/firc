@@ -26,6 +26,7 @@
 #include "firc/groups.h"
 #include "firc/loop.h"
 #include "firc/resolveroute.h"
+#include "firc/rtnl.h"
 
 typedef struct harness {
     firc_loop_t *loop;
@@ -458,6 +459,53 @@ TEST a_bad_device_entry_is_refused_naming_the_field_and_the_group(void) {
 
 static firc_ruleset_t *only_group(harness_t *h) {
     return firc_app_user_group_count(h->app) == 1 ? firc_app_user_group_at(h->app, 0) : NULL;
+}
+
+static char *saved_groups_of(harness_t *h) {
+    firc_group_t *gp = (firc_group_t *)firc_ruleset_group(only_group(h));
+    firc_config_t c = h->cfg;
+    c.groups = &gp;
+    c.n_groups = 1;
+    char *out = NULL;
+    size_t len = 0;
+    return firc_config_save_buffer_part(&c, "0.0.0", FIRC_CFG_GROUPS, &out, &len) == FIRC_OK ? out : NULL;
+}
+
+TEST a_put_moves_a_live_group_between_list_lengths_both_ways(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":\"nwg0\"}", &out));
+    char path[96];
+    snprintf(path, sizeof(path), "/api/v1/groups/%s", jstr(out, "id"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("PUT", path, "{\"name\":\"g\",\"interface\":[\"nwg3\",\"nwg4\",\"nwg5\"]}", &out));
+    cJSON_Delete(out);
+    const firc_group_t *g = firc_ruleset_group(only_group(h));
+    ASSERT_EQ_FMT((size_t)3, firc_group_n_ifaces(g), "%zu");
+    ASSERT_STR_EQ("nwg3", firc_group_iface_at(g, 0));
+    ASSERT_STR_EQ("nwg4", firc_group_iface_at(g, 1));
+    ASSERT_STR_EQ("nwg5", firc_group_iface_at(g, 2));
+    char *yaml = saved_groups_of(h);
+    ASSERT(yaml != NULL);
+    ASSERT(strstr(yaml, "interface:\n  - nwg3\n  - nwg4\n  - nwg5\n") != NULL);
+    free(yaml);
+
+    ASSERT_EQ(200, do_request("PUT", path, "{\"name\":\"g\",\"interface\":[\"nwg6\"]}", &out));
+    ASSERT_STR_EQ("nwg6", jstr(out, "interface"));
+    cJSON_Delete(out);
+    g = firc_ruleset_group(only_group(h));
+    ASSERT_EQ_FMT((size_t)1, firc_group_n_ifaces(g), "%zu");
+    ASSERT_STR_EQ("nwg6", firc_group_iface_at(g, 0));
+    ASSERT_STR_EQ("", firc_group_iface_at(g, 1));
+    yaml = saved_groups_of(h);
+    ASSERT(yaml != NULL);
+    ASSERT(strstr(yaml, "interface: nwg6\n") != NULL);
+    ASSERT_EQ(NULL, strstr(yaml, "nwg4"));
+    free(yaml);
+    harness_stop(h);
+    PASS();
 }
 
 /* Catches: a refused PUT taking the group out of netfilter before the body was checked. */
@@ -1748,12 +1796,215 @@ static void stop_live_harness(void *ud) {
     if (live_harness != NULL) { harness_stop(live_harness); }
 }
 
+TEST the_api_takes_and_answers_an_interface_list(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":[\"nwg0\",\"nwg1\"]}", &out));
+    cJSON *ifs = cJSON_GetObjectItemCaseSensitive(out, "interface");
+    ASSERT(cJSON_IsArray(ifs));
+    ASSERT_EQ(2, cJSON_GetArraySize(ifs));
+    ASSERT_STR_EQ("nwg0", cJSON_GetArrayItem(ifs, 0)->valuestring);
+    ASSERT_STR_EQ("nwg1", cJSON_GetArrayItem(ifs, 1)->valuestring);
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"h\",\"interface\":[\"nwg2\"]}", &out));
+    ASSERT_STR_EQ("nwg2", jstr(out, "interface"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+TEST the_api_refuses_a_bad_interface_list_naming_the_field(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    static const char *const bodies[] = {
+        "{\"name\":\"g\",\"interface\":[]}",
+        "{\"name\":\"g\",\"interface\":[\"nwg0\",\"nwg0\"]}",
+        "{\"name\":\"g\",\"interface\":[\"a0\",\"a1\",\"a2\",\"a3\",\"a4\"]}",
+        "{\"name\":\"g\",\"interface\":[\"blackhole\",\"nwg0\"]}",
+        "{\"name\":\"g\",\"interface\":[\"nwg0\",7]}",
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        cJSON *out = NULL;
+        ASSERT_EQm(bodies[i], 400, do_request("POST", "/api/v1/groups", bodies[i], &out));
+        ASSERT_STR_EQm(bodies[i], "interface", jstr(out, "field"));
+        cJSON_Delete(out);
+    }
+    harness_stop(h);
+    PASS();
+}
+
+static firc_err_t g_move_up_answer;
+static int g_move_up_calls;
+static firc_id_t g_move_up_id;
+static firc_err_t stub_move_up(void *ud, firc_id_t id) {
+    (void)ud;
+    g_move_up_id = id;
+    g_move_up_calls++;
+    return g_move_up_answer;
+}
+static bool stub_view(void *ud, const char *name, firc_if_view_t *out) {
+    (void)ud;
+    if (strcmp(name, "nwg4") == 0) {
+        out->state = FIRC_IF_ALIVE;
+        out->since_unix = 7;
+        snprintf(out->error, sizeof(out->error), "junk");
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->state = strcmp(name, "nwg1") == 0 ? FIRC_IF_DEAD : FIRC_IF_ALIVE;
+    out->since_unix = 1790000000;
+    snprintf(out->error, sizeof(out->error), "%s", strcmp(name, "nwg1") == 0 ? "timed out" : "");
+    return true;
+}
+
+TEST a_list_group_answers_its_active_entry_and_entry_states(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_app_ifaces_t hooks = {.view = stub_view, .move_up = stub_move_up};
+    firc_app_set_ifaces(h->app, &hooks);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"g\",\"interface\":[\"nwg1\",\"nwg2\",\"nwg4\"]}", &out));
+    ASSERT_STR_EQ("nwg1", jstr(out, "active"));
+    cJSON *ifs = cJSON_GetObjectItemCaseSensitive(out, "interfaces");
+    ASSERT_EQ(3, cJSON_GetArraySize(ifs));
+    ASSERT_STR_EQ("nwg1", jstr(cJSON_GetArrayItem(ifs, 0), "name"));
+    ASSERT_STR_EQ("dead", jstr(cJSON_GetArrayItem(ifs, 0), "state"));
+    ASSERT_STR_EQ("timed out", jstr(cJSON_GetArrayItem(ifs, 0), "error"));
+    ASSERT_EQ(1790000000.0, cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(ifs, 0), "since")->valuedouble);
+    ASSERT_STR_EQ("nwg2", jstr(cJSON_GetArrayItem(ifs, 1), "name"));
+    ASSERT_STR_EQ("alive", jstr(cJSON_GetArrayItem(ifs, 1), "state"));
+    ASSERT_STR_EQ("", jstr(cJSON_GetArrayItem(ifs, 1), "error"));
+    ASSERT_STR_EQ("nwg4", jstr(cJSON_GetArrayItem(ifs, 2), "name"));
+    ASSERT_STR_EQ("unknown", jstr(cJSON_GetArrayItem(ifs, 2), "state"));
+    ASSERT_STR_EQ("", jstr(cJSON_GetArrayItem(ifs, 2), "error"));
+    ASSERT_EQ(0.0, cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(ifs, 2), "since")->valuedouble);
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"name\":\"h\",\"interface\":\"nwg3\"}", &out));
+    ASSERT_STR_EQ("nwg3", jstr(out, "active"));
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(out, "interfaces"));
+    cJSON_Delete(out);
+    firc_app_set_ifaces(h->app, NULL);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups", NULL, &out));
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(out, "groups");
+    ifs = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(arr, 0), "interfaces");
+    ASSERT_EQ(3, cJSON_GetArraySize(ifs));
+    ASSERT_STR_EQm("no watcher: every entry unknown", "unknown", jstr(cJSON_GetArrayItem(ifs, 0), "state"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static unsigned listed_links(const char *name) {
+    if (strcmp(name, "up0") == 0) { return 7; }
+    if (strcmp(name, "up1") == 0) { return 8; }
+    return 0;
+}
+
+TEST a_group_moved_to_its_second_entry_answers_it_as_active(void) {
+    harness_t *h = harness_start_with_kernels(true);
+    ASSERT(h != NULL);
+    firc_rtnl_set_nametoindex_for_test(listed_links);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0000ac03\",\"name\":\"g\",\"interface\":[\"up0\",\"up1\"]}", &out));
+    ASSERT(jbool(out, "live"));
+    ASSERT_STR_EQ("up0", jstr(out, "active"));
+    cJSON_Delete(out);
+    firc_id_t id;
+    ASSERT_EQ(FIRC_OK, firc_id_parse("0000ac03", &id));
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(h->app, id, 1, false));
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups/0000ac03", NULL, &out));
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    ASSERT_STR_EQ("up1", jstr(out, "active"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static int move_up_status(const char *id, char *error, size_t cap) {
+    char path[64];
+    snprintf(path, sizeof(path), "/api/v1/groups/%s/move-up", id);
+    cJSON *out = NULL;
+    int status = do_request("POST", path, NULL, &out);
+    const char *e = jstr(out, "error");
+    snprintf(error, cap, "%s", e != NULL ? e : "");
+    cJSON_Delete(out);
+    return status;
+}
+
+TEST move_up_asks_the_watcher_for_the_group_and_names_each_refusal(void) {
+    harness_t *h = harness_start_with_kernels(true);
+    ASSERT(h != NULL);
+    firc_rtnl_set_nametoindex_for_test(listed_links);
+    firc_app_ifaces_t hooks = {.view = stub_view, .move_up = stub_move_up};
+    firc_app_set_ifaces(h->app, &hooks);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0000ac01\",\"name\":\"g\",\"interface\":[\"up0\",\"up1\"]}", &out));
+    ASSERT(jbool(out, "live"));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"id\":\"0000ac02\",\"name\":\"h\",\"interface\":\"up0\"}", &out));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0000ac04\",\"name\":\"off\",\"interface\":[\"up0\",\"up1\"],\"enable\":false}",
+                              &out));
+    cJSON_Delete(out);
+    firc_id_t want;
+    ASSERT_EQ(FIRC_OK, firc_id_parse("0000ac01", &want));
+    char error[128];
+
+    g_move_up_calls = 0;
+    memset(&g_move_up_id, 0, sizeof(g_move_up_id));
+    g_move_up_answer = FIRC_OK;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups/0000ac01/move-up", NULL, &out));
+    ASSERT_STR_EQ("0000ac01", jstr(out, "id"));
+    cJSON_Delete(out);
+    ASSERT_EQ(1, g_move_up_calls);
+    ASSERTm("the watcher is asked to move this group", firc_id_equal(want, g_move_up_id));
+
+    g_move_up_answer = FIRC_ERR_STATE;
+    ASSERT_EQ(409, move_up_status("0000ac01", error, sizeof(error)));
+    ASSERT_STR_EQ("up0 is not alive", error);
+    g_move_up_answer = FIRC_ERR_AGAIN;
+    ASSERT_EQ(409, move_up_status("0000ac01", error, sizeof(error)));
+    ASSERT_STR_EQ("the group is not routed", error);
+    g_move_up_answer = FIRC_ERR_NOENT;
+    ASSERT_EQ(409, move_up_status("0000ac01", error, sizeof(error)));
+    ASSERT_STR_EQ("no check runs for the group", error);
+    g_move_up_answer = FIRC_ERR_NOMEM;
+    ASSERT_EQ(500, move_up_status("0000ac01", error, sizeof(error)));
+
+    g_move_up_calls = 0;
+    g_move_up_answer = FIRC_OK;
+    ASSERT_EQ(409, move_up_status("0000ac04", error, sizeof(error)));
+    ASSERT_STR_EQ("the group is not routed", error);
+    ASSERT_EQ(404, move_up_status("0000ac09", error, sizeof(error)));
+    ASSERT_EQ(400, move_up_status("nothex!", error, sizeof(error)));
+    ASSERT_EQ(400, move_up_status("0000ac02", error, sizeof(error)));
+    ASSERT_STR_EQ("the group names one interface", error);
+    ASSERT_EQm("a refused request never reaches the watcher", 0, g_move_up_calls);
+
+    firc_app_set_ifaces(h->app, NULL);
+    ASSERT_EQ(409, move_up_status("0000ac01", error, sizeof(error)));
+    ASSERT_STR_EQ("no check runs for the group", error);
+    firc_rtnl_set_nametoindex_for_test(NULL);
+    harness_stop(h);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     GREATEST_SET_TEARDOWN_CB(stop_live_harness, NULL);
     RUN_TEST(get_groups_starts_empty);
+    RUN_TEST(the_api_takes_and_answers_an_interface_list);
+    RUN_TEST(a_put_moves_a_live_group_between_list_lengths_both_ways);
+    RUN_TEST(the_api_refuses_a_bad_interface_list_naming_the_field);
+    RUN_TEST(a_list_group_answers_its_active_entry_and_entry_states);
+    RUN_TEST(a_group_moved_to_its_second_entry_answers_it_as_active);
+    RUN_TEST(move_up_asks_the_watcher_for_the_group_and_names_each_refusal);
     RUN_TEST(create_group_defaults_enable);
     RUN_TEST(get_group_unknown_and_invalid_id);
     RUN_TEST(put_group_updates_fields_and_keeps_rules_when_absent);

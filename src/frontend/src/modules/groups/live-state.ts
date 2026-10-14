@@ -1,3 +1,5 @@
+import type { IfaceState } from "./iface-list";
+
 export type LiveReason =
   | "disabled"
   | "not-enabled"
@@ -6,7 +8,33 @@ export type LiveReason =
   | "not-written";
 
 /* `liveReason` rides only with `live: false`. */
-export type GroupLive = { live: boolean; liveReason?: LiveReason };
+export type GroupLive = {
+  live: boolean;
+  liveReason?: LiveReason;
+  active?: string;
+  interfaces?: IfaceState[];
+};
+
+export function liveOfRecord(record: any): GroupLive | null {
+  if (!record?.id || typeof record.live !== "boolean") return null;
+  return {
+    live: record.live,
+    liveReason: record.live ? undefined : record.liveReason,
+    ...(record.active !== undefined && { active: record.active }),
+    ...(record.interfaces !== undefined && { interfaces: record.interfaces }),
+  };
+}
+
+export function clockTime(unix: number): string {
+  const d = new Date(unix * 1000);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, "0"))
+    .join(":");
+}
+
+export function clockMinutes(unix: number): string {
+  return clockTime(unix).slice(0, 5);
+}
 
 export type NetfilterState = {
   ok: boolean;

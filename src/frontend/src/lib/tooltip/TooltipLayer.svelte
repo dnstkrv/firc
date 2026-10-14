@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Kbd from "../../components/ui/Kbd.svelte";
   import { tooltip } from "./tooltip.svelte";
 </script>
 
@@ -7,11 +8,13 @@
     id="global-tooltip"
     role="tooltip"
     class="tooltip-content"
+    class:with-keys={tooltip.keys.length > 0}
     style:left="{tooltip.x}px"
     style:top="{tooltip.y}px"
     style:opacity={tooltip.opacity}
   >
     {tooltip.text}
+    {#if tooltip.keys.length > 0}<Kbd keys={tooltip.keys} />{/if}
   </div>
 {/if}
 
@@ -30,8 +33,15 @@
     transition: opacity 0.1s ease-out;
   }
 
+  .tooltip-content.with-keys {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.9rem;
+  }
+
   @media (hover: none), (pointer: coarse) {
-    .tooltip-content {
+    .tooltip-content,
+    .tooltip-content.with-keys {
       display: none;
     }
   }

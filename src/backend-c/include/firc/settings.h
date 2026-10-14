@@ -31,6 +31,7 @@ typedef enum {
     FIRC_APPLY_UPSTREAM,    /* firc_dnsproxy_set_upstream, address and port together */
     FIRC_APPLY_PROXY_FLAGS, /* firc_dnsproxy_set_disable_drop_aaaa */
     FIRC_APPLY_UNMATCHED_TTL, /* firc_dns_pipeline_set_unmatched_ttl */
+    FIRC_APPLY_CHECK,         /* the interface check's url, interval and timeout */
 } firc_setting_apply_t;
 
 typedef struct firc_setting {
@@ -42,8 +43,12 @@ typedef struct firc_setting {
     firc_setting_apply_t apply; /* FIRC_APPLY_NONE for showAllInterfaces, update.check and every restart row */
 } firc_setting_t;
 
-#define FIRC_SETTINGS_COUNT 25
+#define FIRC_SETTINGS_COUNT 28
 extern const firc_setting_t firc_settings[FIRC_SETTINGS_COUNT];
+
+/* An http or https URL with a name or IPv4 host, no blanks, 512 characters at most; what the check's fetch accepts,
+ * without libcurl. An IPv6 literal is refused: the check route is IPv4 only. */
+bool firc_check_url_ok(const char *url);
 
 const firc_setting_t *firc_setting_find(const char *path); /* NULL if path names no setting */
 

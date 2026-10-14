@@ -603,6 +603,23 @@ TEST a_published_v6_flag_reaches_the_answer_and_flips_with_the_next_publish(void
     PASS();
 }
 
+TEST a_route_names_the_active_entry_not_the_first(void)
+{
+    firc_group_t *g = group("listed", "up0", 1);
+    firc_resolve_input_t in[] = {
+        {.group = g, .mark = MARK1, .iface = "up1"},
+        {.group = g, .mark = MARK1, .iface = NULL},
+    };
+    firc_resolve_table_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(in, 2, NULL, &t));
+    ASSERT_EQ((size_t)2, t.n);
+    ASSERT_STR_EQ("up1", t.items[0].iface);
+    ASSERT_STR_EQ("up0", t.items[1].iface);
+    firc_resolve_table_free(&t);
+    firc_group_free(g);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -620,5 +637,6 @@ int main(int argc, char **argv)
     RUN_TEST(what_is_not_routed_goes_to_the_common_upstream);
     RUN_TEST(the_stale_groups_are_the_removed_and_the_rewired);
     RUN_TEST(a_published_v6_flag_reaches_the_answer_and_flips_with_the_next_publish);
+    RUN_TEST(a_route_names_the_active_entry_not_the_first);
     GREATEST_MAIN_END();
 }

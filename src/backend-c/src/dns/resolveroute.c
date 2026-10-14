@@ -55,7 +55,7 @@ static void route_fill(const firc_resolve_input_t *in, firc_resolve_route_t *r)
     const firc_group_t *g = in->group;
     r->group_id = g->id;
     snprintf(r->group_name, sizeof(r->group_name), "%s", g->name != NULL ? g->name : "");
-    snprintf(r->iface, sizeof(r->iface), "%s", g->iface != NULL ? g->iface : "");
+    snprintf(r->iface, sizeof(r->iface), "%s", in->iface != NULL ? in->iface : (g->iface != NULL ? g->iface : ""));
     r->blackhole = in->blackhole;
     r->mark = in->mark;
     r->v6 = in->v6_route;

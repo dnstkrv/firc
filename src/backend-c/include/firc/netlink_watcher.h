@@ -39,7 +39,12 @@ size_t firc_nl_watcher_default_route_oifs(const struct nlmsghdr *h, int *out, si
 /* The interface an address message (added or removed) is about; 0 for any other message. */
 int firc_nl_watcher_addr_ifindex(const struct nlmsghdr *h);
 
-/* Watches link, address and default-route events. loop borrowed; NULL callbacks ignore that event class. */
+/* Name and state of a link message: NEWLINK is up when IFF_UP is set; DELLINK is always down; false for any other
+ * message or one without a name. */
+bool firc_nl_watcher_link_event(const struct nlmsghdr *h, char *name, size_t cap, bool *up);
+
+/* Watches link, address and default-route events; links dispatch up and down. loop borrowed; NULL callbacks ignore
+ * that event class. */
 firc_err_t firc_nl_watcher_create(firc_loop_t *loop, firc_nl_link_cb link_cb, void *link_ud,
                                   firc_nl_addr_cb addr_cb, void *addr_ud, firc_nl_lost_cb lost_cb,
                                   void *lost_ud, firc_nl_watcher_t **out);

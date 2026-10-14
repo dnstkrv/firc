@@ -59,6 +59,8 @@ void firc_sub_fetch_global_init(void) { curl_global_init(CURL_GLOBAL_DEFAULT); }
 void firc_sub_fetch_global_cleanup(void) { curl_global_cleanup(); }
 
 bool firc_sub_url_is_supported(const char *url) {
+    size_t skip = strncasecmp(url, "http://", 7) == 0 ? 7 : strncasecmp(url, "https://", 8) == 0 ? 8 : 0;
+    if (skip == 0 || url[skip] == '/') { return false; }
     CURLU *cu = curl_url();
     if (!cu) { return false; }
     bool ok = false;
@@ -208,7 +210,9 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
     visited_set_t visited = {.urls = calloc((size_t)max_redirects + 1, sizeof(char *)),
                              .cap = (size_t)max_redirects + 1};
     char *current = strdup(url);
-    if (!headers_ok || visited.urls == NULL || current == NULL) {
+    struct curl_slist *pin = o->resolve != NULL ? curl_slist_append(NULL, o->resolve) : NULL;
+    if (!headers_ok || visited.urls == NULL || current == NULL || (o->resolve != NULL && pin == NULL)) {
+        curl_slist_free_all(pin);
         curl_slist_free_all(headers);
         visited_clear(&visited);
         free(current);
@@ -242,6 +246,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
         }
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_err);
         if (headers != NULL) { curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers); }
+        if (pin != NULL) { curl_easy_setopt(curl, CURLOPT_RESOLVE, pin); }
         if (o->on_header != NULL) {
             curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
             curl_easy_setopt(curl, CURLOPT_HEADERDATA, &x);
@@ -274,7 +279,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
             break;
         }
 
-        if (status == 301 || status == 302) {
+        if ((status == 301 || status == 302) && !o->no_redirects) {
             char *location = NULL;
             curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &location);
             if (!location || !url_allowed(o, location) || visited_contains(&visited, location)) {
@@ -312,6 +317,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
     free(current);
     visited_clear(&visited);
     curl_slist_free_all(headers);
+    curl_slist_free_all(pin);
     return result;
 }
 

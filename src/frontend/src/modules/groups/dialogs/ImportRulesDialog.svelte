@@ -6,11 +6,13 @@
   import Button from "../../../components/ui/Button.svelte";
   import GenericDialog from "../../../components/ui/GenericDialog.svelte";
   import Select from "../../../components/ui/Select.svelte";
+  import Tooltip from "../../../components/ui/Tooltip.svelte";
   import { t } from "../../../data/locale.svelte";
 
   import { RULE_TYPES, type Rule } from "../../../types";
   import { defaultRule } from "../../../utils/defaults";
   import { deriveRule } from "../../../utils/detect-rule-type";
+  import { MOD } from "../../../utils/keys";
   import { VALIDATOP_MAP } from "../../../utils/rule-validators";
 
   let { open = $bindable(false), group_index = null } = $props();
@@ -338,7 +340,9 @@
 
   <div slot="actions" class="rule-type-select">
     <Select options={RULE_TYPE_SELECT} bind:selected={selectedRuleType} />
-    <Button type="submit" onclick={submit} class="primary">{t("Import")}</Button>
+    <Tooltip value={t("Import")} keys={[MOD, "Enter"]}>
+      <Button type="submit" onclick={submit} class="primary">{t("Import")}</Button>
+    </Tooltip>
   </div>
 </GenericDialog>
 

@@ -275,7 +275,13 @@ static void emit_group(emitter_ctx_t *ctx, const firc_group_t *g)
     emit_plain(ctx, "name");
     emit_string(ctx, g->name != NULL ? g->name : "");
     emit_plain(ctx, "interface");
-    emit_string(ctx, g->iface != NULL ? g->iface : "");
+    if (g->n_iface_rest == 0) {
+        emit_string(ctx, g->iface != NULL ? g->iface : "");
+    } else {
+        seq_start(ctx, false);
+        for (size_t i = 0; i < firc_group_n_ifaces(g); i++) { emit_string(ctx, firc_group_iface_at(g, i)); }
+        seq_end(ctx);
+    }
     emit_plain(ctx, "enable");
     emit_bool(ctx, g->enable);
     emit_devices(ctx, &g->devices);
@@ -390,6 +396,15 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     map_start(ctx);
     emit_plain(ctx, "check");
     emit_bool(ctx, a->update.check);
+    map_end(ctx);
+    emit_plain(ctx, "check");
+    map_start(ctx);
+    emit_plain(ctx, "url");
+    emit_string(ctx, a->check.url != NULL ? a->check.url : "");
+    emit_plain(ctx, "interval");
+    emit_duration(ctx, a->check.interval);
+    emit_plain(ctx, "timeout");
+    emit_duration(ctx, a->check.timeout);
     map_end(ctx);
     map_end(ctx); /* app */
 }

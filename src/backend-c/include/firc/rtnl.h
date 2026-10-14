@@ -28,6 +28,10 @@ firc_err_t firc_rtnl_rule_del(firc_rtnl_t *r, int family, uint32_t mark, uint32_
 firc_err_t firc_rtnl_rule_add_reply(firc_rtnl_t *r, int family, uint32_t mark, uint32_t mask,
                                     const char *iif, uint32_t table, uint32_t priority);
 
+/* Deletes the reply rule of mark that names iif; another iif's twin of the same mark stays. ENOENT is success. */
+firc_err_t firc_rtnl_rule_del_reply(firc_rtnl_t *r, int family, uint32_t mark, uint32_t mask, const char *iif,
+                                    uint32_t table, uint32_t priority);
+
 /* Builds the rule request without sending it (for tests). */
 struct nlmsghdr *firc_rtnl_build_rule(void *buf, bool add, uint32_t seq, int family, uint32_t mark,
                                       uint32_t mask, uint32_t table, uint32_t priority);
@@ -66,6 +70,9 @@ typedef struct firc_link_info {
     bool up;
     bool point_to_point;
 } firc_link_info_t;
+
+/* Test seam: the name-to-index lookup firc_rtnl_link_by_name uses; NULL restores if_nametoindex. */
+void firc_rtnl_set_nametoindex_for_test(unsigned (*fn)(const char *name));
 
 /* *found=false with FIRC_OK when the interface does not exist yet. */
 firc_err_t firc_rtnl_link_by_name(firc_rtnl_t *r, const char *name, firc_link_info_t *out, bool *found);

@@ -26,7 +26,11 @@ struct firc_ruleset {
     bool dev_narrowed;
     _Atomic int pass;
     _Atomic bool flush_owed;
+    size_t start_active;
+    bool start_blocked;
 };
+
+_Static_assert(FIRC_IPSET_TO_LINK_IFACES_MAX == FIRC_GROUP_IFACES_MAX, "one list bound");
 
 firc_ruleset_retry_t *firc_ruleset_retry(firc_ruleset_t *rs) { return &rs->retry; }
 
@@ -53,9 +57,15 @@ static firc_err_t subnets_apply(firc_ruleset_t *rs, bool *changed);
 static firc_err_t devices_apply(firc_ruleset_t *rs, bool *changed);
 
 /* The encoder takes 1-15 characters and no wildcard; anything else would fail the whole pass. */
-static bool iface_usable(const firc_ruleset_t *rs) {
-    return firc_is_interface_name(rs->group->iface);
+static const char *unusable_iface(const firc_ruleset_t *rs) {
+    for (size_t i = 0; i < firc_group_n_ifaces(rs->group); i++) {
+        const char *name = firc_group_iface_at(rs->group, i);
+        if (!firc_is_interface_name(name)) { return name; }
+    }
+    return NULL;
 }
+
+static bool iface_usable(const firc_ruleset_t *rs) { return unusable_iface(rs) == NULL; }
 
 static bool configured_enabled(const firc_ruleset_t *rs) {
     return rs->group->enable && iface_usable(rs);
@@ -116,7 +126,7 @@ static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, const char **step) {
     if (rs->group->enable && !iface_usable(rs)) {
         /* Sanitised: the name is refused for what it can do to a line of text. */
         char safe[IF_NAMESIZE + 8];
-        firc_interface_name_for_log(rs->group->iface, safe, sizeof(safe));
+        firc_interface_name_for_log(unusable_iface(rs), safe, sizeof(safe));
         FIRC_WARN("group %s routes nothing: \"%s\" is not an interface name",
                   rs->group->name != NULL ? rs->group->name : "?", safe);
     }
@@ -135,6 +145,18 @@ static firc_err_t ruleset_enable_locked(firc_ruleset_t *rs, const char **step) {
     if (!link) {
         if (step) { *step = "memory"; }
         return FIRC_ERR_NOMEM;
+    }
+    size_t n = firc_group_n_ifaces(rs->group);
+    if (n > 1) {
+        const char *names[FIRC_GROUP_IFACES_MAX];
+        for (size_t i = 0; i < n; i++) { names[i] = firc_group_iface_at(rs->group, i); }
+        firc_err_t serr = firc_ipset_to_link_set_ifaces(link, names, n, rs->start_active < n ? rs->start_active : 0,
+                                                        rs->start_blocked);
+        if (serr != FIRC_OK) {
+            if (step) { *step = "memory"; }
+            firc_ipset_to_link_free(link);
+            return serr;
+        }
     }
 
     /* Set before enable, so the first pass after it stages the prefixes and devices. */
@@ -185,8 +207,31 @@ firc_err_t firc_ruleset_disable(firc_ruleset_t *rs) {
     return e1 != FIRC_OK ? e1 : e2;
 }
 
-bool firc_ruleset_has_reply_rule(const firc_ruleset_t *rs) {
-    return firc_ruleset_routed(rs) && firc_ipset_to_link_has_reply_rule(rs->ipset_to_link);
+void firc_ruleset_set_start(firc_ruleset_t *rs, size_t active, bool blocked) {
+    rs->start_active = active;
+    rs->start_blocked = blocked;
+}
+
+size_t firc_ruleset_active(const firc_ruleset_t *rs, bool *blocked) {
+    if (rs->ipset_to_link == NULL) {
+        if (blocked != NULL) { *blocked = false; }
+        return 0;
+    }
+    return firc_ipset_to_link_active(rs->ipset_to_link, blocked);
+}
+
+const char *firc_ruleset_active_iface(const firc_ruleset_t *rs) {
+    return rs->ipset_to_link != NULL ? firc_ipset_to_link_active_iface(rs->ipset_to_link)
+                                     : firc_group_iface_at(rs->group, 0);
+}
+
+firc_err_t firc_ruleset_set_active(firc_ruleset_t *rs, size_t to, bool blocked) {
+    if (!firc_ruleset_routed(rs)) { return FIRC_ERR_STATE; }
+    return firc_ipset_to_link_set_active(rs->ipset_to_link, to, blocked);
+}
+
+const firc_ipset_to_link_t *firc_ruleset_link(const firc_ruleset_t *rs) {
+    return firc_ruleset_routed(rs) ? rs->ipset_to_link : NULL;
 }
 
 firc_ipset_to_link_t *firc_ruleset_disable_hold(firc_ruleset_t *rs) {

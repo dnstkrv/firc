@@ -43,10 +43,14 @@ typedef struct firc_group_resolve {
     char *server; /* NULL/"" means the firmware's own resolvers for this interface; else "addr[:port]" */
 } firc_group_resolve_t;
 
+#define FIRC_GROUP_IFACES_MAX 4
+
 typedef struct firc_group {
     firc_id_t id;
     char *name;
-    char *iface; /* yaml key: interface */
+    char *iface; /* yaml key: interface; entry 0 of the list */
+    char *iface_rest[FIRC_GROUP_IFACES_MAX - 1];
+    size_t n_iface_rest;
     bool enable;
     firc_rule_t **rules;
     size_t n_rules;
@@ -54,6 +58,21 @@ typedef struct firc_group {
     firc_group_resolve_t resolve;
     firc_group_list_t *list; /* NULL: a manual group */
 } firc_group_t;
+
+/* Entries in the group's interface list: 1 + the ones after `iface`. */
+static inline size_t firc_group_n_ifaces(const firc_group_t *g) { return 1u + g->n_iface_rest; }
+/* Entry i of the list; "" past its end or for an unset first entry. */
+static inline const char *firc_group_iface_at(const firc_group_t *g, size_t i)
+{
+    if (i == 0) { return g->iface != NULL ? g->iface : ""; }
+    return i - 1 < g->n_iface_rest ? g->iface_rest[i - 1] : "";
+}
+/* Whether name is an entry of g's list. */
+bool firc_group_has_iface(const firc_group_t *g, const char *name);
+/* NULL when names is a valid list of 1..4; else why, with *bad the offending index. */
+const char *firc_group_ifaces_check(const char *const *names, size_t n, size_t *bad);
+/* Replaces the list with copies of names (1..4); FIRC_ERR_NOMEM leaves it as it was. */
+firc_err_t firc_group_set_ifaces(firc_group_t *g, const char *const *names, size_t n);
 
 void firc_devsel_spec_clear(firc_devsel_spec_t *s);
 firc_err_t firc_devsel_spec_copy(firc_devsel_spec_t *dst, const firc_devsel_spec_t *src);
@@ -196,6 +215,11 @@ typedef struct firc_app_config {
     struct {
         bool check;
     } update;
+    struct {
+        char *url;
+        firc_duration_t interval;
+        firc_duration_t timeout;
+    } check;
 } firc_app_config_t;
 
 /* Whole-application state produced by config load (defaults + overlay). */

@@ -5,6 +5,7 @@
   import InfoDialog from "../InfoDialog.svelte";
   import Button from "../ui/Button.svelte";
   import Tooltip from "../ui/Tooltip.svelte";
+  import ShortcutsSheet from "./ShortcutsSheet.svelte";
 
   import { hasNewer } from "../../modules/settings/update";
   import { Info, Locale, LogOut } from "../ui/icons";
@@ -40,6 +41,10 @@
     {#if isDev}
       <div class="under-construction">dev</div>
     {/if}
+  </div>
+
+  <div class="keys">
+    <ShortcutsSheet />
   </div>
 
   <div class="info">
@@ -132,6 +137,7 @@
     width: 100%;
   }
 
+  .keys,
   .locale,
   .logout,
   .info {
@@ -169,6 +175,12 @@
 
   .info-content {
     font-size: 0.85rem;
+  }
+
+  @media (hover: none) {
+    .keys {
+      display: none;
+    }
   }
 
   @media (max-width: 380px) {

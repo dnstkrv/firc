@@ -145,7 +145,7 @@ async function withWindowStub<T>(action: () => Promise<T>): Promise<T> {
 const makeGroup = (id: string, withList = false) => ({
   id,
   name: `group-${id}`,
-  interface: "",
+  interface: "" as string | string[],
   enable: true,
   devices: { allow: [], deny: [] },
   resolve: { tunnel: true, server: "" },
@@ -784,9 +784,21 @@ describe("GroupsStore live state", () => {
   // Catches the first load leaving `live` inside tracked data, where it would ride every PUT.
   it("the first load reads live state out of the tracked groups", async () => {
     const id = "11ve0005";
+    const listed = "11ve0006";
+    const states = [
+      { name: "nwg0", state: "dead", since: 1790000000, error: "timed out" },
+      { name: "nwg1", state: "alive", since: 1790000001, error: "" },
+    ];
     const stub = installFetchStub({
       "/groups?with_rules=true": liveAnswer([
         { ...makeGroup(id), live: false, liveReason: "not-written" },
+        {
+          ...makeGroup(listed),
+          interface: ["nwg0", "nwg1"],
+          live: true,
+          active: "nwg1",
+          interfaces: states,
+        },
       ]),
       "/system/netfilter": { ok: false, firstWritePending: true },
     });
@@ -795,9 +807,20 @@ describe("GroupsStore live state", () => {
       await withWindowStub(() => store.mount());
       assert.strictEqual(store.fetchError, false);
       assert.deepStrictEqual(store.liveOf(id), { live: false, liveReason: "not-written" });
-      const [loaded] = store.tracker.data as any[];
+      assert.deepStrictEqual(store.liveOf(listed), {
+        live: true,
+        liveReason: undefined,
+        active: "nwg1",
+        interfaces: states,
+      });
+      const [loaded, loadedList] = store.tracker.data as any[];
       assert.strictEqual(loaded.id, id);
       assert.ok(!("live" in loaded) && !("liveReason" in loaded), JSON.stringify(loaded));
+      assert.ok(
+        !("active" in loadedList) && !("interfaces" in loadedList),
+        JSON.stringify(loadedList),
+      );
+      assert.deepStrictEqual(loadedList.interface, ["nwg0", "nwg1"]);
       assert.ok(store.checkedAt > 0);
       store.destroy();
     } finally {

@@ -186,6 +186,17 @@ static void add_group(hx_t *h, const char *name, const char *iface)
     (void)firc_app_add_group(h->app, g);
 }
 
+static void add_list_group(hx_t *h, const char *name, const char *first, const char *second)
+{
+    firc_group_t *g = firc_group_new();
+    g->id = test_random_id();
+    g->enable = false;
+    (void)firc_strset(&g->name, name);
+    const char *const names[] = {first, second};
+    (void)firc_group_set_ifaces(g, names, 2);
+    (void)firc_app_add_group(h->app, g);
+}
+
 static hx_t *hx_start(const char *initial, unsigned link_flags)
 {
     hx_t *h = calloc(1, sizeof *h);
@@ -222,6 +233,7 @@ static hx_t *hx_start(const char *initial, unsigned link_flags)
     }
     add_group(h, "via-tunnel", "tunvless0");
     add_group(h, "elsewhere", "eth0");
+    add_list_group(h, "second-entry", "nwg9", "tunvless0");
     h->ctx.app = h->app;
     h->ctx.path = h->path;
     h->ctx.binary = FAKE;
@@ -738,7 +750,7 @@ TEST state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions(void)
                                      "\"since\":0,\"skipReason\":\"\"},"
                                      "{\"key\":\"0000000c:B\",\"name\":\"B\",\"source\":\"link\","
                                      "\"state\":\"excluded\",\"since\":0,\"skipReason\":\"\"}]"));
-    ASSERT(same_json(at(a, "groups"), "[\"via-tunnel\"]"));
+    ASSERT(same_json(at(a, "groups"), "[\"via-tunnel\",\"second-entry\"]"));
     ASSERT(same_json(at(a, "subscriptions"), "[]"));
     ASSERT(cJSON_IsTrue(at(a, "uplinkOk")));
     double since = at(a, "since")->valuedouble;

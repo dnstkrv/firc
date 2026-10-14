@@ -34,6 +34,8 @@
 #include "firc/dnsproxy.h"
 #include "firc/groups.h"
 #include "firc/httpd.h"
+#include "firc/ifcheck.h"
+#include "firc/ifwatch.h"
 #include "firc/iptables.h"
 #include "firc/xtables.h"
 #include "firc/events.h"
@@ -106,6 +108,8 @@ struct daemon {
     firc_tunsubs_t *tunsubs;
     firc_update_t *update;
     int update_timer;
+    firc_ifcheck_t *ifcheck;
+    firc_ifwatch_t *ifwatch;
     firc_httpd_t *http_tcp;
     firc_httpd_t *http_unix;
 
@@ -182,9 +186,79 @@ static bool tunnel_down(void *ud, const char *iface)
     return firc_tunrun_device_down(ud, iface);
 }
 
+static size_t iw_n_groups(void *ud) { return firc_app_user_group_count(((struct daemon *)ud)->app); }
+
+static const firc_group_t *iw_group_at(void *ud, size_t i) {
+    return firc_ruleset_group(firc_app_user_group_at(((struct daemon *)ud)->app, i));
+}
+
+static firc_err_t iw_move(void *ud, firc_id_t id, size_t to, bool blocked) {
+    return firc_app_move_group(((struct daemon *)ud)->app, id, to, blocked);
+}
+
+static bool iw_link_up(void *ud, const char *name) {
+    firc_link_info_t li;
+    bool found = false;
+    return firc_rtnl_link_by_name(((struct daemon *)ud)->rtnl, name, &li, &found) == FIRC_OK && found && li.up;
+}
+
+static bool iw_tunnel_known(void *ud, const char *dev) {
+    struct daemon *d = ud;
+    const firc_tunnels_t *c = d->tunrun != NULL ? firc_tunrun_config(d->tunrun) : NULL;
+    for (size_t i = 0; c != NULL && i < c->n; i++) {
+        if (strcmp(c->t[i].device, dev) == 0) { return true; }
+    }
+    return false;
+}
+
+static bool iw_tunnel_down(void *ud, const char *dev) {
+    struct daemon *d = ud;
+    return d->tunrun != NULL && firc_tunrun_device_down(d->tunrun, dev);
+}
+
+static bool iw_tunnel_starting(void *ud, const char *dev, int64_t *since_ms) {
+    struct daemon *d = ud;
+    return d->tunrun != NULL && firc_tunrun_device_starting(d->tunrun, dev, since_ms);
+}
+
+static firc_err_t iw_queue(void *ud, const char *name, uint32_t mark, uint32_t gen) {
+    struct daemon *d = ud;
+    return d->ifcheck != NULL ? firc_ifcheck_queue(d->ifcheck, name, mark, gen) : FIRC_ERR_STATE;
+}
+
+static void iw_results(void *ud, const firc_ifcheck_result_t *r, size_t n) {
+    struct daemon *d = ud;
+    if (d->ifwatch != NULL) { firc_ifwatch_results(d->ifwatch, r, n); }
+}
+
+static firc_ifchoice_t iw_pick(void *ud, const firc_group_t *g) {
+    return firc_ifwatch_pick(((struct daemon *)ud)->ifwatch, g);
+}
+
+static bool iw_view(void *ud, const char *name, firc_if_view_t *out) {
+    return firc_ifwatch_view(((struct daemon *)ud)->ifwatch, name, out);
+}
+
+static firc_err_t iw_move_up(void *ud, firc_id_t id) {
+    return firc_ifwatch_move_up(((struct daemon *)ud)->ifwatch, id);
+}
+
+static void iw_settings(void *ud, const firc_app_config_t *run) {
+    struct daemon *d = ud;
+    firc_ifwatch_configure(d->ifwatch, run);
+    firc_ifcheck_settings_t s;
+    firc_ifcheck_settings_from(run, &s);
+    firc_ifcheck_configure(d->ifcheck, &s);
+}
+
 static void daemon_teardown(struct daemon *d)
 {
     firc_update_cancel(d->update);
+    firc_app_set_ifaces(d->app, NULL);
+    firc_ifcheck_free(d->ifcheck);
+    d->ifcheck = NULL;
+    firc_ifwatch_free(d->ifwatch);
+    d->ifwatch = NULL;
     firc_tunnels_api_close(d->tunnels_ctx);
     firc_app_set_tunnel_down(d->app, NULL, NULL);
     if (d->tunrun != NULL) { firc_tunrun_set_subs(d->tunrun, NULL); }
@@ -525,19 +599,20 @@ static void resync(struct daemon *d, const char *iface_name)
     for (size_t i = 0; i < firc_app_user_group_count(d->app); i++) {
         firc_ruleset_t *rs = firc_app_user_group_at(d->app, i);
         const firc_group_t *g = firc_ruleset_group(rs);
-        if (g->iface == NULL || (iface_name != NULL && strcmp(g->iface, iface_name) != 0)) {
+        if (iface_name != NULL && strcmp(firc_ruleset_active_iface(rs), iface_name) != 0) {
             continue;
         }
         /* A connected tunnel socket keeps its old source address after the interface's address moves. */
         if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
         firc_err_t err = firc_ruleset_on_addr_change(rs);
         if (err != FIRC_OK) {
-            FIRC_WARN("error while re-reading interface %s: group=%s err=%s", g->iface, g->name,
+            FIRC_WARN("error while re-reading interface %s: group=%s err=%s", firc_ruleset_active_iface(rs), g->name,
                        firc_err_str(err));
         }
     }
     firc_tunrun_refresh_uplinks(d->tunrun, iface_name);
     (void)firc_app_retry_groups(d->app, iface_name);
+    if (d->ifwatch != NULL) { firc_ifwatch_refresh(d->ifwatch, iface_name); }
 }
 
 static void on_refresh_due(firc_loop_t *loop, void *ud)
@@ -639,19 +714,20 @@ static bool on_policies_changed(void *ud)
 
 static void on_link_up(const char *iface_name, bool up, void *ud)
 {
-    (void)up;
     struct daemon *d = ud;
-    FIRC_DEBUG("interface up: %s", iface_name);
+    FIRC_DEBUG("interface %s: %s", up ? "up" : "down", iface_name);
+    if (d->ifwatch != NULL) { firc_ifwatch_link(d->ifwatch, iface_name, up); }
+    if (!up) { return; }
     for (size_t i = 0; i < firc_app_user_group_count(d->app); i++) {
         firc_ruleset_t *rs = firc_app_user_group_at(d->app, i);
         const firc_group_t *g = firc_ruleset_group(rs);
-        if (g->iface == NULL || strcmp(g->iface, iface_name) != 0) {
+        if (strcmp(firc_ruleset_active_iface(rs), iface_name) != 0) {
             continue;
         }
         if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
         firc_err_t err = firc_ruleset_on_link_up(rs);
         if (err != FIRC_OK) {
-            FIRC_WARN("error while handling interface up: group=%s err=%s",
+            FIRC_WARN("error while handling interface up: %s group=%s err=%s", firc_ruleset_active_iface(rs),
                      g->name, firc_err_str(err));
         }
     }
@@ -1332,6 +1408,31 @@ int main(int argc, char **argv)
         firc_tunnels_free(&tunnels);
     }
 
+    d.ifcheck = firc_ifcheck_new(d.loop, iw_results, &d);
+    firc_ifwatch_deps_t iw = {.loop = d.loop,
+                              .rtnl = d.rtnl,
+                              .start_table = cfg.app.netfilter.start_mark_table_index,
+                              .n_groups = iw_n_groups,
+                              .group_at = iw_group_at,
+                              .move = iw_move,
+                              .link_up = iw_link_up,
+                              .tunnel_known = iw_tunnel_known,
+                              .tunnel_down = iw_tunnel_down,
+                              .tunnel_starting = iw_tunnel_starting,
+                              .queue = iw_queue,
+                              .ud = &d};
+    d.ifwatch = d.ifcheck != NULL ? firc_ifwatch_new(&iw) : NULL;
+    if (d.ifwatch == NULL) {
+        FIRC_ERROR("interface lists: no memory for their checks; every group stays on its first interface");
+        firc_ifcheck_free(d.ifcheck);
+        d.ifcheck = NULL;
+    } else {
+        iw_settings(&d, firc_app_running_settings(d.app));
+        firc_app_ifaces_t hooks = {
+            .pick = iw_pick, .view = iw_view, .move_up = iw_move_up, .settings = iw_settings, .ud = &d};
+        firc_app_set_ifaces(d.app, &hooks);
+    }
+
     /* Initial delay is the interval, not 0: the boot sweep below already asks for missing lists. */
     int list_auto_update_timer = 0;
     if (firc_loop_add_timer(d.loop, FIRC_LIST_AUTO_UPDATE_INTERVAL_MS,
@@ -1482,6 +1583,14 @@ int main(int argc, char **argv)
             update_ctx.update = NULL;
             system_ctx.update = NULL;
         }
+    }
+    if (d.ifwatch != NULL && (firc_ifcheck_start(d.ifcheck) != FIRC_OK || firc_ifwatch_start(d.ifwatch) != FIRC_OK)) {
+        FIRC_ERROR("interface lists: their checks could not start; every group stays where it is");
+        firc_app_set_ifaces(d.app, NULL);
+        firc_ifwatch_free(d.ifwatch);
+        d.ifwatch = NULL;
+        firc_ifcheck_free(d.ifcheck);
+        d.ifcheck = NULL;
     }
     /* Boot sweep: no list body is kept on flash, so every enabled list needs a first fetch. */
     firc_app_request_sync_missing(d.app);

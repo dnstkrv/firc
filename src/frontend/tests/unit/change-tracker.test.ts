@@ -480,4 +480,51 @@ describe("ChangeTracker", () => {
       );
     });
   });
+
+  describe("A list of names assigned whole", () => {
+    const group = (iface: string | string[]) => [{ id: "g1", name: "G", interface: iface }];
+
+    it("is clean again once reordered back to the saved order", () => {
+      const tracker = new ChangeTracker(group(["a", "b"]));
+      tracker.data[0].interface = ["b", "a"];
+      assert.strictEqual(tracker.isDirty, true);
+      assert.strictEqual(tracker.isDirtyWithin(tracker.data[0]), true);
+      tracker.data[0].interface = ["a", "b"];
+      assert.strictEqual(tracker.isDirty, false);
+      assert.strictEqual(tracker.isDirtyWithin(tracker.data[0]), false);
+    });
+
+    it("stays dirty for a longer, shorter or string value", () => {
+      const tracker = new ChangeTracker(group(["a", "b"]));
+      tracker.data[0].interface = ["a", "b", "c"];
+      assert.strictEqual(tracker.isDirty, true);
+      tracker.data[0].interface = ["a"];
+      assert.strictEqual(tracker.isDirty, true);
+      tracker.data[0].interface = "a";
+      assert.strictEqual(tracker.isDirty, true);
+      tracker.data[0].interface = ["a", "b"];
+      assert.strictEqual(tracker.isDirty, false);
+    });
+
+    it("names one field dirty without its neighbours", () => {
+      const tracker = new ChangeTracker(group(["a", "b"]));
+      const g = tracker.data[0];
+      g.name = "H";
+      assert.strictEqual(tracker.isFieldDirty(g, "interface"), false);
+      g.interface = ["b", "a"];
+      assert.strictEqual(tracker.isFieldDirty(g, "interface"), true);
+      g.interface = ["a", "b"];
+      assert.strictEqual(tracker.isFieldDirty(g, "interface"), false);
+
+      const inPlace = new ChangeTracker(group(["a", "b"]));
+      (inPlace.data[0].interface as string[]).reverse();
+      assert.strictEqual(inPlace.isFieldDirty(inPlace.data[0], "interface"), true);
+    });
+
+    it("counts every field of a group it has never saved as dirty", () => {
+      const tracker = new ChangeTracker(group("a"));
+      tracker.data.push({ id: "g2", name: "N", interface: "a" });
+      assert.strictEqual(tracker.isFieldDirty(tracker.data[1], "interface"), true);
+    });
+  });
 });
