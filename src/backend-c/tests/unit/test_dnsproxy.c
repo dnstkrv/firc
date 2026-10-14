@@ -22,6 +22,7 @@
 #include "firc/dnswire.h"
 #include "firc/fakeip.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/loop.h"
 
 static bool bind_loopback(int fd, uint16_t port, uint16_t *got) {
@@ -356,6 +357,7 @@ static bool test_route(void *ud, const firc_dns_msg_t *q, const firc_ip_t *clien
 
 static troute_t *g_live_route;
 static uint32_t g_live_timeout_ms;
+static uint16_t g_live_upstream_port;
 static uint32_t g_live_max_concurrent;
 static uint32_t g_live_rest_ms;
 
@@ -992,7 +994,7 @@ static bool live_start(live_t *lv) {
     cfg.listen_addr = "127.0.0.1";
     cfg.listen_port = lv->proxy_port;
     cfg.upstream_addr = "127.0.0.1";
-    cfg.upstream_port = lv->a.port;
+    cfg.upstream_port = g_live_upstream_port ? g_live_upstream_port : lv->a.port;
     cfg.timeout_ms = g_live_timeout_ms ? g_live_timeout_ms : 3000;
     cfg.max_concurrent = g_live_max_concurrent ? g_live_max_concurrent : 16;
     cfg.max_idle_conns = 2;
@@ -1039,6 +1041,7 @@ static void live_stop(live_t *lv) {
     g_live_ops = NULL;
     g_live_route = NULL;
     g_live_timeout_ms = 0;
+    g_live_upstream_port = 0;
     g_live_max_concurrent = 0;
     g_live_rest_ms = 0;
     g_live_cache = false;
@@ -1946,11 +1949,12 @@ TEST a_query_the_router_declines_goes_to_the_common_upstream(void) {
     PASS();
 }
 
-/* Catches: a socket whose mark failed still used (the query leaves by the WAN), or no fallback. */
+/* Catches: a socket whose mark failed still used (the query leaves by the WAN), no fallback, the refusal kept out of sight at DEBUG, or a DEBUG line per refused query. */
 TEST a_mark_that_cannot_be_set_is_never_used(void) {
     live_t lv;
     tunnel_setup(0);
     atomic_store(&g_rec.fail_mark, EPERM);
+    firc_event_reset_for_test();
     ASSERT(live_start_retrying(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(1, ask(lv.proxy_port, 0x5103));
@@ -1958,7 +1962,222 @@ TEST a_mark_that_cannot_be_set_is_never_used(void) {
     ASSERT_EQ(0, atomic_load(&g_rec.connects_marked));
     ASSERT_EQ(0, atomic_load(&lv.b.received));
     ASSERT_EQ(1, atomic_load(&lv.a.received));
+    ASSERT_EQ(1, ask(lv.proxy_port, 0x5104));
+    ASSERT_EQ(2, atomic_load(&g_rec.marks));
     live_stop(&lv);
+    firc_event_t ev[64];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 64, &next, &dropped);
+    int warned = 0, quiet = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && strstr(ev[i].u.log.text, "group resolver: SO_MARK refused") != NULL) {
+            if (ev[i].u.log.level == FIRC_LOG_WARN) { warned++; }
+            if (ev[i].u.log.level == FIRC_LOG_DEBUG) { quiet++; }
+        }
+    }
+    ASSERT_EQ(1, warned);
+    ASSERT_EQ(0, quiet);
+    PASS();
+}
+
+static _Atomic uint64_t g_rep_ms = 1000;
+static uint64_t rep_clock(void) { return atomic_load(&g_rep_ms); }
+
+static int journal_at(firc_log_level_t level, const char *needle) {
+    firc_event_t ev[256];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 256, &next, &dropped);
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strstr(ev[i].u.log.text, needle) != NULL) {
+            c++;
+        }
+    }
+    return c;
+}
+
+static void unanswered(live_t *lv, int n, uint16_t id) {
+    int fds[16];
+    atomic_store(&lv->a.drop, n);
+    for (int i = 0; i < n; i++) { fds[i] = ask_send_for(lv->proxy_port, (uint16_t)(id + i), 0, (char)('c' + i)); }
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 400 * 1000000L};
+    nanosleep(&ts, NULL);
+    for (int i = 0; i < n; i++) {
+        if (fds[i] >= 0) { close(fds[i]); }
+    }
+}
+
+/* Catches: a common upstream that answers nothing kept at DEBUG, said for a lone timeout, never raised to ERROR after a minute, its first answer not said as a recovery, or a DEBUG line per query. */
+TEST a_silent_common_upstream_warns_then_errs_after_a_minute(void) {
+    live_t lv;
+    g_live_timeout_ms = 100;
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    ASSERT(live_start(&lv));
+    unanswered(&lv, 1, 0x6100);
+    ASSERT_EQ(1, ask(lv.proxy_port, 0x6110));
+    int lone = journal_at(FIRC_LOG_WARN, "common upstream");
+    unanswered(&lv, 8, 0x6200);
+    int warned = journal_at(FIRC_LOG_WARN, "the common upstream does not answer");
+    atomic_fetch_add(&g_rep_ms, 60000);
+    unanswered(&lv, 1, 0x6300);
+    int erred = journal_at(FIRC_LOG_ERROR, "the common upstream does not answer");
+    ASSERT_EQ(1, ask(lv.proxy_port, 0x6310));
+    live_stop(&lv);
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_EQ_FMTm("a lone timeout says nothing", 0, lone, "%d");
+    ASSERT_EQ_FMT(1, warned, "%d");
+    ASSERT_EQ_FMT(1, erred, "%d");
+    ASSERT_EQ_FMT(1, journal_at(FIRC_LOG_INFO, "the common upstream: recovered after 2 failures over "), "%d");
+    ASSERT_EQ_FMTm("no line per query", 0, journal_at(FIRC_LOG_DEBUG, ""), "%d");
+    PASS();
+}
+
+/* Catches: a common upstream that refuses every query (nothing listens on its port) said at no level, or never raised to ERROR. */
+TEST a_refusing_common_upstream_warns_then_errs_after_a_minute(void) {
+    live_t lv;
+    g_live_upstream_port = closed_udp_port();
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    ASSERT(live_start(&lv));
+    unanswered(&lv, 8, 0x6500);
+    int warned = journal_at(FIRC_LOG_WARN, "the common upstream does not answer");
+    atomic_fetch_add(&g_rep_ms, 60000);
+    unanswered(&lv, 1, 0x6510);
+    int erred = journal_at(FIRC_LOG_ERROR, "the common upstream does not answer");
+    live_stop(&lv);
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_EQ_FMT(1, warned, "%d");
+    ASSERT_EQ_FMT(1, erred, "%d");
+    PASS();
+}
+
+/* Catches: a cached or group-resolver answer taken for the common upstream's, so a dead upstream reads as recovered. */
+TEST answers_not_from_the_common_upstream_do_not_end_its_run(void) {
+    live_t lv;
+    tunnel_setup(0);
+    g_live_cache = true;
+    g_live_timeout_ms = 100;
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    ASSERT(live_start_retrying(&lv));
+    g_troute.ports[0] = lv.b.port;
+    ASSERT_EQ(2, ask(lv.proxy_port, 0x6601));
+    g_troute.take = false;
+    unanswered(&lv, 8, 0x6610);
+    g_troute.take = true;
+    ASSERT_EQm("a cache hit", 2, ask(lv.proxy_port, 0x6601));
+    g_troute.take = false;
+    atomic_fetch_add(&g_rep_ms, 60000);
+    unanswered(&lv, 1, 0x6620);
+    live_stop(&lv);
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_EQ_FMT(0, journal_at(FIRC_LOG_INFO, "the common upstream: recovered"), "%d");
+    ASSERT_EQ_FMT(1, journal_at(FIRC_LOG_ERROR, "the common upstream does not answer"), "%d");
+    PASS();
+}
+
+typedef struct {
+    int fd;
+    _Atomic int stop;
+    pthread_t th;
+} tcp_up_t;
+
+static void *tcp_up_accept(void *arg) {
+    tcp_up_t *u = arg;
+    while (!atomic_load(&u->stop)) {
+        int c = accept(u->fd, NULL, NULL);
+        if (c < 0) { continue; }
+        struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        pthread_t th;
+        if (pthread_create(&th, NULL, serve_upstream_tcp, (void *)(intptr_t)c) != 0) {
+            close(c);
+            continue;
+        }
+        pthread_detach(th);
+    }
+    return NULL;
+}
+
+static int tcp_ask_send(uint16_t port, uint16_t id) {
+    int c = tcp_open(port);
+    if (c < 0) { return -1; }
+    uint8_t q[512], framed[514];
+    size_t qlen = build_query_for(q, id, 0, (char)('c' + (id & 7)));
+    framed[0] = (uint8_t)(qlen >> 8);
+    framed[1] = (uint8_t)qlen;
+    memcpy(framed + 2, q, qlen);
+    if (send(c, framed, qlen + 2, MSG_NOSIGNAL) != (ssize_t)(qlen + 2)) {
+        close(c);
+        return -1;
+    }
+    return c;
+}
+
+static void tcp_batch(uint16_t port, uint16_t id) {
+    int fds[8];
+    for (int i = 0; i < 8; i++) { fds[i] = tcp_ask_send(port, (uint16_t)(id + i)); }
+    struct timespec ts = {.tv_sec = 1, .tv_nsec = 600 * 1000000L};
+    nanosleep(&ts, NULL);
+    for (int i = 0; i < 8; i++) {
+        if (fds[i] >= 0) { close(fds[i]); }
+    }
+}
+
+/* Catches: a TCP group resolver leg that times out while its tunnel is down counted against the common upstream. */
+TEST a_silent_tcp_tunnel_leg_is_not_the_common_upstreams_miss(void) {
+    live_t lv;
+    tunnel_setup(0);
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    ASSERT(live_start_retrying(&lv));
+    int silent = socket(AF_INET, SOCK_STREAM, 0);
+    uint16_t silent_port = 0;
+    ASSERT(silent >= 0 && bind_loopback(silent, 0, &silent_port) && listen(silent, 64) == 0);
+    tcp_up_t up;
+    memset(&up, 0, sizeof(up));
+    up.fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
+    setsockopt(up.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ASSERT(up.fd >= 0 && bind_loopback(up.fd, lv.a.port, NULL) && listen(up.fd, 64) == 0);
+    ASSERT_EQ(0, pthread_create(&up.th, NULL, tcp_up_accept, &up));
+    g_troute.ports[0] = silent_port;
+    tcp_batch(lv.proxy_port, 0x6700);
+    atomic_fetch_add(&g_rep_ms, 60000);
+    tcp_batch(lv.proxy_port, 0x6710);
+    live_stop(&lv);
+    atomic_store(&up.stop, 1);
+    pthread_join(up.th, NULL);
+    close(up.fd);
+    close(silent);
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_EQ_FMT(0, journal_at(FIRC_LOG_WARN, "the common upstream does not answer"), "%d");
+    ASSERT_EQ_FMT(0, journal_at(FIRC_LOG_ERROR, "the common upstream does not answer"), "%d");
+    ASSERT(journal_at(FIRC_LOG_WARN, "consecutive failures") >= 1);
+    PASS();
+}
+
+/* Catches: a mark set again after a refusal not said as a recovery, over UDP or over TCP, so a later refusal would stay at DEBUG. */
+TEST a_mark_set_again_ends_the_refusal(void) {
+    for (int tcp = 0; tcp < 2; tcp++) {
+        live_t lv;
+        tunnel_setup(0);
+        firc_event_reset_for_test();
+        ASSERT(live_start_retrying(&lv));
+        g_troute.ports[0] = lv.b.port;
+        atomic_store(&g_rec.fail_mark, EPERM);
+        if (tcp) { (void)ask_tcp(lv.proxy_port, 0x6401); } else { (void)ask(lv.proxy_port, 0x6401); }
+        atomic_store(&g_rec.fail_mark, 0);
+        if (tcp) { (void)ask_tcp(lv.proxy_port, 0x6402); } else { (void)ask(lv.proxy_port, 0x6402); }
+        live_stop(&lv);
+        ASSERT_EQ_FMTm(tcp ? "tcp" : "udp", 1, journal_at(FIRC_LOG_WARN, "group resolver: SO_MARK refused"), "%d");
+        ASSERT_EQ_FMTm(tcp ? "tcp" : "udp", 1, journal_at(FIRC_LOG_INFO, "group resolver: SO_MARK: recovered after 1 failure"), "%d");
+    }
     PASS();
 }
 
@@ -2410,14 +2629,12 @@ TEST an_unreachable_resolver_beside_a_working_one_costs_nothing(void) {
 }
 
 static int g_log_pipe[2] = {-1, -1};
-static firc_log_level_t g_log_prev_level;
 
 /* Sends everything logged at INFO and above to a pipe. */
 static void log_capture_start(void) {
     if (pipe(g_log_pipe) != 0) { return; }
     fcntl(g_log_pipe[0], F_SETFL, O_NONBLOCK);
-    g_log_prev_level = firc_log_level();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(g_log_pipe[1]);
 }
 
@@ -2427,10 +2644,10 @@ static int occurrences(const char *hay, const char *needle) {
     return count;
 }
 
-/* Stops the capture, restores the log level, and counts two phrases in what was logged. */
+/* Stops the capture, restores the output floor, and counts two phrases in what was logged. */
 static void log_capture_counts(const char *a, int *na, const char *b, int *nb) {
     firc_log_set_fd(STDOUT_FILENO);
-    firc_log_set_level(g_log_prev_level);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     close(g_log_pipe[1]);
     static char buf[65536];
     ssize_t n = read(g_log_pipe[0], buf, sizeof(buf) - 1);
@@ -4207,6 +4424,11 @@ int main(int argc, char **argv)
     RUN_TEST(a_common_datagram_that_answers_another_query_is_ignored);
     RUN_TEST(a_query_the_router_declines_goes_to_the_common_upstream);
     RUN_TEST(a_mark_that_cannot_be_set_is_never_used);
+    RUN_TEST(a_silent_common_upstream_warns_then_errs_after_a_minute);
+    RUN_TEST(a_mark_set_again_ends_the_refusal);
+    RUN_TEST(a_refusing_common_upstream_warns_then_errs_after_a_minute);
+    RUN_TEST(answers_not_from_the_common_upstream_do_not_end_its_run);
+    RUN_TEST(a_silent_tcp_tunnel_leg_is_not_the_common_upstreams_miss);
     RUN_TEST(a_tunnel_that_cannot_start_falls_back);
     RUN_TEST(a_tunnel_resolver_that_refuses_falls_back_at_once);
     RUN_TEST(a_silent_tunnel_resolver_falls_back_after_the_tunnel_timeout);

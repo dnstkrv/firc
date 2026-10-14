@@ -325,7 +325,7 @@ static int do_xtparse(const char *path, const char *fam_text) {
 
 static int do_xtnat(const char *what, const char *fam_text) {
     firc_log_set_fd(STDERR_FILENO);
-    firc_log_set_level(FIRC_LOG_DEBUG);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     bool v6 = strcmp(fam_text, "v6") == 0;
     if (!v6 && strcmp(fam_text, "v4") != 0) { return 64; }
     firc_xt_t *xt = firc_xt_real_new(v6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4);

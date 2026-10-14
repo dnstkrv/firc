@@ -130,7 +130,7 @@ firc_err_t firc_xt_probe_capture(firc_xt_t *xt);
 /* The mac match revision the probe confirmed: 1 when the kernel has it (Keenetic), else 0. */
 uint8_t firc_xt_mac_rev(const firc_xt_t *xt);
 
-/* At debug log level a refused table is written to dir/refused-<family>-<table>.bin; NULL turns it off. */
+/* A table the kernel refuses is written to dir/refused-<family>-<table>.bin, one file per table, overwritten; NULL turns it off. */
 firc_err_t firc_xt_set_dump_dir(firc_xt_t *xt, const char *dir);
 
 /* Reads table, merges stage, replaces the table when the result differs. AGAIN and CANCELED mean build it again. */

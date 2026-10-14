@@ -1103,7 +1103,7 @@ int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
     GREATEST_MAIN_BEGIN();
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     setenv("FAKE_MODE", "ok", 1);
     firc_sub_fetch_global_init();
     RUN_SUITE(tunnels_api);

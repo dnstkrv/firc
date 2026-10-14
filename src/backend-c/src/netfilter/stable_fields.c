@@ -88,7 +88,7 @@ bool firc_stable_fields_start(firc_stable_fields_t *sf, const char *path, firc_r
                   r.reserved, r.tunnels);
         firc_rtnl_fields_now(rtnl, save_on_change, sf);
     } else if (err == FIRC_ERR_NOENT) {
-        FIRC_INFO("no mark field map at %s: fields are assigned afresh", path);
+        FIRC_DEBUG("no mark field map at %s: fields are assigned afresh", path);
     } else if (err == FIRC_ERR_INVAL) {
         FIRC_WARN("%s is not a mark field map; removed, fields are assigned afresh", path);
         unlink(path);

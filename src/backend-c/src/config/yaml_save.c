@@ -386,8 +386,6 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     seq_end(ctx);
     emit_plain(ctx, "showAllInterfaces");
     emit_bool(ctx, a->show_all_interfaces);
-    emit_plain(ctx, "logLevel");
-    emit_string(ctx, a->log_level);
     emit_plain(ctx, "update");
     map_start(ctx);
     emit_plain(ctx, "check");

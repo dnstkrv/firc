@@ -1,5 +1,6 @@
 #include "greatest.h"
 
+#include "firc/events.h"
 #include "firc/ruleset.h"
 #include "firc/keenetic_policy.h"
 #include "firc/mark.h"
@@ -107,6 +108,24 @@ TEST a_subnet_rule_is_a_prefix_for_the_chain(void) {
     PASS();
 }
 
+/* Catches: an unusable subnet rule planned as a match-all, or said again at every plan though the config load already said it. */
+TEST an_unusable_subnet_rule_is_skipped_without_a_word(void) {
+    fixture_t f;
+    fixture_up(&f, FIRC_RULE_SUBNET, "10.1.0.0/16", true);
+    f.cfg.groups[0]->rules[0]->ports = strdup("53");
+    add_group(&f.cfg, 2, FIRC_RULE_SUBNET6, "not-a-prefix", true);
+    firc_event_reset_for_test();
+    plan_t p = {0};
+    ASSERT_EQ(FIRC_OK, firc_ruleset_plan_subnets(f.cfg.groups[0], collect, &p));
+    ASSERT_EQ(FIRC_OK, firc_ruleset_plan_subnets(f.cfg.groups[1], collect, &p));
+    ASSERT_EQ_FMT((size_t)0, p.n, "%zu");
+    firc_event_t ev[4];
+    uint64_t next = 0, dropped = 0;
+    ASSERT_EQ_FMT((size_t)0, firc_event_read(0, ev, 4, &next, &dropped), "%zu");
+    fixture_down(&f);
+    PASS();
+}
+
 /* Catches: a prefix with host bits written as given, so the chain is rewritten on every commit. */
 TEST a_prefix_with_host_bits_is_normalised(void) {
     fixture_t f;
@@ -181,6 +200,7 @@ SUITE(ruleset) {
     RUN_TEST(a_prefix_with_host_bits_is_normalised);
     RUN_TEST(a_group_plans_its_list_subnets_with_its_own);
     RUN_TEST(a_list_prefix_carries_its_protocol_and_ports);
+    RUN_TEST(an_unusable_subnet_rule_is_skipped_without_a_word);
 }
 
 static bool t_mark(const char *policy, uint32_t *mark, void *ud) {

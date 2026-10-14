@@ -398,18 +398,22 @@ definitions:
         type: string
       level:
         enum:
-        - trace
         - debug
         - info
         - warn
         - error
-        - fatal
-        - panic
-        - nolevel
         example: warn
         type: string
       message:
         example: 'group Example routes nothing: "" is not an interface name'
+        type: string
+      source:
+        description: >-
+          Who said the line (present only when kind=log): `fircd` for the
+          daemon itself, or a tunnel's device (`tunvless0`) for a line its
+          tunvless process wrote and for the tunnel's node events. The
+          message does not repeat the device.
+        example: fircd
         type: string
       seq:
         description: 'Event number; grows by one and is never reused'
@@ -582,10 +586,6 @@ definitions:
         items:
           $ref: '#/definitions/types.Event'
         type: array
-      level:
-        description: 'The level the daemon runs at -- there are no events below it (log events only)'
-        example: info
-        type: string
       next:
         description: 'Cursor for the next request'
         example: 1041
@@ -2476,11 +2476,12 @@ paths:
   /api/v1/system/events:
     get:
       description: >-
-        The journal of what the daemon said and what it answered. Two rings
-        under one numbering, in memory only: 512 lines from the daemon itself
-        and 4096 kind=dns/kind=bypass events together, so DNS traffic and the
-        capture do not push out the daemon's lines; the answer merges both by
-        number. A restart does not keep the journal, and `boot` in the answer
+        The journal of what the daemon said and what it answered. Four rings
+        under one numbering, in memory only: 512 debug lines, 512 info lines,
+        256 warn and error lines, and 4096 kind=dns/kind=bypass events
+        together, so DNS traffic and the capture do not push out the daemon's
+        lines and a burst of lower lines does not push out a higher one; the
+        answer merges all four by number. A restart does not keep the journal, and `boot` in the answer
         changes. `since` is the cursor from the previous answer; 0 or absent
         means everything the ring still holds. The ring can hold names a
         client asked for, so the route is available only after a WebUI login.
@@ -2558,7 +2559,7 @@ paths:
         and reads them itself, writing the bypasses it finds to the journal as
         kind=bypass events. The request body is not read. Only one capture can
         run at a time; it always ends on its own. Start, stop and the result
-        reach the journal at any log level.
+        reach the journal.
       produces:
       - application/json
       responses:

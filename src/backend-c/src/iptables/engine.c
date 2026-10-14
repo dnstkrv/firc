@@ -1,5 +1,6 @@
 #include "firc/iptables.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/xtables.h"
 
 #include <stdio.h>
@@ -38,8 +39,8 @@ struct firc_ipt {
     regs_t written[N_TABLES];
     bool known[N_TABLES];
     firc_xt_info_t shape[N_TABLES];
-    bool said_inval;
-    bool said_uncovered;
+    firc_logrep_t said_inval;
+    firc_logrep_t said_uncovered;
     int refusal;
     char report[512];
     size_t report_len;
@@ -165,14 +166,9 @@ firc_err_t firc_ipt_register_chain_override(firc_ipt_t *ipt, const char *table, 
 
 static void say_refused(firc_ipt_t *ipt, const char *table, const char *chain, const firc_ipt_rule_t *rule) {
     char *words = firc_ipt_rule_string(rule);
-    if (!ipt->said_inval) {
-        FIRC_WARN("x_tables %s %s: the rule \"%s\" in %s is outside what firc writes", fam_name(ipt), table,
-                  words ? words : "", chain);
-        ipt->said_inval = true;
-    } else {
-        FIRC_DEBUG("x_tables %s %s: the rule \"%s\" in %s is outside what firc writes", fam_name(ipt), table,
-                   words ? words : "", chain);
-    }
+    firc_logrep_fail(&ipt->said_inval, FIRC_LOG_WARN, NULL,
+                     "x_tables %s %s: the rule \"%s\" in %s is outside what firc writes", fam_name(ipt), table,
+                     words ? words : "", chain);
     free(words);
 }
 
@@ -517,14 +513,9 @@ static firc_err_t plan(firc_ipt_t *ipt, const bool *due, step_t *steps, size_t *
         firc_err_t err = unmarked_rewrites(ipt, &lost);
         if (err != FIRC_OK) { return err; }
         if (lost > 0) {
-            if (!ipt->said_uncovered) {
-                FIRC_WARN("x_tables %s: %zu rewrites in nat would be left without their mark in mangle; not written",
-                          fam_name(ipt), lost);
-                ipt->said_uncovered = true;
-            } else {
-                FIRC_DEBUG("x_tables %s: %zu rewrites in nat would be left without their mark in mangle; not written",
-                           fam_name(ipt), lost);
-            }
+            firc_logrep_fail(&ipt->said_uncovered, FIRC_LOG_WARN, NULL,
+                             "x_tables %s: %zu rewrites in nat would be left without their mark in mangle; not written",
+                             fam_name(ipt), lost);
             return FIRC_ERR_INVAL;
         }
     }
@@ -541,7 +532,7 @@ static firc_err_t plan(firc_ipt_t *ipt, const bool *due, step_t *steps, size_t *
 
 static void report_add(firc_ipt_t *ipt, const char *what, long long ms, firc_err_t err) {
     size_t room = sizeof(ipt->report) - ipt->report_len;
-    if (room <= 1 || firc_log_level() > FIRC_LOG_DEBUG) { return; }
+    if (room <= 1) { return; }
     const char *sep = ipt->report_len ? ", " : "";
     char *at = ipt->report + ipt->report_len;
     int n = ms < 0 ? snprintf(at, room, "%s%s skipped", sep, what)
@@ -620,8 +611,8 @@ static firc_err_t commit_kind(firc_ipt_t *ipt, bool full) {
     regs_clear(&part);
     firc_ipt_discard(ipt);
     if (err == FIRC_OK) {
-        ipt->said_inval = false;
-        ipt->said_uncovered = false;
+        (void)firc_logrep_ok(&ipt->said_inval, NULL, "x_tables %s rules", fam_name(ipt));
+        (void)firc_logrep_ok(&ipt->said_uncovered, NULL, "x_tables %s nat rewrites", fam_name(ipt));
     }
     return err;
 }

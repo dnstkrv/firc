@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "firc/log.h"
+
 #define FIRC_TUN_LINE_MAX 1024
 
 typedef struct {
@@ -16,6 +18,10 @@ typedef void (*firc_tun_line_fn)(const char *line, size_t len, void *ud);
 
 /* Splits a byte stream into lines; returns how many oversize lines were dropped in this call. */
 size_t firc_tun_lines_feed(firc_tun_lines_t *l, const char *data, size_t n, firc_tun_line_fn fn, void *ud);
+
+/* Level of a tunvless stderr line from its leading tunvless[<level>] tag, INFO without one;
+   *skip is where the text after the tag starts, 0 when there is none. */
+firc_log_level_t firc_tun_err_level(const char *line, size_t len, size_t *skip);
 
 typedef enum {
     FIRC_TEV_READY,

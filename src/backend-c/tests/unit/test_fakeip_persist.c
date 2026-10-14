@@ -6,7 +6,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "firc/events.h"
 #include "firc/fakeip.h"
+#include "firc/log.h"
+#include "firc/logrep.h"
 
 static firc_fakeip_cfg_t geometry(size_t max_names) {
     firc_fakeip_cfg_t c;
@@ -918,6 +921,44 @@ TEST a_distrusted_pool_never_walks_an_address_twice(void) {
     PASS();
 }
 
+/* Catches: a pool state that cannot be saved said below ERROR, said at every save, or its next good save not said. */
+TEST a_state_that_cannot_be_saved_is_an_error_until_a_save_works(void) {
+    char dir[] = "/tmp/firc-pool-err-XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    char target[600], inner[700];
+    snprintf(target, sizeof(target), "%s/pool.state", dir);
+    snprintf(inner, sizeof(inner), "%s/keep", target);
+    ASSERT_EQ(0, mkdir(target, 0700));
+    FILE *k = fopen(inner, "w");
+    ASSERT(k != NULL);
+    fclose(k);
+    firc_fakeip_t *f = fresh(64);
+    firc_logrep_t said = {0};
+    firc_event_reset_for_test();
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    firc_log_set_fd(-1);
+    ASSERT(firc_fakeip_save_file_said(f, target, false, &said) != FIRC_OK);
+    ASSERT(firc_fakeip_save_file_said(f, target, false, &said) != FIRC_OK);
+    unlink(inner);
+    rmdir(target);
+    ASSERT_EQ(FIRC_OK, firc_fakeip_save_file_said(f, target, false, &said));
+    firc_log_set_fd(STDOUT_FILENO);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    firc_event_t ev[8];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 8, &next, &dropped);
+    unlink(target);
+    rmdir(dir);
+    firc_fakeip_free(f);
+    ASSERT_EQ_FMT((size_t)3, n, "%zu");
+    ASSERT_EQ(FIRC_LOG_ERROR, ev[0].u.log.level);
+    ASSERTm(ev[0].u.log.text, strstr(ev[0].u.log.text, "pool state not saved to ") == ev[0].u.log.text);
+    ASSERT_EQ(FIRC_LOG_DEBUG, ev[1].u.log.level);
+    ASSERT_EQ(FIRC_LOG_INFO, ev[2].u.log.level);
+    ASSERTm(ev[2].u.log.text, strstr(ev[2].u.log.text, ": recovered after 2 failures over ") != NULL);
+    PASS();
+}
+
 /* Catches: a save whose rename failed clearing the dirty flag. */
 TEST a_save_that_fails_after_writing_leaves_the_pool_dirty(void) {
     char dir[] = "/tmp/firc-pool-dir-XXXXXX";
@@ -1301,5 +1342,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_park_above_the_mark_is_not_walked_over);
     RUN_TEST(a_refused_park_or_qchunk_line_makes_the_file_not_exact);
     RUN_TEST(a_restored_pool_names_the_same_addresses);
+    RUN_TEST(a_state_that_cannot_be_saved_is_an_error_until_a_save_works);
     GREATEST_MAIN_END();
 }

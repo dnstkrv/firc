@@ -6,19 +6,27 @@ import type {
   LogLevel,
 } from "../../data/events.svelte";
 
-export type Kind = "log" | "dns" | "bypass";
+export type Source = "fircd" | "tunnels" | "dns" | "bypass";
+
+export const SOURCES: Source[] = ["fircd", "tunnels", "dns", "bypass"];
+export const LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
+export const DEFAULT_LEVELS: LogLevel[] = ["info", "warn", "error"];
 
 export type JournalFilter = {
-  kinds: Set<Kind>;
-  minLevel: LogLevel;
+  sources: Set<Source>;
+  levels: Set<LogLevel>;
   group: string;
 };
 
-const ORDER: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
+export function sourceOf(e: JournalEvent): Source {
+  if (e.kind === "log") return e.source === "fircd" ? "fircd" : "tunnels";
+  return e.kind;
+}
 
-export function levelRank(l: LogLevel): number {
-  const i = ORDER.indexOf(l);
-  return i < 0 ? 0 : i;
+export function sourceCounts(events: JournalEvent[]): Record<Source, number> {
+  const out: Record<Source, number> = { fircd: 0, tunnels: 0, dns: 0, bypass: 0 };
+  for (const e of events) out[sourceOf(e)] += 1;
+  return out;
 }
 
 export type GroupRef = { id: string; name: string };
@@ -46,10 +54,10 @@ export function groupFilterOptions(
 }
 
 export function matches(e: JournalEvent, f: JournalFilter): boolean {
-  if (!f.kinds.has(e.kind)) return false;
+  if (!f.sources.has(sourceOf(e))) return false;
   if (e.kind === "log") {
     if (f.group) return false;
-    return levelRank(e.level) >= levelRank(f.minLevel);
+    return f.levels.has(e.level);
   }
   if (f.group && e.group?.id !== f.group) return false;
   return true;
@@ -58,7 +66,9 @@ export function matches(e: JournalEvent, f: JournalFilter): boolean {
 export function matchesQuery(e: JournalEvent, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  if (e.kind === "log") return e.message.toLowerCase().includes(q);
+  if (e.kind === "log") {
+    return e.message.toLowerCase().includes(q) || e.source.toLowerCase().includes(q);
+  }
   return e.client.toLowerCase().includes(q) || e.name.toLowerCase().includes(q);
 }
 

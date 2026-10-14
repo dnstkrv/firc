@@ -32,15 +32,63 @@ static ssize_t capture(int level_to_log, const char *msg, char *out,
     return n;
 }
 
+/* Catches: a level threshold that keeps any of the four levels out of the journal. */
+TEST the_journal_records_every_level(void) {
+    firc_event_reset_for_test();
+    int devnull = open("/dev/null", O_WRONLY);
+    ASSERT(devnull >= 0);
+    firc_log_set_fd(devnull);
+    FIRC_DEBUG("d");
+    FIRC_INFO("i");
+    FIRC_WARN("w");
+    FIRC_ERROR("e");
+    firc_log_set_fd(STDOUT_FILENO);
+    close(devnull);
+    firc_event_t out[8];
+    uint64_t next = 0, dropped = 0;
+    ASSERT_EQ_FMT((size_t)4, firc_event_read(0, out, 8, &next, &dropped), "%zu");
+    static const firc_log_level_t want[] = {FIRC_LOG_DEBUG, FIRC_LOG_INFO, FIRC_LOG_WARN, FIRC_LOG_ERROR};
+    for (size_t i = 0; i < 4; i++) { ASSERT_EQ(want[i], out[i].u.log.level); }
+    PASS();
+}
+
+/* Catches: a source lost on the way to the journal, kept in the text, or missing from the output line. */
+TEST a_line_from_a_tunnel_carries_its_device(void) {
+    firc_event_reset_for_test();
+    int fds[2];
+    ASSERT_EQ(0, pipe(fds));
+    firc_log_set_fd(fds[1]);
+    firc_log_from(FIRC_LOG_WARN, "tunvless0", "node %s does not answer", "A");
+    FIRC_INFO("plain");
+    firc_log_set_fd(STDOUT_FILENO);
+    close(fds[1]);
+    char buf[512];
+    ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    close(fds[0]);
+    ASSERT(n > 0);
+    buf[n] = '\0';
+    ASSERT(strstr(buf, " WRN tunvless0: node A does not answer\n") != NULL);
+    ASSERT(strstr(buf, " INF plain\n") != NULL);
+    firc_event_t out[4];
+    uint64_t next = 0, dropped = 0;
+    ASSERT_EQ_FMT((size_t)2, firc_event_read(0, out, 4, &next, &dropped), "%zu");
+    ASSERT_STR_EQ("tunvless0", out[0].u.log.source);
+    ASSERT_STR_EQ("node A does not answer", out[0].u.log.text);
+    ASSERT_EQ(FIRC_LOG_WARN, out[0].u.log.level);
+    ASSERT_STR_EQ("", out[1].u.log.source);
+    ASSERT_STR_EQ("plain", out[1].u.log.text);
+    PASS();
+}
+
 /* Catches: an output floor that also starves the journal, or lets a line under it through. */
 TEST the_output_floor_thins_the_output_but_not_the_journal(void) {
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_output_floor(FIRC_LOG_WARN);
     char out[256];
     ssize_t quiet = capture(FIRC_LOG_INFO, "kept for the journal", out, sizeof(out));
     ssize_t loud = capture(FIRC_LOG_WARN, "said everywhere", out, sizeof(out));
-    firc_log_set_output_floor(FIRC_LOG_TRACE);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     ASSERT_EQ_FMT((ssize_t)0, quiet, "%zd");
     ASSERT(loud > 0 && strstr(out, " WRN said everywhere") != NULL);
     firc_event_t ev[4];
@@ -53,7 +101,7 @@ TEST the_output_floor_thins_the_output_but_not_the_journal(void) {
 /* Catches: the ring not keeping the lines the daemon logged. */
 TEST the_ring_keeps_what_the_daemon_said(void) {
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     int devnull = open("/dev/null", O_WRONLY);
     ASSERT(devnull >= 0);
     firc_log_set_fd(devnull);
@@ -90,7 +138,7 @@ TEST the_ring_keeps_what_the_daemon_said(void) {
 /* Catches: a reader that fell behind not told the size of the hole. */
 TEST a_reader_that_fell_behind_is_told_how_much_it_missed(void) {
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     int devnull = open("/dev/null", O_WRONLY);
     ASSERT(devnull >= 0);
     firc_log_set_fd(devnull);
@@ -112,30 +160,10 @@ TEST a_reader_that_fell_behind_is_told_how_much_it_missed(void) {
     PASS();
 }
 
-/* Catches: a line the level suppressed kept in the ring. */
-TEST the_ring_keeps_only_what_the_level_let_through(void) {
-    firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_WARN);
-    int devnull = open("/dev/null", O_WRONLY);
-    ASSERT(devnull >= 0);
-    firc_log_set_fd(devnull);
-
-    FIRC_DEBUG("not said");
-    FIRC_INFO("not said either");
-    FIRC_WARN("said");
-
-    firc_event_t out[8];
-    uint64_t next = 0, dropped = 0;
-    ASSERT_EQ_FMT((size_t)1, firc_event_read(0, out, 8, &next, &dropped), "%zu");
-    ASSERT_STR_EQ("said", out[0].u.log.text);
-    close(devnull);
-    PASS();
-}
-
 /* Catches: a long line dropped instead of cut. */
 TEST a_line_longer_than_the_ring_holds_is_cut_not_dropped(void) {
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     int devnull = open("/dev/null", O_WRONLY);
     ASSERT(devnull >= 0);
     firc_log_set_fd(devnull);
@@ -159,19 +187,19 @@ TEST a_line_longer_than_the_ring_holds_is_cut_not_dropped(void) {
 TEST level_filtering(void)
 {
     char buf[256];
-    firc_log_set_level(FIRC_LOG_WARN);
+    firc_log_set_output_floor(FIRC_LOG_WARN);
     ASSERT_EQ(0, capture(FIRC_LOG_INFO, "hidden", buf, sizeof(buf)));
     ASSERT(capture(FIRC_LOG_ERROR, "shown", buf, sizeof(buf)) > 0);
     ASSERT(strstr(buf, "ERR") != NULL);
     ASSERT(strstr(buf, "shown") != NULL);
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     PASS();
 }
 
 TEST line_format_has_timestamp_and_tag(void)
 {
     char buf[256];
-    firc_log_set_level(FIRC_LOG_TRACE);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     ASSERT(capture(FIRC_LOG_INFO, "fmt-check", buf, sizeof(buf)) > 0);
     ASSERT_EQ('2', buf[0]);
     ASSERT_EQ('T', buf[10]);
@@ -193,23 +221,41 @@ TEST line_format_has_timestamp_and_tag(void)
         ASSERTm("the timestamp is UTC, not local time wearing a Z",
                 strcmp(got, expect) == 0 || strcmp(got, expect_prev) == 0);
     }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     PASS();
 }
 
-TEST level_parsing_matches_go_config_values(void)
+/* Catches: a level name dropped or mapped to the wrong level, or a removed name still accepted by the output floor. */
+TEST exactly_four_level_names_parse(void)
 {
-    ASSERT_EQ(FIRC_LOG_TRACE, firc_log_level_from_str("trace"));
-    ASSERT_EQ(FIRC_LOG_DEBUG, firc_log_level_from_str("debug"));
-    ASSERT_EQ(FIRC_LOG_INFO, firc_log_level_from_str("info"));
-    ASSERT_EQ(FIRC_LOG_WARN, firc_log_level_from_str("warn"));
-    ASSERT_EQ(FIRC_LOG_ERROR, firc_log_level_from_str("error"));
-    ASSERT_EQ(FIRC_LOG_FATAL, firc_log_level_from_str("fatal"));
-    ASSERT_EQ(FIRC_LOG_PANIC, firc_log_level_from_str("panic"));
-    ASSERT_EQ(FIRC_LOG_NOLEVEL, firc_log_level_from_str("nolevel"));
-    ASSERT_EQ(FIRC_LOG_DISABLED, firc_log_level_from_str("disabled"));
-    ASSERT_EQ(FIRC_LOG_INFO, firc_log_level_from_str("bogus"));
-    ASSERT_EQ(FIRC_LOG_INFO, firc_log_level_from_str(NULL));
+    firc_log_level_t l = FIRC_LOG_ERROR;
+    ASSERT(firc_log_level_parse("debug", &l));
+    ASSERT_EQ(FIRC_LOG_DEBUG, l);
+    ASSERT(firc_log_level_parse("info", &l));
+    ASSERT_EQ(FIRC_LOG_INFO, l);
+    ASSERT(firc_log_level_parse("warn", &l));
+    ASSERT_EQ(FIRC_LOG_WARN, l);
+    ASSERT(firc_log_level_parse("error", &l));
+    ASSERT_EQ(FIRC_LOG_ERROR, l);
+    static const char *const gone[] = {"trace", "fatal", "panic", "nolevel", "disabled", "Info", ""};
+    for (size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) {
+        l = FIRC_LOG_WARN;
+        ASSERT_FALSEm(gone[i], firc_log_level_parse(gone[i], &l));
+        ASSERT_EQm(gone[i], FIRC_LOG_WARN, l);
+    }
+    ASSERT_FALSE(firc_log_level_parse(NULL, &l));
+    PASS();
+}
+
+/* Catches: a level below debug that the threshold or the output floor could still name. */
+TEST debug_is_the_lowest_level(void)
+{
+    ASSERT_EQ(0, (int)FIRC_LOG_DEBUG);
+    char buf[256];
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    ASSERT(capture(FIRC_LOG_DEBUG, "lowest", buf, sizeof(buf)) > 0);
+    ASSERT(strstr(buf, " DBG lowest\n") != NULL);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     PASS();
 }
 
@@ -263,7 +309,7 @@ TEST the_only_rate_limiting_is_the_level(void)
     char buf[2048];
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     for (int i = 0; i < 4; i++) { firc_log(FIRC_LOG_WARN, "the same thing"); }
     firc_log_set_fd(STDOUT_FILENO);
@@ -280,29 +326,21 @@ TEST the_only_rate_limiting_is_the_level(void)
     PASS();
 }
 
-TEST disabled_level_suppresses_everything(void)
-{
-    char buf[256];
-    firc_log_set_level(FIRC_LOG_DISABLED);
-    ASSERT_EQ(0, capture(FIRC_LOG_ERROR, "nope", buf, sizeof(buf)));
-    firc_log_set_level(FIRC_LOG_INFO);
-    PASS();
-}
-
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
 {
     GREATEST_MAIN_BEGIN();
+    RUN_TEST(the_journal_records_every_level);
+    RUN_TEST(a_line_from_a_tunnel_carries_its_device);
     RUN_TEST(the_ring_keeps_what_the_daemon_said);
     RUN_TEST(the_output_floor_thins_the_output_but_not_the_journal);
     RUN_TEST(a_reader_that_fell_behind_is_told_how_much_it_missed);
-    RUN_TEST(the_ring_keeps_only_what_the_level_let_through);
     RUN_TEST(a_line_longer_than_the_ring_holds_is_cut_not_dropped);
     RUN_TEST(level_filtering);
     RUN_TEST(line_format_has_timestamp_and_tag);
-    RUN_TEST(level_parsing_matches_go_config_values);
-    RUN_TEST(disabled_level_suppresses_everything);
+    RUN_TEST(exactly_four_level_names_parse);
+    RUN_TEST(debug_is_the_lowest_level);
     RUN_TEST(the_only_rate_limiting_is_the_level);
     RUN_TEST(a_pipe_nobody_reads_does_not_block_the_logger);
     RUN_TEST(only_pipes_and_sockets_are_made_non_blocking);

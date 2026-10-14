@@ -6,22 +6,11 @@
 #include <stdint.h>
 
 typedef enum firc_log_level {
-    FIRC_LOG_TRACE = 0,
-    FIRC_LOG_DEBUG,
+    FIRC_LOG_DEBUG = 0,
     FIRC_LOG_INFO,
     FIRC_LOG_WARN,
     FIRC_LOG_ERROR,
-    FIRC_LOG_FATAL,
-    FIRC_LOG_PANIC,
-    FIRC_LOG_NOLEVEL,
-    FIRC_LOG_DISABLED,
 } firc_log_level_t;
-
-void firc_log_set_level(firc_log_level_t level);
-firc_log_level_t firc_log_level(void);
-
-/* Parses a level name; unknown falls back to FIRC_LOG_INFO. */
-firc_log_level_t firc_log_level_from_str(const char *s);
 
 /* True and sets *out only if s is a level name. */
 bool firc_log_level_parse(const char *s, firc_log_level_t *out);
@@ -41,8 +30,9 @@ void firc_log_nonblocking(void);
 #endif
 
 void firc_log(firc_log_level_t level, const char *fmt, ...) FIRC_PRINTF(2, 3);
+/* A line said for `source` (a tunnel device): the journal keeps it apart, the output prefixes "<source>: ". */
+void firc_log_from(firc_log_level_t level, const char *source, const char *fmt, ...) FIRC_PRINTF(3, 4);
 
-#define FIRC_TRACE(...) firc_log(FIRC_LOG_TRACE, __VA_ARGS__)
 #define FIRC_DEBUG(...) firc_log(FIRC_LOG_DEBUG, __VA_ARGS__)
 #define FIRC_INFO(...)  firc_log(FIRC_LOG_INFO, __VA_ARGS__)
 #define FIRC_WARN(...)  firc_log(FIRC_LOG_WARN, __VA_ARGS__)

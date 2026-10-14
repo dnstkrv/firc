@@ -1,16 +1,16 @@
 import { fetcher } from "../utils/fetcher";
+import { trimHeld } from "./journal-held";
 
-export type LogLevel =
-  | "trace"
-  | "debug"
-  | "info"
-  | "warn"
-  | "error"
-  | "fatal"
-  | "panic"
-  | "nolevel";
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
-export type LogEvent = { seq: number; at: number; kind: "log"; level: LogLevel; message: string };
+export type LogEvent = {
+  seq: number;
+  at: number;
+  kind: "log";
+  level: LogLevel;
+  source: string;
+  message: string;
+};
 
 export type DnsDecision = "issued" | "not-covered" | "no-match" | "pool-refused" | "passed";
 
@@ -61,12 +61,10 @@ type EventsRes = {
   events: JournalEvent[];
   next: number;
   dropped: number;
-  level: LogLevel;
   boot: string;
 };
 
 export const PAGE = 1024;
-export const KEEP = 4096 + 512;
 
 class Journal {
   events = $state.raw<JournalEvent[]>([]);
@@ -76,7 +74,6 @@ class Journal {
   dropped = $state(0);
   /* The daemon run the cursor belongs to; "" before the first answer. */
   boot = $state("");
-  daemonLevel = $state<LogLevel>("info");
   seenGroups = $state.raw<{ id: string; name: string }[]>([]);
   failed = $state(false);
 }
@@ -89,26 +86,26 @@ let inflight = false;
 export async function pollEvents() {
   if (inflight) return;
   inflight = true;
+  let catchingUp = journal.cursor === 0;
   try {
     for (;;) {
       const data = await fetcher.get<EventsRes>(`/system/events?since=${journal.cursor}`, {
         quiet: true,
       });
       journal.failed = false;
-      journal.daemonLevel = data.level;
       if (journal.boot !== "" && data.boot !== journal.boot) {
         journal.boot = data.boot;
         journal.events = [];
         journal.dropped = 0;
         journal.cursor = 0;
+        catchingUp = true;
         continue;
       }
       journal.boot = data.boot;
-      if (data.dropped > 0) journal.dropped += data.dropped;
+      if (data.dropped > 0 && !catchingUp) journal.dropped += data.dropped;
       if (data.events.length > 0) {
         journal.cursor = data.next;
-        const merged = journal.events.concat(data.events);
-        journal.events = merged.length > KEEP ? merged.slice(merged.length - KEEP) : merged;
+        journal.events = trimHeld(journal.events.concat(data.events));
         noteGroups(data.events);
       }
       if (data.events.length < PAGE) return;

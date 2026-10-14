@@ -58,7 +58,13 @@ pins)
 crash) printf '{"type":"ready","dev":"%s"}\n' "$3"; exit 1 ;;
 late) sleep "${FAKE_SLEEP:-1}" </dev/null >/dev/null 2>&1; exit 1 ;;
 badconf) echo 'tunvless[warn]: bad option' >&2; exit 2 ;;
-warnsp) echo "tunvless[warn] tunnel: device $3 was not created" >&2; echo 'tunvless[warn]ing: not a warn tag' >&2; exec sleep 3600 ;;
+warnsp)
+    echo "tunvless[warn] tunnel: device $3 was not created" >&2
+    echo 'tunvless[warn]ing: not a warn tag' >&2
+    echo 'tunvless[error]: no usable VLESS node' >&2
+    echo 'tunvless[debug] tun: rx 40' >&2
+    echo 'tunvless: by hand' >&2
+    exec sleep 3600 ;;
 flood) head -c 5000 /dev/zero | tr '\0' x; printf '\n{"type":"active","nodes":["B"]}\n'; exec sleep 3600 ;;
 flood2) head -c 5000 /dev/zero | tr '\0' y >&2; echo >&2; head -c 5000 /dev/zero | tr '\0' x; echo; exec sleep 3600 ;;
 down) printf '{"type":"ready","dev":"%s"}\n{"type":"active","nodes":["A"]}\n{"type":"node_down","node":"B","why":"x"}\n' "$3"; answer ;;

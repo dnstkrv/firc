@@ -1459,7 +1459,7 @@ static void park_gaps(firc_fakeip_t *f, group_t *g, int64_t now, bool clean, boo
     if (fam->chunk_addrs > 65536) {
         /* No free set at this width: a freed address is not reissued. */
         if (!*wide_warned) {
-            FIRC_WARN("pool: v4 chunks wider than /16 have no free set; addresses freed before a restart are not reissued");
+            FIRC_INFO("pool: v4 chunks wider than /16 have no free set; addresses freed before a restart are not reissued");
             *wide_warned = true;
         }
         if (!clean && gf->has_chunk) { gf->next_off = fam->chunk_addrs; }
@@ -1538,7 +1538,7 @@ static void v6_mark_past_the_unsaved(firc_fakeip_t *f, group_t *g, bool *warned)
     if (!gf6->has_chunk) { return; }
     if (span <= ((uint64_t)1 << 32)) {
         if (!*warned) {
-            FIRC_WARN("pool: v6 chunks of /96 or narrower get no crash protection on load; v6 addresses issued "
+            FIRC_INFO("pool: v6 chunks of /96 or narrower get no crash protection on load; v6 addresses issued "
                       "since the last save may be reissued");
             *warned = true;
         }
@@ -1663,6 +1663,17 @@ firc_err_t firc_fakeip_load(firc_fakeip_t *f, FILE *in, int64_t now, size_t *res
     f->dirty = clean;
     if (restored != NULL) { *restored = n; }
     return FIRC_OK;
+}
+
+firc_err_t firc_fakeip_save_file_said(const firc_fakeip_t *f, const char *path, bool clean, firc_logrep_t *said) {
+    firc_err_t err = firc_fakeip_save_file(f, path, clean);
+    if (err != FIRC_OK) {
+        firc_logrep_fail_for(said, 0, NULL, "pool state not saved to %s: %s; a restart is the fix", path,
+                             firc_err_str(err));
+    } else {
+        (void)firc_logrep_ok(said, NULL, "pool state saved to %s", path);
+    }
+    return err;
 }
 
 firc_err_t firc_fakeip_save_file(const firc_fakeip_t *f, const char *path, bool clean) {

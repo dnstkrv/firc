@@ -25,26 +25,34 @@
   import { Capture, CaptureStop, Clear, Pause, Play, Search } from "../../components/ui/icons";
   import { counted } from "../../utils/plural";
   import {
+    DEFAULT_LEVELS,
     describeBypassTail,
     describeDnsTail,
     groupFilterOptions,
+    LEVELS,
     matches,
     matchesQuery,
-    type Kind,
+    sourceCounts,
+    SOURCES,
+    type Source,
   } from "./journal";
 
   let { onRenderComplete }: { onRenderComplete?: () => void } = $props();
 
   const POLL_MS = 2000;
-  const LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
-  const LEVEL_OPTIONS = LEVELS.map((l) => ({ value: l, label: l }));
+  const SOURCE_COLOR: Record<Source, string> = {
+    fircd: "var(--src-fircd)",
+    tunnels: "var(--src-tun)",
+    dns: "var(--src-dns)",
+    bypass: "var(--src-bypass)",
+  };
 
   let frozen = $state.raw<JournalEvent[] | null>(null);
   let frozenSeq = 0;
   let frozenBoot = "";
   const paused = $derived(frozen !== null);
-  let minLevel = $state<LogLevel>("trace");
-  let kinds = $state<Set<Kind>>(new Set(["log", "dns", "bypass"]));
+  let levels = $state<Set<LogLevel>>(new Set(DEFAULT_LEVELS));
+  let sources = $state<Set<Source>>(new Set(SOURCES));
   let query = $state("");
   let group = $state("");
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -62,7 +70,8 @@
     return `${m}:${String(s).padStart(2, "0")}`;
   });
 
-  const filter = $derived({ kinds, minLevel, group });
+  const filter = $derived({ sources, levels, group });
+  const counts = $derived(sourceCounts(frozen ?? journal.events));
   const shown = $derived(
     journal.events.filter((e) => matches(e, filter) && matchesQuery(e, query)),
   );
@@ -92,11 +101,17 @@
     frozen = null;
   }
 
-  function toggleKind(k: Kind) {
-    const next = new Set(kinds);
-    if (next.has(k)) next.delete(k);
-    else next.add(k);
-    kinds = next;
+  function toggled<T>(set: Set<T>, v: T): Set<T> {
+    const next = new Set(set);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    return next;
+  }
+
+  function sourceLabel(s: Source): string {
+    if (s === "tunnels") return t("Tunnels");
+    if (s === "bypass") return t("Bypass");
+    return s === "dns" ? "DNS" : "fircd";
   }
 
   function clearView() {
@@ -160,92 +175,88 @@
   });
 </script>
 
-<div class="toolbar">
-  <div class="seg" role="group" aria-label={t("Kinds")}>
-    <button
-      type="button"
-      class:on={kinds.has("log")}
-      aria-pressed={kinds.has("log")}
-      onclick={() => toggleKind("log")}
-    >
-      {t("System")}
-    </button>
-    <button
-      type="button"
-      class:on={kinds.has("dns")}
-      aria-pressed={kinds.has("dns")}
-      onclick={() => toggleKind("dns")}
-    >
-      DNS
-    </button>
-    <button
-      type="button"
-      class:on={kinds.has("bypass")}
-      aria-pressed={kinds.has("bypass")}
-      onclick={() => toggleKind("bypass")}
-    >
-      {t("Bypass")}
-    </button>
-  </div>
-  <label class="field search">
-    <Search size={18} aria-hidden="true" />
-    <input
-      type="search"
-      bind:value={query}
-      placeholder={t("client or name")}
-      aria-label={t("client or name")}
-    />
-  </label>
-  <div class="field sel">
-    <Select
-      options={LEVEL_OPTIONS}
-      selected={minLevel}
-      onValueChange={(v) => (minLevel = v as LogLevel)}
-      ariaLabel={t("Minimum level")}
-    />
-  </div>
-  <div class="field sel grow">
-    <Select
-      options={groupOptions}
-      selected={group}
-      onValueChange={(v) => (group = v)}
-      ariaLabel={t("Group")}
-    />
-  </div>
-  <div class="actions">
-    {#if capture.running}
-      <span class="capturing" role="timer" aria-label={`${t("Capturing")} ${captureClock}`}>
-        <span class="dot" aria-hidden="true"></span>{captureClock}
-      </span>
-      {#if isOurs()}
-        <Tooltip value={t("Stop")}>
-          <Button disabled={capture.busy} onclick={() => void onCaptureStop()}>
-            <CaptureStop size={20} />
-          </Button>
-        </Tooltip>
-      {/if}
-    {:else}
-      <Tooltip value={t("Capture 5 min")}>
-        <Button
-          disabled={capture.busy || capture.unsupported !== ""}
-          onclick={() => void onCaptureStart()}
+<div class="tb">
+  <div class="toolbar">
+    <div class="seg sources" role="group" aria-label={t("Sources")}>
+      {#each SOURCES as s (s)}
+        <button
+          type="button"
+          style:--c={SOURCE_COLOR[s]}
+          aria-pressed={sources.has(s)}
+          onclick={() => (sources = toggled(sources, s))}
         >
-          <Capture size={20} />
-        </Button>
-      </Tooltip>
-    {/if}
-    {#if paused}
-      <Tooltip value={t("Resume")}>
-        <Button class="on" onclick={resume}><Play size={20} /></Button>
-      </Tooltip>
-    {:else}
-      <Tooltip value={t("Pause")}>
-        <Button onclick={pause}><Pause size={20} /></Button>
-      </Tooltip>
-    {/if}
-    <Tooltip value={t("Clear view")}>
-      <Button onclick={clearView}><Clear size={20} /></Button>
-    </Tooltip>
+          <span class="dot" aria-hidden="true"></span>{sourceLabel(s)}<span class="ct"
+            >{counts[s]}</span
+          >
+        </button>
+      {/each}
+    </div>
+    <div class="seg levels" role="group" aria-label={t("Levels")}>
+      {#each LEVELS as l (l)}
+        <button
+          type="button"
+          style:--c={`var(--lv-${l})`}
+          aria-pressed={levels.has(l)}
+          onclick={() => (levels = toggled(levels, l))}
+        >
+          <span class="bar" aria-hidden="true"></span>{l}
+        </button>
+      {/each}
+    </div>
+    <label class="field search">
+      <Search size={18} aria-hidden="true" />
+      <input
+        type="search"
+        bind:value={query}
+        placeholder={t("client, name or tunnel")}
+        aria-label={t("client, name or tunnel")}
+      />
+    </label>
+    <div class="right">
+      <div class="field sel grow">
+        <Select
+          options={groupOptions}
+          selected={group}
+          onValueChange={(v) => (group = v)}
+          ariaLabel={t("Group")}
+        />
+      </div>
+      <div class="actions">
+        {#if capture.running}
+          <span class="capturing" role="timer" aria-label={`${t("Capturing")} ${captureClock}`}>
+            <span class="cdot" aria-hidden="true"></span>{captureClock}
+          </span>
+          {#if isOurs()}
+            <Tooltip value={t("Stop")}>
+              <Button disabled={capture.busy} onclick={() => void onCaptureStop()}>
+                <CaptureStop size={20} />
+              </Button>
+            </Tooltip>
+          {/if}
+        {:else}
+          <Tooltip value={t("Capture 5 min")}>
+            <Button
+              disabled={capture.busy || capture.unsupported !== ""}
+              onclick={() => void onCaptureStart()}
+            >
+              <Capture size={20} />
+            </Button>
+          </Tooltip>
+        {/if}
+        {#if paused}
+          <Tooltip value={t("Resume")}>
+            <Button class="on" onclick={resume}><Play size={20} /></Button>
+          </Tooltip>
+        {:else}
+          <Tooltip value={t("Pause")}>
+            <Button onclick={pause}><Pause size={20} /></Button>
+          </Tooltip>
+        {/if}
+        <Tooltip value={t("Clear view")}>
+          <Button onclick={clearView}><Clear size={20} /></Button>
+        </Tooltip>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -280,19 +291,31 @@
 <div class="card">
   <div class="pane" bind:this={pane}>
     {#if rendered.length === 0}
-      <p class="empty">{t("Nothing matches. The daemon is running at:")} {journal.daemonLevel}</p>
+      <p class="empty">{t("Nothing matches the filters.")}</p>
     {/if}
     {#each rendered as e (e.seq)}
       {#if e.kind === "log"}
-        <div class="row {e.level}">
+        <div class="row l-{e.level}">
           <span class="at">{stamp(e.at)}</span>
-          <span class="badge lvl-{e.level}">{e.level}</span>
+          {#if e.source === "fircd"}
+            <span class="chip mono" style:--c={SOURCE_COLOR.fircd}>fircd</span>
+          {:else}
+            <button
+              type="button"
+              class="chip mono"
+              style:--c={SOURCE_COLOR.tunnels}
+              title={t("Show only this tunnel")}
+              onclick={() => (query = e.source)}
+            >
+              {e.source}
+            </button>
+          {/if}
           <span class="msg">{e.message}</span>
         </div>
       {:else if e.kind === "dns"}
         <div class="row {decisionClass(e)}">
           <span class="at">{stamp(e.at)}</span>
-          <span class="badge dns">DNS</span>
+          <span class="chip" style:--c={SOURCE_COLOR.dns}>DNS</span>
           <span class="msg">
             <button type="button" class="pick" onclick={() => (query = e.client)}>
               {e.client}
@@ -306,7 +329,7 @@
       {:else}
         <div class="row bypass">
           <span class="at">{stamp(e.at)}</span>
-          <span class="badge bypass">{t("Bypass")}</span>
+          <span class="chip" style:--c={SOURCE_COLOR.bypass}>{t("Bypass")}</span>
           <span
             class="msg"
             title={e.how === "addr" ? t("the last name firc recorded for this address") : undefined}
@@ -326,39 +349,101 @@
 </div>
 
 <style>
-  .toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
+  .tb {
+    container-type: inline-size;
     margin-bottom: 0.5rem;
+  }
+  .toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: stretch;
+  }
+  .right {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
   }
   .seg {
     display: inline-flex;
     flex: 0 0 auto;
+    box-sizing: border-box;
     background: var(--bg-light);
     border: 1px solid var(--bg-light-extra);
     border-radius: 0.5rem;
     padding: 0.2rem;
     gap: 0.2rem;
   }
+  .seg.sources {
+    display: flex;
+  }
+  .seg.sources button {
+    flex: 1;
+  }
   .seg button {
     all: unset;
     cursor: pointer;
-    padding: 0.45rem 0.8rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.42rem 0.7rem 0.38rem;
     border-radius: 0.35rem;
     color: var(--text-2);
-    font-size: 0.95rem;
+    font-size: 0.92rem;
+    white-space: nowrap;
   }
-  .seg button.on {
-    background: var(--bg-light-extra);
-    color: var(--text);
+  .seg button[aria-pressed="false"] {
+    color: color-mix(in srgb, var(--text-2) 75%, transparent);
   }
   .seg button:hover {
     color: var(--text);
   }
+  .seg button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--c) 16%, var(--bg-light-extra));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 55%, transparent);
+    color: var(--text);
+  }
+  .seg .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--c);
+    opacity: 0.35;
+  }
+  .seg .bar {
+    width: 3px;
+    height: 0.8rem;
+    border-radius: 2px;
+    background: var(--c);
+    opacity: 0.35;
+  }
+  .seg button[aria-pressed="true"] .dot,
+  .seg button[aria-pressed="true"] .bar {
+    opacity: 1;
+  }
+  .seg .ct {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .seg.levels {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .seg.levels button {
+    font-size: 0.76rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding-inline: 0.6rem;
+  }
   .seg button:focus-visible,
   .pick:focus-visible,
+  .chip:focus-visible,
   .new-events:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
@@ -376,8 +461,7 @@
     color: var(--text-2);
   }
   .field.search {
-    flex: 1 1 14rem;
-    min-width: 10rem;
+    min-width: 0;
     cursor: text;
   }
   .field.search input {
@@ -385,10 +469,9 @@
     flex: 1;
     min-width: 0;
     color: var(--text);
-    font-size: 0.95rem;
+    font-size: 0.92rem;
   }
   .field.sel {
-    flex: 0 0 auto;
     padding: 0 0.3rem;
   }
   .field.grow {
@@ -404,7 +487,6 @@
     flex: 0 0 auto;
     align-items: center;
     gap: 0.5rem;
-    margin-left: auto;
   }
   .actions :global(button.on) {
     color: var(--accent);
@@ -416,7 +498,7 @@
     color: var(--red);
     font-variant-numeric: tabular-nums;
   }
-  .dot {
+  .cdot {
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
@@ -426,6 +508,39 @@
   @keyframes blink {
     50% {
       opacity: 0.3;
+    }
+  }
+  @container (max-width: 600px) {
+    .toolbar {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.45rem;
+    }
+    .seg,
+    .seg.sources {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      width: 100%;
+    }
+    .seg button {
+      padding-inline: 0.25rem;
+      font-size: 0.84rem;
+      gap: 0.3rem;
+    }
+    .seg .dot {
+      display: none;
+    }
+    .seg.sources button[aria-pressed="true"] {
+      color: var(--c);
+    }
+    .seg.levels button {
+      font-size: 0.72rem;
+      padding-inline: 0.2rem;
+    }
+    .field.grow {
+      flex: 1 1 auto;
+    }
+    .actions {
+      gap: 0.2rem;
     }
   }
   .status {
@@ -447,13 +562,14 @@
     font-variant-numeric: tabular-nums;
   }
   .card {
+    container-type: inline-size;
     background: var(--bg-light);
     border: 1px solid var(--bg-light-extra);
     border-radius: 0.6rem;
     overflow: hidden;
   }
   .pane {
-    height: calc(100vh - 13rem);
+    height: calc(100vh - 16rem);
     min-height: 16rem;
     overflow: auto;
     padding: 0.3rem 0;
@@ -464,66 +580,79 @@
     color: var(--text-2);
   }
   .row {
+    position: relative;
     display: grid;
-    grid-template-columns: 4.5rem 4.6rem 1fr;
+    grid-template-columns: 4.6rem 6.4rem 1fr;
     gap: 0.6rem;
     align-items: baseline;
-    padding: 0.22rem 0.8rem;
+    padding: 0.25rem 0.8rem 0.2rem 1rem;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .row::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 3px;
+    bottom: 3px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--stripe, transparent);
   }
   .row:hover {
     background: var(--bg-dark);
   }
+  .row.l-debug {
+    --stripe: var(--lv-debug);
+  }
+  .row.l-info {
+    --stripe: var(--lv-info);
+  }
+  .row.l-warn {
+    --stripe: var(--lv-warn);
+  }
+  .row.l-error {
+    --stripe: var(--lv-error);
+    background: color-mix(in srgb, var(--lv-error) 5%, transparent);
+  }
   .at {
+    white-space: nowrap;
     color: var(--text-2);
-    opacity: 0.7;
+    opacity: 0.75;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     font-variant-numeric: tabular-nums;
   }
-  .badge {
+  .chip {
+    all: unset;
     justify-self: start;
-    font-size: 0.72rem;
+    font-size: 0.74rem;
+    font-weight: 600;
     line-height: 1;
-    padding: 0.22rem 0.45rem;
+    padding: 0.25rem 0.45rem 0.2rem;
     border-radius: 0.35rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
     white-space: nowrap;
-    background: var(--bg-light-extra);
-    color: var(--text-2);
+    color: var(--c);
+    background: color-mix(in srgb, var(--c) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--c) 20%, transparent);
   }
-  .badge.dns,
-  .badge.lvl-info {
-    color: var(--blue-light);
-    background: color-mix(in srgb, var(--blue-light) 15%, transparent);
+  .chip.mono {
+    font-family: var(--font-mono);
   }
-  .badge.lvl-warn,
-  .badge.bypass {
-    color: var(--orange);
-    background: color-mix(in srgb, var(--orange) 15%, transparent);
-  }
-  .badge.lvl-error,
-  .badge.lvl-fatal,
-  .badge.lvl-panic {
-    color: var(--red);
-    background: color-mix(in srgb, var(--red) 15%, transparent);
+  button.chip {
+    cursor: pointer;
   }
   .msg {
     color: var(--text);
   }
-  .row.trace .msg,
-  .row.debug .msg {
+  .row.l-debug .msg {
     color: var(--text-2);
   }
-  .row.warn .msg {
-    color: var(--orange);
+  .row.l-warn .msg {
+    color: var(--lv-warn);
   }
-  .row.error .msg,
-  .row.fatal .msg,
-  .row.panic .msg {
-    color: var(--red);
+  .row.l-error .msg {
+    color: var(--lv-error);
   }
   .row.dns.no-match .msg,
   .row.dns.passed .msg {
@@ -547,13 +676,20 @@
   .pick:hover {
     text-decoration: underline;
   }
-
-  @media (max-width: 640px) {
-    .field.search {
-      flex-basis: 100%;
+  @container (max-width: 560px) {
+    .row {
+      grid-template-columns: auto 1fr;
+      row-gap: 3px;
+      column-gap: 8px;
+      padding: 0.35rem 0.6rem 0.3rem 0.8rem;
     }
-    .actions {
-      margin-left: 0;
+    .row .msg {
+      grid-column: 1 / -1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cdot {
+      animation: none;
     }
   }
 </style>

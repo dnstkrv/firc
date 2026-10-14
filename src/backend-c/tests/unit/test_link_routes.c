@@ -9,7 +9,9 @@
 
 #include "fake_iptables.h"
 #include "fake_rtnl.h"
+#include "firc/events.h"
 #include "firc/ipset_to_link.h"
+#include "firc/logrep.h"
 #include "firc/pool_reject.h"
 #include "firc/mark.h"
 #include "firc/netfilter_cleaner.h"
@@ -287,6 +289,67 @@ TEST an_event_while_the_link_is_down_writes_nothing(void) {
     ASSERT_EQ_FMTm("nothing written while it is down", before,
                    fake_rtnl_count(f.kernel, RTM_NEWROUTE, RTN_UNICAST), "%zu");
     down(&f);
+    PASS();
+}
+
+static size_t journal_at(firc_log_level_t level, const char *needle) {
+    firc_event_t ev[32];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 32, &next, &dropped), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strstr(ev[i].u.log.text, needle) != NULL) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a down link warned at every link event, or its coming up not said. */
+TEST a_down_link_is_warned_once_and_its_return_said(void) {
+    fixture_t f;
+    ASSERT(up(&f, 0));
+    firc_event_reset_for_test();
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
+    fake_rtnl_set_link_flags(f.kernel, IFF_UP);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
+    down(&f);
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_WARN, "interface lo is down"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_DEBUG, "interface lo is down"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_INFO, "interface lo: recovered after 2 failures over "), "%zu");
+    PASS();
+}
+
+static uint64_t g_rep_ms = 1000;
+static uint64_t rep_clock(void) { return g_rep_ms; }
+
+/* Catches: an interface that never appears said once and never again, a reminder sooner than ten minutes, a DEBUG line at every sweep, its return seen by the sweep but not said, or a later loss taken as the old run. */
+TEST a_missing_interface_is_said_again_every_ten_minutes(void) {
+    fixture_t f;
+    ASSERT(up(&f, 0));
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_enable(f.link, NULL));
+    g_rep_ms += FIRC_LOGREP_REMIND_MS - 1;
+    firc_ipset_to_link_remind(f.link);
+    size_t quiet = journal_at(FIRC_LOG_DEBUG, "interface lo");
+    g_rep_ms += 1;
+    firc_ipset_to_link_remind(f.link);
+    size_t reminded = journal_at(FIRC_LOG_WARN, "interface lo is down (still failing, 2 times for 10 min)");
+    fake_rtnl_set_link_flags(f.kernel, IFF_UP);
+    g_rep_ms += FIRC_LOGREP_REMIND_MS;
+    firc_ipset_to_link_remind(f.link);
+    size_t back = journal_at(FIRC_LOG_INFO, "interface lo: recovered after 2 failures over 20 min");
+    fake_rtnl_set_link_flags(f.kernel, 0);
+    ASSERT_EQ(FIRC_OK, firc_ipset_to_link_on_link_up(f.link));
+    firc_logrep_set_clock_for_test(NULL);
+    down(&f);
+    ASSERT_EQ_FMTm("no line between reminders", (size_t)0, quiet, "%zu");
+    ASSERT_EQ_FMT((size_t)1, reminded, "%zu");
+    ASSERT_EQ_FMT((size_t)1, back, "%zu");
+    ASSERT_EQ_FMTm("the first, the reminder and a fresh one after the return", (size_t)3,
+                   journal_at(FIRC_LOG_WARN, "interface lo is down"), "%zu");
     PASS();
 }
 
@@ -1071,6 +1134,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_default_that_lost_its_gateway_for_good_is_followed);
     RUN_TEST(a_reject_default_on_the_interface_is_not_a_gatewayless_one);
     RUN_TEST(an_event_while_the_link_is_down_writes_nothing);
+    RUN_TEST(a_down_link_is_warned_once_and_its_return_said);
+    RUN_TEST(a_missing_interface_is_said_again_every_ten_minutes);
     RUN_TEST(one_familys_failure_does_not_cost_the_other_its_refresh);
     RUN_TEST(a_refused_blackhole_on_link_up_still_writes_both_defaults);
     RUN_TEST(a_refused_interface_lookup_on_link_up_is_reported);

@@ -1,5 +1,6 @@
 #include "firc/netlink_watcher.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/nlattr_iter.h"
 #include "firc/rtnl.h"
 
@@ -18,7 +19,8 @@
 #define FIRC_NL_WATCHER_RECVBUF 8192
 #define FIRC_NL_WATCHER_REOPEN_FIRST_MS 100u
 #define FIRC_NL_WATCHER_REOPEN_CAP_MS 5000u
-#define FIRC_NL_WATCHER_WARN_EVERY 4u
+
+#define FIRC_NL_WATCHER_ERROR_AFTER_MS (5u * 60u * 1000u)
 
 struct firc_nl_watcher {
     struct mnl_socket *nl;
@@ -32,6 +34,8 @@ struct firc_nl_watcher {
     int reopen_timer;
     unsigned failures;
     uint32_t ticks_left;
+    firc_logrep_t down;
+    firc_lograte_t lost;
 };
 
 uint32_t firc_nl_watcher_reopen_delay_ms(unsigned failures) {
@@ -168,12 +172,13 @@ bool firc_nl_watcher_handle_recv_error(firc_nl_watcher_t *w, int err) {
     case FIRC_NL_RECV_RETRY:
         return true;
     case FIRC_NL_RECV_LOST:
-        FIRC_WARN("netlink watcher lost messages (%s); every interface is re-read",
-                  err == ENOBUFS ? "its buffer overran" : "a message did not fit the read buffer");
+        firc_lograte_say(&w->lost, 60000, FIRC_LOG_WARN, NULL, "netlink watcher lost messages (%s); every interface is re-read",
+                         err == ENOBUFS ? "its buffer overran" : "a message did not fit the read buffer");
         if (w->lost_cb) { w->lost_cb(w->lost_ud); }
         return true;
     case FIRC_NL_RECV_FATAL:
-        FIRC_WARN("netlink watcher recv error: %s; its socket is reopened", strerror(err));
+        firc_logrep_fail_for(&w->down, FIRC_NL_WATCHER_ERROR_AFTER_MS, NULL,
+                             "netlink watcher recv error: %s; its socket is reopened", strerror(err));
         socket_failed(w);
         return false;
     case FIRC_NL_RECV_DRAINED:
@@ -264,18 +269,14 @@ static void on_reopen_tick(firc_loop_t *loop, void *ud) {
     if (--w->ticks_left > 0) { return; }
     firc_err_t err = open_socket(w);
     if (err != FIRC_OK) {
-        if (w->failures % FIRC_NL_WATCHER_WARN_EVERY == 0) {
-            FIRC_WARN("netlink watcher socket still not reopened after %u tries: %s", w->failures,
-                      firc_err_str(err));
-        } else {
-            FIRC_DEBUG("netlink watcher socket not reopened yet: %s", firc_err_str(err));
-        }
+        firc_logrep_fail_for(&w->down, FIRC_NL_WATCHER_ERROR_AFTER_MS, NULL,
+                             "netlink watcher socket not reopened yet: %s", firc_err_str(err));
         wait_before_reopen(w);
         return;
     }
     firc_loop_del_timer(loop, w->reopen_timer);
     w->reopen_timer = 0;
-    FIRC_INFO("netlink watcher socket reopened; every interface is re-read");
+    (void)firc_logrep_ok(&w->down, NULL, "netlink watcher socket");
     if (w->lost_cb) { w->lost_cb(w->lost_ud); }
 }
 

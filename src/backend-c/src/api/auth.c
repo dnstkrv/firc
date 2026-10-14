@@ -18,6 +18,7 @@
 #include "firc/hash.h"
 #include "firc/jwt.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/paths.h"
 #include "firc/rand.h"
 
@@ -140,9 +141,11 @@ void firc_auth_forget_cached_hash(void) {
 /* throttles the work, not a caller identity (there is none to key on); one success clears it */
 #define FIRC_AUTH_THROTTLE_AFTER 3
 #define FIRC_AUTH_THROTTLE_MS 1000
+#define FIRC_AUTH_SAY_EVERY_MS 60000u
 
 static unsigned g_login_failures;
 static int64_t g_login_next_ms;
+static firc_lograte_t g_said_unreadable, g_said_no_hash, g_said_odd_hash;
 
 static int64_t mono_ms(void) {
     struct timespec ts;
@@ -153,6 +156,9 @@ static int64_t mono_ms(void) {
 void firc_auth_reset_throttle_for_test(void) {
     g_login_failures = 0;
     g_login_next_ms = 0;
+    g_said_unreadable = (firc_lograte_t){0};
+    g_said_no_hash = (firc_lograte_t){0};
+    g_said_odd_hash = (firc_lograte_t){0};
 }
 
 static void login_failed(void) {
@@ -240,8 +246,8 @@ firc_err_t firc_auth_load_password_hash_from(const char *shadow_path, const char
     firc_err_t err = hash_from_file(shadow_path, login, out, out_len);
     if (err == FIRC_OK || err == FIRC_ERR_STATE) { return err; } /* STATE ("no password login") is an answer too */
     if (err != FIRC_ERR_NOENT) {
-        FIRC_WARN("%s could not be read (%s): falling back to %s", shadow_path, firc_err_str(err),
-                  passwd_path);
+        firc_lograte_say(&g_said_unreadable, FIRC_AUTH_SAY_EVERY_MS, FIRC_LOG_WARN, NULL,
+                         "%s could not be read (%s): falling back to %s", shadow_path, firc_err_str(err), passwd_path);
     }
     firc_err_t fallback = hash_from_file(passwd_path, login, out, out_len);
     if (fallback == FIRC_OK) { return FIRC_OK; }
@@ -394,8 +400,9 @@ firc_err_t firc_auth_authenticate_from(const char *shadow_path, const char *pass
     if (err != FIRC_OK) {
         char safe[64]; /* the HTTP layer flattens this to "Invalid credentials"; log the real reason */
         quote_login(login, safe, sizeof(safe));
-        FIRC_WARN("login refused for \"%s\": no usable password hash in %s or %s (%s)", safe,
-                  shadow_path, passwd_path, firc_err_str(err));
+        firc_lograte_say(&g_said_no_hash, FIRC_AUTH_SAY_EVERY_MS, FIRC_LOG_WARN, NULL,
+                         "login refused for \"%s\": no usable password hash in %s or %s (%s)", safe, shadow_path,
+                         passwd_path, firc_err_str(err));
         login_failed();
         return err;
     }
@@ -405,9 +412,10 @@ firc_err_t firc_auth_authenticate_from(const char *shadow_path, const char *pass
     if (err != FIRC_OK) {
         char safe[64];
         quote_login(login, safe, sizeof(safe));
-        FIRC_WARN("login refused for \"%s\": this build cannot compute the hash in %s -- "
-                  "firc knows $1$, $5$ and $6$, and that one starts \"%.3s\"",
-                  safe, shadow_path, password_hash);
+        firc_lograte_say(&g_said_odd_hash, FIRC_AUTH_SAY_EVERY_MS, FIRC_LOG_WARN, NULL,
+                         "login refused for \"%s\": this build cannot compute the hash in %s -- "
+                         "firc knows $1$, $5$ and $6$, and that one starts \"%.3s\"",
+                         safe, shadow_path, password_hash);
         login_failed();
         return FIRC_ERR_INVAL;
     }

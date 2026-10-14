@@ -441,7 +441,7 @@ static size_t capture_apply(firc_app_t *app, firc_sub_event_t *ev, char *out, si
                             bool *out_changed) {
     int fds[2];
     if (pipe(fds) != 0) { return (size_t)-1; }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     bool changed = false;
     firc_app_apply_sync_result(app, ev, 1000, &changed);
@@ -463,7 +463,7 @@ static int count_lines(const char *s) {
     return n;
 }
 
-/* Catches: unusable list lines unreported, reported per rule, or with the wrong count or example. */
+/* Catches: unusable list lines unreported, reported per rule, with the wrong count or example, or reported again by the matcher. */
 TEST a_list_full_of_junk_says_it_once(void) {
     ASSERT(fixture_up_no_worker(&g_fx));
     firc_group_t *g = group_with_list(1, URL_A, 3600);
@@ -489,14 +489,11 @@ TEST a_list_full_of_junk_says_it_once(void) {
                    "matcher skip the unusable ones",
                    4u, (unsigned)cur->list->rules.n, "%u");
 
-    ASSERT_EQ_FMTm("one line for the count, one for the matcher's own check", 2, count_lines(out),
-                   "%d");
+    ASSERT_EQ_FMTm("one line for the count, none from the matcher", 1, count_lines(out), "%d");
     ASSERTm("the count", strstr(out, "3 line(s)") != NULL);
     ASSERTm("names the group", strstr(out, "adblock") != NULL);
     ASSERTm("the first example", strstr(out, "010.0.0.1") != NULL);
     ASSERTm("...and the reason", strstr(out, "an IPv4 address or prefix") != NULL);
-    ASSERTm("the matcher's own line names the same regex",
-            strstr(out, "do not compile") != NULL && strstr(out, "^[a-z") != NULL);
 
     g_fx_open = false;
     fixture_down(&g_fx);
@@ -1078,7 +1075,7 @@ TEST a_routed_group_warns_once_not_on_every_resync(void) {
     ASSERT(rs != NULL);
     int fds[2];
     ASSERT(pipe(fds) == 0);
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     ASSERT_EQ(FIRC_OK, firc_app_sync_group(g_nfx.app, rs));
     firc_log_set_fd(STDOUT_FILENO);

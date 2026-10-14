@@ -25,6 +25,7 @@
 #include "firc/tunnet.h"
 #include "firc/tunrun.h"
 #include "firc/tunsubs.h"
+#include "firc/tunwatch.h"
 
 #define FAKE "tests/unit/fixtures/fake_tunvless.sh"
 #define START 4200u
@@ -365,20 +366,9 @@ TEST uplink_device_names_the_device_packets_leave_by(void)
     PASS();
 }
 
-static firc_tun_state_t st_of(firc_tun_status_t status)
-{
-    firc_tun_state_t st;
-    memset(&st, 0, sizeof st);
-    strcpy(st.id, "t0");
-    strcpy(st.device, "tunvless0");
-    st.status = status;
-    return st;
-}
-
 /* catches: journal lines that drift from the agreed wording or lose a node name */
 TEST journal_lines_read_as_agreed(void)
 {
-    firc_tun_state_t st = st_of(FIRC_TUN_ST_UP);
     firc_tev_t ev;
     char buf[240];
     firc_log_level_t lv = FIRC_LOG_DEBUG;
@@ -388,44 +378,37 @@ TEST journal_lines_read_as_agreed(void)
     strcpy(ev.active[0], "NL-1");
     strcpy(ev.active[1], "my-vps");
     ev.n_active = 2;
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: active NL-1, my-vps", buf);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("active NL-1, my-vps", buf);
     ASSERT_EQ(FIRC_LOG_INFO, lv);
 
     memset(&ev, 0, sizeof ev);
     ev.kind = FIRC_TEV_NODE_DOWN;
     strcpy(ev.node, "NL-3");
     strcpy(ev.why, "timeout");
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: NL-3 does not answer (timeout)", buf);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("NL-3 does not answer (timeout)", buf);
     ASSERT_EQ(FIRC_LOG_WARN, lv);
     ev.why[0] = 0;
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: NL-3 does not answer", buf);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("NL-3 does not answer", buf);
 
     memset(&ev, 0, sizeof ev);
     ev.kind = FIRC_TEV_NODE_UP;
     strcpy(ev.node, "NL-3");
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: NL-3 answers again", buf);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("NL-3 answers again", buf);
     ASSERT_EQ(FIRC_LOG_INFO, lv);
 
     memset(&ev, 0, sizeof ev);
     ev.kind = FIRC_TEV_NO_NODE;
     ev.retry_s = 60;
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: no node answers, retry in 60 s", buf);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("no node answers, retry in 60 s", buf);
     ASSERT_EQ(FIRC_LOG_WARN, lv);
     ev.retry_s = 0;
-    ASSERT(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: no node answers", buf);
-
-    firc_tun_state_t off = st_of(FIRC_TUN_ST_BACKOFF);
-    off.last_exit = 1;
-    off.backoff_s = 6;
-    ASSERT(firc_tun_journal_line(&off, NULL, buf, sizeof buf, &lv));
-    ASSERT_STR_EQ("tunnel tunvless0: exited (1), restart in 6 s", buf);
-    ASSERT_EQ(FIRC_LOG_WARN, lv);
+    ASSERT(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
+    ASSERT_STR_EQ("no node answers", buf);
     PASS();
 }
 
@@ -436,27 +419,27 @@ TEST quiet_events_write_no_line(void)
     firc_log_level_t lv = FIRC_LOG_DEBUG;
     firc_tev_t ev;
     memset(&ev, 0, sizeof ev);
-    firc_tun_state_t st = st_of(FIRC_TUN_ST_STARTING);
-    ASSERT_FALSE(firc_tun_journal_line(&st, NULL, buf, sizeof buf, &lv));
-    st = st_of(FIRC_TUN_ST_OFF);
-    ASSERT_FALSE(firc_tun_journal_line(&st, NULL, buf, sizeof buf, &lv));
     ev.kind = FIRC_TEV_READY;
-    ASSERT_FALSE(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
+    ASSERT_FALSE(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
     ev.kind = FIRC_TEV_ACTIVE;
-    ASSERT_FALSE(firc_tun_journal_line(&st, &ev, buf, sizeof buf, &lv));
+    ASSERT_FALSE(firc_tun_journal_line(&ev, buf, sizeof buf, &lv));
     PASS();
 }
 
-/* catches: a tunnel whose uplink was never written started anyway, leaving by the main route */
+static int journal_count(const char *source, const char *text);
+
+/* catches: a tunnel whose uplink was never written started anyway, leaving by the main route, or the refusal journalled as fircd's */
 TEST a_failed_uplink_is_not_started_until_a_reload_writes_it(void)
 {
     fx_t f;
     ASSERT(fx_up(&f, IFF_UP));
+    firc_event_reset_for_test();
     const spec_t s[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}, {"b", 1, FIRC_UPLINK_AUTO, NULL, false}};
     fake_rtnl_fail_next_of(f.kernel, RTM_NEWRULE, EPERM);
     apply(&f, s, 2);
     ASSERT_EQ(1, wait_starts(&f, "tunvless1", 1, 2000));
     ASSERT_EQ(0, starts_of(&f, "tunvless0"));
+    ASSERT_EQ(1, journal_count("tunvless0", "not started, its uplink could not be set up (system error)"));
     apply(&f, s, 2);
     ASSERT_EQ(1, wait_starts(&f, "tunvless0", 1, 2000));
     ASSERT(argv_has(&f, "-m"));
@@ -924,11 +907,12 @@ static void run_ms(fx_t *f, int ms);
     "      - id: 0000000d\n        link: \"vless://" U "@d.example:443?security=none#d\"\n"
 #define LINK_OF(h) "vless://" U "@" h ".example:443?type=tcp&security=none#" h "\n"
 
-/* catches: a list past tunvless's stdin limit sent whole (refused, or cut by tunvless out of step with fircd) */
+/* catches: a list past tunvless's stdin limit sent whole (refused, or cut by tunvless out of step with fircd), or the cut journalled as fircd's */
 TEST a_list_past_the_stdin_limit_is_cut_from_the_end(void)
 {
     static fx_t f;
     ASSERT(fx_up(&f, 0));
+    firc_event_reset_for_test();
     char in[256], logp[256];
     snprintf(in, sizeof in, "%s/stdin", f.dir);
     snprintf(logp, sizeof logp, "%s/log", f.dir);
@@ -956,8 +940,9 @@ TEST a_list_past_the_stdin_limit_is_cut_from_the_end(void)
     unlink(logp);
     ASSERT_STR_EQ(LINK_OF("b") LINK_OF("c") "\nnodes\n" LINK_OF("a") LINK_OF("b") "\n", buf);
     ASSERT_EQ(1, starts_of(&f, "tunvless0"));
-    ASSERT(strstr(log, "tunnel tunvless0: node list over 200 bytes, 2 nodes kept, 1 left out") != NULL);
-    ASSERT(strstr(log, "tunnel tunvless0: node list over 200 bytes, 2 nodes kept, 2 left out") != NULL);
+    ASSERT(strstr(log, "WRN tunvless0: node list over 200 bytes, 2 nodes kept, 1 left out\n") != NULL);
+    ASSERT(strstr(log, "WRN tunvless0: node list over 200 bytes, 2 nodes kept, 2 left out\n") != NULL);
+    ASSERT_EQ(1, journal_count("tunvless0", "node list over 200 bytes, 2 nodes kept, 1 left out"));
     fx_down(&f);
     PASS();
 }
@@ -1089,14 +1074,15 @@ static void sub_srv_stop(sub_srv_t *s)
     firc_loop_destroy(s->loop);
 }
 
-static int journal_count(const char *text)
+static int journal_count(const char *source, const char *text)
 {
     firc_event_t ev[64];
     uint64_t next = 0, dropped = 0;
     size_t n = firc_event_read(0, ev, 64, &next, &dropped);
     int c = 0;
     for (size_t i = 0; i < n; i++) {
-        if (ev[i].kind == FIRC_EVENT_LOG && strcmp(ev[i].u.log.text, text) == 0) {
+        if (ev[i].kind == FIRC_EVENT_LOG && strcmp(ev[i].u.log.source, source) == 0 &&
+            strcmp(ev[i].u.log.text, text) == 0) {
             c++;
         }
     }
@@ -1122,7 +1108,7 @@ TEST a_save_during_a_refresh_takes_the_new_config(void)
     apply_yaml(&f, SUB_TUN "    exclude: [\"0000000a:B\"]\n");
     ASSERT_EQ(0, run_until_starts(&f, "tunvless0", 1, 150));
     apply_yaml(&f, SUB_TUN "    exclude: [\"0000000a:A\"]\n");
-    ASSERT_EQ(1, journal_count("tunnel tunvless0: no nodes to use yet"));
+    ASSERT_EQ(1, journal_count("tunvless0", "no nodes to use yet"));
     ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 3000));
     char buf[1024];
     bool done = run_until_file(&f, in, buf, sizeof buf, 2000);
@@ -1299,15 +1285,18 @@ static void run_ms(fx_t *f, int ms)
     "      - id: 0000000a\n        link: \"vless://" U "@a.example:443?security=none#A\"\n" \
     "      - id: 0000000b\n        link: \"vless://" U "@b.example:443?security=none#B\"\n"
 
-/* catches: a node_down not remembered per tunnel, or remembered across a restart of the child */
+/* catches: a node_down not remembered per tunnel, remembered across a restart of the child, or journalled as fircd's */
 TEST node_down_lasts_until_the_child_restarts(void)
 {
     static fx_t f;
     ASSERT(fx_up(&f, 0));
+    firc_event_reset_for_test();
     setenv("FAKE_MODE", "down", 1);
     apply_yaml(&f, AB_LINKS);
     ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
     run_ms(&f, 300);
+    ASSERT_EQ(1, journal_count("tunvless0", "active A"));
+    ASSERT_EQ(1, journal_count("tunvless0", "B does not answer (x)"));
     int64_t since = 0;
     ASSERT(firc_tunrun_node_down(f.run, "a", "0000000b:B", &since));
     ASSERT(since > 0 && since <= now_ms());
@@ -1502,6 +1491,135 @@ TEST device_down_is_every_status_but_up(void)
     PASS();
 }
 
+static int64_t g_watch_now;
+static int64_t watch_now(void) { return g_watch_now; }
+
+static int journal_level_count(firc_log_level_t level, const char *source, const char *text)
+{
+    firc_event_t ev[64];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 64, &next, &dropped);
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strcmp(ev[i].u.log.source, source) == 0 &&
+            strcmp(ev[i].u.log.text, text) == 0) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a tunnel with no working node never said at ERROR, said for an off tunnel, said under another source, or its recovery not said. */
+TEST five_minutes_without_a_node_is_an_error_for_the_device(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    firc_event_reset_for_test();
+    g_watch_now = 1000;
+    (void)firc_tunrun_set_watch_for_test(f.run, watch_now, 20);
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS", "{\"type\":\"no_node\",\"retry\":5}", 1);
+    apply_yaml(&f, AB_LINKS "  - id: off\n    device: tunvless1\n    enable: false\n");
+    ASSERT_EQ(FIRC_TUN_ST_NO_NODE, run_until_status(&f, "a", FIRC_TUN_ST_NO_NODE, 3000));
+    run_ms(&f, 100);
+    g_watch_now += FIRC_TUNWATCH_AFTER_MS;
+    run_ms(&f, 100);
+    ASSERT_EQ(1, journal_level_count(FIRC_LOG_ERROR, "tunvless0", "no node has worked for 5 min; groups on it fail closed"));
+    ASSERT_EQ(0, journal_level_count(FIRC_LOG_ERROR, "tunvless1", "no node has worked for 5 min; groups on it fail closed"));
+    setenv("FAKE_MODE", "ok", 1);
+    unsetenv("FAKE_EVENTS");
+    g_watch_now += 60 * 1000;
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    run_ms(&f, 100);
+    ASSERT_EQ(1, journal_level_count(FIRC_LOG_INFO, "tunvless0", "recovered: a node works again after 6 min without one"));
+    fx_down(&f);
+    PASS();
+}
+
+static int journal_prefix_count(firc_log_level_t level, const char *source, const char *prefix)
+{
+    firc_event_t ev[256];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 256, &next, &dropped);
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strcmp(ev[i].u.log.source, source) == 0 &&
+            strncmp(ev[i].u.log.text, prefix, strlen(prefix)) == 0) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a tunnel with no node answering warned at every retry, so one outage fills the warning ring, or the first answer after it not said. */
+TEST twenty_no_node_retries_leave_one_warning(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    firc_event_reset_for_test();
+    static char evs[2048];
+    evs[0] = 0;
+    for (int i = 0; i < 20; i++) { strcat(evs, i ? "\n{\"type\":\"no_node\",\"retry\":5}" : "{\"type\":\"no_node\",\"retry\":5}"); }
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS", evs, 1);
+    apply_yaml(&f, AB_LINKS);
+    ASSERT_EQ(FIRC_TUN_ST_NO_NODE, run_until_status(&f, "a", FIRC_TUN_ST_NO_NODE, 3000));
+    run_ms(&f, 300);
+    int warned = journal_level_count(FIRC_LOG_WARN, "tunvless0", "no node answers, retry in 5 s");
+    int quiet = journal_level_count(FIRC_LOG_DEBUG, "tunvless0", "no node answers, retry in 5 s");
+    setenv("FAKE_MODE", "ok", 1);
+    unsetenv("FAKE_EVENTS");
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    run_ms(&f, 100);
+    fx_down(&f);
+    ASSERT_EQ(1, warned);
+    ASSERT_EQ(19, quiet);
+    ASSERT_EQ(1, journal_prefix_count(FIRC_LOG_INFO, "tunvless0", "nodes: recovered after 20 failures over "));
+    PASS();
+}
+
+/* Catches: the watch run only from its timer, so a tunnel's alarm and recovery wait up to a period instead of following the child's events. */
+TEST the_watch_follows_the_childs_events(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    firc_event_reset_for_test();
+    g_watch_now = 1000;
+    (void)firc_tunrun_set_watch_for_test(f.run, watch_now, 3600000);
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS", "{\"type\":\"no_node\",\"retry\":5}", 1);
+    apply_yaml(&f, AB_LINKS);
+    ASSERT_EQ(FIRC_TUN_ST_NO_NODE, run_until_status(&f, "a", FIRC_TUN_ST_NO_NODE, 3000));
+    g_watch_now += FIRC_TUNWATCH_AFTER_MS;
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_NO_NODE, run_until_status(&f, "a", FIRC_TUN_ST_NO_NODE, 3000));
+    run_ms(&f, 100);
+    ASSERT_EQ(1, journal_level_count(FIRC_LOG_ERROR, "tunvless0", "no node has worked for 5 min; groups on it fail closed"));
+    setenv("FAKE_MODE", "ok", 1);
+    unsetenv("FAKE_EVENTS");
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    run_ms(&f, 100);
+    ASSERT_EQ(1, journal_level_count(FIRC_LOG_INFO, "tunvless0", "recovered: a node works again after 5 min without one"));
+    fx_down(&f);
+    PASS();
+}
+
+/* Catches: the watch timer left on the loop after a stop, to run on a freed tunrun. */
+TEST a_stop_takes_the_watch_timer_off_the_loop(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    int id = firc_tunrun_set_watch_for_test(f.run, watch_now, 20);
+    ASSERT(id > 0);
+    firc_tunrun_stop(f.run, 0);
+    ASSERT_EQ(FIRC_ERR_NOENT, firc_loop_del_timer(f.loop, id));
+    fx_down(&f);
+    PASS();
+}
+
 /* catches: a tunnel removed from the config still read down while its child lives out the grace */
 TEST a_removed_tunnel_is_not_down_while_its_child_ends(void)
 {
@@ -1562,6 +1680,10 @@ SUITE(tunrun)
     RUN_TEST(the_built_rows_are_kept_without_links);
     RUN_TEST(mark_of_reports_the_uplink_mark_and_whether_a_child_holds_it);
     RUN_TEST(device_down_is_every_status_but_up);
+    RUN_TEST(five_minutes_without_a_node_is_an_error_for_the_device);
+    RUN_TEST(twenty_no_node_retries_leave_one_warning);
+    RUN_TEST(the_watch_follows_the_childs_events);
+    RUN_TEST(a_stop_takes_the_watch_timer_off_the_loop);
     RUN_TEST(a_removed_tunnel_is_not_down_while_its_child_ends);
 }
 

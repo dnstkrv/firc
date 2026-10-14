@@ -181,7 +181,7 @@ const EVENTS_BOOT = `${Math.floor(Date.now() / 1000).toString(16)}-${crypto
   .slice(0, 8)}`;
 type DnsDecision = "issued" | "not-covered" | "no-match" | "pool-refused" | "passed";
 type Event =
-  | { seq: number; at: number; kind: "log"; level: string; message: string }
+  | { seq: number; at: number; kind: "log"; level: string; source: string; message: string }
   | {
       seq: number;
       at: number;
@@ -212,13 +212,17 @@ type Event =
 type Fresh<E> = E extends unknown ? Omit<E, "seq" | "at"> : never;
 const EVENTS: Event[] = [];
 let eventSeq = 0;
-const LOG_SAMPLES: [string, string][] = [
-  ["info", "netfilter rebuilt: 3 group(s), 1 subscription(s)"],
-  ["debug", "committer: request folded into the running pass"],
-  ["info", 'subscription "Bad Bad Services" synced: 1204 rule(s)'],
-  ["warn", 'group Example routes nothing: "" is not an interface name'],
-  ["debug", "pool: 12 name(s) idle past the window, quarantined"],
-  ["error", "upstream 127.0.0.1:53 did not answer within 2s"],
+const LOG_SAMPLES: [string, string, string][] = [
+  ["info", "fircd", "netfilter rebuilt: 3 group(s), 1 subscription(s)"],
+  ["debug", "fircd", "committer: request folded into the running pass"],
+  ["info", "fircd", 'subscription "Bad Bad Services" synced: 1204 rule(s)'],
+  ["warn", "fircd", 'group Example routes nothing: "" is not an interface name'],
+  ["debug", "fircd", "pool: 12 name(s) idle past the window, quarantined"],
+  ["error", "fircd", "upstream 127.0.0.1:53 did not answer within 2s"],
+  ["info", "tunvless0", "active Amsterdam-1"],
+  ["warn", "tunvless0", "Frankfurt-2 does not answer (timeout)"],
+  ["error", "tunvless1", "no usable VLESS node"],
+  ["debug", "tunvless0", "tun: rx 40"],
 ];
 function pushEvent(e: Fresh<Event>) {
   eventSeq += 1;
@@ -226,8 +230,8 @@ function pushEvent(e: Fresh<Event>) {
   if (EVENTS.length > EVENTS_RING) EVENTS.shift();
 }
 function pushLogLine() {
-  const [level, message] = LOG_SAMPLES[Math.floor(Math.random() * LOG_SAMPLES.length)];
-  pushEvent({ kind: "log", level, message });
+  const [level, source, message] = LOG_SAMPLES[Math.floor(Math.random() * LOG_SAMPLES.length)];
+  pushEvent({ kind: "log", level, source, message });
 }
 
 const DNS_CLIENTS = ["192.168.1.42", "192.168.1.51"];
@@ -943,7 +947,6 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.showAllInterfaces": false,
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
-  "app.logLevel": "info",
   "app.update.check": false,
 };
 const SETTINGS_LIVE = new Set([
@@ -952,7 +955,6 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.disableDropAAAA",
   "app.dnsProxy.unmatchedTtl",
   "app.showAllInterfaces",
-  "app.logLevel",
   "app.update.check",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -976,18 +978,6 @@ app.get(`${API_BASE}/system/settings`, (c) =>
   }),
 );
 
-const SETTINGS_LEVELS = [
-  "trace",
-  "debug",
-  "info",
-  "warn",
-  "error",
-  "fatal",
-  "panic",
-  "nolevel",
-  "disabled",
-];
-
 function settingRefusal(key: string, value: unknown): string | null {
   if (!(key in SETTINGS_DEFAULTS)) return "not a setting";
   const want = SETTINGS_DEFAULTS[key];
@@ -1005,9 +995,6 @@ function settingRefusal(key: string, value: unknown): string | null {
     return null;
   }
   if (typeof value !== "string") return "must be a string";
-  if (key === "app.logLevel" && !SETTINGS_LEVELS.includes(value)) {
-    return "one of trace, debug, info, warn, error, fatal, panic, nolevel, disabled";
-  }
   return null;
 }
 
@@ -1194,7 +1181,6 @@ app.get(`${API_BASE}/system/events`, (c) => {
     events: lines,
     next: lines.length > 0 ? lines[lines.length - 1].seq : since,
     dropped,
-    level: "debug",
     boot: EVENTS_BOOT,
   });
 });

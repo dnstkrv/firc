@@ -16,6 +16,15 @@ test("the saved values show, with nothing counted as changed", async ({ page }) 
   await expect(page.getByTestId("settings-counter")).toHaveText("0 settings changed");
 });
 
+// Catches the log level row or its section left on the page after the daemon dropped the setting.
+test("there is no log level to set", async ({ page }) => {
+  await openSettings(page, (r) => r.fulfill({ json: answer() }));
+  await expect(page.getByRole("switch", { name: "Drop AAAA" })).toBeVisible();
+  await expect(page.getByText("Log level")).toHaveCount(0);
+  await expect(page.locator('[data-row="app.logLevel"]')).toHaveCount(0);
+  await expect(page.locator('[data-section="journal"]')).toHaveCount(0);
+});
+
 test("there is no fake PTR switch", async ({ page }) => {
   await openSettings(page, (r) => r.fulfill({ json: answer() }));
   await expect(page.getByRole("switch", { name: "Drop AAAA" })).toBeVisible();

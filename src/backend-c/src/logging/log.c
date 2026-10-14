@@ -14,20 +14,8 @@
 
 #define FIRC_LOG_LINE_MAX 1024
 
-static _Atomic int g_level = FIRC_LOG_INFO;
 static _Atomic int g_fd = STDOUT_FILENO;
-static _Atomic int g_output_floor = FIRC_LOG_TRACE;
-
-void firc_log_set_level(firc_log_level_t level)
-{
-    atomic_store_explicit(&g_level, (int)level, memory_order_relaxed);
-}
-
-firc_log_level_t firc_log_level(void)
-{
-    return (firc_log_level_t)atomic_load_explicit(&g_level,
-                                                memory_order_relaxed);
-}
+static _Atomic int g_output_floor = FIRC_LOG_DEBUG;
 
 void firc_log_set_fd(int fd)
 {
@@ -57,11 +45,10 @@ bool firc_log_level_parse(const char *s, firc_log_level_t *out)
         const char *name;
         firc_log_level_t level;
     } levels[] = {
-        {"trace", FIRC_LOG_TRACE},     {"debug", FIRC_LOG_DEBUG},
-        {"info", FIRC_LOG_INFO},       {"warn", FIRC_LOG_WARN},
-        {"error", FIRC_LOG_ERROR},     {"fatal", FIRC_LOG_FATAL},
-        {"panic", FIRC_LOG_PANIC},     {"nolevel", FIRC_LOG_NOLEVEL},
-        {"disabled", FIRC_LOG_DISABLED},
+        {"debug", FIRC_LOG_DEBUG},
+        {"info", FIRC_LOG_INFO},
+        {"warn", FIRC_LOG_WARN},
+        {"error", FIRC_LOG_ERROR},
     };
     for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
         if (strcmp(s, levels[i].name) == 0) {
@@ -72,36 +59,19 @@ bool firc_log_level_parse(const char *s, firc_log_level_t *out)
     return false;
 }
 
-firc_log_level_t firc_log_level_from_str(const char *s)
-{
-    firc_log_level_t level = FIRC_LOG_INFO;
-    (void)firc_log_level_parse(s, &level);
-    return level;
-}
-
 static const char *level_tag(firc_log_level_t level)
 {
     switch (level) {
-    case FIRC_LOG_TRACE:   return "TRC";
-    case FIRC_LOG_DEBUG:   return "DBG";
-    case FIRC_LOG_INFO:    return "INF";
-    case FIRC_LOG_WARN:    return "WRN";
-    case FIRC_LOG_ERROR:   return "ERR";
-    case FIRC_LOG_FATAL:   return "FTL";
-    case FIRC_LOG_PANIC:   return "PNC";
-    case FIRC_LOG_NOLEVEL: return "???";
-    case FIRC_LOG_DISABLED: return "OFF";
+    case FIRC_LOG_DEBUG: return "DBG";
+    case FIRC_LOG_INFO:  return "INF";
+    case FIRC_LOG_WARN:  return "WRN";
+    case FIRC_LOG_ERROR: return "ERR";
     }
-    return "???";
+    return "ERR";
 }
 
-void firc_log(firc_log_level_t level, const char *fmt, ...)
+FIRC_PRINTF(3, 0) static void vlog(firc_log_level_t level, const char *source, const char *fmt, va_list ap)
 {
-    if ((int)level < atomic_load_explicit(&g_level, memory_order_relaxed) ||
-        level >= FIRC_LOG_DISABLED) {
-        return;
-    }
-
     char buf[FIRC_LOG_LINE_MAX];
     struct timespec ts;
     struct tm tm;
@@ -115,12 +85,16 @@ void firc_log(firc_log_level_t level, const char *fmt, ...)
     if (off < 0 || (size_t)off >= sizeof(buf)) {
         return;
     }
+    if (source != NULL && source[0] != '\0') {
+        int p = snprintf(buf + off, sizeof(buf) - (size_t)off, "%s: ", source);
+        if (p < 0 || (size_t)(off + p) >= sizeof(buf)) {
+            return;
+        }
+        off += p;
+    }
 
-    va_list ap;
-    va_start(ap, fmt);
-    /* NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) — va_start above */
+    /* NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) — the caller started ap */
     int n = vsnprintf(buf + off, sizeof(buf) - (size_t)off, fmt, ap);
-    va_end(ap);
     if (n < 0) {
         return;
     }
@@ -129,7 +103,7 @@ void firc_log(firc_log_level_t level, const char *fmt, ...)
         len = sizeof(buf) - 1;
     }
     /* Before the write, text only: the UI renders its own timestamp and level. */
-    firc_event_put_log(level, (int64_t)ts.tv_sec, buf + off);
+    firc_event_put_log(level, (int64_t)ts.tv_sec, source, buf + off);
     if ((int)level < atomic_load_explicit(&g_output_floor, memory_order_relaxed)) {
         return;
     }
@@ -141,4 +115,20 @@ void firc_log(firc_log_level_t level, const char *fmt, ...)
     ssize_t rc = write(atomic_load_explicit(&g_fd, memory_order_relaxed),
                        buf, len);
     (void)rc;
+}
+
+void firc_log(firc_log_level_t level, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vlog(level, NULL, fmt, ap);
+    va_end(ap);
+}
+
+void firc_log_from(firc_log_level_t level, const char *source, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vlog(level, source, fmt, ap);
+    va_end(ap);
 }

@@ -11,7 +11,10 @@
 
 #define FIRC_EVENTS_RING 4096
 #define FIRC_EVENTS_LOG_RING 512
+#define FIRC_EVENTS_DEBUG_RING 512
+#define FIRC_EVENTS_WARN_RING 256
 #define FIRC_EVENT_TEXT 240
+#define FIRC_EVENT_SOURCE 16
 #define FIRC_EVENT_NAME 256
 #define FIRC_EVENT_GROUP_NAME 48
 #define FIRC_EVENT_REALS 4
@@ -49,6 +52,7 @@ typedef enum firc_bypass_how { FIRC_BYPASS_BY_ADDR = 0, FIRC_BYPASS_BY_SNI } fir
 
 typedef struct firc_event_log {
     firc_log_level_t level;
+    char source[FIRC_EVENT_SOURCE]; /* "" for fircd itself, else a tunnel device */
     char text[FIRC_EVENT_TEXT];
 } firc_event_log_t;
 
@@ -99,8 +103,8 @@ _Static_assert(sizeof(firc_event_t) <= 448, "a bypass event must not grow the jo
 /* Copies e into its kind's ring and stamps seq. Thread-safe; never allocates or logs. */
 void firc_event_put(firc_event_t *e);
 
-/* Records a log event; firc_log calls it after the level filter. */
-void firc_event_put_log(firc_log_level_t level, int64_t at, const char *text);
+/* Records a log event; source NULL or "" is fircd itself. */
+void firc_event_put_log(firc_log_level_t level, int64_t at, const char *source, const char *text);
 
 /* Copies events with seq > since, oldest first, up to cap; *out_next is the cursor, *out_dropped counts lost seqs. */
 size_t firc_event_read(uint64_t since, firc_event_t *out, size_t cap,

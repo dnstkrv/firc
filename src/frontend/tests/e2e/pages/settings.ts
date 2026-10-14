@@ -28,7 +28,6 @@ export const DEFAULTS: Record<string, unknown> = {
   "app.showAllInterfaces": false,
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
-  "app.logLevel": "info",
   "app.update.check": false,
 };
 
@@ -38,7 +37,6 @@ const LIVE = new Set([
   "app.dnsProxy.disableDropAAAA",
   "app.dnsProxy.unmatchedTtl",
   "app.showAllInterfaces",
-  "app.logLevel",
   "app.update.check",
 ]);
 

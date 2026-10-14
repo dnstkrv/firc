@@ -4,12 +4,15 @@ import { describe, it } from "jsr:@std/testing@1.0.19/bdd";
 import type { BypassEvent, DnsEvent, LogEvent } from "../../src/data/events.svelte";
 
 import {
+  DEFAULT_LEVELS,
   describeBypassTail,
   describeDns,
   describeDnsTail,
   groupFilterOptions,
   matches,
   matchesQuery,
+  sourceCounts,
+  sourceOf,
   type JournalFilter,
 } from "../../src/modules/logs/journal";
 
@@ -49,33 +52,69 @@ const log = (o: Partial<LogEvent>): LogEvent => ({
   at: 0,
   kind: "log",
   level: "info",
+  source: "fircd",
   message: "netfilter rebuilt",
   ...o,
 });
 const all = (o: Partial<JournalFilter> = {}): JournalFilter => ({
-  kinds: new Set(["log", "dns", "bypass"]),
-  minLevel: "trace",
+  sources: new Set(["fircd", "tunnels", "dns", "bypass"]),
+  levels: new Set(["debug", "info", "warn", "error"]),
   group: "",
   ...o,
 });
 
 describe("journal filter", () => {
-  it("keeps only the kinds asked for", () => {
-    assert.strictEqual(matches(dns({}), all({ kinds: new Set(["log"]) })), false);
-    assert.strictEqual(matches(log({}), all({ kinds: new Set(["log"]) })), true);
+  // Catches a tunnel's line counted as fircd's, or fircd's as a tunnel's.
+  it("files a log line under fircd or the tunnels by its source", () => {
+    assert.strictEqual(sourceOf(log({ source: "fircd" })), "fircd");
+    assert.strictEqual(sourceOf(log({ source: "tunvless0" })), "tunnels");
+    assert.strictEqual(sourceOf(log({ source: "tunvless12" })), "tunnels");
+    assert.strictEqual(sourceOf(dns({})), "dns");
+    assert.strictEqual(sourceOf(bypass({})), "bypass");
   });
-  it("applies the level to log events only", () => {
-    assert.strictEqual(matches(log({ level: "debug" }), all({ minLevel: "info" })), false);
-    assert.strictEqual(matches(dns({}), all({ minLevel: "error" })), true);
+  // Catches a source button that hides another source's rows, or none.
+  it("keeps only the sources asked for", () => {
+    const only = (s: "fircd" | "tunnels" | "dns" | "bypass") => all({ sources: new Set([s]) });
+    assert.strictEqual(matches(log({}), only("fircd")), true);
+    assert.strictEqual(matches(log({ source: "tunvless0" }), only("fircd")), false);
+    assert.strictEqual(matches(log({ source: "tunvless0" }), only("tunnels")), true);
+    assert.strictEqual(matches(log({}), only("tunnels")), false);
+    assert.strictEqual(matches(dns({}), only("bypass")), false);
+    assert.strictEqual(matches(bypass({}), only("bypass")), true);
+    assert.strictEqual(matches(dns({}), only("dns")), true);
+  });
+  // Catches the level buttons read as a minimum instead of four independent switches.
+  it("keeps a log line exactly when its own level is on", () => {
+    const order = ["debug", "info", "warn", "error"] as const;
+    for (const on of order) {
+      for (const lv of order) {
+        assert.strictEqual(
+          matches(log({ level: lv }), all({ levels: new Set([on]) })),
+          lv === on,
+          `${lv} with only ${on} on`,
+        );
+      }
+    }
+    assert.strictEqual(matches(log({ level: "warn" }), all({ levels: new Set() })), false);
+  });
+  // Catches DNS or bypass rows hidden by the level buttons, which they have no level for.
+  it("applies the levels to log lines only", () => {
+    const none = all({ levels: new Set() });
+    assert.strictEqual(matches(dns({}), none), true);
+    assert.strictEqual(matches(bypass({}), none), true);
+    assert.strictEqual(
+      matches(log({ source: "tunvless0", level: "debug" }), all({ levels: new Set(["info"]) })),
+      false,
+    );
+  });
+  // Catches a default that shows debug or hides one of the other three.
+  it("starts with info, warn and error on and debug off", () => {
+    assert.deepStrictEqual([...DEFAULT_LEVELS].sort(), ["error", "info", "warn"]);
   });
   it("matches a group by id, and hides log lines while it is set", () => {
     assert.strictEqual(matches(dns({}), all({ group: "g1" })), true);
     assert.strictEqual(matches(dns({ group: undefined }), all({ group: "g1" })), false);
     assert.strictEqual(matches(log({}), all({ group: "g1" })), false);
-  });
-  it("keeps the bypass kind only when it is asked for", () => {
-    assert.strictEqual(matches(bypass({}), all({ kinds: new Set(["dns"]) })), false);
-    assert.strictEqual(matches(bypass({}), all({ kinds: new Set(["bypass"]) })), true);
   });
   it("applies the group filter to a bypass event too", () => {
     assert.strictEqual(matches(bypass({}), all({ group: "g1" })), true);
@@ -83,7 +122,40 @@ describe("journal filter", () => {
   });
 });
 
+describe("sourceCounts", () => {
+  // Catches a count taken over the shown rows instead of everything held, or a tunnel counted as fircd.
+  it("counts every event held under its source", () => {
+    const held = [
+      log({}),
+      log({ level: "debug" }),
+      log({ source: "tunvless0", level: "warn" }),
+      log({ source: "tunvless1", level: "error" }),
+      log({ source: "tunvless1" }),
+      dns({}),
+      bypass({}),
+      bypass({ name: "x.example" }),
+    ];
+    assert.deepStrictEqual(sourceCounts(held), { fircd: 2, tunnels: 3, dns: 1, bypass: 2 });
+    assert.deepStrictEqual(sourceCounts([]), { fircd: 0, tunnels: 0, dns: 0, bypass: 0 });
+  });
+});
+
 describe("matchesQuery", () => {
+  // Catches a tunnel's device left out of the search, so its badge click finds nothing.
+  it("matches a log line by its source device as well as its message", () => {
+    assert.strictEqual(
+      matchesQuery(log({ source: "tunvless0", message: "active A" }), "tunvless0"),
+      true,
+    );
+    assert.strictEqual(
+      matchesQuery(log({ source: "tunvless1", message: "active A" }), "tunvless0"),
+      false,
+    );
+    assert.strictEqual(
+      matchesQuery(log({ source: "tunvless1", message: "active A" }), "ACTIVE"),
+      true,
+    );
+  });
   it("matches a client by substring, case-insensitively", () => {
     assert.strictEqual(matchesQuery(dns({ client: "192.168.1.42" }), "168.1.4"), true);
     assert.strictEqual(matchesQuery(dns({ client: "192.168.1.42" }), "10.0.0"), false);

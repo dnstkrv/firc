@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "firc/httpd.h"
+#include "firc/events.h"
 #include "firc/log.h"
 #include "firc/loop.h"
 #include "firc/sub_fetch.h"
@@ -904,12 +905,26 @@ TEST the_shortest_interval_wins_and_zero_is_by_hand(void)
     PASS();
 }
 
-/* catches: a pair that never got a body waiting a whole interval (hours) after a failed first fetch */
+static size_t journal_at(firc_log_level_t level, const char *needle)
+{
+    firc_event_t ev[64];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 64, &next, &dropped), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strstr(ev[i].u.log.text, needle) != NULL) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a pair that never got a body waiting a whole interval (hours) after a failed first fetch, a retry every minute warned about each time, or the fetch that works again not said. */
 TEST a_pair_without_a_body_retries_on_the_next_tick(void)
 {
     static fx_t f;
     ASSERT(server_start());
     ASSERT(fx_up(&f));
+    firc_event_reset_for_test();
     pthread_mutex_lock(&g_mu);
     g_status = 500;
     pthread_mutex_unlock(&g_mu);
@@ -937,6 +952,9 @@ TEST a_pair_without_a_body_retries_on_the_next_tick(void)
     firc_tunsubs_due(f.subs);
     idle(&f, 200);
     ASSERT_EQ(3, hits());
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_WARN, ": fetch failed: "), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_DEBUG, ": fetch failed: "), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_at(FIRC_LOG_INFO, ": recovered after 2 failures over "), "%zu");
     fx_down(&f);
     server_stop();
     PASS();
@@ -1014,8 +1032,7 @@ TEST the_url_is_logged_as_scheme_and_host_only(void)
     snprintf(logp, sizeof logp, "%s/log", f.dir);
     int fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     ASSERT(fd >= 0);
-    firc_log_level_t old = firc_log_level();
-    firc_log_set_level(FIRC_LOG_TRACE);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     firc_log_set_fd(fd);
     pthread_mutex_lock(&g_mu);
     g_status = 500;
@@ -1028,7 +1045,7 @@ TEST the_url_is_logged_as_scheme_and_host_only(void)
     firc_tun_sub_state_t st;
     size_t have = firc_tunsubs_state(f.subs, URL, 0, &st);
     firc_log_set_fd(1);
-    firc_log_set_level(old);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     close(fd);
     ASSERT(done);
     ASSERT_EQ_FMT((size_t)1, have, "%zu");

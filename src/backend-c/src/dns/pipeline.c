@@ -7,8 +7,10 @@
 #include "firc/dnsrewrite.h"
 #include "firc/events.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 #define FIRC_DNS_OUTAGE_RUN 8
+#define FIRC_DNS_OUTAGE_ERROR_AFTER_MS 60000u
 
 struct firc_dns_pipeline {
     firc_fakeip_t *pool; /* borrowed, nullable */
@@ -24,6 +26,9 @@ struct firc_dns_pipeline {
     uint64_t failing_count;
     uint64_t healthy_count;
     bool outage_said;
+    uint64_t last_healthy_ms;
+    firc_logrep_t outage;
+    firc_lograte_t said_reals, said_collapse, said_refused;
     bool someone_covers_all;
     firc_recall_t *recall;
 };
@@ -217,7 +222,7 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     firc_ip_t fake4 = {{0}, 0}, fake6 = {{0}, 0};
     firc_err_t issue = firc_fakeip_get(p->pool, qname, group_id, now, &fake4, &fake6);
     if (issue == FIRC_ERR_INVAL) {
-        FIRC_ERROR("pool refused to issue for %s: caller bug", qname);
+        firc_lograte_say(&p->said_refused, 60000, FIRC_LOG_WARN, NULL, "pool refused to issue for %s: caller bug", qname);
         return FIRC_DNS_DROP; /* never the real answer in place of a rewrite */
     }
     /* LIMIT/NOMEM answer with the blackhole, never the real address. */
@@ -253,7 +258,10 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     }
     if (issue == FIRC_OK && n_reals > 0) {
         firc_err_t e = firc_fakeip_set_reals(p->pool, qname, reals, n_reals);
-        if (e != FIRC_OK) { FIRC_ERROR("recording real addresses for %s: %s", qname, firc_err_str(e)); }
+        if (e != FIRC_OK) {
+            firc_lograte_say(&p->said_reals, 60000, FIRC_LOG_WARN, NULL, "recording real addresses for %s: %s", qname,
+                             firc_err_str(e));
+        }
         /* Every real address, not only the event's four. */
         for (size_t i = 0; i < n_reals; i++) {
             firc_recall_real(p->recall, &reals[i], qname, group_id, now);
@@ -270,7 +278,8 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     firc_err_t e = firc_dns_msg_collapse(msg, had4 ? &fake4 : NULL, had6 ? &fake6 : NULL, ttl);
     if (e != FIRC_OK) {
         /* Neither the real answer nor a broken one may go out. */
-        FIRC_ERROR("collapsing the answer for %s: %s", qname, firc_err_str(e));
+        firc_lograte_say(&p->said_collapse, 60000, FIRC_LOG_WARN, NULL, "collapsing the answer for %s: %s", qname,
+                         firc_err_str(e));
         return FIRC_DNS_DROP;
     }
     if (ev != NULL) {
@@ -286,6 +295,14 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     return waits ? FIRC_DNS_HOLD : FIRC_DNS_REWRITTEN;
 }
 
+static uint64_t outage_after(const firc_dns_pipeline_t *p)
+{
+    if (p->last_healthy_ms == 0) { return FIRC_DNS_OUTAGE_ERROR_AFTER_MS; }
+    uint64_t first = p->outage.count != 0 ? p->outage.first_ms : firc_logrep_now_ms();
+    uint64_t quiet_until = p->last_healthy_ms + FIRC_DNS_OUTAGE_ERROR_AFTER_MS;
+    return quiet_until > first + FIRC_DNS_OUTAGE_ERROR_AFTER_MS ? quiet_until - first : FIRC_DNS_OUTAGE_ERROR_AFTER_MS;
+}
+
 firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p, firc_dns_msg_t *msg,
                                                          int64_t now, const firc_ip_t *client,
                                                          firc_dns_resolver_t resolver, bool *pool_changed)
@@ -293,22 +310,25 @@ firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p,
     if (pool_changed != NULL) { *pool_changed = false; }
     uint32_t rcode = msg->flags & 0x000fu;
     /* NXDOMAIN/NOTIMP stay at DEBUG: at WARN they wrap the firmware's syslog ring in minutes. */
+    bool common = resolver != FIRC_DNS_RESOLVER_GROUP && resolver != FIRC_DNS_RESOLVER_CACHE;
     bool failing = rcode == 2u || rcode == 5u;
-    if (failing) {
+    if (common && failing) {
         if (p->failing_count == 0) { p->failing_rcode = rcode; }
         p->failing_count++;
         p->healthy_count = 0;
-        if (!p->outage_said && p->failing_count >= FIRC_DNS_OUTAGE_RUN) {
+        if (p->failing_count >= FIRC_DNS_OUTAGE_RUN) {
             p->outage_said = true;
-            FIRC_WARN("upstream is answering rcode=%u and has for %llu responses; names it "
-                      "refuses are not routed",
-                      p->failing_rcode, (unsigned long long)p->failing_count);
+            firc_logrep_fail_for_quiet(&p->outage, outage_after(p), NULL,
+                                 "upstream is answering rcode=%u and has for %llu responses; names it "
+                                 "refuses are not routed",
+                                 p->failing_rcode, (unsigned long long)p->failing_count);
         }
-    } else if (p->failing_count > 0) {
+    } else if (common && p->failing_count > 0) {
         p->healthy_count++;
+        p->last_healthy_ms = firc_logrep_now_ms();
         if (p->healthy_count >= FIRC_DNS_OUTAGE_RUN) {
             if (p->outage_said) {
-                FIRC_WARN("upstream is answering again, after %llu failed response(s) starting "
+                FIRC_INFO("upstream is answering again, after %llu failed response(s) starting "
                           "with rcode=%u",
                           (unsigned long long)p->failing_count, p->failing_rcode);
             }
@@ -316,13 +336,14 @@ firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p,
             p->healthy_count = 0;
             p->failing_rcode = 0;
             p->outage_said = false;
+            p->last_healthy_ms = 0;
+            firc_logrep_reset(&p->outage);
         }
     }
     const bool journalled = covered(p, client);
     firc_event_t ev_store;
     firc_event_t *ev = journalled ? &ev_store : NULL;
     if (rcode != 0) {
-        FIRC_DEBUG("response passed through (rcode=%u)", rcode);
         if (ev != NULL) {
             char nx[FIRC_DNS_MAX_NAME * 4 + 2];
             if (!firc_dns_msg_queried_name(msg, nx, sizeof(nx))) { nx[0] = '\0'; }

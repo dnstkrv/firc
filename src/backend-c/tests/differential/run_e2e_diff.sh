@@ -58,7 +58,6 @@ app:
     startMarkTableIndex: 1718186595
   link: []
   showAllInterfaces: true
-  logLevel: error
 groups: []
 EOF
 

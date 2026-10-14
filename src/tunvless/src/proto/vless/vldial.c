@@ -22,6 +22,7 @@
 #include "vldial.h"
 #include "stack.h"
 #include "pool.h"
+#include "ratelog.h"
 
 #define LOG_W  "tunvless[warn] tunnel: "
 
@@ -31,7 +32,7 @@ _Static_assert(TUNNEL_BUF >= VLESS_MIN_RECV_CAP + 2048,
                "TUNNEL_BUF is smaller than a transport record plus room for VLESS and Vision");
 
 static int g_trace;
-#define TR(...) do { if (g_trace) fprintf(stderr, "tun: " __VA_ARGS__); } while (0)
+#define TR(...) do { if (g_trace) fprintf(stderr, "tunvless[debug] tun: " __VA_ARGS__); } while (0)
 
 void vl_set_trace(int on) { g_trace = on; }
 
@@ -403,13 +404,13 @@ static int vl_send(const void *ctx, void *sess, const struct flow_key *k, int ud
         /* The xhttp server refused the upload (stream-up, packet-up): the chunk is lost, and
          * the stream after it cannot be whole. Close as on any send failure, but name the
          * reason: otherwise a node that refuses every chunk looks alive. */
-        static __thread time_t said;
-        time_t now = stack_now_s();
-        if (now - said >= 5) {
-            said = now;
+        static struct ratelog said_refused;
+        unsigned held;
+        char more[48];
+        if (ratelog_take(&said_refused, (unsigned)stack_now_s(), 10, &held))
             fprintf(stderr, LOG_W "node %s refused the data: %s — connection closed; "
-                            "check the node's xhttp settings\n", node->name, vless_strerror(rc));
-        }
+                            "check the node's xhttp settings%s\n", node->name, vless_strerror(rc),
+                    ratelog_more(more, sizeof more, held));
     }
     if (rc) return SEND_FATAL;
     /* Mark the header sent only now: marked earlier, a retry would go without it, and the
@@ -479,13 +480,12 @@ static int udp_downstream(struct vl_sess *s, const unsigned char *d, size_t n,
             }
             if (!s->dg_want) continue;              /* length 0: nothing to pass on */
             if (s->dg_want > UDP_DGRAM_MAX) {
-                static __thread time_t said;
-                time_t now = stack_now_s();
-                if (now - said >= 10) {
-                    said = now;
+                static struct ratelog said;
+                unsigned held;
+                char more[48];
+                if (ratelog_take(&said, (unsigned)stack_now_s(), 10, &held))
                     fprintf(stderr, LOG_W "datagram of %u bytes exceeds the limit %d — "
-                            "dropped\n", s->dg_want, UDP_DGRAM_MAX);
-                }
+                            "dropped%s\n", s->dg_want, UDP_DGRAM_MAX, ratelog_more(more, sizeof more, held));
                 s->dg_skip = s->dg_want;
                 s->dg_want = 0;
                 continue;
@@ -615,7 +615,7 @@ int vless_tunnel_run(const struct tun_cfg *tc, const struct pool_cfg *pc, stack_
     const struct vless_node *node = pc->node(pc->first);
     unsigned char id[16];
     if (vless_uuid_parse(node->uuid, id) != 0) {
-        fprintf(stderr, "tunvless[warn]: the UUID of node %s does not parse — %s is not brought up; "
+        fprintf(stderr, "tunvless[error]: the UUID of node %s does not parse — %s is not brought up; "
                         "check the node's link\n", node->name, tc->dev);
         return 1;
     }

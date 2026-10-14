@@ -49,7 +49,6 @@ const firc_setting_t firc_settings[] = {
     {"app.showAllInterfaces", FIRC_SK_BOOL, LIVE, AT(show_all_interfaces), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.address", FIRC_SK_ADDR, RESTART, AT(http_web.host.address), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.port", FIRC_SK_PORT, RESTART, AT(http_web.host.port), 0, FIRC_APPLY_NONE},
-    {"app.logLevel", FIRC_SK_STRING, LIVE, AT(log_level), 0, FIRC_APPLY_LOG_LEVEL},
     {"app.update.check", FIRC_SK_BOOL, LIVE, AT(update.check), 0, FIRC_APPLY_NONE},
 };
 _Static_assert(sizeof(firc_settings) / sizeof(firc_settings[0]) == FIRC_SETTINGS_COUNT,
@@ -338,11 +337,6 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
                 REFUSE("app.link", "an interface is named twice");
             }
         }
-    }
-    firc_log_level_t level;
-    if (!firc_log_level_parse(c->log_level, &level)) {
-        REFUSE("app.logLevel",
-               "one of trace, debug, info, warn, error, fatal, panic, nolevel, disabled");
     }
     return FIRC_OK;
 }

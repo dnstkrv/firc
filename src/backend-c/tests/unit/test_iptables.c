@@ -20,12 +20,12 @@ static FILE *g_log;
 static void log_start(firc_log_level_t level) {
     g_log = tmpfile();
     firc_log_set_fd(fileno(g_log));
-    firc_log_set_level(level);
+    firc_log_set_output_floor(level);
 }
 
 static char *log_stop(void) {
     firc_log_set_fd(STDOUT_FILENO);
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     long n = ftell(g_log);
     char *text = calloc(1, (size_t)(n > 0 ? n : 0) + 1);
     rewind(g_log);
@@ -439,7 +439,7 @@ static void stage_uncovered(firc_ipt_t *ipt) {
     (void)firc_ipt_append_dnat(ipt, "nat", "FIRC_DNAT", fake, real);
 }
 
-/* Catches: an uncovered rewrite warned about on every pass, or not warned about again after a pass that landed. */
+/* Catches: an uncovered rewrite warned about on every pass, not warned about again after a pass that landed, or the landing pass not saying it recovered. */
 TEST an_uncovered_rewrite_is_warned_about_once_per_run_of_refusals(void) {
     firc_fake_ipt_t *f;
     firc_ipt_t *ipt = engine(&f);
@@ -454,6 +454,8 @@ TEST an_uncovered_rewrite_is_warned_about_once_per_run_of_refusals(void) {
     ASSERT_EQ_FMT(FIRC_ERR_INVAL, firc_ipt_commit(ipt), "%d");
     char *text = log_stop();
     ASSERT_EQ_FMTm(text, (size_t)2, count(text, "without their mark"), "%zu");
+    ASSERT_EQ_FMTm(text, (size_t)1, count(text, " INF x_tables ipv4 nat rewrites: recovered after 3 failures over "),
+                   "%zu");
     free(text);
     firc_ipt_free(ipt);
     PASS();

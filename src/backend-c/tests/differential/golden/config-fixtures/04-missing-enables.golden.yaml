@@ -36,7 +36,6 @@ app:
   link:
   - br0
   showAllInterfaces: false
-  logLevel: info
   update:
     check: false
 groups:

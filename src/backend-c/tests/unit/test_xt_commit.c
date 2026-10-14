@@ -10,6 +10,7 @@
 #include "fake_xtables.h"
 #include "firc/cancel.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/xtables.h"
 #include "xt_golden.h"
 #include "../../src/xtables/xt_internal.h"
@@ -19,12 +20,12 @@ static FILE *g_log;
 static void log_start(firc_log_level_t level) {
     g_log = tmpfile();
     firc_log_set_fd(fileno(g_log));
-    firc_log_set_level(level);
+    firc_log_set_output_floor(level);
 }
 
 static char *log_stop(void) {
     firc_log_set_fd(STDOUT_FILENO);
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     long n = ftell(g_log);
     char *text = calloc(1, (size_t)(n > 0 ? n : 0) + 1);
     rewind(g_log);
@@ -194,6 +195,38 @@ TEST a_refusal_is_io_and_said_once_per_run(void) {
     ASSERT_EQ_FMTm(text, (size_t)2, count(text, "x_tables refused ipv4 nat (EINVAL)"), "%zu");
     free(text);
     firc_test_stage_free(again);
+    firc_test_stage_free(s);
+    firc_xt_free(xt);
+    firc_fake_xt_free(f);
+    PASS();
+}
+
+static uint64_t g_clock_ms;
+static uint64_t clock_ms(void) { return g_clock_ms; }
+
+/* Catches: a refusal that lasts never said again at WARN, or its end not said when the table is written. */
+TEST a_lasting_refusal_is_said_again_and_its_end_too(void) {
+    firc_fake_xt_t *f = fake_with("firmware", FIRC_IPT_PROTO_IPV4);
+    firc_xt_t *xt = firc_fake_xt_handle(f);
+    firc_test_stage_t *s = firc_test_stage_new();
+    firc_test_stage_fixture(s, "firmware-firc", FIRC_IPT_PROTO_IPV4);
+    g_clock_ms = 1000;
+    firc_logrep_set_clock_for_test(clock_ms);
+    log_start(FIRC_LOG_INFO);
+    for (int i = 0; i < 3; i++) {
+        firc_fake_xt_fail_next_replace(f, EINVAL);
+        ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
+        g_clock_ms += FIRC_LOGREP_REMIND_MS / 2;
+    }
+    ASSERT_EQ_FMT(FIRC_OK, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
+    char *text = log_stop();
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_EQ_FMTm(text, (size_t)2, count(text, " WRN x_tables refused ipv4 nat (EINVAL)"), "%zu");
+    ASSERT_EQ_FMTm(text, (size_t)1,
+                   count(text, "(still failing, 3 times for 10 min)"), "%zu");
+    ASSERT_EQ_FMTm(text, (size_t)1,
+                   count(text, " INF x_tables ipv4 nat: recovered after 3 failures over 15 min"), "%zu");
+    free(text);
     firc_test_stage_free(s);
     firc_xt_free(xt);
     firc_fake_xt_free(f);
@@ -466,8 +499,37 @@ TEST a_revision_the_kernel_does_not_support_is_missing(void) {
     PASS();
 }
 
-/* Catches: the refused blob written at every log level (flash wear, run dir litter) or never written. */
-TEST a_refused_blob_is_kept_at_debug_only(void) {
+/* Catches: the refused blob written without a dump dir (run dir litter) or never written with one. */
+TEST a_refused_blob_is_kept_only_with_a_dump_dir(void) {
+    char dir[] = "/tmp/firc-xt-XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    char path[128];
+    snprintf(path, sizeof(path), "%s/refused-ipv4-nat.bin", dir);
+    firc_fake_xt_t *f = fake_with("firmware", FIRC_IPT_PROTO_IPV4);
+    firc_xt_t *xt = firc_fake_xt_handle(f);
+    firc_test_stage_t *s = firc_test_stage_new();
+    firc_test_stage_fixture(s, "firmware-firc", FIRC_IPT_PROTO_IPV4);
+    log_start(FIRC_LOG_INFO);
+    firc_fake_xt_fail_next_replace(f, EINVAL);
+    ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
+    struct stat st;
+    ASSERT(stat(path, &st) != 0);
+    ASSERT_EQ_FMT(FIRC_OK, firc_xt_set_dump_dir(xt, dir), "%d");
+    firc_fake_xt_fail_next_replace(f, EINVAL);
+    ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
+    free(log_stop());
+    ASSERT_EQ(0, stat(path, &st));
+    ASSERT_EQ_FMT((long)(96 + 5712), (long)st.st_size, "%ld");
+    unlink(path);
+    rmdir(dir);
+    firc_test_stage_free(s);
+    firc_xt_free(xt);
+    firc_fake_xt_free(f);
+    PASS();
+}
+
+/* Catches: the dump tied to an output floor again, so a router run by the init script (floor error) keeps none. */
+TEST a_refused_blob_is_kept_at_the_init_scripts_floor(void) {
     char dir[] = "/tmp/firc-xt-XXXXXX";
     ASSERT(mkdtemp(dir) != NULL);
     char path[128];
@@ -477,17 +539,12 @@ TEST a_refused_blob_is_kept_at_debug_only(void) {
     ASSERT_EQ_FMT(FIRC_OK, firc_xt_set_dump_dir(xt, dir), "%d");
     firc_test_stage_t *s = firc_test_stage_new();
     firc_test_stage_fixture(s, "firmware-firc", FIRC_IPT_PROTO_IPV4);
-    log_start(FIRC_LOG_INFO);
-    firc_fake_xt_fail_next_replace(f, EINVAL);
-    ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
-    struct stat st;
-    ASSERT(stat(path, &st) != 0);
-    firc_log_set_level(FIRC_LOG_DEBUG);
+    log_start(FIRC_LOG_ERROR);
     firc_fake_xt_fail_next_replace(f, EINVAL);
     ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
     free(log_stop());
+    struct stat st;
     ASSERT_EQ(0, stat(path, &st));
-    ASSERT_EQ_FMT((long)(96 + 5712), (long)st.st_size, "%ld");
     unlink(path);
     rmdir(dir);
     firc_test_stage_free(s);
@@ -1035,6 +1092,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_held_lock_is_again_without_a_write);
     RUN_TEST(the_lock_covers_only_the_write);
     RUN_TEST(a_refusal_is_io_and_said_once_per_run);
+    RUN_TEST(a_lasting_refusal_is_said_again_and_its_end_too);
     RUN_TEST(a_missing_table_is_said_once);
     RUN_TEST(a_missing_revision_is_named_and_fails_only_its_rules);
     RUN_TEST(the_barrier_needs_connmark_revision_one);
@@ -1042,7 +1100,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_refused_rule_writes_nothing_and_is_quoted);
     RUN_TEST(a_jump_to_a_missing_chain_is_io_and_named);
     RUN_TEST(failed_counters_still_complete_the_write);
-    RUN_TEST(a_refused_blob_is_kept_at_debug_only);
+    RUN_TEST(a_refused_blob_is_kept_only_with_a_dump_dir);
+    RUN_TEST(a_refused_blob_is_kept_at_the_init_scripts_floor);
     RUN_TEST(a_refused_blob_is_dumped_after_the_lock_is_released);
     RUN_TEST(the_debug_line_splits_the_merge);
     RUN_TEST(a_probe_that_cannot_ask_names_every_extension);

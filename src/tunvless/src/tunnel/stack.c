@@ -44,6 +44,7 @@
 #include "dialer.h"
 #include "stack.h"
 #include "ifcfg.h"
+#include "ratelog.h"
 
 /* ---- leveled log ----------------------------------------------------------------------
  *
@@ -54,6 +55,7 @@
  */
 #define LOG_W  "tunvless[warn] tunnel: "
 #define LOG_I  "tunvless[info] tunnel: "
+#define LOG_E  "tunvless[error] tunnel: "
 
 /* Connections per loop thread. Browsers keep connections alive between requests: with a wide set
  * of routes into the tunnel, two open sites filled a table of 64. An idle slot costs little (see
@@ -691,7 +693,7 @@ static void stats_dump(uint64_t window_ns) {
     double s = (double)window_ns / 1e9;
     if (s <= 0) return;
     fprintf(stderr,
-            "tun-stats[%d]: %.1f MB/s | turns %.0f/s | poll %.0f%% | server reads %.0f/s "
+            "tunvless[debug] tun-stats[%d]: %.1f MB/s | turns %.0f/s | poll %.0f%% | server reads %.0f/s "
             "(%.1f KB each) | client writes %.0f/s (%.0f us each) | window waits %.0f/s | "
             "read limit hit %.0f/s | connections %u | retransmits %.0f/s (%.0f KB/s) | "
             "datagrams dropped %.0f/s | ACKs held %.0f/s | "
@@ -722,7 +724,7 @@ static void stats_dump(uint64_t window_ns) {
 /* Per-packet trace (STEER_TUN_TRACE): too noisy for normal work, essential when a connection
  * does not come up. */
 static int g_trace;
-#define TR(...) do { if (g_trace) fprintf(stderr, "tun: " __VA_ARGS__); } while (0)
+#define TR(...) do { if (g_trace) fprintf(stderr, "tunvless[debug] tun: " __VA_ARGS__); } while (0)
 
 /* ---- connector pool ---------------------------------------------------------------------
  *
@@ -1224,13 +1226,13 @@ static struct conn *conn_new(const struct tun_dev *tun) {
             old = c;
     }
     if (!old) {
-        /* Say so, but not on every packet: one line per two seconds. */
-        static __thread time_t said;
-        if (now != said && now - said >= 2) {
-            said = now;
+        static struct ratelog said;
+        unsigned held;
+        char more[48];
+        if (ratelog_take(&said, (unsigned)now, 10, &held))
             fprintf(stderr, LOG_W "all %d connection slots hold active connections, new ones "
-                            "are refused — too much is routed into the tunnel\n", MAX_CONNS);
-        }
+                            "are refused — too much is routed into the tunnel%s\n", MAX_CONNS,
+                    ratelog_more(more, sizeof more, held));
         return NULL;
     }
 
@@ -1245,15 +1247,15 @@ static struct conn *conn_new(const struct tun_dev *tun) {
                               NULL, 0, 0, 0, -1);
         if (rl) tun_write_ctl(tun, rst, rl);
     }
-    /* Log at most once per ten seconds. Evicting a dead connection is housekeeping, not an
-     * event, and a log that shouts during normal work stops being read. */
-    static __thread time_t said_evict;
-    if (now - said_evict >= 10) {
-        said_evict = now;
+    /* Evicting a dead connection is housekeeping, not an event, and a log that shouts during normal work
+     * stops being read. */
+    static struct ratelog said_evict;
+    unsigned held;
+    char more[48];
+    if (ratelog_take(&said_evict, (unsigned)now, 10, &held))
         fprintf(stderr, LOG_W "table full (%d), evicting open connections "
-                        "(this one idle %lu s) — too much is routed into the tunnel\n",
-                MAX_CONNS, (unsigned long)(now - old->last));
-    }
+                        "(this one idle %lu s) — too much is routed into the tunnel%s\n",
+                MAX_CONNS, (unsigned long)(now - old->last), ratelog_more(more, sizeof more, held));
     conn_drop(old);
     /* conn_drop put the slot back in the free list: take it from there, not by the old pointer.
      * Otherwise the slot would be both ours and in the list, and the next SYN would get a BUSY
@@ -1725,12 +1727,13 @@ static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct f
             /* The connector queue is full. Say so: from outside it looks like "QUIC does not
              * work through the tunnel", while the cause is the CPU, not the protocol. connq_push
              * has already logged -2 (no connector threads). */
-            static __thread time_t said_q;
-            if (qr == -1 && g_now_s - said_q >= 5) {
-                said_q = g_now_s;
+            static struct ratelog said_q;
+            unsigned held;
+            char more[48];
+            if (qr == -1 && ratelog_take(&said_q, (unsigned)g_now_s, 10, &held))
                 fprintf(stderr, LOG_W "connector queue full (%d), "
-                                "datagram dropped — the CPU cannot keep up\n", CONNQ);
-            }
+                                "datagram dropped — the CPU cannot keep up%s\n", CONNQ,
+                        ratelog_more(more, sizeof more, held));
             conn_drop(c);
             return;
         }
@@ -2050,13 +2053,13 @@ static void handle_packet(const struct tun_dev *tun, const unsigned char *pkt, s
             /* Queue full: the CPU cannot digest that many handshakes at once. Do not drop the
              * SYN silently: log it and free the record; the client retries the SYN itself.
              * connq_push has already logged -2 (no connector threads). */
-            static __thread time_t said_q;
-            time_t nw = g_now_s;
-            if (qr == -1 && nw - said_q >= 5) {
-                said_q = nw;
+            static struct ratelog said_q;
+            unsigned held;
+            char more[48];
+            if (qr == -1 && ratelog_take(&said_q, (unsigned)g_now_s, 10, &held))
                 fprintf(stderr, LOG_W "connector queue full (%d), "
-                                "SYN refused — the CPU cannot keep up\n", CONNQ);
-            }
+                                "SYN refused — the CPU cannot keep up%s\n", CONNQ,
+                        ratelog_more(more, sizeof more, held));
             conn_drop(c);
             return;
         }
@@ -2365,9 +2368,13 @@ static int conn_ready(struct conn *c, const struct tun_dev *tun) {
     if (c->rc != 0) {
         /* With the reason, not just "did not open": the code tells "TCP did not connect", "the
          * server rejected the key" and "the server refused HTTP/2" apart. */
-        fprintf(stderr, LOG_W "flow to %s did not open: %s (rc=%d)\n",
-                d->peer_of ? d->peer_of(g_dl->ctx, SESS(c)) : d->peer(g_dl->ctx),
-                d->strerror(c->rc), c->rc);
+        static struct ratelog said_open;
+        unsigned held;
+        char more[48];
+        if (ratelog_take(&said_open, ratelog_now(), 10, &held))
+            fprintf(stderr, LOG_W "flow to %s did not open: %s (rc=%d)%s\n",
+                    d->peer_of ? d->peer_of(g_dl->ctx, SESS(c)) : d->peer(g_dl->ctx),
+                    d->strerror(c->rc), c->rc, ratelog_more(more, sizeof more, held));
         /* RST, not silence: otherwise the client waits for its timeout. With silence a video
          * page stopped opening at all: a browser handles a fast refusal better than a wait. */
         conn_reset(c, tun);
@@ -2961,9 +2968,9 @@ int stack_run(const struct tun_cfg *tc, const struct dialer *d, stack_ready_fn r
     int served = 0;
     for (int i = 0; i < n; i++) served += workers[i].served;
     if (!served)
-        fprintf(stderr, LOG_W "%s did not come up on any of its %d queues\n", dev, n);
+        fprintf(stderr, LOG_E "%s did not come up on any of its %d queues\n", dev, n);
     else
-        fprintf(stderr, LOG_W "%s no longer carries traffic — all its queues (%d) "
+        fprintf(stderr, LOG_E "%s no longer carries traffic — all its queues (%d) "
                         "have ended\n", dev, n);
     return 1;
 }

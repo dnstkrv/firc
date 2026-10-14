@@ -23,7 +23,7 @@ async function shell(page: Page, events: unknown[]) {
     const since = Number(new URL(route.request().url()).searchParams.get("since") ?? 0);
     const fresh = since === 0 ? events : [];
     const next = since === 0 && events.length ? events.length : since;
-    return route.fulfill({ json: { events: fresh, next, dropped: 0, level: "info" } });
+    return route.fulfill({ json: { events: fresh, next, dropped: 0 } });
   });
 }
 
@@ -45,13 +45,139 @@ test("a log that does not answer is shown on its tab, not toasted per poll", asy
 
 test("the journal shows what the daemon said", async ({ page }) => {
   await shell(page, [
-    { seq: 1, at: 1790000000, kind: "log", level: "warn", message: "pool is low" },
+    { seq: 1, at: 1790000000, kind: "log", level: "warn", source: "fircd", message: "pool is low" },
   ]);
   await page.goto("/");
   await page.getByRole("tab", { name: "Journal" }).click();
-  await expect(page.locator(".row.warn").getByText("pool is low")).toBeVisible();
+  await expect(page.locator(".row.l-warn").getByText("pool is low")).toBeVisible();
   await page.waitForTimeout(2500);
   await expect(page.locator(".pane .row")).toHaveCount(1);
+});
+
+const MIXED = [
+  { seq: 1, at: 1790000000, kind: "log", level: "info", source: "fircd", message: "group up" },
+  { seq: 2, at: 1790000001, kind: "log", level: "debug", source: "fircd", message: "a detail" },
+  {
+    seq: 3,
+    at: 1790000002,
+    kind: "log",
+    level: "warn",
+    source: "tunvless0",
+    message: "B does not answer",
+  },
+  {
+    seq: 4,
+    at: 1790000003,
+    kind: "log",
+    level: "error",
+    source: "tunvless1",
+    message: "no usable VLESS node",
+  },
+  {
+    seq: 5,
+    at: 1790000004,
+    kind: "dns",
+    client: "192.168.1.42",
+    name: "youtube.com",
+    qtype: "A",
+    rcode: "NOERROR",
+    decision: "no-match",
+    reals: [],
+  },
+  {
+    seq: 6,
+    at: 1790000005,
+    kind: "bypass",
+    client: "192.168.1.42",
+    dst: "142.250.1.1",
+    port: 443,
+    proto: "tcp",
+    how: "sni",
+    name: "cdn.example.net",
+    repeats: 0,
+  },
+];
+
+// Catches a count over the shown rows, a level read as a minimum, or DNS rows hidden by a level.
+test("the source and level buttons filter the rows, each on its own", async ({ page }) => {
+  await shell(page, MIXED);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Journal" }).click();
+  const rows = page.locator(".pane .row");
+  const sources = page.getByRole("group", { name: "Sources" });
+  const levels = page.getByRole("group", { name: "Levels" });
+  await expect(rows).toHaveCount(5);
+  await expect(page.getByText("a detail")).toHaveCount(0);
+  await expect(sources.getByRole("button")).toHaveText(["fircd2", "Tunnels2", "DNS1", "Bypass1"]);
+  await expect(levels.getByRole("button", { name: "debug" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+
+  await levels.getByRole("button", { name: "debug" }).click();
+  await expect(rows).toHaveCount(6);
+  for (const name of ["debug", "info", "warn"]) await levels.getByRole("button", { name }).click();
+  await expect(rows).toHaveCount(3);
+  await expect(page.locator(".pane .row.l-error")).toHaveText(/no usable VLESS node/);
+  await expect(sources.getByRole("button", { name: /fircd/ })).toHaveText("fircd2");
+
+  await levels.getByRole("button", { name: "error" }).click();
+  await expect(rows).toHaveCount(2);
+  await sources.getByRole("button", { name: /DNS/ }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText("cdn.example.net");
+});
+
+// Catches a tunnel badge that does not search for its device, or a search that ignores the source.
+test("clicking a tunnel's badge shows that tunnel's lines", async ({ page }) => {
+  await shell(page, MIXED);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Journal" }).click();
+  const rows = page.locator(".pane .row");
+  await expect(rows).toHaveCount(5);
+  await expect(rows.nth(0).locator(".chip")).toHaveText("fircd");
+  await rows.nth(1).getByRole("button", { name: "tunvless0" }).click();
+  await expect(page.getByPlaceholder("client, name or tunnel")).toHaveValue("tunvless0");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText("B does not answer");
+  await expect(rows.nth(0)).not.toContainText("tunnel tunvless0");
+});
+
+// Catches a toolbar or row wider than a phone, or segments that do not split into rows of four.
+test("a phone-wide journal scrolls only down", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shell(page, MIXED);
+  await page.addInitScript(() => {
+    localStorage.setItem("active_tab", JSON.stringify({ value: "logs" }));
+  });
+  await page.goto("/");
+  await expect(page.locator(".pane .row")).toHaveCount(5);
+  const wide = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(wide).toBeLessThanOrEqual(0);
+  for (const name of ["Sources", "Levels"]) {
+    const boxes = await page
+      .getByRole("group", { name })
+      .getByRole("button")
+      .evaluateAll((els) => els.map((el) => el.getBoundingClientRect()));
+    expect(boxes).toHaveLength(4);
+    for (const b of boxes) {
+      expect(Math.abs(b.top - boxes[0].top)).toBeLessThan(1);
+      expect(Math.abs(b.width - boxes[0].width)).toBeLessThan(1);
+    }
+  }
+  const search = await page.getByPlaceholder("client, name or tunnel").boundingBox();
+  const levels = await page.getByRole("group", { name: "Levels" }).boundingBox();
+  expect(search && levels && search.width).toBeGreaterThan((levels?.width ?? 0) * 0.8);
+  const row = page.locator(".pane .row").first();
+  const at = await row.locator(".at").boundingBox();
+  const msg = await row.locator(".msg").boundingBox();
+  expect(msg!.y).toBeGreaterThanOrEqual(at!.y + at!.height - 1);
+  await expect(page.getByRole("group", { name: "Sources" }).getByRole("button").first()).toHaveCSS(
+    "color",
+    "rgb(143, 179, 204)",
+  );
 });
 
 test("a DNS event is shown, and clicking its client filters to that client", async ({ page }) => {
@@ -80,7 +206,14 @@ test("a DNS event is shown, and clicking its client filters to that client", asy
       decision: "no-match",
       reals: [],
     },
-    { seq: 3, at: 1790000002, kind: "log", level: "info", message: "netfilter rebuilt" },
+    {
+      seq: 3,
+      at: 1790000002,
+      kind: "log",
+      level: "info",
+      source: "fircd",
+      message: "netfilter rebuilt",
+    },
   ]);
   await page.goto("/");
   await page.getByRole("tab", { name: "Journal" }).click();
@@ -119,14 +252,21 @@ test("typing in the search field filters by client, name or message", async ({ p
       decision: "no-match",
       reals: [],
     },
-    { seq: 3, at: 1790000002, kind: "log", level: "info", message: "netfilter rebuilt" },
+    {
+      seq: 3,
+      at: 1790000002,
+      kind: "log",
+      level: "info",
+      source: "fircd",
+      message: "netfilter rebuilt",
+    },
   ]);
   await page.goto("/");
   await page.getByRole("tab", { name: "Journal" }).click();
   const rows = page.locator(".pane .row");
   await expect(rows).toHaveCount(3);
 
-  const search = page.getByPlaceholder("client or name");
+  const search = page.getByPlaceholder("client, name or tunnel");
   await search.fill("tube");
   await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText("youtube.com");
@@ -169,7 +309,7 @@ test("clicking a row's name fills the search field", async ({ page }) => {
   await expect(rows).toHaveCount(2);
 
   await rows.nth(0).getByRole("button", { name: "youtube.com" }).click();
-  await expect(page.getByPlaceholder("client or name")).toHaveValue("youtube.com");
+  await expect(page.getByPlaceholder("client, name or tunnel")).toHaveValue("youtube.com");
   await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText("youtube.com");
 });
@@ -234,15 +374,110 @@ test("a full page is followed at once by the next one", async ({ page }) => {
       at: 1790000000,
       kind: "log",
       level: "info",
+      source: "fircd",
       message: `m${since + i + 1}`,
     }));
-    return route.fulfill({ json: { events, next: since + size, dropped: 0, level: "info" } });
+    return route.fulfill({ json: { events, next: since + size, dropped: 0 } });
   });
   await page.goto("/");
   await page.getByRole("tab", { name: "Journal" }).click();
   await expect(page.getByText("m1027")).toBeVisible();
   expect(at.length).toBeGreaterThanOrEqual(2);
   expect(at[1] - at[0]).toBeLessThan(1000);
+});
+
+// Catches a stripe in the wrong colour, a DNS row given one, or warn and error rows not set apart.
+test("each level has its own stripe, and warn and error their own colour", async ({ page }) => {
+  await shell(
+    page,
+    MIXED.concat([
+      { seq: 7, at: 1790000006, kind: "log", level: "warn", source: "fircd", message: "w" },
+      { seq: 8, at: 1790000007, kind: "log", level: "error", source: "fircd", message: "e" },
+    ]),
+  );
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Journal" }).click();
+  await page.getByRole("group", { name: "Levels" }).getByRole("button", { name: "debug" }).click();
+  const stripe = (sel: string) =>
+    page
+      .locator(sel)
+      .first()
+      .evaluate((el) => getComputedStyle(el, "::before").backgroundColor);
+  expect(await stripe(".row.l-debug")).toBe("rgb(93, 96, 114)");
+  expect(await stripe(".row.l-info")).toBe("rgb(47, 127, 168)");
+  expect(await stripe(".row.l-warn")).toBe("rgb(217, 138, 43)");
+  expect(await stripe(".row.l-error")).toBe("rgb(217, 83, 76)");
+  expect(await stripe(".row.dns")).toBe("rgba(0, 0, 0, 0)");
+  await expect(page.locator(".row.l-warn .msg").first()).toHaveCSS("color", "rgb(217, 138, 43)");
+  await expect(page.locator(".row.l-error .msg").first()).toHaveCSS("color", "rgb(217, 83, 76)");
+  await expect(page.locator(".row.l-info .msg").first()).toHaveCSS("color", "rgb(255, 255, 255)");
+  const bg = (sel: string) =>
+    page
+      .locator(sel)
+      .first()
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(await bg(".row.l-info")).toBe("rgba(0, 0, 0, 0)");
+  expect(await bg(".row.l-error")).not.toBe("rgba(0, 0, 0, 0)");
+});
+
+// Catches a toggle whose aria-pressed does not follow its state, or a pressed toggle that looks like the rest.
+test("every toggle says and shows whether it is pressed", async ({ page }) => {
+  await shell(page, MIXED);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Journal" }).click();
+  const sources = page.getByRole("group", { name: "Sources" }).getByRole("button");
+  const levels = page.getByRole("group", { name: "Levels" }).getByRole("button");
+  for (let i = 0; i < 4; i++) await expect(sources.nth(i)).toHaveAttribute("aria-pressed", "true");
+  const want = ["false", "true", "true", "true"];
+  for (let i = 0; i < 4; i++) await expect(levels.nth(i)).toHaveAttribute("aria-pressed", want[i]);
+  await sources.nth(0).click();
+  await expect(sources.nth(0)).toHaveAttribute("aria-pressed", "false");
+  await levels.nth(2).click();
+  await expect(levels.nth(2)).toHaveAttribute("aria-pressed", "false");
+  await levels.nth(0).click();
+  await expect(levels.nth(0)).toHaveAttribute("aria-pressed", "true");
+  const look = (i: number) =>
+    levels.nth(i).evaluate((el) => {
+      const c = getComputedStyle(el);
+      return { bg: c.backgroundColor, ring: c.boxShadow };
+    });
+  const on = await look(1);
+  const off = await look(2);
+  expect(on.ring).not.toBe("none");
+  expect(off.ring).toBe("none");
+  expect(on.bg).not.toBe(off.bg);
+});
+
+// Catches seqs the daemon evicted before a fresh page ever asked counted as lost, or a later loss not counted.
+test("the first catch-up reports nothing lost, a later gap does", async ({ page }) => {
+  let later = false;
+  let told = false;
+  await shellWith(page, (route) => {
+    const since = Number(new URL(route.request().url()).searchParams.get("since") ?? 0);
+    const size = since === 0 ? 1024 : since === 1024 ? 3 : 0;
+    const gap = since === 1027 && later && !told;
+    if (gap) told = true;
+    const dropped = since === 1024 ? 40 : gap ? 5 : 0;
+    const events = Array.from({ length: size }, (_, i) => ({
+      seq: since + i + 1,
+      at: 1790000000,
+      kind: "log",
+      level: "info",
+      source: "fircd",
+      message: `m${since + i + 1}`,
+    }));
+    return route.fulfill({ json: { events, next: since + size, dropped } });
+  });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Journal" }).click();
+  await expect(page.getByText("m1027")).toBeVisible();
+  await page.waitForTimeout(2500);
+  await expect(page.getByText("Events were lost before this page asked for them:")).toHaveCount(0);
+  later = true;
+  await expect(page.locator(".status")).toContainText(
+    "Events were lost before this page asked for them: 5",
+    { timeout: 6000 },
+  );
 });
 
 // Catches rows arriving under display:none (scrollHeight 0) leaving the tab open on its top row.
@@ -252,6 +487,7 @@ test("the pane follows to the bottom the first time its tab is opened", async ({
     at: 1790000000 + i,
     kind: "log",
     level: "info",
+    source: "fircd",
     message: `line ${i + 1}`,
   }));
   await shell(page, events);
@@ -273,19 +509,42 @@ test("a restarted daemon replaces the old run's events", async ({ page }) => {
     const run = restarted
       ? {
           boot: "b",
-          events: [{ seq: 1, at: 1790000100, kind: "log", level: "info", message: "second run" }],
+          events: [
+            {
+              seq: 1,
+              at: 1790000100,
+              kind: "log",
+              level: "info",
+              source: "fircd",
+              message: "second run",
+            },
+          ],
         }
       : {
           boot: "a",
           events: [
-            { seq: 1, at: 1790000000, kind: "log", level: "info", message: "first run" },
-            { seq: 2, at: 1790000001, kind: "log", level: "info", message: "first run, later" },
+            {
+              seq: 1,
+              at: 1790000000,
+              kind: "log",
+              level: "info",
+              source: "fircd",
+              message: "first run",
+            },
+            {
+              seq: 2,
+              at: 1790000001,
+              kind: "log",
+              level: "info",
+              source: "fircd",
+              message: "first run, later",
+            },
           ],
         };
     const fresh = run.events.filter((e) => e.seq > since);
     const next = fresh.length ? fresh[fresh.length - 1].seq : since;
     return route.fulfill({
-      json: { events: fresh, next, dropped: 0, level: "info", boot: run.boot },
+      json: { events: fresh, next, dropped: 0, boot: run.boot },
     });
   });
   await page.goto("/");
@@ -373,6 +632,7 @@ test.describe("pausing the journal", () => {
     at: 1790000000 + seq,
     kind: "log",
     level: "info",
+    source: "fircd",
     message: `line ${seq}`,
   });
 
@@ -381,9 +641,27 @@ test.describe("pausing the journal", () => {
       const since = Number(new URL(route.request().url()).searchParams.get("since") ?? 0);
       const fresh = (all as { seq: number }[]).filter((e) => e.seq > since);
       const next = fresh.length ? fresh[fresh.length - 1].seq : since;
-      return route.fulfill({ json: { events: fresh, next, dropped: 0, level: "info" } });
+      return route.fulfill({ json: { events: fresh, next, dropped: 0 } });
     });
   }
+
+  // Catches the source counts following the live buffer while the rows stay frozen.
+  test("counts stay with the frozen rows while paused", async ({ page }) => {
+    const all = [line(1), line(2)];
+    await live(page, all);
+    await page.goto("/");
+    await page.getByRole("tab", { name: "Journal" }).click();
+    const fircd = page.getByRole("group", { name: "Sources" }).getByRole("button").first();
+    await expect(fircd).toHaveText("fircd2");
+    await page.getByRole("button", { name: "Pause", exact: true }).click();
+    all.push(line(3), line(4), line(5));
+    await expect(page.getByRole("button", { name: "+3 new events" })).toBeVisible({
+      timeout: 6000,
+    });
+    await expect(fircd).toHaveText("fircd2");
+    await page.getByRole("button", { name: "+3 new events" }).click();
+    await expect(fircd).toHaveText("fircd5");
+  });
 
   // Catches a poll appending rows while paused, a wrong new-row count, or Resume not catching up.
   test("freezes the rows, counts the new ones, and resumes on a click", async ({ page }) => {

@@ -29,6 +29,41 @@ size_t firc_tun_lines_feed(firc_tun_lines_t *l, const char *data, size_t n, firc
     return dropped;
 }
 
+firc_log_level_t firc_tun_err_level(const char *line, size_t len, size_t *skip)
+{
+    static const char head[] = "tunvless[";
+    static const struct {
+        const char *name;
+        firc_log_level_t level;
+    } tags[] = {
+        {"debug]", FIRC_LOG_DEBUG},
+        {"info]", FIRC_LOG_INFO},
+        {"warn]", FIRC_LOG_WARN},
+        {"error]", FIRC_LOG_ERROR},
+    };
+    *skip = 0;
+    size_t hl = sizeof head - 1;
+    if (len <= hl || memcmp(line, head, hl) != 0) {
+        return FIRC_LOG_INFO;
+    }
+    for (size_t i = 0; i < sizeof tags / sizeof tags[0]; i++) {
+        size_t at = hl + strlen(tags[i].name);
+        if (len <= at || memcmp(line + hl, tags[i].name, at - hl) != 0 ||
+            (line[at] != ':' && line[at] != ' ')) {
+            continue;
+        }
+        if (line[at] == ':') {
+            at++;
+        }
+        while (at < len && line[at] == ' ') {
+            at++;
+        }
+        *skip = at;
+        return tags[i].level;
+    }
+    return FIRC_LOG_INFO;
+}
+
 static bool copy_str(const cJSON *obj, const char *key, char *dst, size_t cap)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);

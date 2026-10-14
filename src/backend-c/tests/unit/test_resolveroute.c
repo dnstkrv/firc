@@ -242,7 +242,7 @@ static size_t publish_logged(firc_resolve_router_t *r, firc_resolve_table_t *t, 
 {
     int fds[2];
     if (pipe(fds) != 0) { return 0; }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     firc_resolve_router_publish(r, t);
     firc_log_set_fd(STDOUT_FILENO);

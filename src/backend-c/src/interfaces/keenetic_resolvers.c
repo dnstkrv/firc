@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 static bool addr_equal(const firc_resolver_addr_t *a, const firc_resolver_addr_t *b)
 {
@@ -206,20 +207,20 @@ static firc_err_t fetch(firc_kn_resolvers_t *r)
 static void *refresher(void *ud)
 {
     firc_kn_resolvers_t *r = ud;
-    unsigned retry = 1, failures = 0;
+    unsigned retry = 1;
+    firc_logrep_t failing = {0};
     pthread_mutex_lock(&r->mu);
     while (!r->stop) {
         pthread_mutex_unlock(&r->mu);
         firc_err_t err = fetch(r);
         unsigned wait;
         if (err == FIRC_OK) {
-            if (failures > 0) { FIRC_INFO("keenetic resolvers: RCI is back"); }
-            failures = 0;
+            (void)firc_logrep_ok(&failing, NULL, "keenetic resolvers: RCI");
             retry = 1;
             wait = r->refresh_secs;
         } else {
             /* the last good list stays */
-            if (failures++ == 0) { FIRC_WARN("keenetic resolvers: refresh failed: %s", firc_err_str(err)); }
+            firc_logrep_fail(&failing, FIRC_LOG_WARN, NULL, "keenetic resolvers: refresh failed: %s", firc_err_str(err));
             wait = retry < r->refresh_secs ? retry : r->refresh_secs;
             if (retry < r->refresh_secs) { retry *= 2; }
         }

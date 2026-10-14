@@ -123,7 +123,7 @@ static firc_err_t bind_the_group(firc_nflog_t *n, uint16_t group, uint16_t copy_
 
 firc_nflog_t *firc_nflog_open_fd(int fd, uint16_t group, uint16_t copy_range) {
     if (copy_range == 0 || copy_range > FIRC_NFLOG_MAX_RANGE) {
-        FIRC_ERROR("nflog: a copy range of %u bytes is not one this reader can hold (1..%u)",
+        FIRC_WARN("nflog: a copy range of %u bytes is not one this reader can hold (1..%u)",
                    (unsigned)copy_range, (unsigned)FIRC_NFLOG_MAX_RANGE);
         close(fd);
         return NULL;
@@ -143,10 +143,10 @@ firc_nflog_t *firc_nflog_open_fd(int fd, uint16_t group, uint16_t copy_range) {
     if (e != FIRC_OK) {
         /* A timeout is not a refusal: say so, since it is a different fault to chase. */
         if (e == FIRC_ERR_AGAIN) {
-            FIRC_ERROR("nflog: the kernel did not answer the bind of group %u within %d ms",
+            FIRC_WARN("nflog: the kernel did not answer the bind of group %u within %d ms",
                        (unsigned)group, FIRC_NFLOG_ACK_MS);
         } else {
-            FIRC_ERROR("nflog: the kernel refused group %u: %s", (unsigned)group,
+            FIRC_WARN("nflog: the kernel refused group %u: %s", (unsigned)group,
                        strerror(errno));
         }
         firc_nflog_close(n);
@@ -161,7 +161,7 @@ firc_nflog_t *firc_nflog_open_fd(int fd, uint16_t group, uint16_t copy_range) {
 firc_nflog_t *firc_nflog_open(uint16_t group, uint16_t copy_range) {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_NETFILTER);
     if (fd < 0) {
-        FIRC_ERROR("nflog: no netfilter netlink socket: %s", strerror(errno));
+        FIRC_WARN("nflog: no netfilter netlink socket: %s", strerror(errno));
         return NULL;
     }
     int rcvbuf = 1024 * 1024;
@@ -175,7 +175,7 @@ firc_nflog_t *firc_nflog_open(uint16_t group, uint16_t copy_range) {
     memset(&sa, 0, sizeof(sa));
     sa.nl_family = AF_NETLINK;
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        FIRC_ERROR("nflog: cannot bind the netlink socket: %s", strerror(errno));
+        FIRC_WARN("nflog: cannot bind the netlink socket: %s", strerror(errno));
         close(fd);
         return NULL;
     }

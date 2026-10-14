@@ -21,6 +21,7 @@
 #include <pthread.h>
 
 #include "transport.h"
+#include "ratelog.h"
 
 /* ---- TCP connect: EVERY address of the node, not the first ----------------------------
  *
@@ -439,12 +440,16 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
         for (unsigned i = 0; i < nf; i++) close(fd[i]);
         /* The message gives the scale: when none of N addresses answers, the problem is the
          * node's name, not the local network. */
-        fprintf(stderr, "tunvless: %s:%u — no address answered (%u addresses, %u failed)\n",
-                host, port, an, dead);
+        static struct ratelog said;
+        unsigned held;
+        char more[48];
+        if (ratelog_take(&said, ratelog_now(), 600, &held))
+            fprintf(stderr, "tunvless[warn]: %s:%u — no address answered (%u addresses, %u failed)%s\n",
+                    host, port, an, dead, ratelog_more(more, sizeof more, held));
         return TR_ECONNECT;
     }
     if (dead)
-        fprintf(stderr, "tunvless: %s:%u — connected after %u of %u addresses failed\n",
+        fprintf(stderr, "tunvless[info]: %s:%u — connected after %u of %u addresses failed\n",
                 host, port, dead, an);
     sock_ready(win, timeout_s);
     return win;

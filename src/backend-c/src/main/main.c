@@ -76,6 +76,7 @@
 struct daemon {
     firc_loop_t *loop;
     firc_dnsproxy_t *proxy;
+    firc_logrep_t pool_said;
     firc_dns_pipeline_t *pipeline;
     firc_kn_policies_t *policies;
     firc_kn_resolvers_t *resolvers;
@@ -425,10 +426,7 @@ static void save_pool(struct daemon *d, bool clean)
     /* never overwrite an unreadable file with an empty pool */
     if (d->pool == NULL || !d->pool_file_ok) { return; }
     /* A removed run dir is not remade for the pool file alone; a restart is the fix. */
-    firc_err_t err = firc_fakeip_save_file(d->pool, FIRC_POOL_STATE_PATH, clean);
-    if (err != FIRC_OK) {
-        FIRC_WARN("pool state not saved to %s: %s", FIRC_POOL_STATE_PATH, firc_err_str(err));
-    }
+    (void)firc_fakeip_save_file_said(d->pool, FIRC_POOL_STATE_PATH, clean, &d->pool_said);
 }
 
 static void on_chunk_taken(void *ud, const firc_fakeip_t *f)
@@ -441,6 +439,9 @@ static void on_pool_sweep_timer(firc_loop_t *loop, void *ud)
 {
     (void)loop;
     struct daemon *d = ud;
+    for (size_t i = 0; d->app != NULL && i < firc_app_user_group_count(d->app); i++) {
+        firc_ruleset_remind_link(firc_app_user_group_at(d->app, i));
+    }
     if (d->pool != NULL && d->app != NULL) {
         uint64_t before = firc_fakeip_gen(d->pool);
         firc_fakeip_reclaim(d->pool, now_unix());
@@ -510,9 +511,8 @@ static void on_list_auto_update_timer(firc_loop_t *loop, void *ud)
 static firc_dns_verdict_t on_response(firc_dns_msg_t *msg, const firc_ip_t *client,
                                       const char *network, firc_dns_resolver_t resolver, void *ud)
 {
+    (void)network;
     struct daemon *d = ud;
-    FIRC_DEBUG("upstream response: id=%u answers=%zu network=%s", msg->id,
-             msg->n_answers, network);
     bool pool_changed = false;
     firc_dns_verdict_t v = firc_dns_pipeline_handle_message_from(d->pipeline, msg, now_unix(), client,
                                                                  resolver, &pool_changed);
@@ -532,7 +532,7 @@ static void resync(struct daemon *d, const char *iface_name)
         if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
         firc_err_t err = firc_ruleset_on_addr_change(rs);
         if (err != FIRC_OK) {
-            FIRC_ERROR("error while re-reading interface %s: group=%s err=%s", g->iface, g->name,
+            FIRC_WARN("error while re-reading interface %s: group=%s err=%s", g->iface, g->name,
                        firc_err_str(err));
         }
     }
@@ -596,7 +596,7 @@ static void on_addr_change(const char *iface_name, void *ud)
 static void on_watcher_lost(void *ud)
 {
     struct daemon *d = ud;
-    FIRC_WARN("netlink watcher missed events; re-reading every interface");
+    FIRC_DEBUG("netlink watcher missed events; re-reading every interface");
     schedule_refresh(d, NULL);
 }
 
@@ -651,7 +651,7 @@ static void on_link_up(const char *iface_name, bool up, void *ud)
         if (d->proxy != NULL) { firc_dnsproxy_close_group_pools(d->proxy, g->id); }
         firc_err_t err = firc_ruleset_on_link_up(rs);
         if (err != FIRC_OK) {
-            FIRC_ERROR("error while handling interface up: group=%s err=%s",
+            FIRC_WARN("error while handling interface up: group=%s err=%s",
                      g->name, firc_err_str(err));
         }
     }
@@ -821,7 +821,7 @@ int main(int argc, char **argv)
     /* --purge takes the lock like a start; an unknown argument prints usage and exits 2. */
     bool purge = false;
     const char *config_path = FIRC_CONFIG_PATH;
-    firc_log_level_t out_floor = FIRC_LOG_TRACE;
+    firc_log_level_t out_floor = FIRC_LOG_DEBUG;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
             puts(FIRC_VERSION_LINE);
@@ -871,7 +871,6 @@ int main(int argc, char **argv)
         firc_config_clear(&cfg);
         return 1;
     }
-    firc_log_set_level(firc_log_level_from_str(cfg.app.log_level));
     (void)firc_event_boot();
 
     /* Before any thread exists (refresher, committer, curl): an unblocked thread takes the signal's default action. */
@@ -1322,7 +1321,7 @@ int main(int argc, char **argv)
         d.tunsubs = firc_tunsubs_new(d.loop, cache != NULL && cache[0] != 0 ? cache : FIRC_TUNNELS_CACHE_DIR,
                                      firc_tunrun_bodies_changed, d.tunrun);
         if (d.tunsubs == NULL) {
-            FIRC_ERROR("tunnels: subscriptions cannot be fetched (no worker thread); links still work");
+            FIRC_WARN("tunnels: subscriptions cannot be fetched (no worker thread); links still work");
         }
         firc_tunrun_set_subs(d.tunrun, d.tunsubs);
         firc_app_set_tunnel_down(d.app, tunnel_down, d.tunrun);
@@ -1394,13 +1393,13 @@ int main(int argc, char **argv)
         .ud = &update_ctx,
     };
     d.update = firc_update_new(&update_deps);
-    if (d.update == NULL) { FIRC_ERROR("update: the checker could not be created; running without it"); }
+    if (d.update == NULL) { FIRC_WARN("update: the checker could not be created; running without it"); }
     update_ctx.update = d.update;
     system_ctx.update = d.update;
     d.update_ctx = &update_ctx;
     if (d.update != NULL && firc_loop_add_timer(d.loop, FIRC_UPDATE_FIRST_CHECK_MS, FIRC_UPDATE_CHECK_INTERVAL_MS,
                                                 on_update_timer, &d, &d.update_timer) != FIRC_OK) {
-        FIRC_ERROR("update: the daily check could not be scheduled; checks run only on request");
+        FIRC_WARN("update: the daily check could not be scheduled; checks run only on request");
         d.update_timer = 0;
     }
 
@@ -1473,7 +1472,7 @@ int main(int argc, char **argv)
     if (d.update != NULL) {
         err = firc_update_start(d.update);
         if (err != FIRC_OK) {
-            FIRC_ERROR("update: the checker could not be started (%s); running without it", firc_err_str(err));
+            FIRC_WARN("update: the checker could not be started (%s); running without it", firc_err_str(err));
             if (d.update_timer != 0) {
                 (void)firc_loop_del_timer(d.loop, d.update_timer);
                 d.update_timer = 0;

@@ -15,6 +15,7 @@
 #include "firc/auth.h"
 #include "firc/events.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/httpd.h"
 #include "firc/jwt.h"
 #include "firc/loop.h"
@@ -243,7 +244,7 @@ TEST a_login_name_cannot_write_its_own_log_line(void) {
     firc_auth_forget_cached_hash();
     firc_auth_reset_throttle_for_test();
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_WARN);
+    firc_log_set_output_floor(FIRC_LOG_WARN);
     char *state_dir = mkdtemp_dup("/tmp/firc_auth_forge_XXXXXX");
     ASSERT(state_dir != NULL);
 
@@ -269,6 +270,96 @@ TEST a_login_name_cannot_write_its_own_log_line(void) {
     firc_event_reset_for_test();
     firc_auth_reset_throttle_for_test();
     free(state_dir);
+    PASS();
+}
+
+static uint64_t g_say_ms;
+static uint64_t say_clock(void) { return g_say_ms; }
+
+/* Catches: a refused login written to the journal at every try, so any LAN client can push the warnings out, or the ones held back never counted. */
+TEST refused_logins_are_said_once_a_minute_with_the_count(void) {
+    unlink(SHADOW_FIXTURE);
+    unlink(PASSWD_FIXTURE);
+    firc_auth_forget_cached_hash();
+    firc_auth_reset_throttle_for_test();
+    firc_event_reset_for_test();
+    g_say_ms = 1000;
+    firc_logrep_set_clock_for_test(say_clock);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    char *state_dir = mkdtemp_dup("/tmp/firc_auth_rate_XXXXXX");
+    ASSERT(state_dir != NULL);
+    char token[FIRC_JWT_MAX_TOKEN];
+    for (int i = 0; i < 3; i++) {
+        (void)firc_auth_authenticate_from(SHADOW_FIXTURE, PASSWD_FIXTURE, state_dir, "nobody", "x", token,
+                                          sizeof(token));
+    }
+    g_say_ms += 60000;
+    struct timespec pause = {.tv_sec = 1, .tv_nsec = 100 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    (void)firc_auth_authenticate_from(SHADOW_FIXTURE, PASSWD_FIXTURE, state_dir, "late", "x", token, sizeof(token));
+    firc_logrep_set_clock_for_test(NULL);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+
+    firc_event_t kept[16];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, kept, 16, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)2, n, "%zu");
+    ASSERTm(kept[0].u.log.text, strstr(kept[0].u.log.text, "login refused for \"nobody\": ") == kept[0].u.log.text);
+    ASSERT_EQ(FIRC_LOG_WARN, kept[0].u.log.level);
+    ASSERTm(kept[1].u.log.text, strstr(kept[1].u.log.text, "login refused for \"late\": ") == kept[1].u.log.text);
+    ASSERTm(kept[1].u.log.text, strstr(kept[1].u.log.text, " (2 more since the last)") != NULL);
+    firc_event_reset_for_test();
+    firc_auth_reset_throttle_for_test();
+    free(state_dir);
+    PASS();
+}
+
+static int journal_starting(const firc_event_t *ev, size_t n, const char *head, const char *tail) {
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        const char *t = ev[i].u.log.text;
+        if (strncmp(t, head, strlen(head)) == 0 && (tail == NULL || strstr(t, tail) != NULL)) { c++; }
+    }
+    return c;
+}
+
+/* Catches: an unreadable shadow or a hash this build cannot compute said at every login, or the held ones never counted. */
+TEST the_other_refusals_are_said_once_a_minute_too(void) {
+    write_file(SHADOW_FIXTURE, "x\n");
+    write_file(PASSWD_FIXTURE, "admin:$9$abcdefgh$zzzzzzzz:0:0::/root:/bin/sh\n");
+    firc_auth_forget_cached_hash();
+    firc_auth_reset_throttle_for_test();
+    firc_event_reset_for_test();
+    g_say_ms = 1000;
+    firc_logrep_set_clock_for_test(say_clock);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    char *state_dir = mkdtemp_dup("/tmp/firc_auth_rate2_XXXXXX");
+    ASSERT(state_dir != NULL);
+    char token[FIRC_JWT_MAX_TOKEN];
+    for (int i = 0; i < 3; i++) {
+        (void)firc_auth_authenticate_from(SHADOW_FIXTURE "/x", PASSWD_FIXTURE, state_dir, "admin", "pw", token,
+                                          sizeof(token));
+    }
+    g_say_ms += 60000;
+    struct timespec pause = {.tv_sec = 1, .tv_nsec = 100 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    (void)firc_auth_authenticate_from(SHADOW_FIXTURE "/x", PASSWD_FIXTURE, state_dir, "admin", "pw", token,
+                                      sizeof(token));
+    firc_logrep_set_clock_for_test(NULL);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    firc_event_t kept[16];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, kept, 16, &next, &dropped);
+    unlink(SHADOW_FIXTURE);
+    unlink(PASSWD_FIXTURE);
+    firc_auth_forget_cached_hash();
+    firc_auth_reset_throttle_for_test();
+    free(state_dir);
+    ASSERT_EQ_FMT(2, journal_starting(kept, n, SHADOW_FIXTURE "/x could not be read", NULL), "%d");
+    ASSERT_EQ_FMT(1, journal_starting(kept, n, SHADOW_FIXTURE "/x could not be read", " (2 more since the last)"), "%d");
+    ASSERT_EQ_FMT(2, journal_starting(kept, n, "login refused for \"admin\": this build cannot compute", NULL), "%d");
+    ASSERT_EQ_FMT(1, journal_starting(kept, n, "login refused for \"admin\": this build cannot compute", " (2 more since the last)"),
+                  "%d");
     PASS();
 }
 
@@ -726,6 +817,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_run_of_wrong_passwords_stops_costing_a_crypt);
     RUN_TEST(what_the_cache_cannot_hold_it_does_not_answer_for);
     RUN_TEST(a_login_name_cannot_write_its_own_log_line);
+    RUN_TEST(refused_logins_are_said_once_a_minute_with_the_count);
+    RUN_TEST(the_other_refusals_are_said_once_a_minute_too);
     RUN_TEST(the_password_file_is_read_once_per_change);
     RUN_TEST(an_edited_password_file_is_noticed);
     RUN_TEST(verify_rejects_token_for_unknown_user);

@@ -6,13 +6,15 @@
 #include <time.h>
 
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 /* Folds a firmware burst (one event per table) into one pass. */
 #define FIRC_NFCOMMIT_DELAY_MS 150u
 /* Backoff ceiling for hard failures; races never back off. */
 #define FIRC_NFCOMMIT_MAX_DELAY_MS 5000u
-/* Hard refusals in a row before ERR; a lost COMMIT race is one and its retry usually fixes it. */
-#define FIRC_NFCOMMIT_ESCALATE_AFTER 3u
+/* Hard refusals in a row before a WARN; a lost COMMIT race is one and its retry usually fixes it. */
+#define FIRC_NFCOMMIT_WARN_AFTER 3u
+#define FIRC_NFCOMMIT_ERROR_AFTER_MS 60000u
 
 struct firc_nfcommit {
     firc_nfcommit_rebuild_fn rebuild;
@@ -44,10 +46,12 @@ struct firc_nfcommit {
     uint64_t fail_mono_ms;
     int64_t fail_wall;
     unsigned hard_run;
-    int64_t hard_wall;
     firc_err_t fail_err;
-    bool races_said;
+    bool said_run;
+    uint64_t log_start;
+    uint64_t log_after;
     unsigned failing_after_ms;
+    firc_logrep_t said;
 };
 
 static uint64_t mono_ms(void) {
@@ -59,64 +63,51 @@ static uint64_t mono_ms(void) {
 
 static bool is_race(firc_err_t err) { return err == FIRC_ERR_CANCELED || err == FIRC_ERR_AGAIN; }
 
-typedef enum { NOTE_QUIET, NOTE_ESCALATE, NOTE_RECOVERED, NOTE_RACES, NOTE_RACES_OVER } note_say_t;
+typedef enum { NOTE_QUIET, NOTE_FAIL, NOTE_RACES, NOTE_OK } note_say_t;
 
-static note_say_t note_result(firc_nfcommit_t *c, firc_err_t err, unsigned *hard_run, int64_t *hard_wall) {
-    *hard_run = c->hard_run;
-    *hard_wall = c->hard_wall;
+static note_say_t note_result(firc_nfcommit_t *c, firc_err_t err, uint64_t *after) {
     if (err == FIRC_OK) {
-        bool escalated = c->hard_run >= FIRC_NFCOMMIT_ESCALATE_AFTER;
-        bool races = c->races_said;
-        *hard_wall = c->fail_wall;
+        bool said = c->said_run;
         c->fail_mono_ms = 0;
         c->hard_run = 0;
         c->fail_err = FIRC_OK;
-        c->races_said = false;
-        if (escalated) {
-            *hard_wall = c->hard_wall;
-            return NOTE_RECOVERED;
-        }
-        return races ? NOTE_RACES_OVER : NOTE_QUIET;
+        c->said_run = false;
+        return said ? NOTE_OK : NOTE_QUIET;
     }
     if (c->fail_mono_ms == 0) {
         c->fail_mono_ms = mono_ms();
         c->fail_wall = (int64_t)time(NULL);
+        c->log_start = firc_logrep_now_ms();
     }
-    if (is_race(err)) {
+    bool race = is_race(err);
+    if (race) {
         if (c->hard_run == 0) { c->fail_err = err; }
-        if (err == FIRC_ERR_AGAIN && !c->races_said && c->hard_run < FIRC_NFCOMMIT_ESCALATE_AFTER &&
-            mono_ms() - c->fail_mono_ms >= c->failing_after_ms) {
-            c->races_said = true;
-            *hard_wall = c->fail_wall;
-            return NOTE_RACES;
-        }
-        return NOTE_QUIET;
+    } else {
+        c->hard_run++;
+        c->fail_err = err;
     }
-    if (c->hard_run == 0) { c->hard_wall = (int64_t)time(NULL); }
-    c->hard_run++;
-    c->fail_err = err;
-    *hard_run = c->hard_run;
-    *hard_wall = c->hard_wall;
-    return c->hard_run == FIRC_NFCOMMIT_ESCALATE_AFTER ? NOTE_ESCALATE : NOTE_QUIET;
+    if (!c->said_run) {
+        bool hard_due = !race && c->hard_run >= FIRC_NFCOMMIT_WARN_AFTER;
+        bool race_due = err == FIRC_ERR_AGAIN && mono_ms() - c->fail_mono_ms >= c->failing_after_ms;
+        if (!hard_due && !race_due) { return NOTE_QUIET; }
+        uint64_t gone = firc_logrep_now_ms() - c->log_start;
+        c->log_after = gone >= FIRC_NFCOMMIT_ERROR_AFTER_MS ? 0 : FIRC_NFCOMMIT_ERROR_AFTER_MS - gone;
+        c->said_run = true;
+    }
+    *after = c->log_after;
+    return race ? NOTE_RACES : NOTE_FAIL;
 }
 
-/* Said outside `mu`: the log is a write(2) that may block on a pipe. */
-static void say_note(note_say_t say, firc_err_t err, unsigned hard_run, int64_t hard_wall) {
-    if (say == NOTE_QUIET) { return; }
-    char when[32] = "?";
-    struct tm tm;
-    time_t t = (time_t)hard_wall;
-    if (gmtime_r(&t, &tm) != NULL) { (void)strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tm); }
-    if (say == NOTE_ESCALATE) {
-        FIRC_ERROR("netfilter pass keeps failing (%u in a row since %s): %s", hard_run, when,
-                   firc_err_str(err));
+/* Said outside `mu` (a write(2) may block on a pipe); the tracker is the committer thread's own. */
+static void say_note(firc_nfcommit_t *c, note_say_t say, firc_err_t err, uint64_t after) {
+    if (say == NOTE_FAIL) {
+        firc_logrep_fail_for(&c->said, after, NULL, "netfilter pass keeps failing: %s", firc_err_str(err));
     } else if (say == NOTE_RACES) {
-        FIRC_WARN("netfilter pass keeps losing races since %s: a table changed while it was read, "
-                  "or another writer held the xtables lock", when);
-    } else if (say == NOTE_RACES_OVER) {
-        FIRC_INFO("netfilter pass completed again after losing races since %s", when);
-    } else {
-        FIRC_INFO("netfilter pass completed again after %u failed in a row since %s", hard_run, when);
+        firc_logrep_fail_for(&c->said, after, NULL,
+                             "netfilter pass keeps losing races: a table changed while it was read, "
+                             "or another writer held the xtables lock");
+    } else if (say == NOTE_OK) {
+        (void)firc_logrep_ok(&c->said, NULL, "netfilter pass");
     }
 }
 
@@ -334,12 +325,11 @@ static void *committer_main(void *arg) {
         c->running = false;
         c->last_end_ms = mono_ms();
         if (err == FIRC_OK) { c->last_ok = ordinal; }
-        unsigned hard_run = 0;
-        int64_t hard_wall = 0;
-        note_say_t say = note_result(c, err, &hard_run, &hard_wall);
+        uint64_t after = 0;
+        note_say_t say = note_result(c, err, &after);
         stopping = c->stopping;
         pthread_mutex_unlock(&c->mu);
-        say_note(say, err, hard_run, hard_wall);
+        say_note(c, say, err, after);
         if (stopping) { break; }
 
         if (err == FIRC_OK) {

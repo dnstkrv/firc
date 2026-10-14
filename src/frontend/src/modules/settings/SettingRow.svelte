@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Select from "../../components/ui/Select.svelte";
   import Switch from "../../components/ui/Switch.svelte";
   import TagInput from "../../components/ui/TagInput.svelte";
   import { groupInterfaces } from "../../data/interfaces.svelte";
@@ -52,15 +51,6 @@
             aria-label={field.label()}
             checked={c.invert ? !settings.draft[field.key] : Boolean(settings.draft[field.key])}
             onCheckedChange={(v: boolean) => (settings.draft[field.key] = c.invert ? !v : v)}
-          />
-        </span>
-      {:else if c.kind === "select"}
-        <span class="field {changedClass(field.key)}">
-          <Select
-            ariaLabel={field.label()}
-            options={c.options.map((o) => ({ value: o, label: o }))}
-            selected={String(settings.draft[field.key])}
-            onValueChange={(v: string) => (settings.draft[field.key] = v)}
           />
         </span>
       {:else if c.kind === "tags"}

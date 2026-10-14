@@ -86,7 +86,6 @@ app:
     iptables:
       chainPrefix: FIRC_
   link: []
-  logLevel: info
 EOF
 tunnels() {
     cat > /etc/firc/tunnels.yaml <<EOF
@@ -194,10 +193,10 @@ wait_new_pid() {
 wait_link tunvless0 5
 check "tunvless0 appears within 5 s" 0 "$?"
 # catches: the journal missing a tunnel's first active node
-wait_ev "tunnel tunvless0: active A" 15
+wait_ev "\"source\":\"tunvless0\",\"message\":\"active A" 15
 check "the journal names tunvless0's active node" 0 "$?"
 # catches: a tunnel left out when there are several
-wait_ev "tunnel tunvless1: active B" 15
+wait_ev "\"source\":\"tunvless1\",\"message\":\"active B" 15
 check "tunvless1 runs beside it" 0 "$?"
 
 # catches: a tunnel uplink written without its rule, or more than one
@@ -218,15 +217,15 @@ check "with tunvless0 gone only the blackhole is left" "0 1 1" \
 # catches: no refresh on READY or link-up, so the uplink stays closed after a restart
 wait_table has "dev tunvless0" 20
 check "the default via tunvless0 returns after its restart" 0 "$?"
-wait_ev "tunnel tunvless0: exited (137), restart in" 5
+wait_ev "\"source\":\"tunvless0\",\"message\":\"exited (137), restart in" 5
 check "the kill is journalled with its restart" 0 "$?"
 
 kill "$SRV_A"; wait "$SRV_A" 2>/dev/null; SRV_A=
 # catches: node_down events not reaching the journal
-wait_ev "tunnel tunvless0: A does not answer" 15
+wait_ev "\"source\":\"tunvless0\",\"message\":\"A does not answer" 15
 check "A's failure is journalled within 15 s" 0 "$?"
 # catches: the replacement node not journalled
-wait_ev "tunnel tunvless0: active B" 15
+wait_ev "\"source\":\"tunvless0\",\"message\":\"active B" 15
 check "B takes over within 15 s" 0 "$?"
 journal
 # catches: a link (secret) written to the journal
@@ -234,21 +233,21 @@ check "no link in the journal" 0 "$(grep -c "vless://\|$UUID" "$W/ev")"
 
 node_up A
 P0=$(tpid tunvless0)
-STARTS0=$(count_ev "tunnel tunvless0: tunvless[info]: tunvless ")
-ACT_A=$(count_ev "tunnel tunvless0: active A")
+STARTS0=$(count_ev "\"source\":\"tunvless0\",\"message\":\"tunvless ")
+ACT_A=$(count_ev "\"source\":\"tunvless0\",\"message\":\"active A")
 # catches: a start-count check that proves nothing because the journal holds no start line to count
 check "the journal holds tunvless0's start line" yes "$([ "$STARTS0" -ge 1 ] && echo yes || echo no)"
 tunnels 1 with2 '    exclude: ["0000000b:B"]'
 kill -HUP "$FP"
 i=0
-while [ $i -lt 100 ] && [ "$(count_ev "tunnel tunvless0: active A")" -le "$ACT_A" ]; do sleep 0.2; i=$((i + 1)); done
+while [ $i -lt 100 ] && [ "$(count_ev "\"source\":\"tunvless0\",\"message\":\"active A")" -le "$ACT_A" ]; do sleep 0.2; i=$((i + 1)); done
 # catches: a node change never reaching the running tunvless, so the excluded node stays active
 check "excluding the active node makes A active within 20 s" yes \
-    "$([ "$(count_ev "tunnel tunvless0: active A")" -gt "$ACT_A" ] && echo yes || echo no)"
+    "$([ "$(count_ev "\"source\":\"tunvless0\",\"message\":\"active A")" -gt "$ACT_A" ] && echo yes || echo no)"
 # catches: a node change restarting tunvless instead of sending it the new list
 check "the node change keeps tunvless0's process" "$P0" "$(tpid tunvless0)"
 # catches: a restart hidden behind a reused pid, seen as a second start line
-check "no new start of tunvless0 in the journal" "$STARTS0" "$(count_ev "tunnel tunvless0: tunvless[info]: tunvless ")"
+check "no new start of tunvless0 in the journal" "$STARTS0" "$(count_ev "\"source\":\"tunvless0\",\"message\":\"tunvless ")"
 kill "$SRV_A"; wait "$SRV_A" 2>/dev/null; SRV_A=
 
 P0=$(tpid tunvless0)
@@ -350,7 +349,7 @@ EOF
 FIRC_TUNVLESS_BIN="$TV/out/tunvless" "$BE/build/host/fircd" --config /etc/firc/firc.conf >> "$W/fircd.log" 2>&1 &
 FP=$!
 # catches: a subscription fetched unmarked (main has only a prohibit route to it), or its nodes never handed to tunvless
-wait_ev "tunnel tunvless3: active B" 20
+wait_ev "\"source\":\"tunvless3\",\"message\":\"active B" 20
 check "a subscription tunnel reaches its first node" 0 "$?"
 # catches: the body not cached, or cached readable by others
 check "one cache file, mode 600" "1 600" \
@@ -366,7 +365,7 @@ FP=
 FIRC_TUNVLESS_BIN="$TV/out/tunvless" "$BE/build/host/fircd" --config /etc/firc/firc.conf >> "$W/fircd.log" 2>&1 &
 FP=$!
 # catches: a restart without the provider leaving the tunnel down although the cache holds its nodes
-wait_ev "tunnel tunvless3: active B" 20
+wait_ev "\"source\":\"tunvless3\",\"message\":\"active B" 20
 check "with the provider gone the restarted tunnel comes up from the cache" 0 "$?"
 i=0
 while [ $i -lt 50 ] && ! grep -q "fetch failed" "$W/fircd.log"; do sleep 0.2; i=$((i + 1)); done

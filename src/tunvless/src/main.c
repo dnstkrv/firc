@@ -42,6 +42,7 @@
 
 #define LOG_W "tunvless[warn]: "
 #define LOG_I "tunvless[info]: "
+#define LOG_E "tunvless[error]: "
 
 #define ROUTES_MAX 64
 #define RETRY_MAX_S 60
@@ -220,7 +221,7 @@ static int parse_args(int argc, char **argv) {
         case OPT_CA: g.ca = optarg; break;
         case 'd':
             if (!optarg[0] || strlen(optarg) >= IFNAMSIZ) {
-                fprintf(stderr, "tunvless: device name must be 1..%d characters\n", IFNAMSIZ - 1);
+                fprintf(stderr, LOG_E "device name must be 1..%d characters\n", IFNAMSIZ - 1);
                 return 2;
             }
             g.tc.dev = optarg;
@@ -261,27 +262,27 @@ static int parse_args(int argc, char **argv) {
     }
     if (g.control) {
         if (optind < argc) {
-            fprintf(stderr, LOG_W "--control takes nodes on stdin, not as arguments\n");
+            fprintf(stderr, LOG_E "--control takes nodes on stdin, not as arguments\n");
             return 2;
         }
         if (g.list || g.probe) {
-            fprintf(stderr, LOG_W "--control does not combine with --list or --probe\n");
+            fprintf(stderr, LOG_E "--control does not combine with --list or --probe\n");
             return 2;
         }
         if (g.active > CTL_ACTIVE_MAX) {
-            fprintf(stderr, LOG_W "--control allows at most %d active nodes\n", CTL_ACTIVE_MAX);
+            fprintf(stderr, LOG_E "--control allows at most %d active nodes\n", CTL_ACTIVE_MAX);
             return 2;
         }
     } else if (optind >= argc) { usage(stderr); return 2; }
     g.sources = argv + optind;
     g.sources_n = argc - optind;
     if (ifcfg_parse_cidr(addr, &g.tc.addr, &g.tc.prefix) != 0) {
-        fprintf(stderr, "tunvless: --addr %s is not an IPv4 address\n", addr);
+        fprintf(stderr, LOG_E "--addr %s is not an IPv4 address\n", addr);
         return 2;
     }
     return 0;
 bad:
-    fprintf(stderr, "tunvless: bad option value: %s\n", optarg);
+    fprintf(stderr, LOG_E "bad option value: %s\n", optarg);
     return 2;
 }
 
@@ -292,7 +293,7 @@ static const struct vless_node *vnode(int i) { return node_at(i); }
 static int append_nodes(const struct vless_node *n, size_t cnt, const char *key) {
     for (size_t i = 0; i < cnt; i++)
         if (nodes_add(&n[i], key) < 0) {
-            fprintf(stderr, "tunvless: no room for %zu nodes\n", (size_t)nodes_count() + cnt - i);
+            fprintf(stderr, LOG_E "no room for %zu nodes\n", (size_t)nodes_count() + cnt - i);
             return 1;
         }
     return 0;
@@ -340,7 +341,7 @@ static int load_stdin_nodes(void) {
     while ((len = getline(&line, &cap, stdin)) > 0) {
         total += (size_t)len;
         if (total > CTL_STDIN_MAX) {
-            fprintf(stderr, LOG_W "nodes on stdin exceed %u bytes\n", CTL_STDIN_MAX);
+            fprintf(stderr, LOG_E "nodes on stdin exceed %u bytes\n", CTL_STDIN_MAX);
             free(line);
             return 2;
         }
@@ -382,7 +383,7 @@ static int load_nodes(void) {
     }
     int cnt = nodes_count();
     if (!cnt) {
-        fprintf(stderr, "tunvless: no usable VLESS node\n");
+        fprintf(stderr, LOG_E "no usable VLESS node\n");
         return 2;
     }
     g_sel = calloc(g.want_n ? g.want_n : (size_t)cnt, sizeof(*g_sel));
@@ -486,7 +487,7 @@ static int pin_candidates(void) {
         if (g_sel_n == 1) snprintf(what, sizeof(what), "%s does not resolve", failed);
         else snprintf(what, sizeof(what), "no candidate's name resolves (%s, ...)", failed);
         if (!retry_wait(&step, what)) {
-            fprintf(stderr, LOG_W "%s\n", what);
+            fprintf(stderr, LOG_E "%s\n", what);
             free(ok);
             return -1;
         }
@@ -724,7 +725,7 @@ int main(int argc, char **argv) {
     int checked;
     int first = choose_node(&checked);
     if (first < 0) {
-        fprintf(stderr, LOG_W "no node answered\n");
+        fprintf(stderr, LOG_E "no node answered\n");
         ctl_emit_no_node(0);
         return 1;
     }

@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 extern char **environ;
 
@@ -29,7 +30,6 @@ extern char **environ;
 #define TERM_GRACE_S 5
 #define ACK_S 10
 #define INDEX_MAX 4096
-#define WARN_TAG "tunvless[warn]"
 
 typedef struct slot {
     firc_tunsup_t *s;
@@ -49,6 +49,7 @@ typedef struct slot {
     int restart_timer;
     int kill_timer;
     int64_t started_ms;
+    firc_logrep_t exits;
     int next_backoff_s;
     bool terminating;
     bool gone;
@@ -160,6 +161,7 @@ static void put_status(slot_t *sl, firc_tun_status_t status)
         sl->st.status = status;
         sl->st.since_ms = now_ms();
     }
+    if (status == FIRC_TUN_ST_UP) { (void)firc_logrep_ok(&sl->exits, sl->cfg.device, "tunvless"); }
 }
 
 static void set_status(slot_t *sl, firc_tun_status_t status)
@@ -262,9 +264,10 @@ static void schedule_backoff(slot_t *sl)
     if (firc_loop_add_timer(s->loop, (uint64_t)sl->st.backoff_s * (uint64_t)s->second_ms, 0, restart_cb, sl,
                             &sl->restart_timer) != FIRC_OK) {
         sl->restart_timer = 0;
-        FIRC_WARN("tunnel %s: cannot schedule a restart", sl->cfg.device);
+        firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "cannot schedule a restart");
     }
-    FIRC_WARN("tunnel %s: exited (%d), restart in %d s", sl->cfg.device, sl->st.last_exit, sl->st.backoff_s);
+    firc_logrep_fail(&sl->exits, FIRC_LOG_WARN, sl->cfg.device, "exited (%d), restart in %d s", sl->st.last_exit,
+                     sl->st.backoff_s);
     set_status(sl, FIRC_TUN_ST_BACKOFF);
 }
 
@@ -299,7 +302,7 @@ static void exit_one(slot_t *sl, int code)
         return;
     }
     if (code == 2) {
-        FIRC_WARN("tunnel %s: configuration refused, not restarted", sl->cfg.device);
+        firc_log_from(FIRC_LOG_ERROR, sl->cfg.device, "configuration refused, not restarted");
         set_status(sl, FIRC_TUN_ST_BAD_CONFIG);
         return;
     }
@@ -351,7 +354,7 @@ static void warn_bad_once(slot_t *sl)
 {
     if (!sl->warned_bad) {
         sl->warned_bad = true;
-        FIRC_WARN("tunnel %s: unreadable event from tunvless ignored", sl->cfg.device);
+        firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "unreadable event from tunvless ignored");
     }
 }
 
@@ -418,7 +421,7 @@ static void took(slot_t *sl, int count)
     sl->n_want--;
     if ((size_t)count != want && !sl->drift) {
         sl->drift = true;
-        FIRC_WARN("tunnel %s: tunvless took %d of %zu nodes, node states go by name until it restarts", sl->cfg.device,
+        firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "tunvless took %d of %zu nodes, node states go by name until it restarts",
                   count, want);
     }
 }
@@ -443,7 +446,7 @@ static void ack_cb(firc_loop_t *loop, void *ud)
     (void)loop;
     slot_t *sl = ud;
     sl->ack_timer = 0;
-    FIRC_WARN("tunnel %s: tunvless did not take the node list in %d s, restarting", sl->cfg.device, ACK_S);
+    firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "tunvless did not take the node list in %d s, restarting", ACK_S);
     restart_child(sl);
 }
 
@@ -482,7 +485,7 @@ static void on_out_line(const char *line, size_t len, void *ud)
         break;
     case FIRC_TEV_PINS_FULL:
         if (!sl->terminating) {
-            FIRC_WARN("tunnel %s: pin table full, restarting", sl->cfg.device);
+            firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "pin table full, restarting");
             restart_child(sl);
         }
         return;
@@ -517,10 +520,9 @@ static void on_out_line(const char *line, size_t len, void *ud)
 static void on_err_line(const char *line, size_t len, void *ud)
 {
     slot_t *sl = ud;
-    size_t wl = sizeof WARN_TAG - 1;
-    bool warn = len > wl && memcmp(line, WARN_TAG, wl) == 0 && (line[wl] == ':' || line[wl] == ' ');
-    firc_log_level_t level = warn ? FIRC_LOG_WARN : FIRC_LOG_INFO;
-    firc_log(level, "tunnel %s: %.*s", sl->cfg.device, (int)len, line);
+    size_t skip;
+    firc_log_level_t level = firc_tun_err_level(line, len, &skip);
+    firc_log_from(level, sl->cfg.device, "%.*s", (int)(len - skip), line + skip);
 }
 
 static void drain(slot_t *sl, int *fd, firc_tun_lines_t *lines, firc_tun_line_fn fn, bool *warned,
@@ -532,7 +534,7 @@ static void drain(slot_t *sl, int *fd, firc_tun_lines_t *lines, firc_tun_line_fn
         if (n > 0) {
             if (firc_tun_lines_feed(lines, buf, (size_t)n, fn, sl) > 0 && !*warned) {
                 *warned = true;
-                FIRC_WARN("tunnel %s: oversize %s line from tunvless dropped", sl->cfg.device, what);
+                firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "oversize %s line from tunvless dropped", what);
             }
             if (*fd < 0) {
                 return;
@@ -588,7 +590,7 @@ static void in_cb(firc_loop_t *loop, int fd, uint32_t events, void *ud)
         if (n < 0 && errno == EAGAIN) {
             return;
         }
-        FIRC_WARN("tunnel %s: node list not delivered: %s", sl->cfg.device, strerror(errno));
+        firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "node list not delivered: %s", strerror(errno));
         close_in(sl);
         if (sl->pid > 0) {
             kill(sl->pid, SIGTERM);
@@ -799,7 +801,7 @@ static void spawn(slot_t *sl)
     const firc_tunnel_t *t = &sl->cfg;
     sl->deferred = device_busy(sl);
     if (sl->deferred) {
-        FIRC_INFO("tunnel %s: waiting for the previous holder of the device to exit", t->device);
+        firc_log_from(FIRC_LOG_INFO, t->device, "waiting for the previous holder of the device to exit");
         sl->st.n_active = 0;
         set_status(sl, FIRC_TUN_ST_STARTING);
         return;
@@ -862,7 +864,7 @@ static void spawn(slot_t *sl)
         free(sl->in_buf);
         sl->in_buf = NULL;
         sl->pid = 0;
-        FIRC_WARN("tunnel %s: cannot start %s: %s", t->device, s->binary, strerror(rc));
+        firc_log_from(FIRC_LOG_WARN, t->device, "cannot start %s: %s", s->binary, strerror(rc));
         sl->st.last_exit = -1;
         schedule_backoff(sl);
         return;
@@ -873,7 +875,7 @@ static void spawn(slot_t *sl)
     if (firc_loop_add_fd(s->loop, sl->out_fd, EPOLLIN, out_cb, sl) != FIRC_OK ||
         firc_loop_add_fd(s->loop, sl->err_fd, EPOLLIN, err_cb, sl) != FIRC_OK ||
         firc_loop_add_fd(s->loop, sl->in_fd, EPOLLOUT, in_cb, sl) != FIRC_OK) {
-        FIRC_WARN("tunnel %s: cannot watch the child", t->device);
+        firc_log_from(FIRC_LOG_WARN, t->device, "cannot watch the child");
         kill(sl->pid, SIGKILL);
         int status = 0;
         while (waitpid(sl->pid, &status, 0) < 0 && errno == EINTR) {
@@ -1006,7 +1008,7 @@ static void retire(firc_tunsup_t *s, slot_t *sl)
 static void reconfigure(slot_t *sl, const firc_tunnel_t *t, uint32_t mark)
 {
     if (copy_cfg(&sl->cfg, t) != FIRC_OK) {
-        FIRC_WARN("tunnel %s: out of memory, left as it was", t->device);
+        firc_log_from(FIRC_LOG_WARN, t->device, "out of memory, left as it was");
         return;
     }
     sl->mark = mark;
@@ -1046,14 +1048,14 @@ static void update_nodes(slot_t *sl, const firc_tunnel_t *t, uint32_t mark)
         return;
     }
     if (copy_cfg(&sl->cfg, t) != FIRC_OK) {
-        FIRC_WARN("tunnel %s: out of memory, left as it was", t->device);
+        firc_log_from(FIRC_LOG_WARN, t->device, "out of memory, left as it was");
         return;
     }
     if (queue_nodes(sl)) {
         sl->update_seq = ++sl->s->seq;
         return;
     }
-    FIRC_WARN("tunnel %s: the new node list cannot be sent, restarting", t->device);
+    firc_log_from(FIRC_LOG_WARN, t->device, "the new node list cannot be sent, restarting");
     restart_child(sl);
 }
 

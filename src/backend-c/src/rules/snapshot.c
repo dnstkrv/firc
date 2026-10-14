@@ -15,18 +15,14 @@ static void group_snapshot_free(firc_group_snapshot_t *g)
     free(g);
 }
 
-/* A rule that will not compile is counted and WARNed once per group per rebuild, not per rule. */
 typedef struct entry_build {
     firc_group_snapshot_t *gs;
-    size_t broken;
-    const char *first_type, *first_rule;
 } entry_build_t;
 
 static firc_err_t entry_begin(entry_build_t *b, firc_id_t id, const char *name,
                               const firc_devsel_spec_t *devices)
 {
     memset(b, 0, sizeof(*b));
-    b->first_type = b->first_rule = "";
     firc_group_snapshot_t *gs = calloc(1, sizeof(*gs));
     if (gs == NULL) {
         return FIRC_ERR_NOMEM;
@@ -55,11 +51,6 @@ static firc_err_t entry_add(entry_build_t *b, const char *type, const char *rule
     firc_err_t add = borrow ? firc_matcher_add_borrowed(b->gs->matcher, type, rule)
                             : firc_matcher_add(b->gs->matcher, type, rule);
     if (add == FIRC_ERR_INVAL) {
-        if (b->broken == 0) {
-            b->first_type = type ? type : "";
-            b->first_rule = rule ? rule : "";
-        }
-        b->broken++;
         return FIRC_OK; /* the rest of the group still routes */
     }
     return add == FIRC_OK ? FIRC_OK : FIRC_ERR_NOMEM;
@@ -70,11 +61,6 @@ static void entry_end(entry_build_t *b, firc_ruleset_snapshot_t *snap, firc_err_
     if (err != FIRC_OK) {
         group_snapshot_free(b->gs);
         return;
-    }
-    if (b->broken > 0) {
-        FIRC_WARN("group \"%s\": %zu rule(s) do not compile and match nothing, the first being "
-                  "type \"%s\", rule \"%s\"",
-                  b->gs->name ? b->gs->name : "", b->broken, b->first_type, b->first_rule);
     }
     snap->groups[snap->n_groups++] = b->gs;
 }

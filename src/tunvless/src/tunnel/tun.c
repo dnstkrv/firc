@@ -188,18 +188,18 @@ int tun_open(struct tun_dev *d, int max_queues, const char *name) {
     /* No set of flags worked. Log why: the caller only gets a code. */
     if (g_open_stage == 1 && (g_open_errno == ENOENT || g_open_errno == ENXIO ||
                               g_open_errno == ENODEV)) {
-        fprintf(stderr, "tunvless[warn] tunnel: no %s (%s) — %s\n", TUN_DEV,
+        fprintf(stderr, "tunvless[error] tunnel: no %s (%s) — %s\n", TUN_DEV,
                 strerror(g_open_errno), TUN_HINT);
         return TUN_ENODEV;
     }
     if (g_open_stage == 3) {
-        fprintf(stderr, "tunvless[warn] tunnel: the kernel created the device under another name: "
+        fprintf(stderr, "tunvless[error] tunnel: the kernel created the device under another name: "
                 "asked for %s, got %s%s\n", name, g_open_got,
                 strlen(name) >= IFNAMSIZ
                     ? " — longer than the kernel's limit (IFNAMSIZ, 15 characters)" : "");
         return TUN_ESETUP;
     }
-    fprintf(stderr, "tunvless[warn] tunnel: device %s was not created: %s (%s%s)\n", name,
+    fprintf(stderr, "tunvless[error] tunnel: device %s was not created: %s (%s%s)\n", name,
             strerror(g_open_errno ? g_open_errno : EINVAL),
             g_open_stage == 1 ? "cannot open " : "TUNSETIFF failed",
             g_open_stage == 1 ? TUN_DEV : "");

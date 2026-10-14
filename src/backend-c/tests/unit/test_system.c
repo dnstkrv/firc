@@ -160,7 +160,6 @@ TEST the_events_route_answers_what_the_daemon_said(void) {
     harness_t *h = harness_start(false);
     ASSERT(h != NULL);
     firc_event_reset_for_test();
-    firc_log_set_level(FIRC_LOG_INFO);
     FIRC_INFO("a line the ui should see");
     FIRC_ERROR("and a \"quoted\" \\ one");
 
@@ -174,6 +173,7 @@ TEST the_events_route_answers_what_the_daemon_said(void) {
     ASSERT_STR_EQ("a line the ui should see",
                   cJSON_GetObjectItemCaseSensitive(first, "message")->valuestring);
     ASSERT_STR_EQ("info", cJSON_GetObjectItemCaseSensitive(first, "level")->valuestring);
+    ASSERT_STR_EQ("fircd", cJSON_GetObjectItemCaseSensitive(first, "source")->valuestring);
     ASSERTm("an event carries its time",
             cJSON_GetObjectItemCaseSensitive(first, "at")->valuedouble > 0);
     cJSON *second = cJSON_GetArrayItem(events, 1);
@@ -184,7 +184,7 @@ TEST the_events_route_answers_what_the_daemon_said(void) {
     ASSERTm("the cursor is the newest event",
             next == cJSON_GetObjectItemCaseSensitive(second, "seq")->valuedouble);
     ASSERT_EQ_FMT(0.0, cJSON_GetObjectItemCaseSensitive(out, "dropped")->valuedouble, "%f");
-    ASSERT_STR_EQ("info", cJSON_GetObjectItemCaseSensitive(out, "level")->valuestring);
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(out, "level"));
     cJSON *boot = cJSON_GetObjectItemCaseSensitive(out, "boot");
     ASSERTm("the answer names the run", cJSON_IsString(boot) && boot->valuestring[0] != '\0');
     char boot_was[64];
@@ -202,6 +202,49 @@ TEST the_events_route_answers_what_the_daemon_said(void) {
     ASSERT_EQ(400, do_request("GET", "/api/v1/system/events?since=yesterday", NULL, &out));
     cJSON_Delete(out);
     ASSERT_EQm("the old route is gone", 404, do_request("GET", "/api/v1/system/log", NULL, &out));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a level the events route names other than the four names the WebUI ranks, or a level the daemon does not record. */
+TEST each_level_has_its_name_in_the_events(void) {
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    firc_event_reset_for_test();
+    FIRC_DEBUG("d");
+    FIRC_INFO("i");
+    FIRC_WARN("w");
+    FIRC_ERROR("e");
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/events", NULL, &out));
+    cJSON *events = cJSON_GetObjectItemCaseSensitive(out, "events");
+    ASSERT_EQ_FMT(4, cJSON_GetArraySize(events), "%d");
+    static const char *const names[] = {"debug", "info", "warn", "error"};
+    for (int i = 0; i < 4; i++) {
+        cJSON *lv = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(events, i), "level");
+        ASSERT(cJSON_IsString(lv));
+        ASSERT_STR_EQ(names[i], lv->valuestring);
+    }
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a tunnel line answered as fircd's, or with the device left in its message. */
+TEST a_tunnel_line_names_its_device_as_the_source(void) {
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    firc_event_reset_for_test();
+    firc_log_from(FIRC_LOG_ERROR, "tunvless1", "no usable VLESS node");
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/events", NULL, &out));
+    cJSON *e = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(out, "events"), 0);
+    ASSERT(e != NULL);
+    ASSERT_STR_EQ("log", cJSON_GetObjectItemCaseSensitive(e, "kind")->valuestring);
+    ASSERT_STR_EQ("tunvless1", cJSON_GetObjectItemCaseSensitive(e, "source")->valuestring);
+    ASSERT_STR_EQ("no usable VLESS node", cJSON_GetObjectItemCaseSensitive(e, "message")->valuestring);
+    ASSERT_STR_EQ("error", cJSON_GetObjectItemCaseSensitive(e, "level")->valuestring);
     cJSON_Delete(out);
     harness_stop(h);
     PASS();
@@ -750,6 +793,8 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(the_events_route_answers_what_the_daemon_said);
+    RUN_TEST(each_level_has_its_name_in_the_events);
+    RUN_TEST(a_tunnel_line_names_its_device_as_the_source);
     RUN_TEST(the_resolvers_route_answers_a_list);
     RUN_TEST(list_interfaces_includes_blackhole_first);
     RUN_TEST(a_tunnel_device_is_named_by_its_description);

@@ -380,7 +380,7 @@ int tr_venc_open(struct transport *t, const struct tr_node *node, int timeout_s)
     unsigned char t_pfs[64], t_tk[16];
     const int zrtt = c.zero_rtt && tk_get(e->tk_id, t_pfs, t_tk);
     if (getenv("STEER_VENC_TRACE"))
-        fprintf(stderr, "tunvless[venc]: %s, mode %s, %u keys, cipher %s\n",
+        fprintf(stderr, "tunvless[debug] venc: %s, mode %s, %u keys, cipher %s\n",
                 zrtt ? "0-RTT with ticket" : "full handshake",
                 c.xor_mode == 2 ? "random" : c.xor_mode == 1 ? "xorpub" : "native", c.nkeys,
                 e->use_aes ? "AES-256-GCM" : "ChaCha20-Poly1305");

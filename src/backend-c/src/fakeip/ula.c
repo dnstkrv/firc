@@ -139,7 +139,7 @@ firc_err_t firc_fakeip_ula_load(const char *path, firc_ip_t *base_out, uint8_t *
 
         bool replacing = state == PREFIX_BAD;
         if (replacing && !shouted) {
-            FIRC_ERROR("unusable IPv6 pool prefix in %s: generating a new one, "
+            FIRC_WARN("unusable IPv6 pool prefix in %s: generating a new one, "
                        "clients holding a fake IPv6 address will lose it",
                        path);
             shouted = true;

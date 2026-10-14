@@ -421,8 +421,7 @@ TEST the_same_body_is_not_parsed_twice(void) {
     ASSERT_EQ(FIRC_OK, add_list_group(h->app, sub));
     firc_id_t id = sub->id;
 
-    firc_log_level_t was = firc_log_level();
-    firc_log_set_level(FIRC_LOG_DEBUG);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     firc_event_reset_for_test();
 
     bool changed = false;
@@ -459,7 +458,7 @@ TEST the_same_body_is_not_parsed_twice(void) {
     ASSERT_FALSE(changed);
     ASSERT(ring_says("not parsed"));
 
-    firc_log_set_level(was);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     harness_stop(h);
     PASS();
 }
@@ -473,8 +472,7 @@ TEST the_scheduled_check_does_not_parse_the_same_bytes_either(void) {
     ASSERT_EQ(FIRC_OK, add_list_group(h->app, sub));
     firc_id_t id = sub->id;
 
-    firc_log_level_t was = firc_log_level();
-    firc_log_set_level(FIRC_LOG_DEBUG);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     firc_event_reset_for_test();
 
     sweep_call_t s = {.now = base, .n = 1, .ids = {id}};
@@ -496,7 +494,7 @@ TEST the_scheduled_check_does_not_parse_the_same_bytes_either(void) {
     ASSERT_EQ(2u, v.rules_n);
     ASSERT(v.last_check >= (uint32_t)base);
 
-    firc_log_set_level(was);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     harness_stop(h);
     PASS();
 }
@@ -1425,7 +1423,7 @@ TEST a_result_the_loop_never_read_gives_its_rules_back(void) {
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     firc_sub_fetch_global_init();
     GREATEST_MAIN_BEGIN();
     GREATEST_SET_TEARDOWN_CB(stop_open_harness, NULL);

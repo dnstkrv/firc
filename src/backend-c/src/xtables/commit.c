@@ -8,6 +8,7 @@
 
 #include "firc/atomic_write.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 struct firc_xt {
     firc_ipt_proto_t fam;
@@ -15,7 +16,7 @@ struct firc_xt {
     void *ud;
     uint32_t missing;
     uint8_t mac_rev;
-    bool failing[4];
+    firc_logrep_t failing[4];
     firc_xt_info_t left[4];
     char *dump_dir;
     int refusal;
@@ -98,13 +99,7 @@ static firc_err_t failed(firc_xt_t *xt, const char *table, firc_err_t err, const
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    bool *run = &xt->failing[table_slot(table)];
-    if (!*run) {
-        FIRC_WARN("%s", msg);
-        *run = true;
-    } else {
-        FIRC_DEBUG("%s", msg);
-    }
+    firc_logrep_fail(&xt->failing[table_slot(table)], FIRC_LOG_WARN, NULL, "%s", msg);
     return err;
 }
 
@@ -159,7 +154,7 @@ firc_err_t firc_xt_probe(firc_xt_t *xt) {
 firc_err_t firc_xt_probe_capture(firc_xt_t *xt) { return probe_set(xt, true); }
 
 static void dump_refused(const firc_xt_t *xt, const char *table, const firc_xt_info_t *info, const uint8_t *blob) {
-    if (xt->dump_dir == NULL || firc_log_level() > FIRC_LOG_DEBUG) { return; }
+    if (xt->dump_dir == NULL) { return; }
     char path[512];
     int n = snprintf(path, sizeof(path), "%s/refused-%s-%s.bin", xt->dump_dir, fam_name(xt), table);
     if (n < 0 || (size_t)n >= sizeof(path)) { return; }
@@ -271,7 +266,7 @@ static firc_err_t commit_table(firc_xt_t *xt, const char *table, const firc_xt_s
                    "compare %llu us",
                    fam, table, us(tm.t0, tm.read), us(tm.read, tm.parse), us(tm.parse, tm.merge),
                    us(tm.merge, tm.serialise), us(tm.serialise, tm.compare));
-        xt->failing[table_slot(table)] = false;
+        (void)firc_logrep_ok(&xt->failing[table_slot(table)], NULL, "x_tables %s %s", fam, table);
         xt->left[table_slot(table)] = info;
         return FIRC_OK;
     }
@@ -332,7 +327,7 @@ static firc_err_t write_locked(firc_xt_t *xt, const char *table, const firc_xt_i
                fam, table, us(tm->t0, tm->read), us(tm->read, tm->parse), us(tm->parse, tm->merge),
                us(tm->merge, tm->serialise), us(tm->serialise, tm->compare), us(tm->compare, t3), us(t3, t4),
                ni.num_entries, ni.size);
-    xt->failing[table_slot(table)] = false;
+    (void)firc_logrep_ok(&xt->failing[table_slot(table)], NULL, "x_tables %s %s", fam, table);
     return FIRC_OK;
 }
 

@@ -53,6 +53,8 @@
 
 #define PL_LOG_W "tunvless[warn]: "
 #define PL_LOG_I "tunvless[info]: "
+#define PL_LOG_E "tunvless[error]: "
+#define PL_LOG_D "tunvless[debug]: "
 
 #define PL_CONFIRM_S   3
 #define PL_RETRY_S     15
@@ -302,7 +304,7 @@ static int pl_refill(int i, int own) {
         int n = g_pl.n;
         pthread_mutex_unlock(&g_pl.mu);
         if (prev >= 0)
-            fprintf(stderr, PL_LOG_W "node %s does not answer — %s takes its place\n",
+            fprintf(stderr, PL_LOG_D "node %s does not answer — %s takes its place\n",
                     g_pl.cf.proto->name(pl_node(prev)), g_pl.cf.proto->name(pl_node(c)));
         else
             fprintf(stderr, PL_LOG_I "active node %d of %d: %s\n", i + 1, n,
@@ -373,7 +375,7 @@ static void pl_check(int i) {
     if (!unproven) sl->retry = PL_RETRY_S;
     pthread_mutex_unlock(&g_pl.mu);
     snprintf(g_pl.why, sizeof g_pl.why, "%s", why);
-    fprintf(stderr, PL_LOG_W "node %s does not answer: %s — looking for a replacement\n",
+    fprintf(stderr, PL_LOG_D "node %s does not answer: %s — looking for a replacement\n",
             g_pl.cf.proto->name(pl_node(node)), why);
     ctl_emit_node_down(g_pl.cf.proto->name(pl_node(node)), node, why);
     stack_nodes_changed();
@@ -666,7 +668,7 @@ static const struct dialer *pool_setup(const struct pool_cfg *pc) {
     g_pl.slot = calloc((size_t)g_pl.cf.active, sizeof *g_pl.slot);
     if (!g_pl.slot || !sel) {
         free(sel);
-        fprintf(stderr, PL_LOG_W "out of memory for node slots\n");
+        fprintf(stderr, PL_LOG_E "out of memory for node slots\n");
         return NULL;
     }
     sel->old = g_pl.sel;

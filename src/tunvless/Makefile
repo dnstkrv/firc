@@ -80,7 +80,7 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch dialmatch ratelogmatch
 CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch
 
 test: unit-test crypto-test
@@ -158,6 +158,14 @@ $(T)/ctlmatch: tests/ctlmatch.c src/control.c src/control.h
 $(T)/nodesmatch: tests/nodesmatch.c src/tunnel/nodes.c src/proto/transport/trdial.c $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/nodesmatch.c src/tunnel/nodes.c -lpthread
+
+$(T)/ratelogmatch: tests/ratelogmatch.c src/lib/ratelog.h
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/ratelogmatch.c
+
+$(T)/dialmatch: tests/dialmatch.c src/proto/transport/trdial.c $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/dialmatch.c -lpthread
 
 CTLN_SRC := src/ctlnodes.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
             src/proto/vless/vless_proto.c $(SUB_SRC)

@@ -18,6 +18,7 @@
 #include "firc/listen.h"
 #include "firc/anscache.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/resolver_addr.h"
 #include "pktinfo.h"
 
@@ -90,6 +91,9 @@ struct firc_dnsproxy {
     _Atomic uint64_t dropped;
     uint64_t drop_warn_ms;
     uint64_t drop_warn_base;
+    firc_logrep_t mark_refused;
+    firc_logrep_t silent;
+    uint64_t misses;
     bool drop_warned;
 
     struct exchange *held_head;
@@ -269,6 +273,35 @@ static uint64_t mono_ms(void)
 }
 
 #define DROP_WARN_INTERVAL_MS 10000u
+
+#define SILENT_RUN 8u
+#define SILENT_ERROR_AFTER_MS 60000u
+
+static bool common_leg_open(const exchange_t *ex)
+{
+    return ex->upstream_fd >= 0 && !ex->upstream_tunnel;
+}
+
+static void upstream_missed(firc_dnsproxy_t *p)
+{
+    if (++p->misses < SILENT_RUN) { return; }
+    firc_logrep_fail_for_quiet(&p->silent, SILENT_ERROR_AFTER_MS, NULL,
+                         "the common upstream does not answer: %llu queries in a row went unanswered",
+                         (unsigned long long)p->misses);
+}
+
+static void upstream_answered(firc_dnsproxy_t *p)
+{
+    p->misses = 0;
+    (void)firc_logrep_ok(&p->silent, NULL, "the common upstream");
+}
+
+static void mark_refused(firc_dnsproxy_t *p)
+{
+    firc_logrep_fail_for_quiet(&p->mark_refused, UINT64_MAX, NULL,
+                               "group resolver: SO_MARK refused (%s); the group's names go to the common upstream",
+                               strerror(errno));
+}
 
 static void note_drop(firc_dnsproxy_t *p)
 {
@@ -582,10 +615,7 @@ static void udp_reply(firc_dnsproxy_t *p, exchange_t *ex, const uint8_t *data,
         msg.msg_control = &cbuf;
         msg.msg_controllen = firc_pktinfo_write(&ex->dst, &cbuf);
     }
-    ssize_t rc = sendmsg(p->udp_fd, &msg, 0);
-    if (rc < 0) {
-        FIRC_DEBUG("udp reply failed: %s", strerror(errno));
-    }
+    (void)sendmsg(p->udp_fd, &msg, 0);
 }
 
 static void exchange_send(exchange_t *ex, const uint8_t *out, size_t out_len)
@@ -676,7 +706,6 @@ static void on_hold_deadline(firc_loop_t *loop, void *ud)
     (void)loop;
     exchange_t *ex = ud;
     ex->timer_id = 0; /* already fired */
-    FIRC_DEBUG("held answer released at the deadline");
     held_send(ex);
 }
 
@@ -796,8 +825,6 @@ static bool question_matches(const exchange_t *ex, const firc_dns_msg_t *msg)
 /* UDP: ignore it and keep waiting (late duplicate, spoof); TCP or a cache hit: an unusable answer. */
 static void stray_answer(exchange_t *ex)
 {
-    FIRC_DEBUG("upstream message does not answer the query: %s",
-               ex->is_tcp ? "leg failed" : "ignored");
     if (ex->is_tcp || ex->resolver == FIRC_DNS_RESOLVER_CACHE) { leg_failed(ex, FIRC_DNS_RESOLVER_FALLBACK_SERVFAIL); }
 }
 
@@ -938,6 +965,8 @@ static void deliver_response(exchange_t *ex, const uint8_t *resp, size_t resp_le
         tunnel_pool_t *t = tpool_find(p, &ex->route, ex->server);
         if (t == NULL || t->epoch != ex->tpool_epoch) { ex->cacheable = false; }
         tunnel_won(ex, msg, resp, resp_len);
+    } else if (common_leg_open(ex)) {
+        upstream_answered(p);
     }
     deliver_parsed(ex, msg, resp, resp_len);
 }
@@ -947,7 +976,6 @@ static void on_timeout(firc_loop_t *loop, void *ud)
     (void)loop;
     exchange_t *ex = ud;
     ex->timer_id = 0; /* already fired */
-    FIRC_DEBUG("upstream deadline exceeded");
     leg_failed(ex, FIRC_DNS_RESOLVER_FALLBACK_TIMEOUT);
 }
 
@@ -1132,10 +1160,11 @@ static bool leg_open(firc_dnsproxy_t *p, exchange_t *ex, leg_t *leg)
         fd = p->ops.open(p->ops.ud, rt->servers[leg->server].ss_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (fd < 0) { return false; }
         if (p->ops.set_mark(p->ops.ud, fd, rt->mark) != 0) {
-            FIRC_DEBUG("group resolver: SO_MARK refused: %s", strerror(errno));
+            mark_refused(p);
             close(fd);
             return false;
         }
+        (void)firc_logrep_ok(&p->mark_refused, NULL, "group resolver: SO_MARK");
         if (p->ops.connect(p->ops.ud, fd, (const struct sockaddr *)&rt->servers[leg->server],
                            rt->server_lens[leg->server]) != 0) {
             close(fd);
@@ -1159,7 +1188,6 @@ static void on_retry(firc_loop_t *loop, void *ud)
     ex->retry_timer_id = 0;
     leg_t *leg = &ex->legs[0];
     if (ex->n_legs != 1 || leg->done || leg->fd < 0) { return; }
-    FIRC_DEBUG("group resolver: no answer yet, asking once more");
     ssize_t n = ex->p->ops.send(ex->p->ops.ud, leg->fd, ex->req, ex->req_len, MSG_NOSIGNAL);
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         leg_fail(leg, FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE, false);
@@ -1238,12 +1266,12 @@ static void tunnel_failed(exchange_t *ex, firc_dns_resolver_t why)
     health_failure(p, ex);
     health_fallback_counted(p, ex->route.group_id);
     ex->resolver = (uint8_t)why;
-    FIRC_DEBUG("group resolver failed (%d), asking the common upstream", (int)why);
     start_upstream(p, ex);
 }
 
 static void leg_failed(exchange_t *ex, firc_dns_resolver_t why)
 {
+    if (common_leg_open(ex)) { upstream_missed(ex->p); }
     if (!ex->tunnel) {
         exchange_finish(ex, false);
         return;
@@ -1309,10 +1337,11 @@ static void start_upstream(firc_dnsproxy_t *p, exchange_t *ex)
     if (fresh) {
         /* SO_MARK before connect: the route is chosen at connect. */
         if (ex->tunnel && p->ops.set_mark(p->ops.ud, fd, ex->route.mark) != 0) {
-            FIRC_DEBUG("group resolver: SO_MARK refused: %s", strerror(errno));
+            mark_refused(p);
             leg_failed(ex, FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE);
             return;
         }
+        if (ex->tunnel) { (void)firc_logrep_ok(&p->mark_refused, NULL, "group resolver: SO_MARK"); }
         int rc = p->ops.connect(p->ops.ud, fd, dst, dst_len);
         if (rc < 0 && !(ex->is_tcp && errno == EINPROGRESS)) {
             leg_failed(ex, FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE);
@@ -1586,7 +1615,6 @@ static void on_tcp_read_deadline(firc_loop_t *loop, void *ud)
     (void)loop;
     exchange_t *ex = ud;
     ex->timer_id = 0; /* already fired */
-    FIRC_DEBUG("tcp client did not finish its request in time");
     exchange_finish(ex, false);
 }
 

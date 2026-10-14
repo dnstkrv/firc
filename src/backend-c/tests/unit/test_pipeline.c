@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include "firc/log.h"
+#include "firc/logrep.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -975,7 +976,7 @@ TEST an_unresolved_name_is_not_logged_as_a_problem(void) {
 
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     (void)firc_dns_pipeline_handle_message(f.p, msg, 1000, NULL, NULL);
     firc_log_set_fd(STDOUT_FILENO);
@@ -999,7 +1000,7 @@ static size_t rcodes_through(rw_fixture_t *f, const uint8_t *rcodes, size_t n, c
     static const char *q[] = {"www", "example", "com"};
     int fds[2];
     if (pipe(fds) != 0) { return (size_t)-1; }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     for (size_t i = 0; i < n; i++) {
         uint8_t buf[512];
@@ -1074,7 +1075,139 @@ TEST one_good_answer_in_a_dead_minute_is_not_a_recovery(void) {
     PASS();
 }
 
-/* Catches: an upstream that SERVFAILs everything logged on every response, or never. */
+static uint64_t g_rep_ms = 1000;
+static uint64_t rep_clock(void) { return g_rep_ms; }
+
+static size_t answers_from(rw_fixture_t *f, uint8_t rcode, size_t n, firc_dns_resolver_t resolver, char *out,
+                           size_t cap) {
+    static const char *q[] = {"www", "example", "com"};
+    int fds[2];
+    if (pipe(fds) != 0) { return (size_t)-1; }
+    firc_log_set_output_floor(FIRC_LOG_INFO);
+    firc_log_set_fd(fds[1]);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t buf[512];
+        size_t len = build_response(buf, q, 3, NULL, 0);
+        buf[3] = (uint8_t)(0x80u | rcode);
+        firc_dns_msg_t *msg = NULL;
+        if (firc_dns_msg_parse(buf, len, &msg) != FIRC_OK) { continue; }
+        (void)firc_dns_pipeline_handle_message_from(f->p, msg, 1000, NULL, resolver, NULL);
+        firc_dns_msg_free(msg);
+    }
+    firc_log_set_fd(STDOUT_FILENO);
+    close(fds[1]);
+    ssize_t got = read(fds[0], out, cap - 1);
+    close(fds[0]);
+    out[got > 0 ? got : 0] = '\0';
+    return (size_t)(got > 0 ? got : 0);
+}
+
+static size_t journal_lines(firc_log_level_t level, const char *needle) {
+    static firc_event_t ev[1024];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 1024, &next, &dropped), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strstr(ev[i].u.log.text, needle) != NULL) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: one name that always fails among good answers raised to an ERROR the operator cannot act on, or a DEBUG line per failing response. */
+TEST a_failing_name_among_good_answers_is_no_error(void) {
+    rw_fixture_t f;
+    rw_up(&f, 64);
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    static char out[4096];
+    for (int round = 0; round < 20; round++) {
+        (void)answers_from(&f, 2, 1, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+        (void)answers_from(&f, 0, 7, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+        g_rep_ms += 6000;
+    }
+    firc_logrep_set_clock_for_test(NULL);
+    rw_down(&f);
+    ASSERT_EQ_FMT((size_t)0, journal_lines(FIRC_LOG_ERROR, "upstream is answering rcode="), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_lines(FIRC_LOG_WARN, "upstream is answering rcode="), "%zu");
+    ASSERT_EQ_FMT((size_t)0, journal_lines(FIRC_LOG_DEBUG, "upstream is answering rcode="), "%zu");
+    PASS();
+}
+
+/* Catches: one good answer early in a run keeping a later total outage at WARN for good, or the ERROR before a minute without a good answer. */
+TEST an_outage_after_a_failing_name_errs_a_minute_after_the_last_good_answer(void) {
+    rw_fixture_t f;
+    rw_up(&f, 64);
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_event_reset_for_test();
+    static char out[4096];
+    for (int round = 0; round < 20; round++) {
+        (void)answers_from(&f, 2, 1, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+        (void)answers_from(&f, 0, 7, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+        g_rep_ms += 6000;
+    }
+    uint64_t last_good = g_rep_ms - 6000;
+    g_rep_ms = last_good + 59999;
+    (void)answers_from(&f, 2, 1, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+    size_t early = journal_lines(FIRC_LOG_ERROR, "upstream is answering rcode=");
+    g_rep_ms = last_good + 60000;
+    (void)answers_from(&f, 2, 1, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+    firc_logrep_set_clock_for_test(NULL);
+    rw_down(&f);
+    ASSERT_EQ_FMTm("not before a minute without a good answer", (size_t)0, early, "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_lines(FIRC_LOG_ERROR, "upstream is answering rcode="), "%zu");
+    PASS();
+}
+
+/* Catches: group-resolver or cached answers counted in the common upstream's refusal run, so they end it before its minute. */
+TEST group_and_cached_answers_do_not_end_an_upstream_outage(void) {
+    rw_fixture_t f;
+    rw_up(&f, 64);
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    static char out[4096];
+    (void)answers_from(&f, 5, 8, FIRC_DNS_RESOLVER_UPSTREAM, out, sizeof(out));
+    ASSERT(strstr(out, " WRN upstream is answering rcode=5") != NULL);
+    (void)answers_from(&f, 0, 8, FIRC_DNS_RESOLVER_GROUP, out, sizeof(out));
+    (void)answers_from(&f, 0, 8, FIRC_DNS_RESOLVER_CACHE, out, sizeof(out));
+    ASSERTm(out, strstr(out, "answering again") == NULL);
+    g_rep_ms += 60000;
+    (void)answers_from(&f, 5, 1, FIRC_DNS_RESOLVER_FALLBACK_TIMEOUT, out, sizeof(out));
+    firc_logrep_set_clock_for_test(NULL);
+    rw_down(&f);
+    ASSERTm(out, strstr(out, " ERR upstream is answering rcode=5") != NULL);
+    PASS();
+}
+
+/* Catches: an upstream refusing everything for a minute never raised to ERROR, raised before the minute, or raised again at once. */
+TEST an_upstream_refusing_for_a_minute_is_an_error(void) {
+    rw_fixture_t f;
+    rw_up(&f, 64);
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    char out[4096];
+    uint8_t run[8];
+    for (size_t i = 0; i < sizeof(run); i++) { run[i] = 5; }
+    size_t lines = rcodes_through(&f, run, sizeof(run), out, sizeof(out));
+    ASSERT(strstr(out, " WRN upstream is answering rcode=5") != NULL);
+    g_rep_ms += 59999;
+    uint8_t one[1] = {5};
+    lines = rcodes_through(&f, one, 1, out, sizeof(out));
+    ASSERT_EQ_FMTm("not before a minute", (size_t)0, lines, "%zu");
+    g_rep_ms += 1;
+    lines = rcodes_through(&f, one, 1, out, sizeof(out));
+    ASSERT_EQ_FMT((size_t)1, lines, "%zu");
+    ASSERTm(out, strstr(out, " ERR upstream is answering rcode=5") != NULL);
+    lines = rcodes_through(&f, one, 1, out, sizeof(out));
+    ASSERT_EQ_FMTm("once", (size_t)0, lines, "%zu");
+    firc_logrep_set_clock_for_test(NULL);
+    rw_down(&f);
+    PASS();
+}
+
+/* Catches: an upstream that SERVFAILs everything logged on every response, or never, or its end said as a warning instead of a recovery. */
 TEST an_upstream_answering_servfail_to_everything_is_said_once(void) {
     rw_fixture_t f;
     rw_up(&f, 64);
@@ -1087,8 +1220,8 @@ TEST an_upstream_answering_servfail_to_everything_is_said_once(void) {
     ASSERT(lines != (size_t)-1);
     ASSERT_EQ_FMTm("one line when it starts, one when it ends -- not forty", (size_t)2, lines,
                    "%zu");
-    ASSERTm("the start names the rcode", strstr(out, "rcode=2") != NULL);
-    ASSERTm("the end carries the count", strstr(out, "40 failed") != NULL);
+    ASSERTm("the start names the rcode", strstr(out, " WRN upstream is answering rcode=2") != NULL);
+    ASSERTm("the end carries the count", strstr(out, " INF upstream is answering again, after 40 failed") != NULL);
 
     uint8_t again[10];
     for (size_t i = 0; i < sizeof(again); i++) { again[i] = 2; }
@@ -1111,7 +1244,7 @@ TEST a_run_of_nxdomain_is_still_not_a_problem(void) {
     static const char *q[] = {"nx", "example", "com"};
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     for (int i = 0; i < 40; i++) {
         uint8_t buf[512];
@@ -1363,6 +1496,28 @@ TEST a_failed_answer_is_journalled_with_its_rcode(void) {
     ASSERT_STR_EQm("the name matched a group, and the event says which", "g",
                    ev[0].u.dns.group_name);
     firc_dns_msg_free(msg);
+    rw_down(&f);
+    PASS();
+}
+
+/* Catches: a log line written per answer beside the answer's own event. */
+TEST an_answer_is_journalled_as_its_event_only(void) {
+    firc_event_reset_for_test();
+    rw_fixture_t f;
+    rw_up(&f, 64);
+    firc_ip_t client = {{192, 168, 1, 42}, 4};
+    static const char *nx[] = {"nx", "example", "com"};
+    static const char *ya[] = {"ya", "ru"};
+    firc_dns_msg_t *msg = plain_answer(nx, 3, 3);
+    (void)firc_dns_pipeline_handle_message(f.p, msg, 1000, &client, NULL);
+    firc_dns_msg_free(msg);
+    msg = plain_answer(ya, 2, 2);
+    (void)firc_dns_pipeline_handle_message(f.p, msg, 1001, NULL, NULL);
+    firc_dns_msg_free(msg);
+    firc_event_t all[8], ev[8];
+    size_t n = journal(all, 8);
+    ASSERT_EQ_FMT((size_t)1, dns_events(all, n, ev), "%zu");
+    ASSERT_EQ_FMT((size_t)1, n, "%zu");
     rw_down(&f);
     PASS();
 }
@@ -1877,6 +2032,10 @@ int main(int argc, char **argv)
     RUN_TEST(an_upstream_alternating_failures_is_one_outage);
     RUN_TEST(one_good_answer_in_a_dead_minute_is_not_a_recovery);
     RUN_TEST(an_upstream_answering_servfail_to_everything_is_said_once);
+    RUN_TEST(an_upstream_refusing_for_a_minute_is_an_error);
+    RUN_TEST(group_and_cached_answers_do_not_end_an_upstream_outage);
+    RUN_TEST(a_failing_name_among_good_answers_is_no_error);
+    RUN_TEST(an_outage_after_a_failing_name_errs_a_minute_after_the_last_good_answer);
     RUN_TEST(a_run_of_nxdomain_is_still_not_a_problem);
     RUN_TEST(a_failed_response_is_ignored);
     RUN_TEST(an_unresolved_name_is_not_logged_as_a_problem);
@@ -1886,6 +2045,7 @@ int main(int argc, char **argv)
     RUN_TEST(the_journal_says_where_the_answer_came_from);
     RUN_TEST(an_unmatched_name_from_a_covered_client_is_journalled);
     RUN_TEST(a_failed_answer_is_journalled_with_its_rcode);
+    RUN_TEST(an_answer_is_journalled_as_its_event_only);
     RUN_TEST(a_failed_answer_names_a_group_only_for_a_client_it_covers);
     RUN_TEST(coverage_decides_who_is_journalled);
     RUN_TEST(a_refused_issue_is_journalled_as_refused);

@@ -206,7 +206,7 @@ static void preview_done(firc_loop_t *loop, void *ud) {
     p->joined = true;
     preview_unlink(p->ctx, p);
     if (p->fetch_err != FIRC_OK && p->fetch_err != FIRC_ERR_CANCELED) {
-        FIRC_ERROR("failed to fetch a list to preview: %s", firc_err_str(p->fetch_err));
+        FIRC_WARN("failed to fetch a list to preview: %s", firc_err_str(p->fetch_err));
     }
     if (p->pending != NULL) {
         firc_http_deferred_finish(p->pending, p->status, "application/json; charset=utf-8", p->body,

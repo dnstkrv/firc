@@ -37,6 +37,15 @@
   --font-mono: Monaco, monospace;
 
   --accent: #42bdf9;
+
+  --lv-debug: #5d6072;
+  --lv-info: #2f7fa8;
+  --lv-warn: #d98a2b;
+  --lv-error: #d9534c;
+  --src-fircd: #8fb3cc;
+  --src-tun: #a99cc9;
+  --src-dns: #83b3a2;
+  --src-bypass: #c49aae;
   --shadow-popover: 0px 0px 10px 1px var(--bg-dark-extra);
 }
 

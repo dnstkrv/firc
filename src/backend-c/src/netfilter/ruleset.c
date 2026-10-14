@@ -213,6 +213,10 @@ firc_err_t firc_ruleset_on_link_up(firc_ruleset_t *rs) {
     return firc_ipset_to_link_on_link_up(rs->ipset_to_link);
 }
 
+void firc_ruleset_remind_link(firc_ruleset_t *rs) {
+    if (rs->enabled && configured_enabled(rs) && rs->ipset_to_link) { firc_ipset_to_link_remind(rs->ipset_to_link); }
+}
+
 firc_err_t firc_ruleset_on_addr_change(firc_ruleset_t *rs) {
     if (!rs->enabled) { return FIRC_OK; }
     if (!configured_enabled(rs)) { return FIRC_OK; }
@@ -228,17 +232,9 @@ typedef struct subnets {
 } subnets_t;
 
 /* An unusable proto/ports is skipped, never written as a match-all rule. */
-static bool subnet_match_fill(const char *what, const char *proto_s, const char *ports_s, uint8_t *proto,
-                              char *ports, size_t cap, bool warn) {
-    if (!firc_rule_parse_proto(proto_s, proto)) {
-        if (warn) { FIRC_WARN("subnet rule \"%s\" has proto \"%s\" and routes nothing", what, proto_s); }
-        return false;
-    }
-    if (!firc_rule_parse_ports(ports_s, ports, cap) || (*proto == 0 && ports[0] != '\0')) {
-        if (warn) { FIRC_WARN("subnet rule \"%s\" has ports \"%s\" and routes nothing", what, ports_s); }
-        return false;
-    }
-    return true;
+static bool subnet_match_fill(const char *proto_s, const char *ports_s, uint8_t *proto, char *ports, size_t cap) {
+    if (!firc_rule_parse_proto(proto_s, proto)) { return false; }
+    return firc_rule_parse_ports(ports_s, ports, cap) && (*proto != 0 || ports[0] == '\0');
 }
 
 static firc_err_t append_v4(subnets_t *out, const firc_ipv4_subnet_t *subnet) {
@@ -264,24 +260,16 @@ static firc_err_t subnets_collect(const firc_group_t *g, subnets_t *out) {
         if (!rule->enable) { continue; }
         if (strcmp(rule->type, FIRC_RULE_SUBNET) == 0) {
             firc_ipv4_subnet_t subnet;
-            if (!firc_rule_parse_subnet4(rule->rule, &subnet)) {
-                FIRC_WARN("subnet rule \"%s\" is not a prefix and routes nothing", rule->rule);
-                continue;
-            }
-            if (!subnet_match_fill(rule->rule, rule->proto, rule->ports, &subnet.proto, subnet.ports,
-                                   sizeof(subnet.ports), true)) {
+            if (!firc_rule_parse_subnet4(rule->rule, &subnet) ||
+                !subnet_match_fill(rule->proto, rule->ports, &subnet.proto, subnet.ports, sizeof(subnet.ports))) {
                 continue;
             }
             firc_err_t err = append_v4(out, &subnet);
             if (err != FIRC_OK) { return err; }
         } else if (strcmp(rule->type, FIRC_RULE_SUBNET6) == 0) {
             firc_ipv6_subnet_t subnet;
-            if (!firc_rule_parse_subnet6(rule->rule, &subnet)) {
-                FIRC_WARN("subnet6 rule \"%s\" is not a prefix and routes nothing", rule->rule);
-                continue;
-            }
-            if (!subnet_match_fill(rule->rule, rule->proto, rule->ports, &subnet.proto, subnet.ports,
-                                   sizeof(subnet.ports), true)) {
+            if (!firc_rule_parse_subnet6(rule->rule, &subnet) ||
+                !subnet_match_fill(rule->proto, rule->ports, &subnet.proto, subnet.ports, sizeof(subnet.ports))) {
                 continue;
             }
             firc_err_t err = append_v6(out, &subnet);
@@ -296,18 +284,18 @@ static firc_err_t subnets_collect(const firc_group_t *g, subnets_t *out) {
         const char *text = firc_sub_rules_text(lr, i);
         if (strcmp(type, FIRC_RULE_SUBNET) == 0) {
             firc_ipv4_subnet_t subnet;
-            if (!firc_rule_parse_subnet4(text, &subnet)) { continue; }
-            if (!subnet_match_fill(text, firc_sub_rules_proto(lr, i), firc_sub_rules_ports(lr, i), &subnet.proto,
-                                   subnet.ports, sizeof(subnet.ports), false)) {
+            if (!firc_rule_parse_subnet4(text, &subnet) ||
+                !subnet_match_fill(firc_sub_rules_proto(lr, i), firc_sub_rules_ports(lr, i), &subnet.proto,
+                                   subnet.ports, sizeof(subnet.ports))) {
                 continue;
             }
             firc_err_t err = append_v4(out, &subnet);
             if (err != FIRC_OK) { return err; }
         } else if (strcmp(type, FIRC_RULE_SUBNET6) == 0) {
             firc_ipv6_subnet_t subnet;
-            if (!firc_rule_parse_subnet6(text, &subnet)) { continue; }
-            if (!subnet_match_fill(text, firc_sub_rules_proto(lr, i), firc_sub_rules_ports(lr, i), &subnet.proto,
-                                   subnet.ports, sizeof(subnet.ports), false)) {
+            if (!firc_rule_parse_subnet6(text, &subnet) ||
+                !subnet_match_fill(firc_sub_rules_proto(lr, i), firc_sub_rules_ports(lr, i), &subnet.proto,
+                                   subnet.ports, sizeof(subnet.ports))) {
                 continue;
             }
             firc_err_t err = append_v6(out, &subnet);

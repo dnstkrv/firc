@@ -584,8 +584,7 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
         (err = firc_strset(&c->netfilter.iptables.chain_prefix, "FIRC_")) !=
             FIRC_OK ||
         (err = firc_strset(&c->fakeip.v4.pool, "198.18.0.0/15")) != FIRC_OK ||
-        (err = firc_strset(&c->fakeip.v6.pool, "")) != FIRC_OK ||
-        (err = firc_strset(&c->log_level, "info")) != FIRC_OK) {
+        (err = firc_strset(&c->fakeip.v6.pool, "")) != FIRC_OK) {
         firc_app_config_clear(c);
         return err;
     }
@@ -621,7 +620,6 @@ void firc_app_config_clear(firc_app_config_t *c)
         free(c->link[i]);
     }
     free(c->link);
-    free(c->log_level);
     memset(c, 0, sizeof(*c));
 }
 

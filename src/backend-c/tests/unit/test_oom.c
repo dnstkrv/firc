@@ -653,7 +653,7 @@ TEST a_gibibyte_bomb_is_refused_without_allocating_past_the_cap(void) {
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     firc_sub_fetch_global_init();
     GREATEST_MAIN_BEGIN();
     RUN_TEST(an_allocation_failure_is_never_reported_as_a_bad_line);

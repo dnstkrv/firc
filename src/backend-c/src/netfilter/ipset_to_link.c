@@ -1,5 +1,6 @@
 #include "firc/ipset_to_link.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/mark.h"
 
 #include <linux/rtnetlink.h>
@@ -43,6 +44,7 @@ struct firc_ipset_to_link {
     uint32_t table;
     family_state_t v4, v6;
     bool v6_known, v6_carries;
+    firc_logrep_t link_missing;
 };
 
 firc_ipset_to_link_t *firc_ipset_to_link_new(const char *chain_name, const char *iface_name,
@@ -737,7 +739,7 @@ firc_err_t firc_iface_route_update(firc_rtnl_t *r, int family, uint32_t table, c
                                                has_gw ? gw : NULL, gw_len, &unavailable);
     if (err != FIRC_OK) { return err; }
     if (unavailable) {
-        FIRC_WARN("interface %s is down or not ready for this IP family, skipping route", iface_name);
+        FIRC_DEBUG("interface %s is down or not ready for this IP family, skipping route", iface_name);
         st->present = false;
         return FIRC_OK;
     }
@@ -805,6 +807,19 @@ static firc_err_t add_fallback(firc_ipset_to_link_t *l, int family, family_state
     return err;
 }
 
+static bool say_missing(firc_ipset_to_link_t *l, bool found, const firc_link_info_t *li) {
+    if (!found) {
+        firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s not found, it can be caught later",
+                         l->iface_name);
+        return true;
+    }
+    if (!li->up) {
+        firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s is down", l->iface_name);
+        return true;
+    }
+    return false;
+}
+
 static firc_err_t insert_ip_route(firc_ipset_to_link_t *l) {
     firc_err_t first = FIRC_OK;
     if (l->ipt4) { keep_first(&first, add_fallback(l, AF_INET, &l->v4)); }
@@ -819,14 +834,8 @@ static firc_err_t insert_ip_route(firc_ipset_to_link_t *l) {
         keep_first(&first, err);
         return first;
     }
-    if (!found) {
-        FIRC_WARN("interface %s not found, it can be caught later", l->iface_name);
-        return first;
-    }
-    if (!li.up) {
-        FIRC_WARN("interface %s is down", l->iface_name);
-        return first;
-    }
+    if (say_missing(l, found, &li)) { return first; }
+    (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", l->iface_name);
     keep_first(&first, update_iface_routes(l, &li));
     return first;
 }
@@ -943,6 +952,20 @@ bool firc_ipset_to_link_has_reply_rule(const firc_ipset_to_link_t *l) { return l
 firc_err_t firc_ipset_to_link_on_link_up(firc_ipset_to_link_t *l) {
     if (!l->enabled) { return FIRC_OK; }
     return insert_ip_route(l);
+}
+
+void firc_ipset_to_link_remind(firc_ipset_to_link_t *l) {
+    if (!l->enabled || l->link_missing.count == 0 || strcmp(l->iface_name, FIRC_IPSET_TO_LINK_BLACKHOLE) == 0) {
+        return;
+    }
+    firc_link_info_t li;
+    bool found;
+    if (firc_rtnl_link_by_name(l->rtnl, l->iface_name, &li, &found) != FIRC_OK) { return; }
+    if (found && li.up) {
+        (void)firc_logrep_ok(&l->link_missing, NULL, "interface %s", l->iface_name);
+    } else if (firc_logrep_due(&l->link_missing, UINT64_MAX)) {
+        (void)say_missing(l, found, &li);
+    }
 }
 
 firc_err_t firc_ipset_to_link_on_addr_change(firc_ipset_to_link_t *l) {

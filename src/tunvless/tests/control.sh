@@ -31,6 +31,41 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' INT TERM
 
+"$BIN" --control -d tvc0 < /dev/null 2> "$W/empty.err"
+# catches: a tunvless that has no node to carry and says so untagged, so fircd keeps it at info
+check "no node on stdin: exits 2" 2 "$?"
+check "no node on stdin: an error line" "tunvless[error]: no usable VLESS node" "$(cat "$W/empty.err")"
+"$BIN" --control -d tvc0 -A 0 < /dev/null 2> "$W/opt.err"
+# catches: a refused option told untagged
+check "a bad option value: an error line" "tunvless[error]: bad option value: 0" "$(cat "$W/opt.err")"
+"$BIN" --control -d tvc0 -a 300.1.1.1 < /dev/null 2> "$W/addr.err"
+# catches: a refused --addr told untagged
+check "a bad --addr: an error line" "tunvless[error]: --addr 300.1.1.1 is not an IPv4 address" "$(cat "$W/addr.err")"
+"$BIN" --control -d 0123456789abcdefg < /dev/null 2> "$W/dev.err"
+# catches: a refused device name told untagged
+check "a long device name: an error line" "tunvless[error]: device name must be 1..15 characters" "$(cat "$W/dev.err")"
+
+head -c 1100000 /dev/zero | tr '\0' x | "$BIN" --control -d tvc0 > /dev/null 2> "$W/big.err"
+check "stdin over the limit exits 2" 2 "$?"
+# catches: a node list too big to read told as a warning, though the tunnel never starts
+check "stdin over the limit: an error line" "tunvless[error]: nodes on stdin exceed 1048576 bytes" "$(cat "$W/big.err")"
+printf 'vless://%s@nohost.invalid:443?security=none&type=tcp#X\n\n' "$UUID" \
+  | "$BIN" --control --no-retry -d tvc0 > /dev/null 2> "$W/dns.err"
+check "no name resolves, no retry: exits 1" 1 "$?"
+# catches: a tunnel ended by names that never resolve told as a warning
+check "no name resolves: an error line" 1 "$(grep -cxF 'tunvless[error]: nohost.invalid does not resolve' "$W/dns.err")"
+printf 'vless://%s@192.0.2.1:1?security=none&type=tcp#X\nvless://%s@192.0.2.2:1?security=none&type=tcp#Y\n\n' \
+  "$UUID" "$UUID" | "$BIN" --control --no-retry -t 1 -d tvc0 > /dev/null 2> "$W/dead.err"
+check "no node answers, no retry: exits 1" 1 "$?"
+# catches: a tunnel ended by dead nodes told as a warning
+check "no node answers: an error line" 1 "$(grep -cxF 'tunvless[error]: no node answered' "$W/dead.err")"
+printf 'vless://%s@192.0.2.1:1?security=none&type=tcp#X\n\n' "$UUID" \
+  | "$BIN" --control -d lo > /dev/null 2> "$W/lo.err"
+check "a device that is not a tun: exits 1" 1 "$?"
+# catches: a device that cannot be created told as a warning, though the tunnel ends there
+check "a device that is not a tun: an error line" 1 \
+    "$(grep -c '^tunvless\[error\] tunnel: device lo was not created' "$W/lo.err")"
+
 HX() { ip netns exec $H "$@"; }
 ip netns del $H 2>/dev/null; ip netns del $N 2>/dev/null
 ip netns add $H; ip netns add $N
@@ -90,13 +125,22 @@ check "no link in stdout" 0 "$(grep -c "vless://\|$UUID" "$W/ev")"
 printf 'garbage-%s@host:1\n\n' "$UUID" | HX "$BIN" --control -d tvc1 > /dev/null 2> "$W/bad.log"
 check "malformed line: no uuid in stderr" 0 "$(grep -c "$UUID" "$W/bad.log")"
 check "malformed line named by number" 1 "$(grep -c 'line 1: not a vless:// link' "$W/bad.log")"
-HX "$BIN" --control -d tvc2 "vless://$UUID@$A:$PORT#x" < /dev/null > /dev/null 2>&1
+HX "$BIN" --control -d tvc2 "vless://$UUID@$A:$PORT#x" < /dev/null > /dev/null 2> "$W/argv.err"
 check "--control with a link on argv exits 2" 2 "$?"
-HX "$BIN" --control -d tvc2 -A 9 < "$W/nodes" > /dev/null 2>&1
+# catches: a refused --control invocation told as a warning, so it never reaches an error-only log
+check "--control with a link on argv: an error line" \
+    "tunvless[error]: --control takes nodes on stdin, not as arguments" "$(cat "$W/argv.err")"
+HX "$BIN" --control -d tvc2 -A 9 < "$W/nodes" > /dev/null 2> "$W/nine.err"
 check "--control with nine active nodes exits 2" 2 "$?"
+# catches: -A 9 told at another level than -A 0, though both come from the same option
+check "--control with nine active nodes: an error line" \
+    "tunvless[error]: --control allows at most 8 active nodes" "$(cat "$W/nine.err")"
 
-HX "$BIN" --control -d tvc2 --list < "$W/nodes" > /dev/null 2>&1
+HX "$BIN" --control -d tvc2 --list < "$W/nodes" > /dev/null 2> "$W/list.err"
 check "--control with --list exits 2" 2 "$?"
+# catches: a refused --control combination told as a warning
+check "--control with --list: an error line" \
+    "tunvless[error]: --control does not combine with --list or --probe" "$(cat "$W/list.err")"
 P2=10801 C=10.75.0.3
 ip netns exec $N ip addr add $C/32 dev lo
 srv2() {

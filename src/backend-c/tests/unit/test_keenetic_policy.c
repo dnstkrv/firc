@@ -308,8 +308,7 @@ static void loop_took_too_long(int sig) {
 TEST a_stop_does_not_free_the_object_under_a_waiter(void) {
     signal(SIGALRM, loop_took_too_long);
     alarm(60);
-    firc_log_level_t saved = firc_log_level();
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     const int rounds = 2000;
     for (int i = 0; i < rounds; i++) {
         firc_kn_policies_t *p = firc_kn_policies_start("http://127.0.0.1:9", 30);
@@ -322,7 +321,7 @@ TEST a_stop_does_not_free_the_object_under_a_waiter(void) {
         pthread_join(th, NULL);
     }
     alarm(0);
-    firc_log_set_level(saved);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     PASS();
 }
 
@@ -1878,7 +1877,7 @@ TEST a_refresh_whose_marks_cannot_be_read_keeps_its_hosts(void) {
     PASS();
 }
 
-/* Catches: a missing marks document warned every round or once per daemon, or its marks dropped. */
+/* Catches: a missing marks document warned every round or once per daemon, its return not said with the count, or its marks dropped. */
 TEST a_missing_mark_document_is_said_once_per_streak_and_its_marks_carried(void) {
     g_changes = 0;
     firc_kn_policies_t *p = firc_kn_policies_start_notify(NULL, 0, count_changes, NULL);
@@ -1899,8 +1898,8 @@ TEST a_missing_mark_document_is_said_once_per_streak_and_its_marks_carried(void)
     }
     char *log = log_back(fd);
     firc_kn_policies_stop(p);
-    size_t warned = log != NULL ? count_of(log, "policy marks could not be read") : 99;
-    size_t back = log != NULL ? count_of(log, "policy marks can be read again") : 99;
+    size_t warned = log != NULL ? count_of(log, " WRN keenetic policies: the policy marks could not be read") : 99;
+    size_t back = log != NULL ? count_of(log, " INF keenetic policies: the policy marks: recovered after 2 failures") : 99;
     free(log);
     ASSERT_EQ(FIRC_OK, err);
     ASSERT_EQm("the failing read was asked for", 3, bad.asked_marks);
@@ -1967,8 +1966,7 @@ TEST a_deny_policy_keeps_its_mark_across_a_failed_marks_read(void) {
     ASSERT(p != NULL);
     rci_fake_t ok = {NULL, 0, NULL, NULL, NULL}, bad = {"/rci/show/ip/policy", 0, NULL, NULL, NULL};
     rci_fake_t gone = {"/rci/show/ip/policy", 0, NULL, WITHOUT_KIDS, NULL};
-    firc_log_level_t saved = firc_log_level();
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     firc_err_t e1 = firc_kn_policies_round_for_test(p, fake_get, &ok);
     bool read = deny_kids_has_mark(p);
     firc_err_t e2 = firc_kn_policies_round_for_test(p, fake_get, &bad);
@@ -1977,7 +1975,7 @@ TEST a_deny_policy_keeps_its_mark_across_a_failed_marks_read(void) {
     bool after_gone = deny_kids_has_mark(p);
     uint32_t mark = 0;
     bool by_name = firc_kn_policy_map_mark(firc_kn_policies_live_for_test(p), "Policy0", &mark);
-    firc_log_set_level(saved);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     firc_kn_policies_stop(p);
     ASSERT(e1 == FIRC_OK && e2 == FIRC_OK && e3 == FIRC_OK);
     ASSERTm("the failing reads were asked for", bad.asked_marks == 1 && gone.asked_marks == 1);

@@ -290,8 +290,8 @@ TEST the_first_group_in_config_order_owns_the_name(void)
     PASS();
 }
 
-/* Catches: a rule that fails to compile added silently to the matcher. */
-TEST a_rule_that_cannot_compile_is_said_at_every_rebuild(void)
+/* Catches: a rule the config load already reported said again at every rebuild, or one that does not compile taking the rest of its group with it. */
+TEST a_rule_that_cannot_compile_is_skipped_quietly_at_rebuild(void)
 {
     firc_config_t cfg = make_cfg();
     firc_group_t *g = make_group((firc_id_t){{1, 0, 0, 0}}, "vpn", true);
@@ -303,7 +303,7 @@ TEST a_rule_that_cannot_compile_is_said_at_every_rebuild(void)
     for (int pass = 0; pass < 2; pass++) {
         int fds[2];
         ASSERT_EQ(0, pipe(fds));
-        firc_log_set_level(FIRC_LOG_INFO);
+        firc_log_set_output_floor(FIRC_LOG_INFO);
         firc_log_set_fd(fds[1]);
         firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
         firc_log_set_fd(STDOUT_FILENO);
@@ -319,11 +319,7 @@ TEST a_rule_that_cannot_compile_is_said_at_every_rebuild(void)
         for (const char *c = out; *c != '\0'; c++) {
             if (*c == '\n') { lines++; }
         }
-        ASSERT_EQ_FMTm("one line per group, not one per rule and not none", (size_t)1, lines,
-                       "%zu");
-        ASSERTm("with the count", strstr(out, "2 rule(s)") != NULL);
-        ASSERTm("naming the group", strstr(out, "vpn") != NULL);
-        ASSERTm("and an example", strstr(out, "^[a-z") != NULL);
+        ASSERT_EQ_FMTm(out, (size_t)0, lines, "%zu");
 
         ASSERT(firc_ruleset_snapshot_first_match(snap, "ok.example.com") != NULL);
         firc_ruleset_snapshot_free(snap);
@@ -341,7 +337,7 @@ TEST a_group_that_compiles_rebuilds_quietly(void)
 
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
     firc_log_set_fd(STDOUT_FILENO);
@@ -396,7 +392,7 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv)
 {
     GREATEST_MAIN_BEGIN();
-    RUN_TEST(a_rule_that_cannot_compile_is_said_at_every_rebuild);
+    RUN_TEST(a_rule_that_cannot_compile_is_skipped_quietly_at_rebuild);
     RUN_TEST(a_group_that_compiles_rebuilds_quietly);
     RUN_TEST(disabled_group_excluded);
     RUN_TEST(disabled_rule_excluded_from_matcher);

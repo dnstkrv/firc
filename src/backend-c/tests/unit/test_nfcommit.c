@@ -2,12 +2,14 @@
 
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/nfcommit.h"
 
 typedef struct {
@@ -498,7 +500,6 @@ static bool health_becomes(firc_nfcommit_t *c, bool failing) {
 }
 
 static int g_log_pipe[2] = {-1, -1};
-static firc_log_level_t g_log_prev;
 static char g_log[1 << 18];
 static size_t g_log_len;
 
@@ -508,8 +509,7 @@ static void log_capture_begin(void) {
     fcntl(g_log_pipe[1], F_SETFL, fcntl(g_log_pipe[1], F_GETFL) | O_NONBLOCK);
     g_log_len = 0;
     g_log[0] = '\0';
-    g_log_prev = firc_log_level();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(g_log_pipe[1]);
 }
 
@@ -527,7 +527,7 @@ static const char *log_drain(void) {
 /* Reads the log pipe; call it after the committer is freed, when nothing writes the pipe. */
 static const char *log_capture_end(void) {
     firc_log_set_fd(STDOUT_FILENO);
-    firc_log_set_level(g_log_prev);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     const char *s = log_drain();
     close(g_log_pipe[0]);
     close(g_log_pipe[1]);
@@ -552,8 +552,11 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-#define ESCALATION "netfilter pass keeps failing (3 in a row since "
-#define RECOVERY "netfilter pass completed again"
+#define ESCALATION "netfilter pass keeps failing: i/o error"
+#define RECOVERY "netfilter pass: recovered after "
+
+static _Atomic uint64_t g_rep_ms = 1000;
+static uint64_t rep_clock(void) { return atomic_load(&g_rep_ms); }
 
 /* Catches: one hard failure read as failing at once, said at WARN or ERR, or followed by a recovery line. */
 TEST one_refusal_then_a_completed_pass_is_not_failing_and_no_error(void) {
@@ -585,56 +588,40 @@ TEST one_refusal_then_a_completed_pass_is_not_failing_and_no_error(void) {
     PASS();
 }
 
-/* Catches: ERR said at the wrong count or more than once, failing before the bound, or no recovery. */
-TEST a_refusal_that_persists_escalates_once_and_fails_past_the_bound(void) {
+/* Catches: three quick failures said at ERROR, a run past a minute never raised to ERROR, raised more than once, failing before the bound, or no recovery. */
+TEST a_refusal_that_persists_warns_then_errs_after_a_minute(void) {
     probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_IO;
     p.gate_at = 2;
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
     log_capture_begin();
     uint64_t t0 = now_ms();
-    time_t w0 = time(NULL);
     firc_nfcommit_t *c = start_committer_failing_after(&p, 2000u);
 
     firc_nfcommit_request(c);
     AWAIT(&p, p.started >= 2);
-    time_t w1 = time(NULL);
-    while (time(NULL) <= w1) { sleep_ms(20); }
     set_gate(&p, 3);
     AWAIT(&p, p.started >= 3);
-    ASSERT_EQ_FMTm("two failures: no ERR", 0, occurrences(log_drain(), " ERR "), "%d");
+    ASSERT_EQ_FMTm("two failures: nothing", 0, occurrences(log_drain(), " WRN "), "%d");
 
     set_gate(&p, 4);
     AWAIT(&p, p.started >= 4);
     const char *log = log_drain();
-    ASSERT_EQ_FMTm("the third failure: one ERR", 1, occurrences(log, " ERR "), "%d");
-    ASSERT_EQ_FMTm("and it is the escalation", 1, occurrences(log, "ERR " ESCALATION), "%d");
-    const char *line = strstr(log, ESCALATION);
-    const char *eol = line != NULL ? strchr(line, '\n') : NULL;
-    ASSERTm("the line ends with the error", eol != NULL && (size_t)(eol - line) > strlen("): i/o error") &&
-                                                memcmp(eol - strlen("): i/o error"), "): i/o error",
-                                                       strlen("): i/o error")) == 0);
-    char since0[128], since1[128];
-    struct tm tm;
-    gmtime_r(&w0, &tm);
-    strftime(since0, sizeof(since0), ESCALATION "%Y-%m-%dT%H:%M:%SZ)", &tm);
-    gmtime_r(&w1, &tm);
-    strftime(since1, sizeof(since1), ESCALATION "%Y-%m-%dT%H:%M:%SZ)", &tm);
-    ASSERTm("dated from the first refusal", strstr(log, since0) != NULL || strstr(log, since1) != NULL);
+    ASSERT_EQ_FMTm("the third failure: one WARN", 1, occurrences(log, "WRN " ESCALATION), "%d");
+    ASSERT_EQ_FMTm("and no ERR", 0, occurrences(log, " ERR "), "%d");
     bool early = health_of(c).failing;
-    uint64_t early_at = now_ms();
-    ASSERTm("fixture: read inside the bound", early_at - t0 < 2000u);
+    ASSERTm("fixture: read inside the bound", now_ms() - t0 < 2000u);
     ASSERT_FALSEm("three failures inside the bound are not failing", early);
 
+    atomic_fetch_add(&g_rep_ms, 60000);
     set_gate(&p, 0);
     bool failing = false;
     for (int i = 0; i < 4000 && !failing; i++) {
         failing = health_of(c).failing;
-        if (!failing) {
-            (void)log_drain();
-            sleep_ms(1);
-        }
+        if (!failing) { sleep_ms(1); }
     }
     ASSERT(failing);
     ASSERTm("failing only once the bound has passed", now_ms() - t0 >= 2000u);
@@ -642,10 +629,10 @@ TEST a_refusal_that_persists_escalates_once_and_fails_past_the_bound(void) {
     pthread_mutex_lock(&p.mu);
     int seen = p.started;
     pthread_mutex_unlock(&p.mu);
-    (void)log_drain();
     AWAIT(&p, p.started >= seen + 2);
-    ASSERT_EQ_FMTm("said once per run", 1, occurrences(log_drain(), " ERR "), "%d");
-    ASSERT_EQ_FMTm("no recovery yet", 0, occurrences(log_drain(), RECOVERY), "%d");
+    log = log_drain();
+    ASSERT_EQ_FMTm("a minute without a pass: one ERR", 1, occurrences(log, "ERR " ESCALATION " (still failing, "), "%d");
+    ASSERT_EQ_FMTm("no recovery yet", 0, occurrences(log, RECOVERY), "%d");
 
     pthread_mutex_lock(&p.mu);
     p.fail_times = 0;
@@ -653,14 +640,12 @@ TEST a_refusal_that_persists_escalates_once_and_fails_past_the_bound(void) {
     bool cleared = false;
     for (int i = 0; i < 4000 && !cleared; i++) {
         cleared = !health_of(c).failing;
-        if (!cleared) {
-            (void)log_drain();
-            sleep_ms(1);
-        }
+        if (!cleared) { sleep_ms(1); }
     }
     ASSERTm("a completed pass clears it", cleared);
 
     firc_nfcommit_free(c);
+    firc_logrep_set_clock_for_test(NULL);
     log = log_capture_end();
     ASSERTm("fixture: the capture did not fill", g_log_len + 1 < sizeof(g_log));
     ASSERT_EQ_FMTm("the recovery is said once", 1, occurrences(log, "INF " RECOVERY), "%d");
@@ -689,8 +674,8 @@ TEST races_neither_count_toward_the_escalation_nor_break_it(void) {
                        (unsigned long long)firc_nfcommit_last_completed_pass(c), "%llu");
         firc_nfcommit_free(c);
         const char *log = log_capture_end();
-        ASSERT_EQ_FMT(want_err[k], occurrences(log, "ERR " ESCALATION), "%d");
-        ASSERT_EQ_FMT(want_err[k], occurrences(log, " ERR "), "%d");
+        ASSERT_EQ_FMT(want_err[k], occurrences(log, "WRN " ESCALATION), "%d");
+        ASSERT_EQ_FMT(0, occurrences(log, " ERR "), "%d");
         ASSERT_EQ_FMT(want_err[k], occurrences(log, RECOVERY), "%d");
         probe_destroy(&p);
     }
@@ -717,8 +702,8 @@ TEST a_race_streak_says_nothing_above_debug(void) {
     PASS();
 }
 
-#define RACES "netfilter pass keeps losing races since "
-#define RACES_OVER "netfilter pass completed again after losing races since "
+#define RACES "netfilter pass keeps losing races: "
+#define RACES_OVER RECOVERY
 
 /* Catches: lost races past the bound never said above debug, said per pass, or never said over. */
 TEST a_race_run_past_the_bound_warns_once(void) {
@@ -745,6 +730,45 @@ TEST a_race_run_past_the_bound_warns_once(void) {
     ASSERT_EQ_FMTm("once per run", 1, occurrences(log, " WRN "), "%d");
     ASSERT_EQ_FMTm("never an error", 0, occurrences(log, " ERR "), "%d");
     ASSERT_EQ_FMTm("and its end is said", 1, occurrences(log, "INF " RACES_OVER), "%d");
+    probe_destroy(&p);
+    PASS();
+}
+
+/* Catches: a race run never raised to ERROR, or its minute counted from the WARN instead of the run's first race. */
+TEST a_race_run_errs_a_minute_after_its_first_race(void) {
+    probe_t p;
+    probe_init(&p);
+    p.fail_times = 1000000;
+    p.fail_with = FIRC_ERR_AGAIN;
+    atomic_store(&g_rep_ms, 1000);
+    firc_logrep_set_clock_for_test(rep_clock);
+    log_capture_begin();
+    firc_nfcommit_t *c = start_committer_failing_after(&p, 200u);
+    firc_nfcommit_request(c);
+    AWAIT(&p, p.started >= 1);
+    atomic_fetch_add(&g_rep_ms, 30000);
+    ASSERT(health_becomes(c, true));
+    pthread_mutex_lock(&p.mu);
+    int seen = p.started;
+    pthread_mutex_unlock(&p.mu);
+    AWAIT(&p, p.started >= seen + 2);
+    const char *log = log_drain();
+    ASSERT_EQ_FMTm("the WARN half a minute in", 1, occurrences(log, "WRN " RACES), "%d");
+    ASSERT_EQ_FMT(0, occurrences(log, " ERR "), "%d");
+    atomic_fetch_add(&g_rep_ms, 30000);
+    pthread_mutex_lock(&p.mu);
+    seen = p.started;
+    pthread_mutex_unlock(&p.mu);
+    AWAIT(&p, p.started >= seen + 2);
+    log = log_drain();
+    ASSERT_EQ_FMTm("a minute after the first race: one ERR", 1, occurrences(log, "ERR " RACES), "%d");
+    pthread_mutex_lock(&p.mu);
+    p.fail_times = 0;
+    pthread_mutex_unlock(&p.mu);
+    ASSERT(health_becomes(c, false));
+    firc_nfcommit_free(c);
+    firc_logrep_set_clock_for_test(NULL);
+    (void)log_capture_end();
     probe_destroy(&p);
     PASS();
 }
@@ -1113,10 +1137,11 @@ int main(int argc, char **argv) {
     RUN_TEST(null_and_double_stop_are_safe);
     RUN_TEST(a_hard_failure_is_failing_until_a_pass_completes);
     RUN_TEST(one_refusal_then_a_completed_pass_is_not_failing_and_no_error);
-    RUN_TEST(a_refusal_that_persists_escalates_once_and_fails_past_the_bound);
+    RUN_TEST(a_refusal_that_persists_warns_then_errs_after_a_minute);
     RUN_TEST(races_neither_count_toward_the_escalation_nor_break_it);
     RUN_TEST(a_race_streak_says_nothing_above_debug);
     RUN_TEST(a_race_run_past_the_bound_warns_once);
+    RUN_TEST(a_race_run_errs_a_minute_after_its_first_race);
     RUN_TEST(races_within_the_bound_are_not_failing);
     RUN_TEST(races_past_the_bound_are_failing);
     RUN_TEST(a_completed_pass_starts_the_bound_over);

@@ -124,9 +124,9 @@ grep -o 'retransmits [0-9]*/s ([0-9.]* KB/s)' "$WORK/tun.log" 2>/dev/null |
     grep -v 'retransmits 0/s' | sort -u | tail -2 | sed 's/^/    /' || true
 # Which threads actually carried traffic: in the other numbers "got faster" and "everything
 # landed on one queue" look the same.
-busy=$(grep -o '^tun-stats\[[0-9]\]' "$WORK/tun.log" 2>/dev/null | sort -u | tr -dc '0-9\n' | tr '\n' ' ')
-work=$(grep '^tun-stats' "$WORK/tun.log" 2>/dev/null | grep -v ' 0.0 MB/s ' |
-    grep -o '^tun-stats\[[0-9]\]' | sort -u | wc -l)
+busy=$(grep -o '^tunvless\[debug\] tun-stats\[[0-9]\]' "$WORK/tun.log" 2>/dev/null | sort -u | tr -dc '0-9\n' | tr '\n' ' ')
+work=$(grep '^tunvless\[debug\] tun-stats' "$WORK/tun.log" 2>/dev/null | grep -v ' 0.0 MB/s ' |
+    grep -o '^tunvless\[debug\] tun-stats\[[0-9]\]' | sort -u | wc -l)
 echo "  threads with traffic: $work (threads reporting: $busy)"
 
 awk -v s="$s" -v e="$e" -v ok="$ok" -v n="$STREAMS" -v mb="$MB" -v l="$LOSS" -v d="${dropped:-0}" 'BEGIN{

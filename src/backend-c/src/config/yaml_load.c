@@ -447,8 +447,6 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
                                 &c->n_link, &err));
     GET_OR_FAIL(get_bool(map_get(doc, app, "showAllInterfaces"),
                          &c->show_all_interfaces, &err));
-    GET_OR_FAIL(get_string(map_get(doc, app, "logLevel"), &c->log_level,
-                           &err));
     node_t *upd = map_get(doc, app, "update");
     if (upd != NULL && !node_is_null(upd)) {
         if (upd->type != YAML_MAPPING_NODE) {
@@ -694,7 +692,7 @@ static firc_err_t load_group(yaml_document_t *doc, node_t *n, firc_group_t *g)
             if (err == FIRC_OK) {
                 /* WARNed, not refused: a config the daemon won't start for is worse than a dead rule */
                 const char *why = NULL;
-                if (!firc_rule_is_usable(rule->type, rule->rule, &why)) {
+                if (!firc_rule_spec_is_usable(rule->type, rule->rule, rule->proto, rule->ports, &why)) {
                     FIRC_WARN("config: group \"%s\" has a rule the daemon cannot use and that routes "
                               "nothing -- %s (type \"%s\", rule \"%s\")",
                               g->name ? g->name : "", why ? why : "unusable",

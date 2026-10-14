@@ -56,13 +56,20 @@ app:
     startMarkTableIndex: 1718186595
   link: []
   showAllInterfaces: true
-  logLevel: error
 groups: []
 EOF
 
 echo "== building C daemon"
 ( cd "$BACKEND_C_DIR" && make build/host/fircd >/dev/null )
 C_BIN="$BACKEND_C_DIR/build/host/fircd"
+
+echo "== a removed level as the output floor is refused"
+rc=0
+timeout 10 "$C_BIN" --config "$SCRATCH_CONFIG" --output-floor trace > "$OUT/c_floor.log" 2>&1 || rc=$?
+if [ "$rc" != 2 ] || ! grep -q '^usage: fircd' "$OUT/c_floor.log"; then
+    echo "   --output-floor trace: exit $rc, want 2 and the usage line"
+    exit 1
+fi
 
 wait_for_port() {
     i=0

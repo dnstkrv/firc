@@ -20,13 +20,13 @@ pkill -9 -x dnsstub 2>/dev/null
 sleep 1
 
 ( cd "$REPO/tools/bench" && go run ./genconfig -rules 500 -type namespace \
-    -addr 0.0.0.0 -upstream-port 5399 -group-enable -loglevel error \
+    -addr 0.0.0.0 -upstream-port 5399 -group-enable \
     -out "$CFG" )
 
 "$BIN/dnsstub" -listen 127.0.0.1:5399 -cname 3 >/dev/null 2>&1 &
 STUB=$!
 sleep 0.3
-"$DAEMON" --config "$CFG" >"$OUT_DIR/daemon.log" 2>&1 &
+"$DAEMON" --config "$CFG" --output-floor error >"$OUT_DIR/daemon.log" 2>&1 &
 DP=$!
 sleep 1
 

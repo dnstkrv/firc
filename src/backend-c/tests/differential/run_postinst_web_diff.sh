@@ -64,7 +64,7 @@ firc: set app.httpWeb.host.port in $WORK/firc.conf and run /opt/etc/init.d/S99fi
 fake_socat ''
 expect "no answer from the daemon" "firc: could not ask the daemon where the WebUI is; firc.conf sets port 999"
 
-printf 'app:\n  logLevel: info\n' > "$WORK/firc.conf"
+printf 'app:\n  showAllInterfaces: false\n' > "$WORK/firc.conf"
 expect "no answer, no port in firc.conf" "firc: could not ask the daemon where the WebUI is; firc.conf sets port 666"
 
 if [ "$fail" -ne 0 ]; then

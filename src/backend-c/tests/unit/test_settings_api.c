@@ -64,7 +64,7 @@ static harness_t *harness_start_full(const char *dns_addr, uint16_t dns_port, co
                                      uint16_t web_port, bool conf_writable) {
     harness_t *h = calloc(1, sizeof(*h));
     if (h == NULL) { return NULL; }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_config_init_defaults(&h->cfg);
     snprintf(h->dir, sizeof(h->dir), "/tmp/firc_settings_api_XXXXXX");
     if (mkdtemp(h->dir) == NULL) { return NULL; }
@@ -123,7 +123,7 @@ static void harness_stop(harness_t *h) {
     unlink(h->conf);
     unlink(h->groups);
     rmdir(h->dir);
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     free(h);
 }
 
@@ -243,7 +243,8 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(26, cJSON_GetArraySize(s));
+    ASSERT_EQ(25, cJSON_GetArraySize(s));
+    ASSERT_EQ(NULL, item(s, "app.logLevel"));
     ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
     ASSERT_STR_EQ("live", item(c, "app.update.check")->valuestring);
     ASSERT_EQ(NULL, item(s, "app.httpWeb.enabled"));
@@ -259,7 +260,6 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_STR_EQ("", item(s, "app.addressPool.v6.pool")->valuestring);
     static const char *const br0[] = {"br0"};
     ASSERT(strings_are(item(s, "app.link"), br0, 1));
-    ASSERT_STR_EQ("live", item(c, "app.logLevel")->valuestring);
     ASSERT_STR_EQ("live", item(c, "app.dnsProxy.upstream.address")->valuestring);
     ASSERT_STR_EQ("live", item(c, "app.dnsProxy.unmatchedTtl")->valuestring);
     ASSERT_STR_EQ("restart", item(c, "app.link")->valuestring);
@@ -267,7 +267,7 @@ TEST get_answers_every_setting_typed(void) {
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(7, live);
+    ASSERT_EQ(6, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);
@@ -286,7 +286,7 @@ TEST a_put_with_one_bad_key_writes_nothing(void) {
 
     cJSON *out = NULL;
     ASSERT_EQ(400, do_request("PUT", "/api/v1/system/settings",
-                              "{\"settings\":{\"app.logLevel\":\"debug\","
+                              "{\"settings\":{\"app.dnsProxy.upstream.address\":\"9.9.9.9\","
                               "\"app.dnsProxy.upstream.port\":70000}}",
                               &out));
     ASSERT(out != NULL);
@@ -299,8 +299,7 @@ TEST a_put_with_one_bad_key_writes_nothing(void) {
     ASSERT_STR_EQ(before, text);
     free(text);
     harness_join(h);
-    ASSERT_EQ(FIRC_LOG_INFO, firc_log_level());
-    ASSERT_STR_EQ("info", firc_app_saved_settings(h->app)->log_level);
+    ASSERT_STR_EQ("127.0.0.1", firc_app_saved_settings(h->app)->dns_proxy.upstream.address);
     harness_stop(h);
     PASS();
 }
@@ -324,6 +323,7 @@ TEST an_unknown_key_is_refused(void) {
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.httpWeb.enabled\":false}}", "app.httpWeb.enabled"));
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.nope\":1}}", "app.nope"));
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.dnsProxy.disableFakePTR\":true}}", "app.dnsProxy.disableFakePTR"));
+    CHECK_CALL(expect_refusal("{\"settings\":{\"app.logLevel\":\"debug\"}}", "app.logLevel"));
     harness_stop(h);
     PASS();
 }
@@ -333,7 +333,6 @@ TEST the_put_refuses_what_the_loader_refuses(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.addressPool.v4.chunk\":12}}", "app.addressPool.v4.chunk"));
-    CHECK_CALL(expect_refusal("{\"settings\":{\"app.logLevel\":\"loud\"}}", "app.logLevel"));
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.netfilter.iptables.chainPrefix\":\"\"}}",
                    "app.netfilter.iptables.chainPrefix"));
     CHECK_CALL(expect_refusal("{\"settings\":{\"app.dnsProxy.upstream.address\":\"dns.example\"}}",
@@ -365,7 +364,7 @@ TEST a_body_without_settings_is_refused(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
     cJSON *out = NULL;
-    ASSERT_EQ(400, do_request("PUT", "/api/v1/system/settings", "{\"logLevel\":\"debug\"}", &out));
+    ASSERT_EQ(400, do_request("PUT", "/api/v1/system/settings", "{\"timeout\":\"5s\"}", &out));
     ASSERT(out != NULL && item(out, "field") == NULL);
     cJSON_Delete(out);
     ASSERT_EQ(400, do_request("PUT", "/api/v1/system/settings", "not json", NULL));
@@ -374,24 +373,24 @@ TEST a_body_without_settings_is_refused(void) {
 }
 
 /* Catches: a live key not applied, a restart key applied, or groups.yaml written. */
-TEST a_live_put_changes_the_upstream_and_the_log_level(void) {
+TEST a_live_put_changes_the_upstream(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("PUT", "/api/v1/system/settings",
                               "{\"settings\":{\"app.dnsProxy.upstream.address\":\"9.9.9.9\","
-                              "\"app.logLevel\":\"debug\",\"app.addressPool.maxNames\":4096}}",
+                              "\"app.addressPool.maxNames\":4096}}",
                               &out));
-    static const char *const applied[] = {"app.dnsProxy.upstream.address", "app.logLevel"};
+    static const char *const applied[] = {"app.dnsProxy.upstream.address"};
     static const char *const pending[] = {"app.addressPool.maxNames"};
-    ASSERT(strings_are(item(out, "applied"), applied, 2));
+    ASSERT(strings_are(item(out, "applied"), applied, 1));
     ASSERT(strings_are(item(out, "pendingRestart"), pending, 1));
     cJSON_Delete(out);
 
     char *text = slurp(h->conf);
     ASSERT(text != NULL);
     ASSERT(strstr(text, "maxNames: 4096\n") != NULL);
-    ASSERT(strstr(text, "logLevel: debug\n") != NULL);
+    ASSERT(strstr(text, "logLevel") == NULL);
     free(text);
     ASSERT(access(h->groups, F_OK) != 0);
 
@@ -403,7 +402,6 @@ TEST a_live_put_changes_the_upstream_and_the_log_level(void) {
     uint16_t port = 0;
     ASSERT_STR_EQ("9.9.9.9", firc_dnsproxy_upstream(h->proxy, &port));
     ASSERT_EQ(53, port);
-    ASSERT_EQ(FIRC_LOG_DEBUG, firc_log_level());
     ASSERT_EQ(65536u, firc_app_running_settings(h->app)->fakeip.max_names);
     harness_stop(h);
     PASS();
@@ -476,8 +474,8 @@ TEST pending_restart_is_the_whole_list_after_each_save(void) {
                               "{\"settings\":{\"app.addressPool.maxNames\":4096}}", NULL));
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("PUT", "/api/v1/system/settings",
-                              "{\"settings\":{\"app.logLevel\":\"warn\"}}", &out));
-    static const char *const applied[] = {"app.logLevel"};
+                              "{\"settings\":{\"app.dnsProxy.disableDropAAAA\":true}}", &out));
+    static const char *const applied[] = {"app.dnsProxy.disableDropAAAA"};
     static const char *const pending[] = {"app.addressPool.maxNames"};
     ASSERT(strings_are(item(out, "applied"), applied, 1));
     ASSERT(strings_are(item(out, "pendingRestart"), pending, 1));
@@ -494,7 +492,7 @@ TEST a_value_equal_to_the_saved_one_is_not_a_change(void) {
     ASSERT(h != NULL);
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("PUT", "/api/v1/system/settings",
-                              "{\"settings\":{\"app.logLevel\":\"info\"}}", &out));
+                              "{\"settings\":{\"app.dnsProxy.disableDropAAAA\":false}}", &out));
     ASSERT(strings_are(item(out, "applied"), NONE, 0));
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
@@ -1155,7 +1153,7 @@ int main(int argc, char **argv) {
     RUN_TEST(the_put_refuses_what_the_loader_refuses);
     RUN_TEST(a_wrongly_typed_value_names_its_field);
     RUN_TEST(a_body_without_settings_is_refused);
-    RUN_TEST(a_live_put_changes_the_upstream_and_the_log_level);
+    RUN_TEST(a_live_put_changes_the_upstream);
     RUN_TEST(a_live_put_applies_unmatched_ttl);
     RUN_TEST(pending_restart_is_the_whole_list_after_each_save);
     RUN_TEST(a_value_equal_to_the_saved_one_is_not_a_change);

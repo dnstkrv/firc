@@ -161,5 +161,7 @@ firc_err_t firc_ipset_to_link_build_rules_dev(firc_ipt_t *ipt, const char *chain
 /* Call for each link whose interface the netlink event was about. */
 firc_err_t firc_ipset_to_link_on_link_up(firc_ipset_to_link_t *l);
 firc_err_t firc_ipset_to_link_on_addr_change(firc_ipset_to_link_t *l);
+/* Says again, at most every FIRC_LOGREP_REMIND_MS, that the interface is missing or down; for a periodic timer. */
+void firc_ipset_to_link_remind(firc_ipset_to_link_t *l);
 
 #endif /* FIRC_IPSET_TO_LINK_H */

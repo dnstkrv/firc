@@ -8,6 +8,7 @@
 #include "firc/err.h"
 #include "firc/ipset_to_link.h"
 #include "firc/iptables.h"
+#include "firc/logrep.h"
 #include "firc/models.h"
 #include "firc/conntrack.h"
 #include "firc/devices.h"
@@ -52,7 +53,7 @@ bool firc_ruleset_runtime_enabled(const firc_ruleset_t *rs);
 typedef struct firc_ruleset_retry {
     uint32_t backoff_ms; /* 0: no failure since the last enable that held */
     uint64_t at_ms;      /* monotonic ms */
-    bool warned;
+    firc_logrep_t said;
 } firc_ruleset_retry_t;
 firc_ruleset_retry_t *firc_ruleset_retry(firc_ruleset_t *rs);
 /* Enabled at runtime and in config, holding its link; only routed groups get DNAT rules. */
@@ -113,5 +114,7 @@ firc_err_t firc_ruleset_plan_subnets(const firc_group_t *g, firc_ruleset_plan_fn
 /* Call only for rulesets whose interface the netlink event names. */
 firc_err_t firc_ruleset_on_link_up(firc_ruleset_t *rs);
 firc_err_t firc_ruleset_on_addr_change(firc_ruleset_t *rs);
+/* See firc_ipset_to_link_remind. */
+void firc_ruleset_remind_link(firc_ruleset_t *rs);
 
 #endif /* FIRC_RULESET_H */

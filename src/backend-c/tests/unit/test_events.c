@@ -26,7 +26,7 @@ static firc_event_t bypass_event(const char *name) {
 /* Catches: a seq that does not rise, a cursor that repeats the last event, or kinds mixed up. */
 TEST events_come_back_in_order_by_cursor(void) {
     firc_event_reset_for_test();
-    firc_event_put_log(FIRC_LOG_INFO, 999, "started");
+    firc_event_put_log(FIRC_LOG_INFO, 999, NULL, "started");
     firc_event_t d = dns_event("example.com");
     firc_event_put(&d);
 
@@ -69,7 +69,7 @@ TEST a_reader_that_fell_behind_is_told_how_many_events_it_missed(void) {
 /* Catches: a read that ignores `cap`, or a cursor that skips events past it. */
 TEST a_page_smaller_than_the_backlog_continues_where_it_stopped(void) {
     firc_event_reset_for_test();
-    for (int i = 0; i < 5; i++) { firc_event_put_log(FIRC_LOG_INFO, 1, "x"); }
+    for (int i = 0; i < 5; i++) { firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "x"); }
     firc_event_t out[2];
     uint64_t next = 0, dropped = 0;
     ASSERT_EQ_FMT((size_t)2, firc_event_read(0, out, 2, &next, &dropped), "%zu");
@@ -87,7 +87,7 @@ TEST a_long_text_is_cut_not_dropped(void) {
     char big[FIRC_EVENT_TEXT * 2];
     memset(big, 'a', sizeof(big) - 1);
     big[sizeof(big) - 1] = '\0';
-    firc_event_put_log(FIRC_LOG_WARN, 1, big);
+    firc_event_put_log(FIRC_LOG_WARN, 1, NULL, big);
     firc_event_t out[1];
     uint64_t next = 0, dropped = 0;
     ASSERT_EQ_FMT((size_t)1, firc_event_read(0, out, 1, &next, &dropped), "%zu");
@@ -98,7 +98,7 @@ TEST a_long_text_is_cut_not_dropped(void) {
 /* Catches: one shared ring, so DNS traffic evicts the daemon's own lines. */
 TEST a_log_line_survives_any_number_of_dns_events(void) {
     firc_event_reset_for_test();
-    firc_event_put_log(FIRC_LOG_INFO, 1, "started");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "started");
     for (int i = 0; i < 10000; i++) {
         firc_event_t d = dns_event("busy.example");
         firc_event_put(&d);
@@ -124,7 +124,7 @@ TEST both_kinds_come_back_in_one_seq_order(void) {
     const char *pattern = "LDDLDLLD";
     for (const char *c = pattern; *c != '\0'; c++) {
         if (*c == 'L') {
-            firc_event_put_log(FIRC_LOG_INFO, 1, "l");
+            firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "l");
         } else {
             firc_event_t d = dns_event("d");
             firc_event_put(&d);
@@ -146,7 +146,7 @@ TEST pages_continue_across_both_rings(void) {
     const char *pattern = "LDDLDLLDDL";
     for (const char *c = pattern; *c != '\0'; c++) {
         if (*c == 'L') {
-            firc_event_put_log(FIRC_LOG_INFO, 1, "l");
+            firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "l");
         } else {
             firc_event_t d = dns_event("d");
             firc_event_put(&d);
@@ -177,9 +177,9 @@ TEST pages_continue_across_both_rings(void) {
 /* Catches: the dropped count taken from one ring's oldest or from the total. */
 TEST dropped_counts_exactly_the_missing_seqs_in_a_mixed_wrap(void) {
     firc_event_reset_for_test();
-    firc_event_put_log(FIRC_LOG_INFO, 1, "one");
-    firc_event_put_log(FIRC_LOG_INFO, 1, "two");
-    firc_event_put_log(FIRC_LOG_INFO, 1, "three");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "one");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "two");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "three");
     for (int i = 0; i < FIRC_EVENTS_RING + 5; i++) {
         firc_event_t d = dns_event("d");
         firc_event_put(&d);
@@ -217,7 +217,7 @@ TEST a_first_read_reports_nothing_dropped(void) {
 /* Catches: bypass events routed to a ring of their own. */
 TEST a_bypass_event_shares_the_dns_ring_and_its_order(void) {
     firc_event_reset_for_test();
-    firc_event_put_log(FIRC_LOG_INFO, 1, "started");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "started");
     firc_event_t d1 = dns_event("first.example");
     firc_event_put(&d1);
     firc_event_t b = bypass_event("bypassed.example");
@@ -240,7 +240,7 @@ TEST a_bypass_event_shares_the_dns_ring_and_its_order(void) {
     }
 
     firc_event_reset_for_test();
-    firc_event_put_log(FIRC_LOG_INFO, 1, "started");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "started");
     firc_event_t first_dns = dns_event("first.example");
     firc_event_put(&first_dns);
     for (int i = 0; i < FIRC_EVENTS_RING; i++) {
@@ -262,6 +262,137 @@ TEST a_bypass_event_shares_the_dns_ring_and_its_order(void) {
     PASS();
 }
 
+/* Catches: warnings sharing the debug/info ring, so a burst of lower lines evicts them. */
+TEST a_warning_survives_any_number_of_lower_lines(void) {
+    firc_event_reset_for_test();
+    firc_event_put_log(FIRC_LOG_WARN, 1, NULL, "w");
+    firc_event_put_log(FIRC_LOG_ERROR, 1, NULL, "e");
+    for (int i = 0; i < 10000; i++) { firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "low"); }
+    firc_event_t *out = malloc(sizeof(*out) * (FIRC_EVENTS_LOG_RING + 2));
+    ASSERT(out != NULL);
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, out, FIRC_EVENTS_LOG_RING + 2, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)FIRC_EVENTS_LOG_RING + 2, n, "%zu");
+    ASSERT_STR_EQ("w", out[0].u.log.text);
+    ASSERT_EQ(FIRC_LOG_WARN, out[0].u.log.level);
+    ASSERT_STR_EQ("e", out[1].u.log.text);
+    ASSERT_EQ(FIRC_LOG_ERROR, out[1].u.log.level);
+    ASSERT_EQ_FMTm("the oldest kept lower line follows them", 10002ULL - FIRC_EVENTS_LOG_RING + 1,
+                   (unsigned long long)out[2].seq, "%llu");
+    free(out);
+    PASS();
+}
+
+/* Catches: a warning ring of another size than 256, or warnings that never wrap. */
+TEST the_warning_ring_keeps_the_last_256(void) {
+    firc_event_reset_for_test();
+    ASSERT_EQ(256, FIRC_EVENTS_WARN_RING);
+    for (int i = 0; i < 256 + 10; i++) {
+        char text[16];
+        snprintf(text, sizeof(text), "w%d", i);
+        firc_event_put_log(i % 2 ? FIRC_LOG_WARN : FIRC_LOG_ERROR, 1, NULL, text);
+    }
+    firc_event_t out[300];
+    uint64_t next = 0, dropped = 0;
+    ASSERT_EQ_FMT((size_t)256, firc_event_read(0, out, 300, &next, &dropped), "%zu");
+    ASSERT_STR_EQ("w10", out[0].u.log.text);
+    ASSERT_EQ_FMT(11ULL, (unsigned long long)out[0].seq, "%llu");
+    ASSERT_STR_EQ("w265", out[255].u.log.text);
+    PASS();
+}
+
+static void put_by_letter(char c) {
+    switch (c) {
+    case 'L': firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "l"); break;
+    case 'B': firc_event_put_log(FIRC_LOG_DEBUG, 1, NULL, "b"); break;
+    case 'W': firc_event_put_log(FIRC_LOG_WARN, 1, NULL, "w"); break;
+    case 'E': firc_event_put_log(FIRC_LOG_ERROR, 1, NULL, "e"); break;
+    default: {
+        firc_event_t d = dns_event("d");
+        firc_event_put(&d);
+    }
+    }
+}
+
+static bool is_letter(const firc_event_t *e, char c) {
+    switch (c) {
+    case 'L': return e->kind == FIRC_EVENT_LOG && e->u.log.level == FIRC_LOG_INFO;
+    case 'B': return e->kind == FIRC_EVENT_LOG && e->u.log.level == FIRC_LOG_DEBUG;
+    case 'W': return e->kind == FIRC_EVENT_LOG && e->u.log.level == FIRC_LOG_WARN;
+    case 'E': return e->kind == FIRC_EVENT_LOG && e->u.log.level == FIRC_LOG_ERROR;
+    default: return e->kind == FIRC_EVENT_DNS;
+    }
+}
+
+/* Catches: a cursor restarting one of the rings, or the pages skipping or repeating an event of another. */
+TEST pages_continue_across_every_ring(void) {
+    firc_event_reset_for_test();
+    const char *pattern = "LWDEBDWLLEDWBD";
+    for (const char *c = pattern; *c != '\0'; c++) { put_by_letter(*c); }
+    firc_event_t out[3];
+    uint64_t since = 0, next = 0, dropped = 0;
+    uint64_t want = 1;
+    for (;;) {
+        size_t n = firc_event_read(since, out, 3, &next, &dropped);
+        if (n == 0) { break; }
+        ASSERT_EQ_FMT(0ULL, (unsigned long long)dropped, "%llu");
+        for (size_t i = 0; i < n; i++) {
+            ASSERT_EQ_FMT((unsigned long long)want, (unsigned long long)out[i].seq, "%llu");
+            ASSERTm(pattern + want - 1, is_letter(&out[i], pattern[want - 1]));
+            want++;
+        }
+        since = next;
+    }
+    ASSERT_EQ_FMT((unsigned long long)strlen(pattern) + 1, (unsigned long long)want, "%llu");
+    PASS();
+}
+
+/* Catches: the dropped count taken from one ring when the warning ring wrapped between two kept lines. */
+TEST dropped_counts_the_warnings_the_warning_ring_lost(void) {
+    firc_event_reset_for_test();
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "one");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "two");
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "three");
+    for (int i = 0; i < FIRC_EVENTS_WARN_RING + 5; i++) { firc_event_put_log(FIRC_LOG_WARN, 1, NULL, "w"); }
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "four");
+    firc_event_t out[4];
+    uint64_t next = 0, dropped = 0;
+    ASSERT_EQ_FMT((size_t)4, firc_event_read(1, out, 4, &next, &dropped), "%zu");
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)out[0].seq, "%llu");
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)out[1].seq, "%llu");
+    ASSERT_EQ_FMT(9ULL, (unsigned long long)out[2].seq, "%llu");
+    ASSERT_EQ_FMT(10ULL, (unsigned long long)out[3].seq, "%llu");
+    ASSERT_EQ_FMT(5ULL, (unsigned long long)dropped, "%llu");
+    firc_event_t *rest = malloc(sizeof(*rest) * FIRC_EVENTS_WARN_RING);
+    ASSERT(rest != NULL);
+    size_t n = firc_event_read(next, rest, FIRC_EVENTS_WARN_RING, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)FIRC_EVENTS_WARN_RING - 1, n, "%zu");
+    ASSERT_EQ_FMTm("the hole is told once", 0ULL, (unsigned long long)dropped, "%llu");
+    ASSERT_STR_EQ("four", rest[n - 1].u.log.text);
+    free(rest);
+    PASS();
+}
+
+/* Catches: debug lines sharing the info ring, so a debug burst evicts capture and sync lines. */
+TEST an_info_line_survives_any_number_of_debug_lines(void) {
+    firc_event_reset_for_test();
+    ASSERT_EQ(512, FIRC_EVENTS_DEBUG_RING);
+    firc_event_put_log(FIRC_LOG_INFO, 1, NULL, "capture started");
+    for (int i = 0; i < 10000; i++) { firc_event_put_log(FIRC_LOG_DEBUG, 1, NULL, "pass"); }
+    firc_event_t *out = malloc(sizeof(*out) * (FIRC_EVENTS_DEBUG_RING + 1));
+    ASSERT(out != NULL);
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, out, FIRC_EVENTS_DEBUG_RING + 1, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)FIRC_EVENTS_DEBUG_RING + 1, n, "%zu");
+    ASSERT_STR_EQ("capture started", out[0].u.log.text);
+    ASSERT_EQ(FIRC_LOG_INFO, out[0].u.log.level);
+    ASSERT_EQ_FMTm("the oldest kept debug line follows it", 10001ULL - FIRC_EVENTS_DEBUG_RING + 1,
+                   (unsigned long long)out[1].seq, "%llu");
+    ASSERT_EQ(FIRC_LOG_DEBUG, out[n - 1].u.log.level);
+    free(out);
+    PASS();
+}
+
 SUITE(events) {
     RUN_TEST(events_come_back_in_order_by_cursor);
     RUN_TEST(a_reader_that_fell_behind_is_told_how_many_events_it_missed);
@@ -273,6 +404,11 @@ SUITE(events) {
     RUN_TEST(dropped_counts_exactly_the_missing_seqs_in_a_mixed_wrap);
     RUN_TEST(a_first_read_reports_nothing_dropped);
     RUN_TEST(a_bypass_event_shares_the_dns_ring_and_its_order);
+    RUN_TEST(a_warning_survives_any_number_of_lower_lines);
+    RUN_TEST(the_warning_ring_keeps_the_last_256);
+    RUN_TEST(pages_continue_across_every_ring);
+    RUN_TEST(an_info_line_survives_any_number_of_debug_lines);
+    RUN_TEST(dropped_counts_the_warnings_the_warning_ring_lost);
 }
 
 GREATEST_MAIN_DEFS();

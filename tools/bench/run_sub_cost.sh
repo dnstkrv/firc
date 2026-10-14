@@ -51,13 +51,7 @@ sed -e 's/port: 8080/port: 18080/' \
     -e "s/address: '\[::\]'/address: '127.0.0.1'/" \
     -e 's/disableRemap53: false/disableRemap53: true/' \
     -e 's/chainPrefix: FIRC_/chainPrefix: FIRCB_/' \
-    -e 's/logLevel: .*/logLevel: debug/' \
     "$STOCK_CONF" > "$CONF/firc.conf" || exit 1
-# Anchored, so a word inside a comment cannot satisfy it; without debug there are no stage timings.
-grep -q '^[[:space:]]*logLevel: debug' "$CONF/firc.conf" || {
-    echo "could not set logLevel: debug in $CONF/firc.conf (from $STOCK_CONF)" >&2
-    exit 1
-}
 
 # A large interval keeps the ticker from syncing during a measured run.
 cat > "$CONF/groups.yaml" <<EOF

@@ -399,7 +399,7 @@ static bool wanted(const struct nlmsghdr *h, scan_t *s, ct_hit_t *out) {
     memcpy(out->tuple, orig, whole);
     out->tuple_len = (uint16_t)whole;
     /* Logged after the size check, so only deletions that happen are announced. */
-    if (stale_why != NULL && firc_log_level() <= FIRC_LOG_DEBUG) {
+    if (stale_why != NULL) {
         char where[INET6_ADDRSTRLEN] = "?";
         inet_ntop(family, stale_dst, where, sizeof(where));
         FIRC_DEBUG("stale mark: %s carries group field %u -- %s; deleting", where,
@@ -577,7 +577,7 @@ static firc_err_t dump_family(firc_ct_t *ct, int family, scan_t *s, int64_t dead
         }
 
         /* Filter refused: drop what arrived and read unfiltered, or a refusal reads as an empty table. */
-        FIRC_WARN("this kernel refuses a conntrack dump filtered by mark (%s); reading the whole "
+        FIRC_INFO("this kernel refuses a conntrack dump filtered by mark (%s); reading the whole "
                   "table instead",
                   strerror(code));
         s->n = 0;

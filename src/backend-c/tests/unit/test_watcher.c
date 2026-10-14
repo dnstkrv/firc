@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "firc/events.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -264,6 +266,46 @@ TEST a_lost_message_tells_the_listener_and_reading_goes_on(void) {
     PASS();
 }
 
+static int warned_lost(const char *tail) {
+    firc_event_t ev[32];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 32, &next, &dropped);
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].u.log.level == FIRC_LOG_WARN && strstr(ev[i].u.log.text, "netlink watcher lost messages") != NULL &&
+            (tail == NULL || strstr(ev[i].u.log.text, tail) != NULL)) {
+            c++;
+        }
+    }
+    return c;
+}
+
+static uint64_t g_lost_ms;
+static uint64_t lost_clock(void) { return g_lost_ms; }
+
+/* Catches: every lost message warned, so a route burst floods the warnings, or the held ones never counted. */
+TEST lost_messages_are_warned_once_a_minute_with_the_count(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_nl_watcher_t *w = NULL;
+    ASSERT_EQ(FIRC_OK, firc_nl_watcher_create(loop, NULL, NULL, NULL, NULL, NULL, NULL, &w));
+    g_lost_ms = 1000;
+    firc_logrep_set_clock_for_test(lost_clock);
+    firc_event_reset_for_test();
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    for (int i = 0; i < 3; i++) { (void)firc_nl_watcher_handle_recv_error(w, ENOBUFS); }
+    int first = warned_lost(NULL);
+    g_lost_ms += 60000;
+    (void)firc_nl_watcher_handle_recv_error(w, ENOBUFS);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    firc_logrep_set_clock_for_test(NULL);
+    firc_nl_watcher_destroy(w);
+    firc_loop_destroy(loop);
+    ASSERT_EQ_FMT(1, first, "%d");
+    ASSERT_EQ_FMT(1, warned_lost(" (2 more since the last)"), "%d");
+    PASS();
+}
+
 typedef struct {
     firc_loop_t *loop;
     firc_nl_watcher_t *w;
@@ -299,6 +341,15 @@ static void give_up(firc_loop_t *loop, void *ud) {
     firc_loop_stop(loop);
 }
 
+static uint64_t g_rep_ms = 1000;
+static uint64_t rep_clock(void) { return g_rep_ms; }
+
+static void five_minutes_pass(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    (void)ud;
+    g_rep_ms += 5 * 60 * 1000;
+}
+
 static int open_fds(void) {
     DIR *d = opendir("/proc/self/fd");
     if (d == NULL) { return -1; }
@@ -314,7 +365,7 @@ static int lowest_free_fd(void) {
     return fd;
 }
 
-/* Catches: a dead watcher socket left registered and deaf, retried at a fixed pace, warned at every try, left open, or reopened without the state re-read. */
+/* Catches: a dead watcher socket left registered and deaf, retried at a fixed pace, warned at every try, not raised to ERROR after five minutes, left open, reopened without the state re-read, or its reopening not said with the count. */
 TEST a_dead_socket_is_reopened_until_it_works_and_the_listener_told(void) {
     reopen_t t;
     memset(&t, 0, sizeof(t));
@@ -327,14 +378,17 @@ TEST a_dead_socket_is_reopened_until_it_works_and_the_listener_told(void) {
     int logfd = mkstemp(logpath);
     ASSERT(logfd >= 0);
     unlink(logpath);
-    firc_log_level_t level = firc_log_level();
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(logfd);
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
     int64_t failed_at = mono_ms();
     ASSERT_FALSEm("a socket that is no use any more", firc_nl_watcher_handle_recv_error(t.w, EBADF));
     ASSERT_EQ_FMTm("closed, not left registered", -1, firc_nl_watcher_fd(t.w), "%d");
     ASSERT_EQ_FMTm("and nobody told yet", 0, t.lost, "%d");
     ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 1600, 0, lift_the_limit, &t, NULL));
+    int bump = 0;
+    ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 500, 3600000, five_minutes_pass, NULL, &bump));
     int guard = 0;
     ASSERT_EQ(FIRC_OK, firc_loop_add_timer(t.loop, 5000, 0, give_up, &t, &guard));
     ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &t.saved));
@@ -344,16 +398,23 @@ TEST a_dead_socket_is_reopened_until_it_works_and_the_listener_told(void) {
 
     ASSERT_EQ(FIRC_OK, firc_loop_run(t.loop));
     setrlimit(RLIMIT_NOFILE, &t.saved);
+    firc_logrep_set_clock_for_test(NULL);
     firc_log_set_fd(2);
-    firc_log_set_level(level);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     firc_loop_del_timer(t.loop, guard);
+    firc_loop_del_timer(t.loop, bump);
     char logbuf[4096] = {0};
     ssize_t got = pread(logfd, logbuf, sizeof(logbuf) - 1, 0);
     close(logfd);
     ASSERT(got > 0);
     int warned = 0;
-    for (const char *p = logbuf; (p = strstr(p, "still not reopened")) != NULL; p++) { warned++; }
+    for (const char *p = logbuf; (p = strstr(p, " WRN ")) != NULL; p++) { warned++; }
     ASSERT_EQ_FMTm("four refused tries, one warning", 1, warned, "%d");
+    ASSERTm(logbuf, strstr(logbuf, " WRN netlink watcher recv error: ") != NULL);
+    int errs = 0;
+    for (const char *p = logbuf; (p = strstr(p, " ERR netlink watcher socket not reopened yet: ")) != NULL; p++) { errs++; }
+    ASSERT_EQ_FMTm("five minutes without a socket: one error", 1, errs, "%d");
+    ASSERTm(logbuf, strstr(logbuf, " INF netlink watcher socket: recovered after 5 failures over ") != NULL);
     ASSERT_EQ_FMTm("the first reopens were refused", -1, t.fd_while_refused, "%d");
     ASSERT_EQ_FMTm("a later one worked and the listener re-read the state", 1, t.lost, "%d");
     ASSERTm("tries at 0.1, 0.3, 0.7, 1.5 s, so the one that works is at 3.1 s", t.at[0] - failed_at >= 3000);
@@ -529,6 +590,7 @@ int main(int argc, char **argv) {
     RUN_TEST(an_overrun_buffer_means_lost_state_not_a_dead_socket);
     RUN_TEST(a_lost_message_tells_the_listener_and_reading_goes_on);
     RUN_TEST(a_dead_socket_is_reopened_until_it_works_and_the_listener_told);
+    RUN_TEST(lost_messages_are_warned_once_a_minute_with_the_count);
     RUN_TEST(a_destroyed_watcher_reopens_nothing);
     RUN_TEST(the_reopen_wait_doubles_up_to_five_seconds);
     RUN_TEST(a_socket_failing_again_before_it_reads_waits_longer);

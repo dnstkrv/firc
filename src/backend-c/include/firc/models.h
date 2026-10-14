@@ -193,7 +193,6 @@ typedef struct firc_app_config {
     char **link;
     size_t n_link;
     bool show_all_interfaces;
-    char *log_level;
     struct {
         bool check;
     } update;

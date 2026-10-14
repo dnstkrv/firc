@@ -1659,13 +1659,12 @@ static const char *warn_log_capture_sync(harness_t *h, firc_id_t id) {
     if (pipe(g_warn_pipe) != 0) { return ""; }
     fcntl(g_warn_pipe[0], F_SETFL, fcntl(g_warn_pipe[0], F_GETFL) | O_NONBLOCK);
     fcntl(g_warn_pipe[1], F_SETFL, fcntl(g_warn_pipe[1], F_GETFL) | O_NONBLOCK);
-    firc_log_level_t prev = firc_log_level();
-    firc_log_set_level(FIRC_LOG_WARN);
+    firc_log_set_output_floor(FIRC_LOG_WARN);
     firc_log_set_fd(g_warn_pipe[1]);
     bool changed = false;
     firc_app_sync_list_now(h->app, id, 1000, NULL, &changed);
     firc_log_set_fd(STDOUT_FILENO);
-    firc_log_set_level(prev);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     ssize_t n = read(g_warn_pipe[0], buf, sizeof(buf) - 1);
     buf[n > 0 ? n : 0] = '\0';
     close(g_warn_pipe[0]);
@@ -2330,7 +2329,7 @@ static void stop_live_harness(void *ud) {
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     firc_sub_fetch_global_init();
     GREATEST_MAIN_BEGIN();
     GREATEST_SET_TEARDOWN_CB(stop_live_harness, NULL);

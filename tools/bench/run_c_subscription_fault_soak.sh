@@ -58,7 +58,6 @@ app:
     startMarkTableIndex: 1298229100
   link: []
   showAllInterfaces: true
-  logLevel: info
 groups:
   - id: aaaaaaaa
     name: soak-group

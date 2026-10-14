@@ -29,6 +29,7 @@
 #include "firc/netfilter_cleaner.h"
 #include "firc/port_remap.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/anscache.h"
 #include "firc/dnspipeline.h"
 #include "firc/dnsproxy.h"
@@ -848,7 +849,7 @@ TEST a_pass_that_failed_while_a_capture_ran_is_said_out_loud(void) {
     ASSERT(a_restore_was_tried(&l, before));
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
     ASSERT(journal_says(since, "capture stopped"));
-    ASSERT_FALSEm("a raced pass is not an unwatched second", journal_says(since, "netfilter pass"));
+    ASSERT_FALSEm("a raced pass is not an unwatched second", journal_says(since, "failed while this capture was open"));
 
     locked_app_down(&l);
     PASS();
@@ -874,7 +875,7 @@ TEST one_captures_failed_pass_is_not_the_next_ones(void) {
     sleep_ms(300);
     ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
     ASSERT(journal_says(since, "capture stopped"));
-    ASSERT_FALSEm("this capture's rules were never gone", journal_says(since, "netfilter pass"));
+    ASSERT_FALSEm("this capture's rules were never gone", journal_says(since, "failed while this capture was open"));
 
     locked_app_down(&l);
     PASS();
@@ -962,14 +963,19 @@ static firc_nflog_t *tap_hello_refused(uint16_t group, uint16_t copy_range) {
     return tap_fake_open(group, copy_range);
 }
 
-/* Catches: a capture starting with an NFLOG group unbound, so nobody reads what it copies. */
+static size_t journal_count_at(uint64_t since, firc_log_level_t level, const char *needle);
+
+/* Catches: a capture starting with an NFLOG group unbound, so nobody reads what it copies, or its refusal, already the caller's answer, sent to the system log as an ERROR. */
 TEST a_capture_that_cannot_read_does_not_start(void) {
     firc_loop_t *loop = NULL;
     ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
     locked_app_t l;
     ASSERT(locked_app_up_full(&l, loop, tap_open_refused));
+    uint64_t mark = journal_mark();
     ASSERT_EQ(FIRC_ERR_SYS, firc_app_capture_start(l.app, 1000, NULL));
     ASSERT_FALSEm("and nothing is left running", running(&l));
+    ASSERT_EQ_FMT((size_t)1, journal_count_at(mark, FIRC_LOG_WARN, "capture refused: could not bind NFLOG group"), "%zu");
+    ASSERT_EQ_FMT((size_t)0, journal_count_at(mark, FIRC_LOG_ERROR, ""), "%zu");
     locked_app_down(&l);
     firc_loop_destroy(loop);
 
@@ -1207,17 +1213,16 @@ TEST a_capture_has_a_deadline_and_only_one_exists(void) {
     PASS();
 }
 
-/* Catches: a capture whose start, stop or summary is missing from the journal at any log level. */
+/* Catches: a capture whose start, stop or summary is missing from the journal at any output floor. */
 TEST a_capture_logs_its_start_its_stop_and_its_summary(void) {
-    firc_log_level_t kept = firc_log_level();
     static const firc_log_level_t levels[] = {FIRC_LOG_INFO, FIRC_LOG_ERROR};
     for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
         locked_app_t l;
         ASSERT(locked_app_up(&l));
-        firc_log_set_level(levels[i]);
+        firc_log_set_output_floor(levels[i]);
         ASSERT_EQ(FIRC_OK, firc_app_capture_start(l.app, 1000, NULL));
         ASSERT_EQ(FIRC_OK, firc_app_capture_stop(l.app, NULL));
-        firc_log_set_level(kept);
+        firc_log_set_output_floor(FIRC_LOG_DEBUG);
 
         char why[64];
         snprintf(why, sizeof(why), "the start, at level %d", (int)levels[i]);
@@ -2188,7 +2193,7 @@ TEST an_unreportable_full_pass_asks_once_and_then_says_so(void) {
     char out[8192];
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     (void)firc_app_rebuild_netfilter_kind(l.app, NULL, true);
     (void)firc_app_rebuild_netfilter_kind(l.app, NULL, true);
@@ -4125,12 +4130,59 @@ TEST a_lists_bookkeeping_does_not_interrupt_the_pass(void) {
 static uint64_t g_now_ms;
 static uint64_t test_clock(void) { return g_now_ms; }
 
-static size_t journal_count(uint64_t since, const char *needle) {
+static size_t journal_count_at(uint64_t since, firc_log_level_t level, const char *needle) {
     size_t n = journal(since), c = 0;
     for (size_t i = 0; i < n; i++) {
-        if (g_events[i].kind == FIRC_EVENT_LOG && strstr(g_events[i].u.log.text, needle) != NULL) { c++; }
+        if (g_events[i].kind == FIRC_EVENT_LOG && g_events[i].u.log.level == level &&
+            strstr(g_events[i].u.log.text, needle) != NULL) {
+            c++;
+        }
     }
     return c;
+}
+
+static uint64_t g_rep_ms;
+static uint64_t rep_clock(void) { return g_rep_ms; }
+
+/* Catches: a group that cannot come up said at ERROR at once, not raised to ERROR after five minutes, or its coming up not said with the count. */
+TEST a_failing_group_is_a_warning_then_an_error_and_an_end(void) {
+    g_now_ms = 100000;
+    g_app_mono = test_clock;
+    g_rep_ms = 1000;
+    firc_logrep_set_clock_for_test(rep_clock);
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    locked_app_t l;
+    ASSERT(locked_app_up_with_loop(&l, loop));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "a.example", NULL, NULL)));
+    fake_rtnl_fail_times(l.kernel, RTM_NEWRULE, EPERM, 4);
+    uint64_t mark = journal_mark();
+    ASSERT_EQ(FIRC_OK, firc_app_start_groups(l.app));
+    g_now_ms += 1000;
+    firc_app_retry_groups(l.app, NULL);
+    g_rep_ms += 5 * 60 * 1000 - 1;
+    g_now_ms += 2000;
+    firc_app_retry_groups(l.app, NULL);
+    size_t early = journal_count_at(mark, FIRC_LOG_ERROR, "group \"g\"");
+    g_rep_ms += 1;
+    g_now_ms += 4000;
+    firc_app_retry_groups(l.app, NULL);
+    g_now_ms += 8000;
+    firc_app_retry_groups(l.app, NULL);
+    firc_logrep_set_clock_for_test(NULL);
+    ASSERT_FALSEm("it came up, nothing left to retry", firc_app_retry_timer_for_test(l.app, NULL));
+    ASSERT_EQ_FMTm("not before five minutes", (size_t)0, early, "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_count_at(mark, FIRC_LOG_WARN, "group \"g\": ip rule: "), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_count_at(mark, FIRC_LOG_ERROR, "(still failing, 4 times for 5 min)"),
+                  "%zu");
+    ASSERT_EQ_FMT((size_t)2, journal_count_at(mark, FIRC_LOG_DEBUG, "group \"g\": ip rule: "), "%zu");
+    ASSERT_EQ_FMT((size_t)1,
+                  journal_count_at(mark, FIRC_LOG_INFO, "group \"g\": recovered after 4 failures over 5 min"),
+                  "%zu");
+    locked_app_down(&l);
+    firc_loop_destroy(loop);
+    PASS();
 }
 
 /* Catches: a failed group not retried on its own link-up, or retried before its spacing. */
@@ -4197,7 +4249,7 @@ TEST a_group_that_keeps_failing_is_retried_no_more_often_than_its_spacing(void) 
         ASSERT_EQ_FMTm(what, (unsigned long long)steps[i].delay, (unsigned long long)delay, "%llu");
     }
     ASSERT_STR_EQ("not-enabled", live_reason(&l, 1));
-    ASSERT_EQ_FMTm("one warning for the run", (size_t)1, journal_count(mark, "trying again"), "%zu");
+    ASSERT_EQ_FMTm("one warning for the run", (size_t)1, journal_count_at(mark, FIRC_LOG_WARN, "trying again"), "%zu");
     ASSERT(firc_app_remove_group_by_id(l.app, (firc_id_t){{1, 1, 1, 1}}));
     ASSERT_FALSEm("no group left to retry, no timer", firc_app_retry_timer_for_test(l.app, NULL));
     locked_app_down(&l);
@@ -4254,7 +4306,7 @@ TEST an_edit_that_fails_starts_a_fresh_run(void) {
     uint64_t delay = 0;
     ASSERT(firc_app_retry_timer_for_test(l.app, &delay));
     ASSERT_EQ_FMTm("fixture: the run got to 2 s", 2000ull, (unsigned long long)delay, "%llu");
-    ASSERT_EQ_FMT((size_t)1, journal_count(mark, "trying again"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, journal_count_at(mark, FIRC_LOG_WARN, "trying again"), "%zu");
 
     fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
     ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, gid, activation_group(1, "b.example", NULL, NULL)));
@@ -4265,7 +4317,7 @@ TEST an_edit_that_fails_starts_a_fresh_run(void) {
     fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
     firc_app_retry_groups(l.app, NULL);
     ASSERT_FALSE(fake_rtnl_failure_armed(l.kernel));
-    ASSERT_EQ_FMTm("and it warns again", (size_t)2, journal_count(mark, "trying again"), "%zu");
+    ASSERT_EQ_FMTm("and it warns again", (size_t)2, journal_count_at(mark, FIRC_LOG_WARN, "trying again"), "%zu");
     locked_app_down(&l);
     firc_loop_destroy(loop);
     PASS();
@@ -4323,7 +4375,7 @@ TEST a_retry_that_holds_ends_the_run(void) {
     g_now_ms += 1000;
     fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
     firc_app_retry_groups(l.app, NULL);
-    ASSERT_EQ_FMTm("one warning per run", (size_t)2, journal_count(mark, "trying again"), "%zu");
+    ASSERT_EQ_FMTm("one warning per run", (size_t)2, journal_count_at(mark, FIRC_LOG_WARN, "trying again"), "%zu");
     locked_app_down(&l);
     firc_loop_destroy(loop);
     PASS();
@@ -7020,6 +7072,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_group_refused_in_nat_is_taken_out_of_mangle_too);
     RUN_TEST(a_group_that_failed_comes_up_by_itself_on_link_up);
     RUN_TEST(a_group_that_keeps_failing_is_retried_no_more_often_than_its_spacing);
+    RUN_TEST(a_failing_group_is_a_warning_then_an_error_and_an_end);
     RUN_TEST(a_group_that_failed_comes_up_by_itself_after_a_pass);
     RUN_TEST(a_failed_group_comes_up_on_its_timer_with_no_trigger);
     RUN_TEST(an_edit_that_fails_starts_a_fresh_run);

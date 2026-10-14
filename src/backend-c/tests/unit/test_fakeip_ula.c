@@ -9,7 +9,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "firc/events.h"
 #include "firc/fakeip_ula.h"
+#include "firc/log.h"
 
 static char g_dir[128];
 
@@ -121,7 +123,7 @@ TEST the_prefix_is_written_as_readable_cidr_text(void) {
     PASS();
 }
 
-/* Catches: a prefix file that is not a ULA /48 obeyed, or treated as fatal. */
+/* Catches: a prefix file that is not a ULA /48 obeyed, treated as fatal, or its replacement, which heals itself, sent to the system log as an ERROR. */
 TEST a_file_that_is_not_a_ula_48_is_replaced(void) {
     static const struct {
         const char *why;
@@ -144,9 +146,21 @@ TEST a_file_that_is_not_a_ula_48_is_replaced(void) {
         unlink(p);
         write_file(p, bad[i].body);
 
+        firc_event_reset_for_test();
+        firc_log_set_output_floor(FIRC_LOG_ERROR);
         firc_ip_t base = {{0}, 0};
         uint8_t len = 0;
         if (firc_fakeip_ula_load(p, &base, &len) != FIRC_OK) { FAILm(bad[i].why); }
+        firc_log_set_output_floor(FIRC_LOG_DEBUG);
+        {
+            firc_event_t ev[4];
+            uint64_t next = 0, dropped = 0;
+            size_t n = firc_event_read(0, ev, 4, &next, &dropped);
+            if (n != 1 || ev[0].u.log.level != FIRC_LOG_WARN ||
+                strstr(ev[0].u.log.text, "unusable IPv6 pool prefix") == NULL) {
+                FAILm(bad[i].why);
+            }
+        }
         if (len != 48 || base.b[0] != 0xfd) { FAILm(bad[i].why); }
         for (int j = 6; j < 16; j++) {
             if (base.b[j] != 0) { FAILm(bad[i].why); }

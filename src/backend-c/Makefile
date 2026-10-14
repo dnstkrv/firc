@@ -62,6 +62,7 @@ CORE_SRCS := \
     src/core/lifecycle.c \
     src/logging/log.c \
     src/logging/events.c \
+    src/logging/logrep.c \
     src/platform/loop.c \
     src/dns/wire.c \
     src/netlink/nlattr_iter.c \
@@ -147,7 +148,8 @@ TUNNELS_SRCS := \
     src/tunnels/tunrun.c \
     src/tunnels/tunnodes.c \
     src/tunnels/tunsubs.c \
-    src/tunnels/tunprobe.c
+    src/tunnels/tunprobe.c \
+    src/tunnels/tunwatch.c
 
 # The tunvless parser, built with tunvless's own flags; its own tests cover it.
 TUNVLESS_PARSER_SRCS := \

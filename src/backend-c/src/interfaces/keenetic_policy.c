@@ -13,6 +13,7 @@
 
 #include "firc/keenetic_rci.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/mark.h"
 #include "firc/rand.h"
 
@@ -804,7 +805,7 @@ struct firc_kn_policies {
     firc_kn_policies_changed_fn on_change;
     void *on_change_ud;
     bool clash_said;
-    bool marks_failing;
+    firc_logrep_t marks_failing;
     mark_t *good_marks;
     size_t n_good_marks;
     bool announce_owed;
@@ -949,14 +950,14 @@ static firc_err_t refresh_round(firc_kn_policies_t *p, firc_kn_rci_get_fn get, v
             return err;
         }
     }
-    if (merr != FIRC_OK && !p->marks_failing) {
-        FIRC_WARN("keenetic policies: the policy marks could not be read (%s); the last marks read are kept "
-                  "until they can",
-                  firc_err_str(merr));
-    } else if (merr == FIRC_OK && p->marks_failing) {
-        FIRC_INFO("keenetic policies: the policy marks can be read again");
+    if (merr != FIRC_OK) {
+        firc_logrep_fail(&p->marks_failing, FIRC_LOG_WARN, NULL,
+                         "keenetic policies: the policy marks could not be read (%s); the last marks read are kept "
+                         "until they can",
+                         firc_err_str(merr));
+    } else {
+        (void)firc_logrep_ok(&p->marks_failing, NULL, "keenetic policies: the policy marks");
     }
-    p->marks_failing = merr != FIRC_OK;
     (void)firc_kn_policies_offer(p, m);
     return FIRC_OK;
 }
@@ -967,7 +968,8 @@ firc_err_t firc_kn_policies_round_for_test(firc_kn_policies_t *p, firc_kn_rci_ge
 
 static void *refresher(void *ud) {
     firc_kn_policies_t *p = ud;
-    unsigned retry = 1, failures = 0;
+    unsigned retry = 1;
+    firc_logrep_t failing = {0};
     pthread_mutex_lock(&p->mu);
     while (!p->stop) {
         pthread_mutex_unlock(&p->mu);
@@ -976,13 +978,12 @@ static void *refresher(void *ud) {
         firc_err_t err = refresh_round(p, rci_get, &rci);
         unsigned wait;
         if (err == FIRC_OK) {
-            if (failures > 0) { FIRC_INFO("keenetic policies: RCI is back"); }
-            failures = 0;
+            (void)firc_logrep_ok(&failing, NULL, "keenetic policies: RCI");
             retry = 1;
             wait = p->refresh_secs;
         } else {
             /* Keep the last good map across a failure; before the first map retry fast (ndm may still be starting). */
-            if (failures++ == 0) { FIRC_WARN("keenetic policies: refresh failed: %s", firc_err_str(err)); }
+            firc_logrep_fail(&failing, FIRC_LOG_WARN, NULL, "keenetic policies: refresh failed: %s", firc_err_str(err));
             wait = retry < p->refresh_secs ? retry : p->refresh_secs;
             if (retry < p->refresh_secs) { retry *= 2; }
         }

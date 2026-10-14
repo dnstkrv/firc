@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "firc/logrep.h"
 #include "firc/err.h"
 #include "firc/fakeip_addr.h"
 
@@ -127,6 +128,8 @@ firc_err_t firc_fakeip_load(firc_fakeip_t *f, FILE *in, int64_t now, size_t *res
 /* File variants: atomic write; FIRC_ERR_NOENT if the file is missing on load. */
 firc_err_t firc_fakeip_save_file(const firc_fakeip_t *f, const char *path, bool clean);
 firc_err_t firc_fakeip_load_file(firc_fakeip_t *f, const char *path, int64_t now, size_t *restored);
+/* firc_fakeip_save_file that says a failure at ERROR through said, its repeats per firc_logrep, and the next good save. */
+firc_err_t firc_fakeip_save_file_said(const firc_fakeip_t *f, const char *path, bool clean, firc_logrep_t *said);
 /* fn fires synchronously after the pool takes a new chunk, so a crash before the next save can't reissue it. */
 typedef void (*firc_fakeip_chunk_hook)(void *ud, const firc_fakeip_t *f);
 void firc_fakeip_set_on_chunk(firc_fakeip_t *f, firc_fakeip_chunk_hook fn, void *ud);

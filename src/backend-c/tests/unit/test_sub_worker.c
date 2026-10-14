@@ -761,7 +761,7 @@ TEST a_worker_freed_before_it_starts_frees_what_it_holds(void) {
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
-    firc_log_set_level(FIRC_LOG_ERROR);
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
     firc_sub_fetch_global_init();
     char *big = build_big_list();
     if (big == NULL) { return 1; }

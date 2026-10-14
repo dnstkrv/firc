@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "firc/events.h"
 #include "firc/log.h"
 #include "firc/loop.h"
 #include "firc/tunsup.h"
@@ -109,6 +110,20 @@ static void env_teardown(void)
     unlink(g_log);
     rmdir(g_dir);
     g_dir[0] = 0;
+}
+
+static bool journal_has(firc_log_level_t level, const char *source, const char *text)
+{
+    static firc_event_t ev[256];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 256, &next, &dropped);
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strcmp(ev[i].u.log.source, source) == 0 &&
+            strcmp(ev[i].u.log.text, text) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static size_t read_file(const char *path, char *buf, size_t cap)
@@ -529,8 +544,8 @@ TEST stderr_logged_by_level_without_links(void)
     log_done();
     char buf[8192];
     read_file(g_log, buf, sizeof buf);
-    ASSERT(strstr(buf, "INF tunnel tunvless0: tunvless[info]: up\n") != NULL);
-    ASSERT(strstr(buf, "WRN tunnel tunvless0: tunvless[warn]: bad option\n") != NULL);
+    ASSERT(strstr(buf, "INF tunvless0: up\n") != NULL);
+    ASSERT(strstr(buf, "WRN tunvless0: bad option\n") != NULL);
     ASSERT(strstr(buf, "vless://") == NULL);
     ASSERT(no_children());
     env_teardown();
@@ -539,8 +554,9 @@ TEST stderr_logged_by_level_without_links(void)
 
 TEST crash_restarts_with_growing_backoff(void)
 {
-    /* catches: no restart after a crash, or a backoff that does not double */
+    /* catches: no restart after a crash, a backoff that does not double, or the exit journalled as fircd's */
     env_setup("crash");
+    firc_event_reset_for_test();
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
@@ -559,7 +575,51 @@ TEST crash_restarts_with_growing_backoff(void)
     ASSERT_EQ(2, r.n_backoffs);
     ASSERT_EQ(3, r.backoffs[0]);
     ASSERT_EQ(6, r.backoffs[1]);
+    ASSERT(journal_has(FIRC_LOG_WARN, "tunvless0", "exited (1), restart in 3 s"));
     rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static int journal_count_from(firc_log_level_t level, const char *source, const char *prefix)
+{
+    static firc_event_t ev[512];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 512, &next, &dropped);
+    int c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strcmp(ev[i].u.log.source, source) == 0 &&
+            strncmp(ev[i].u.log.text, prefix, strlen(prefix)) == 0) {
+            c++;
+        }
+    }
+    return c;
+}
+
+/* Catches: a crash-looping child warned at every restart, so one tunnel fills the warning ring. */
+TEST twenty_restarts_leave_one_warning(void)
+{
+    env_setup("crash");
+    firc_event_reset_for_test();
+    char *links[] = {"vless://u@h:443#x"};
+    firc_tunnel_t t;
+    tun_init(&t, "a", 0, links, 1);
+    firc_tunnels_t set = {&t, 1};
+    static rec_t r;
+    rec_open(&r);
+    firc_tunsup_set_second_ms_for_test(r.s, 1);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
+    char buf[4096];
+    for (int i = 0; i < 100; i++) {
+        run_ms(&r, 50);
+        read_file(g_starts, buf, sizeof buf);
+        if (count_starts(buf, "tunvless0") >= 21) { break; }
+    }
+    ASSERT(count_starts(buf, "tunvless0") >= 21);
+    rec_close(&r);
+    ASSERT_EQ(1, journal_count_from(FIRC_LOG_WARN, "tunvless0", "exited (1), restart in "));
+    ASSERT(journal_count_from(FIRC_LOG_DEBUG, "tunvless0", "exited (1), restart in ") >= 19);
     ASSERT(no_children());
     env_teardown();
     PASS();
@@ -616,8 +676,9 @@ TEST backoff_resets_after_stable_run(void)
 
 TEST badconf_not_restarted(void)
 {
-    /* catches: a tight restart loop on a config error */
+    /* Catches: a tight restart loop on a config error, or the stop it needs the operator for said below ERROR. */
     env_setup("badconf");
+    firc_event_reset_for_test();
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
@@ -633,6 +694,7 @@ TEST badconf_not_restarted(void)
     firc_tun_state_t st = state_of(r.s, "a");
     ASSERT_EQ(FIRC_TUN_ST_BAD_CONFIG, st.status);
     ASSERT_EQ(2, st.last_exit);
+    ASSERT(journal_has(FIRC_LOG_ERROR, "tunvless0", "configuration refused, not restarted"));
     rec_close(&r);
     ASSERT(no_children());
     env_teardown();
@@ -1050,12 +1112,14 @@ TEST child_inherits_no_helper_pipe(void)
     PASS();
 }
 
-TEST warn_tag_followed_by_space_is_warn(void)
+TEST each_tag_is_relayed_at_its_level_without_it(void)
 {
-    /* catches: "tunvless[warn] tunnel: ..." logged at INFO, or any "tunvless[warn" prefix taken as WARN */
+    /* catches: a tag relayed at the wrong level or left in the text, a sub-tag cut, a near-tag taken as one, or the device lost as the source */
     env_setup("warnsp");
+    firc_event_reset_for_test();
     log_to_file();
     ASSERT(g_log_fd >= 0);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
@@ -1065,11 +1129,20 @@ TEST warn_tag_followed_by_space_is_warn(void)
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
     run_ms(&r, 500);
     rec_close(&r);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
     log_done();
     char buf[8192];
     read_file(g_log, buf, sizeof buf);
-    ASSERT(strstr(buf, "WRN tunnel tunvless0: tunvless[warn] tunnel: device tunvless0 was not created\n") != NULL);
-    ASSERT(strstr(buf, "INF tunnel tunvless0: tunvless[warn]ing: not a warn tag\n") != NULL);
+    ASSERT(strstr(buf, "WRN tunvless0: tunnel: device tunvless0 was not created\n") != NULL);
+    ASSERT(strstr(buf, "INF tunvless0: tunvless[warn]ing: not a warn tag\n") != NULL);
+    ASSERT(strstr(buf, "ERR tunvless0: no usable VLESS node\n") != NULL);
+    ASSERT(strstr(buf, "DBG tunvless0: tun: rx 40\n") != NULL);
+    ASSERT(strstr(buf, "INF tunvless0: tunvless: by hand\n") != NULL);
+    ASSERT(journal_has(FIRC_LOG_ERROR, "tunvless0", "no usable VLESS node"));
+    ASSERT(journal_has(FIRC_LOG_WARN, "tunvless0", "tunnel: device tunvless0 was not created"));
+    ASSERT(strstr(buf, "tunvless[error]") == NULL);
+    ASSERT(strstr(buf, "tunvless[debug]") == NULL);
+    ASSERT(strstr(buf, "tunvless[warn] ") == NULL);
     ASSERT(no_children());
     env_teardown();
     PASS();
@@ -1317,8 +1390,9 @@ TEST a_node_change_goes_down_the_open_stdin_without_a_restart(void)
 
 TEST an_unanswered_node_list_restarts_the_child(void)
 {
-    /* catches: a child that never takes the new list left running on the old one */
+    /* catches: a child that never takes the new list left running on the old one, or the restart journalled as fircd's */
     env_setup("nodes");
+    firc_event_reset_for_test();
     setenv("FAKE_NOACK", "1", 1);
     log_to_file();
     char *l1[] = {"vless://u@h1:1#x"};
@@ -1344,7 +1418,8 @@ TEST an_unanswered_node_list_restarts_the_child(void)
     log_done();
     char log[4096];
     read_file(g_log, log, sizeof log);
-    ASSERT_EQ(1, count_of(log, "tunnel tunvless0: tunvless did not take the node list in 10 s, restarting"));
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: tunvless did not take the node list in 10 s, restarting\n"));
+    ASSERT(journal_has(FIRC_LOG_WARN, "tunvless0", "tunvless did not take the node list in 10 s, restarting"));
     ASSERT(no_children());
     env_teardown();
     PASS();
@@ -1427,7 +1502,7 @@ TEST a_full_pin_table_restarts_the_child_once(void)
     log_done();
     char log[4096];
     read_file(g_log, log, sizeof log);
-    ASSERT_EQ(1, count_of(log, "tunnel tunvless0: pin table full, restarting"));
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: pin table full, restarting\n"));
     ASSERT(no_children());
     env_teardown();
     PASS();
@@ -1587,7 +1662,7 @@ TEST a_short_ack_stops_trusting_node_numbers(void)
     log_done();
     char log[4096];
     read_file(g_log, log, sizeof log);
-    ASSERT_EQ(1, count_of(log, "tunnel tunvless0: tunvless took 1 of 2 nodes, node states go by name until it restarts"));
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: tunvless took 1 of 2 nodes, node states go by name until it restarts\n"));
     ASSERT(no_children());
     env_teardown();
     PASS();
@@ -1642,6 +1717,7 @@ int main(int argc, char **argv)
     RUN_TEST(stderr_logged_by_level_without_links);
     RUN_TEST(crash_restarts_with_growing_backoff);
     RUN_TEST(backoff_doubles_up_to_sixty);
+    RUN_TEST(twenty_restarts_leave_one_warning);
     RUN_TEST(backoff_resets_after_stable_run);
     RUN_TEST(badconf_not_restarted);
     RUN_TEST(flood_line_dropped_loop_responsive);
@@ -1654,7 +1730,7 @@ int main(int argc, char **argv)
     RUN_TEST(bad_config_waits_for_a_changed_apply);
     RUN_TEST(uplink_tunnel_started_after_its_uplink);
     RUN_TEST(child_inherits_no_helper_pipe);
-    RUN_TEST(warn_tag_followed_by_space_is_warn);
+    RUN_TEST(each_tag_is_relayed_at_its_level_without_it);
     RUN_TEST(empty_dev_or_node_ignored_once_logged);
     RUN_TEST(oversize_lines_warned_per_stream);
     RUN_TEST(device_swap_waits_for_the_old_holder);

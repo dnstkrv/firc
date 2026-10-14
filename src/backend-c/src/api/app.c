@@ -1,7 +1,6 @@
 #include "firc/app.h"
 
 #include <errno.h>
-#include <stdarg.h>
 #include <ifaddrs.h>
 #include <linux/if.h>
 #include <sys/epoll.h>
@@ -20,6 +19,7 @@
 #include "firc/json.h"
 #include "firc/hash.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/match.h"
 #include "firc/dnat.h"
 #include "firc/pool_reject.h"
@@ -56,6 +56,7 @@ typedef struct nf_held {
 } nf_held_t;
 
 struct firc_app {
+    firc_lograte_t said_snapshot;
     bool owed_full_sweep; /* a failed-to-report full pass asked for one more; cleared by the next landed report */
     firc_config_t *cfg;
     firc_app_config_t saved; /* what firc.conf holds; cfg->app is what the daemon RUNS, read at run time */
@@ -505,22 +506,34 @@ static void retry_note_failure(firc_app_t *app, firc_ruleset_t *rs, bool fresh) 
 }
 
 static void retry_note_success(firc_app_t *app, firc_ruleset_t *rs) {
+    const char *name = firc_ruleset_group(rs)->name;
+    (void)firc_logrep_ok(&firc_ruleset_retry(rs)->said, NULL, "group \"%s\"", name != NULL ? name : "");
     *firc_ruleset_retry(rs) = (firc_ruleset_retry_t){0};
     retry_rearm(app);
 }
 
+#define FIRC_APP_GROUP_ERROR_AFTER_MS (5u * 60u * 1000u)
+
+static void group_failed(firc_app_t *app, firc_ruleset_t *rs, const char *step, firc_err_t err, bool fresh,
+                         char *why, size_t why_len) {
+    const char *name = firc_ruleset_group(rs)->name;
+    char line[256];
+    snprintf(line, sizeof(line), "group \"%s\": %s: %s", name != NULL ? name : "", step != NULL ? step : "enable",
+             firc_err_str(err));
+    retry_note_failure(app, rs, fresh);
+    firc_logrep_fail_for(&firc_ruleset_retry(rs)->said, FIRC_APP_GROUP_ERROR_AFTER_MS, NULL,
+                         "%s; trying again, spaced up to every %u s, until it comes up", line,
+                         (unsigned)(FIRC_APP_RETRY_MAX_MS / 1000u));
+    if (why != NULL && why_len > 0) { snprintf(why, why_len, "%s", line); }
+}
+
 static firc_err_t app_group_up_ex(firc_app_t *app, firc_ruleset_t *rs, char *why, size_t why_len,
-                                  bool quiet) {
+                                  bool retry) {
     const firc_group_t *g = firc_ruleset_group(rs);
     const char *step = NULL;
     firc_err_t err = firc_ruleset_enable(rs, &step);
     if (err != FIRC_OK) {
-        char line[256];
-        snprintf(line, sizeof(line), "group \"%s\": %s: %s", g->name != NULL ? g->name : "",
-                 step != NULL ? step : "enable", firc_err_str(err));
-        if (!quiet) { FIRC_ERROR("%s", line); }
-        if (why != NULL && why_len > 0) { snprintf(why, why_len, "%s", line); }
-        retry_note_failure(app, rs, !quiet);
+        group_failed(app, rs, step, err, !retry, why, why_len);
     } else {
         retry_note_success(app, rs);
         if (firc_ruleset_routed(rs)) { release_held(app, 0, &g->id, firc_ruleset_has_reply_rule(rs)); }
@@ -675,7 +688,7 @@ void firc_app_republish_resolve_routes(firc_app_t *app) {
     if (n != 0 && (in == NULL || fw == NULL)) {
         free(in);
         free(fw);
-        FIRC_ERROR("failed to rebuild the group resolver routes: out of memory");
+        FIRC_WARN("failed to rebuild the group resolver routes: out of memory");
         return;
     }
     for (size_t i = 0; i < n; i++) {
@@ -695,7 +708,7 @@ void firc_app_republish_resolve_routes(firc_app_t *app) {
     free(in);
     free(fw);
     if (err != FIRC_OK) {
-        FIRC_ERROR("failed to rebuild the group resolver routes: %s", firc_err_str(err));
+        FIRC_WARN("failed to rebuild the group resolver routes: %s", firc_err_str(err));
         return;
     }
     /* computed before the publish frees the old table; on OOM nothing is closed, sockets just stay on the old route */
@@ -879,12 +892,7 @@ firc_err_t firc_app_start_groups(firc_app_t *app) {
         firc_ruleset_t *rs = app->rulesets[i];
         const char *step = NULL;
         firc_err_t err = firc_ruleset_enable(rs, &step);
-        if (err != FIRC_OK) {
-            const char *name = firc_ruleset_group(rs)->name;
-            FIRC_ERROR("failed to enable group \"%s\": %s: %s", name != NULL ? name : "",
-                       step != NULL ? step : "enable", firc_err_str(err));
-            retry_note_failure(app, rs, true);
-        }
+        if (err != FIRC_OK) { group_failed(app, rs, step, err, true, NULL, 0); }
     }
     app->running = true;
     retry_rearm(app); /* the failures above could not arm it before running */
@@ -1039,22 +1047,9 @@ bool firc_app_retry_groups(firc_app_t *app, const char *iface) {
     for (size_t i = 0; i < app->n_rulesets; i++) {
         firc_ruleset_t *rs = app->rulesets[i];
         if (!retry_due(app, rs, iface, now)) { continue; }
-        char why[FIRC_APP_WHY_MAX];
-        why[0] = '\0';
-        if (app_group_up_ex(app, rs, why, sizeof(why), true) == FIRC_OK) {
+        if (app_group_up_ex(app, rs, NULL, 0, true) == FIRC_OK) {
             hold_if_newly_routed(app, rs, false);
             came_up = true;
-            const char *name = firc_ruleset_group(rs)->name;
-            FIRC_INFO("group \"%s\" came up on a retry", name != NULL ? name : "");
-            continue;
-        }
-        firc_ruleset_retry_t *r = firc_ruleset_retry(rs);
-        if (!r->warned) {
-            FIRC_WARN("%s; trying again, spaced up to every %u s, until it comes up", why,
-                      (unsigned)(FIRC_APP_RETRY_MAX_MS / 1000u));
-            r->warned = true;
-        } else {
-            FIRC_DEBUG("%s (retry)", why);
         }
     }
     if (came_up) { republish_or_log(app); }
@@ -1790,7 +1785,9 @@ void firc_app_on_sync_event(firc_app_t *app, firc_sub_event_t *ev, int64_t now_u
         app_nf_enter(app);
         firc_err_t err = firc_app_apply_sync_result_unlocked(app, ev, now_unix, &changed);
         app_nf_leave(app);
-        if (err != FIRC_OK) { FIRC_WARN("\"%s\": sync failed: %s", name, firc_err_str(err)); }
+        if (err != FIRC_OK && ev->result != FIRC_SUB_RESULT_ERROR) {
+            FIRC_WARN("\"%s\": sync failed: %s", name, firc_err_str(err));
+        }
         break;
     }
     }
@@ -2065,7 +2062,7 @@ firc_err_t firc_app_start_list_worker(firc_app_t *app) {
         app->sub_worker = NULL;
         return err;
     }
-    FIRC_INFO("list worker started");
+    FIRC_DEBUG("list worker started");
     return FIRC_OK;
 }
 
@@ -2209,7 +2206,7 @@ size_t firc_app_pending_restart(const firc_app_t *app, bool pending[FIRC_SETTING
     return n;
 }
 
-/* the proxy and log level are told first: the running copy's old string is about to be freed by the copy */
+/* the proxy is told first: the running copy's old string is about to be freed by the copy */
 static firc_err_t apply_live(firc_app_t *app, bool applied[FIRC_SETTINGS_COUNT]) {
     firc_err_t first = FIRC_OK;
     firc_app_config_t *run = &app->cfg->app;
@@ -2243,12 +2240,9 @@ static firc_err_t apply_live(firc_app_t *app, bool applied[FIRC_SETTINGS_COUNT])
         if (!differ[i]) { continue; }
         const firc_setting_t *s = &firc_settings[i];
         if (firc_setting_copy(s, run, sav) != FIRC_OK) {
-            FIRC_ERROR("settings: %s not applied: out of memory", s->path);
+            FIRC_WARN("settings: %s not applied: out of memory", s->path);
             if (first == FIRC_OK) { first = FIRC_ERR_NOMEM; }
             continue;
-        }
-        if (s->apply == FIRC_APPLY_LOG_LEVEL) {
-            firc_log_set_level(firc_log_level_from_str(run->log_level));
         }
         if (s->apply == FIRC_APPLY_UNMATCHED_TTL && app->pipeline != NULL) {
             firc_dns_pipeline_set_unmatched_ttl(
@@ -2473,31 +2467,11 @@ firc_err_t firc_app_stage_tap(firc_app_t *app) {
 /* dedup table has no eviction; once full, every further bypass becomes its own event. 1024 is an estimate. */
 #define TAP_MAX_FLOWS 1024
 
-static int64_t tap_wall_secs(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (int64_t)ts.tv_sec;
-}
-
-/* the capture's own lines go to the journal at INFO whatever the log level, so they are never silently hidden */
-__attribute__((format(printf, 1, 2))) static void capture_say(const char *fmt, ...) {
-    char buf[FIRC_EVENT_TEXT];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n < 0) { return; }
-    FIRC_INFO("%s", buf);
-    if (firc_log_level() > FIRC_LOG_INFO) {
-        firc_event_put_log(FIRC_LOG_INFO, tap_wall_secs(), buf);
-    }
-}
-
 /* unprefixed: a prefix would cut the sentence's end off, already at most one log event's text */
 _Static_assert(FIRC_TAP_SENTENCE_MAX < FIRC_EVENT_TEXT, "a summary sentence fits a log event");
 static void say_sentence(const char *sentence, void *ud) {
     (void)ud;
-    capture_say("%s", sentence);
+    FIRC_INFO("%s", sentence);
 }
 
 static void tap_lan_free(char **lan, size_t n) {
@@ -2520,7 +2494,7 @@ static firc_err_t tap_reader_up(firc_app_t *app) {
     for (int w = 0; w < 2 && err == FIRC_OK; w++) {
         socks[w] = app->tap_nflog_open(groups[w], ranges[w]);
         if (socks[w] == NULL) {
-            FIRC_ERROR("capture refused: could not bind NFLOG group %u", (unsigned)groups[w]);
+            FIRC_WARN("capture refused: could not bind NFLOG group %u", (unsigned)groups[w]);
             err = FIRC_ERR_SYS;
             break;
         }
@@ -2531,7 +2505,7 @@ static firc_err_t tap_reader_up(firc_app_t *app) {
             firc_err_t watched = firc_loop_add_fd(app->loop, firc_nflog_fd(socks[w]), EPOLLIN,
                                                   on_tap_readable, &app->tap_reader[w]);
             if (watched != FIRC_OK) { /* same FIRC_ERR_SYS as a failed bind; this log line is what tells them apart */
-                FIRC_ERROR("capture refused: NFLOG group %u bound, but the event loop would not "
+                FIRC_WARN("capture refused: NFLOG group %u bound, but the event loop would not "
                            "watch its socket (%s)",
                            (unsigned)groups[w], firc_err_str(watched));
                 err = FIRC_ERR_SYS;
@@ -2595,7 +2569,7 @@ static void on_tap_readable(firc_loop_t *loop, int fd, uint32_t events, void *ud
         firc_err_t e = firc_tap_drain(&d, r->sock, NULL);
         if (e == FIRC_ERR_AGAIN) { return; }
         if (e != FIRC_OK) { /* the reader is broken; carrying on would report a false clean five minutes */
-            FIRC_ERROR("capture: its %s reader failed (%s), so the capture ends here",
+            FIRC_WARN("capture: its %s reader failed (%s), so the capture ends here",
                        r->which == 0 ? "new-connection" : "ClientHello", firc_err_str(e));
             (void)firc_app_capture_stop(app, NULL);
             return;
@@ -2708,7 +2682,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     {
         uint8_t raw[FIRC_TAP_TOKEN_CHARS / 2];
         if (firc_random_bytes(raw, sizeof(raw)) != FIRC_OK) { /* FIRC_ERR_IO, deliberately distinct from the NFLOG bind's FIRC_ERR_SYS */
-            FIRC_ERROR("capture refused: no random bytes for its token");
+            FIRC_WARN("capture refused: no random bytes for its token");
             return FIRC_ERR_IO;
         }
         for (size_t i = 0; i < sizeof(raw); i++) { snprintf(token + i * 2, 3, "%02x", raw[i]); }
@@ -2730,7 +2704,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
     firc_err_t err = tap_reader_up(app);
     if (err != FIRC_OK) {
         tap_lan_free(lan, n_lan);
-        FIRC_ERROR("capture refused: its readers could not be started (%s)", firc_err_str(err));
+        FIRC_WARN("capture refused: its readers could not be started (%s)", firc_err_str(err));
         return err;
     }
     app->tap_failed_passes_seen = /* the last capture's failed passes are its own; it has stopped */
@@ -2763,11 +2737,11 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
             tap_reader_down(app);
             tap_lan_free(lan, n_lan);
             if (asked == FIRC_ERR_NOSYS) {
-                FIRC_ERROR("capture refused: this kernel will not take the capture rules. They need "
+                FIRC_WARN("capture refused: this kernel will not take the capture rules. They need "
                            FIRC_TAP_LAN_MODULES "; the log above names what it lacks");
                 return FIRC_ERR_NOSYS;
             }
-            FIRC_ERROR("capture refused: the kernel could not be asked which capture extensions it has (%s); "
+            FIRC_WARN("capture refused: the kernel could not be asked which capture extensions it has (%s); "
                        "the log above names the errno",
                        firc_err_str(probed));
             return FIRC_ERR_AGAIN;
@@ -2802,7 +2776,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
             app_nf_leave(app);
             tap_reader_down(app);
             tap_lan_free(lan, n_lan);
-            FIRC_ERROR("capture refused: its deadline could not be armed");
+            FIRC_WARN("capture refused: its deadline could not be armed");
             return FIRC_ERR_NOMEM;
         }
     }
@@ -2821,7 +2795,7 @@ firc_err_t firc_app_capture_start(firc_app_t *app, int64_t now_unix,
         if (n < 0) { break; }
         at += (size_t)n;
     }
-    capture_say("capture started: %llds on the LAN side, on %s", (long long)app->tap_seconds,
+    FIRC_INFO("capture started: %llds on the LAN side, on %s", (long long)app->tap_seconds,
                 names);
     if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
     if (token_out != NULL) { memcpy(token_out, token, sizeof(token)); }
@@ -2832,7 +2806,7 @@ static void on_tap_deadline(firc_loop_t *loop, void *ud) {
     (void)loop;
     firc_app_t *app = ud;
     app->tap_timer = 0; /* the timer has fired and is dead; saying so first keeps the stop from deleting an id that names nothing */
-    capture_say("capture reached its end");
+    FIRC_INFO("capture reached its end");
     (void)firc_app_capture_stop(app, NULL);
 }
 
@@ -2861,7 +2835,7 @@ firc_err_t firc_app_capture_stop(firc_app_t *app, const char *token) {
 
     if (timer != 0 && app->loop != NULL) { (void)firc_loop_del_timer(app->loop, timer); }
 
-    capture_say("capture stopped");
+    FIRC_INFO("capture stopped");
     firc_tap_report_sentences(app->tap_report, true, say_sentence, NULL); /* one sentence per line; nothing of the capture is kept after this */
     tap_reader_down(app);
     if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
@@ -3061,13 +3035,14 @@ void firc_app_pool_changed(firc_app_t *app) {
     if (app == NULL) { return; }
     firc_err_t err = firc_app_refresh_pool_snapshot(app);
     if (err != FIRC_OK) { /* the old snapshot stays current; the next change retries the refresh */
-        FIRC_ERROR("failed to snapshot the address pool: %s", firc_err_str(err));
+        firc_lograte_say(&app->said_snapshot, 60000, FIRC_LOG_WARN, NULL, "failed to snapshot the address pool: %s",
+                         firc_err_str(err));
     }
     if (app->committer) {
         firc_nfcommit_request_addresses(app->committer);
     } else {
         err = firc_app_rebuild_netfilter_kind(app, NULL, false);
-        if (err != FIRC_OK) { FIRC_ERROR("netfilter rebuild failed: %s", firc_err_str(err)); }
+        if (err != FIRC_OK) { FIRC_WARN("netfilter rebuild failed: %s", firc_err_str(err)); }
     }
 }
 
@@ -3101,7 +3076,7 @@ firc_err_t firc_app_start_netfilter_committer(firc_app_t *app) {
         pthread_mutex_destroy(&app->nf_mu);
         return err;
     }
-    FIRC_INFO("netfilter table committer started");
+    FIRC_DEBUG("netfilter table committer started");
     return FIRC_OK;
 }
 

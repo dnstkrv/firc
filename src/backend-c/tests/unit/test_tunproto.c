@@ -1,5 +1,6 @@
 #include "greatest.h"
 #include "firc/tunproto.h"
+#include "firc/log.h"
 #include <string.h>
 
 typedef struct {
@@ -284,6 +285,74 @@ TEST embedded_nul_does_not_read_past_len(void)
     PASS();
 }
 
+static const char *rest_of(const char *s, firc_log_level_t *got)
+{
+    size_t skip = 99;
+    *got = firc_tun_err_level(s, strlen(s), &skip);
+    return skip <= strlen(s) ? s + skip : NULL;
+}
+
+TEST each_tag_gives_its_level_and_is_cut(void)
+{
+    /* catches: a tag mapped to the wrong level, left in the relayed text, or a sub-tag cut with it */
+    static const struct {
+        const char *line;
+        firc_log_level_t level;
+        const char *text;
+    } cases[] = {
+        {"tunvless[debug] tun: rx 40", FIRC_LOG_DEBUG, "tun: rx 40"},
+        {"tunvless[info]: up", FIRC_LOG_INFO, "up"},
+        {"tunvless[warn]: bad option", FIRC_LOG_WARN, "bad option"},
+        {"tunvless[warn] tunnel: device x was not created", FIRC_LOG_WARN, "tunnel: device x was not created"},
+        {"tunvless[error]: no usable VLESS node", FIRC_LOG_ERROR, "no usable VLESS node"},
+        {"tunvless[error]:no space", FIRC_LOG_ERROR, "no space"},
+        {"tunvless[error]:", FIRC_LOG_ERROR, ""},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        firc_log_level_t got;
+        const char *rest = rest_of(cases[i].line, &got);
+        ASSERT_EQm(cases[i].line, cases[i].level, got);
+        ASSERTm(cases[i].line, rest != NULL);
+        ASSERT_STR_EQm(cases[i].line, cases[i].text, rest);
+    }
+    PASS();
+}
+
+TEST anything_but_a_whole_tag_is_info_and_kept(void)
+{
+    /* catches: a prefix of a tag, an unknown level or an untagged line taken as a level, or cut */
+    static const char *const lines[] = {
+        "tunvless[warn]ing: not a warn tag",
+        "tunvless[warn]",
+        "tunvless[fatal]: no such level",
+        "tunvless[trace] tun: gone",
+        "tunvless[Error]: case matters",
+        "tunvless: more than 64 routes",
+        "tun-stats[0]: 1.0 MB/s",
+        " tunvless[warn]: indented",
+        "",
+    };
+    for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++) {
+        firc_log_level_t got;
+        const char *rest = rest_of(lines[i], &got);
+        ASSERT_EQm(lines[i], FIRC_LOG_INFO, got);
+        ASSERT_STR_EQm(lines[i], lines[i], rest);
+    }
+    PASS();
+}
+
+TEST the_tag_is_read_within_len(void)
+{
+    /* catches: the tag matched past len, where the line has already ended */
+    const char s[] = "tunvless[warn]: x";
+    size_t skip = 99;
+    ASSERT_EQ(FIRC_LOG_INFO, firc_tun_err_level(s, 14, &skip));
+    ASSERT_EQ((size_t)0, skip);
+    ASSERT_EQ(FIRC_LOG_WARN, firc_tun_err_level(s, 15, &skip));
+    ASSERT_EQ((size_t)15, skip);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -308,5 +377,8 @@ int main(int argc, char **argv)
     RUN_TEST(parse_nodes_ack_and_pins_full);
     RUN_TEST(parse_index_next_to_names);
     RUN_TEST(an_empty_active_list_is_no_live_node);
+    RUN_TEST(each_tag_gives_its_level_and_is_cut);
+    RUN_TEST(anything_but_a_whole_tag_is_info_and_kept);
+    RUN_TEST(the_tag_is_read_within_len);
     GREATEST_MAIN_END();
 }

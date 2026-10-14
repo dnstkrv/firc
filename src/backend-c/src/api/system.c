@@ -22,17 +22,12 @@ static void must_route(firc_httpd_t *h, const char *method, const char *pattern,
 
 static const char *level_name(firc_log_level_t l) {
     switch (l) {
-    case FIRC_LOG_TRACE: return "trace";
     case FIRC_LOG_DEBUG: return "debug";
     case FIRC_LOG_INFO: return "info";
     case FIRC_LOG_WARN: return "warn";
     case FIRC_LOG_ERROR: return "error";
-    case FIRC_LOG_FATAL: return "fatal";
-    case FIRC_LOG_PANIC: return "panic";
-    case FIRC_LOG_NOLEVEL: return "nolevel";
-    case FIRC_LOG_DISABLED: return "disabled";
     }
-    return "nolevel";
+    return "error";
 }
 
 static void put_ip(cJSON *obj, const char *key, const firc_ip_t *ip) {
@@ -176,6 +171,7 @@ static cJSON *event_to_json(const firc_event_t *e) {
     case FIRC_EVENT_LOG:
         cJSON_AddStringToObject(item, "kind", "log");
         cJSON_AddStringToObject(item, "level", level_name(e->u.log.level));
+        cJSON_AddStringToObject(item, "source", e->u.log.source[0] != '\0' ? e->u.log.source : "fircd");
         cJSON_AddStringToObject(item, "message", e->u.log.text);
         break;
     case FIRC_EVENT_DNS:
@@ -228,7 +224,6 @@ static void handle_events(firc_http_req_t *req, firc_http_res_t *res, void *ud) 
     cJSON_AddNumberToObject(out, "next", (double)next);
     cJSON_AddNumberToObject(out, "dropped", (double)dropped);
     cJSON_AddStringToObject(out, "boot", firc_event_boot());
-    cJSON_AddStringToObject(out, "level", level_name(firc_log_level()));
     free(events);
     firc_http_res_write_json(res, 200, out);
 }
@@ -397,8 +392,7 @@ static void handle_netfilterd_hook(firc_http_req_t *req, firc_http_res_t *res, v
     cJSON_Delete(json);
 
     /* never turned into an HTTP error: the firmware fires this hook mid-rewrite and ignores the answer */
-    firc_err_t err = firc_app_force_commit_iptables(ctx->app);
-    if (err != FIRC_OK) { FIRC_ERROR("error fixing iptables after netfilter.d: %s", firc_err_str(err)); }
+    (void)firc_app_force_commit_iptables(ctx->app);
     firc_http_res_write(res, 200, NULL, NULL, 0);
 }
 

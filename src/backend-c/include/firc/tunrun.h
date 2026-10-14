@@ -68,9 +68,10 @@ void firc_tunrun_stop(firc_tunrun_t *t, int grace_ms);
 void firc_tunrun_free(firc_tunrun_t *t);
 
 void firc_tunrun_set_list_max_for_test(firc_tunrun_t *t, size_t bytes); /* test seam: tunvless's stdin limit */
+/* Test seam: the clock and the period of the check for a tunnel with no working node; returns its timer, 0 none. */
+int firc_tunrun_set_watch_for_test(firc_tunrun_t *t, int64_t (*now_ms)(void), int period_ms);
 
-/* The journal line for an event, or for a status change when ev is NULL; false when there is none. */
-bool firc_tun_journal_line(const firc_tun_state_t *st, const firc_tev_t *ev, char *buf, size_t cap,
-                           firc_log_level_t *level);
+/* The journal line for a node event, without the device (the journal keeps it as the source); false when there is none. */
+bool firc_tun_journal_line(const firc_tev_t *ev, char *buf, size_t cap, firc_log_level_t *level);
 
 #endif

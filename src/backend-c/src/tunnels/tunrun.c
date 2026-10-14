@@ -7,11 +7,14 @@
 #include <time.h>
 
 #include "firc/events.h"
+#include "firc/logrep.h"
 #include "firc/mark.h"
 #include "firc/tunnet.h"
 #include "firc/tunnodes.h"
+#include "firc/tunwatch.h"
 
 #define TUNVLESS_STDIN_MAX ((size_t)1 << 20)
+#define WATCH_MS 15000
 
 typedef struct {
     char id[16];
@@ -42,6 +45,8 @@ typedef struct {
     int64_t syn_since;
     keys_t downs;
     keys_t acts;
+    firc_tunwatch_t watch;
+    firc_logrep_t no_node;
 } ext_t;
 
 struct firc_tunrun {
@@ -60,26 +65,19 @@ struct firc_tunrun {
     firc_tunsubs_t *subs;
     size_t list_max;
     bool stopped;
+    int watch_timer;
+    int64_t (*now)(void);
 };
 
-bool firc_tun_journal_line(const firc_tun_state_t *st, const firc_tev_t *ev, char *buf, size_t cap,
-                           firc_log_level_t *level)
+bool firc_tun_journal_line(const firc_tev_t *ev, char *buf, size_t cap, firc_log_level_t *level)
 {
-    if (ev == NULL) {
-        if (st->status != FIRC_TUN_ST_BACKOFF) {
-            return false;
-        }
-        *level = FIRC_LOG_WARN;
-        snprintf(buf, cap, "tunnel %s: exited (%d), restart in %d s", st->device, st->last_exit, st->backoff_s);
-        return true;
-    }
     switch (ev->kind) {
     case FIRC_TEV_ACTIVE: {
         if (ev->n_active == 0) {
             return false;
         }
         *level = FIRC_LOG_INFO;
-        int off = snprintf(buf, cap, "tunnel %s: active ", st->device);
+        int off = snprintf(buf, cap, "active ");
         for (size_t i = 0; i < ev->n_active && off >= 0 && (size_t)off < cap; i++) {
             off += snprintf(buf + off, cap - (size_t)off, "%s%s", i > 0 ? ", " : "", ev->active[i]);
         }
@@ -88,21 +86,21 @@ bool firc_tun_journal_line(const firc_tun_state_t *st, const firc_tev_t *ev, cha
     case FIRC_TEV_NODE_DOWN:
         *level = FIRC_LOG_WARN;
         if (ev->why[0] != 0) {
-            snprintf(buf, cap, "tunnel %s: %s does not answer (%s)", st->device, ev->node, ev->why);
+            snprintf(buf, cap, "%s does not answer (%s)", ev->node, ev->why);
         } else {
-            snprintf(buf, cap, "tunnel %s: %s does not answer", st->device, ev->node);
+            snprintf(buf, cap, "%s does not answer", ev->node);
         }
         return true;
     case FIRC_TEV_NODE_UP:
         *level = FIRC_LOG_INFO;
-        snprintf(buf, cap, "tunnel %s: %s answers again", st->device, ev->node);
+        snprintf(buf, cap, "%s answers again", ev->node);
         return true;
     case FIRC_TEV_NO_NODE:
         *level = FIRC_LOG_WARN;
         if (ev->retry_s > 0) {
-            snprintf(buf, cap, "tunnel %s: no node answers, retry in %d s", st->device, ev->retry_s);
+            snprintf(buf, cap, "no node answers, retry in %d s", ev->retry_s);
         } else {
-            snprintf(buf, cap, "tunnel %s: no node answers", st->device);
+            snprintf(buf, cap, "no node answers");
         }
         return true;
     case FIRC_TEV_READY:
@@ -119,22 +117,6 @@ static int64_t mono_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static int64_t wall_secs(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (int64_t)ts.tv_sec;
-}
-
-static void say(firc_log_level_t level, bool logged, const char *line)
-{
-    if (!logged) {
-        firc_log(level, "%s", line);
-    }
-    if (firc_log_level() > level) {
-        firc_event_put_log(level, wall_secs(), line);
-    }
-}
 
 static bool needs_uplink(const firc_tunnel_t *tun)
 {
@@ -150,7 +132,7 @@ static void refresh(firc_tunrun_t *t, size_t i)
 {
     firc_err_t err = firc_tunnet_uplink_refresh(t->r, &t->cur.t[i], &t->cur, &t->up[i]);
     if (err != FIRC_OK) {
-        FIRC_WARN("tunnel %s: uplink route not rewritten: %s", t->cur.t[i].device, firc_err_str(err));
+        firc_log_from(FIRC_LOG_WARN, t->cur.t[i].device, "uplink route not rewritten: %s", firc_err_str(err));
     }
     show_uplink(t, i);
 }
@@ -271,15 +253,43 @@ static void track_nodes(firc_tunrun_t *t, const firc_tun_state_t *st, const firc
     }
 }
 
+static void watch(firc_tunrun_t *t)
+{
+    if (t->stopped || t->ext == NULL) {
+        return;
+    }
+    firc_tun_state_t st[FIRC_TUN_MAX];
+    size_t n = firc_tunrun_states(t, st, FIRC_TUN_MAX);
+    for (size_t i = 0; i < n && i < FIRC_TUN_MAX; i++) {
+        firc_tunwatch_see(&t->ext[i].watch, st[i].device, st[i].status, t->now());
+    }
+}
+
+static void on_watch(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    watch(ud);
+}
+
 static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
 {
     firc_tunrun_t *t = ud;
     track_nodes(t, st, ev);
+    ssize_t at = find(&t->cur, st->id);
+    firc_logrep_t *no_node = at >= 0 && t->ext != NULL ? &t->ext[at].no_node : NULL;
     char line[FIRC_EVENT_TEXT];
     firc_log_level_t level = FIRC_LOG_INFO;
-    if (firc_tun_journal_line(st, ev, line, sizeof line, &level)) {
-        say(level, ev == NULL, line);
+    if (ev != NULL && firc_tun_journal_line(ev, line, sizeof line, &level)) {
+        if (ev->kind == FIRC_TEV_NO_NODE && no_node != NULL) {
+            firc_logrep_fail(no_node, level, st->device, "%s", line);
+        } else {
+            firc_log_from(level, st->device, "%s", line);
+        }
     }
+    if (ev != NULL && ev->kind == FIRC_TEV_ACTIVE && ev->n_active > 0 && no_node != NULL) {
+        (void)firc_logrep_ok(no_node, st->device, "nodes");
+    }
+    watch(t);
     if (ev == NULL || ev->kind != FIRC_TEV_READY) {
         return;
     }
@@ -301,7 +311,7 @@ static void remove_uplink(firc_tunrun_t *t, const char *device, firc_tunnet_upli
 {
     firc_err_t err = firc_tunnet_uplink_remove(t->r, u);
     if (err != FIRC_OK) {
-        FIRC_WARN("tunnel %s: uplink not fully removed: %s", device, firc_err_str(err));
+        firc_log_from(FIRC_LOG_WARN, device, "uplink not fully removed: %s", firc_err_str(err));
     }
     memset(u, 0, sizeof *u);
 }
@@ -338,7 +348,7 @@ static void drain(firc_tunrun_t *t, const firc_tunnel_t *tun, firc_tunnet_uplink
     }
     drain_t *grown = realloc(t->drains, (t->n_drains + 1) * sizeof *grown);
     if (grown == NULL) {
-        FIRC_ERROR("tunnel %s: out of memory, its uplink rule stays until the next start", tun->device);
+        firc_log_from(FIRC_LOG_WARN, tun->device, "out of memory, its uplink rule stays until the next start");
         memset(u, 0, sizeof *u);
         return;
     }
@@ -370,12 +380,17 @@ firc_tunrun_t *firc_tunrun_new(firc_loop_t *loop, firc_rtnl_t *r, uint32_t start
     t->r = r;
     t->list_max = TUNVLESS_STDIN_MAX;
     t->start = start_table;
+    t->now = mono_ms;
     t->sup = firc_tunsup_new(loop, binary, on_event, t);
     if (t->sup == NULL) {
         free(t);
         return NULL;
     }
     firc_tunsup_set_on_reap(t->sup, on_reap, t);
+    if (firc_loop_add_timer(loop, WATCH_MS, WATCH_MS, on_watch, t, &t->watch_timer) != FIRC_OK) {
+        t->watch_timer = 0;
+        FIRC_WARN("tunnels: a tunnel with no working node will not be reported");
+    }
     return t;
 }
 
@@ -434,7 +449,7 @@ static void keep(firc_tunrun_t *t, const firc_tunnel_t *nt, const firc_tunnels_t
 {
     firc_err_t err = firc_tunnet_uplink_refresh(t->r, nt, want, u);
     if (err != FIRC_OK) {
-        FIRC_WARN("tunnel %s: uplink route not rewritten: %s", nt->device, firc_err_str(err));
+        firc_log_from(FIRC_LOG_WARN, nt->device, "uplink route not rewritten: %s", firc_err_str(err));
     }
 }
 
@@ -472,7 +487,7 @@ static size_t fit_stdin(const firc_tunnel_t *tun, firc_tun_src_t *v, size_t k, f
         snprintf(nodes->v[row_of[p]].skip_reason, sizeof nodes->v[row_of[p]].skip_reason, "%s",
                  "over tunvless's 1 MiB node list");
     }
-    FIRC_WARN("tunnel %s: node list over %zu bytes, %zu nodes kept, %zu left out", tun->device, max, keep, k - keep);
+    firc_log_from(FIRC_LOG_WARN, tun->device, "node list over %zu bytes, %zu nodes kept, %zu left out", max, keep, k - keep);
     return keep;
 }
 
@@ -519,7 +534,7 @@ static void want_subs(firc_tunrun_t *t)
     if (view == NULL || marks == NULL) {
         free(view);
         free(marks);
-        FIRC_ERROR("tunnels: out of memory, the subscriptions to fetch are not updated");
+        FIRC_WARN("tunnels: out of memory, the subscriptions to fetch are not updated");
         return;
     }
     for (size_t i = 0; i < n; i++) {
@@ -573,7 +588,7 @@ static firc_err_t push(firc_tunrun_t *t, bool want)
         sent_t fresh = {0};
         firc_err_t err = sendable(tun, mark, bodies, n_bodies, t->list_max, &fresh);
         if (err != FIRC_OK) {
-            FIRC_ERROR("tunnel %s: node list not built: %s", tun->device, firc_err_str(err));
+            firc_log_from(FIRC_LOG_ERROR, tun->device, "node list not built: %s", firc_err_str(err));
         } else {
             free_one_sent(&t->sent[i]);
             t->sent[i] = fresh;
@@ -582,9 +597,7 @@ static firc_err_t push(firc_tunrun_t *t, bool want)
         }
         if (tun->enable && t->sent[i].n == 0) {
             if (!t->waiting[i]) {
-                char line[FIRC_EVENT_TEXT];
-                snprintf(line, sizeof line, "tunnel %s: no nodes to use yet", tun->device);
-                say(FIRC_LOG_INFO, false, line);
+                firc_log_from(FIRC_LOG_INFO, tun->device, "no nodes to use yet");
                 t->waiting[i] = true;
             }
             continue;
@@ -687,10 +700,8 @@ firc_err_t firc_tunrun_apply(firc_tunrun_t *t, firc_tunnels_t *want)
             }
             memset(&up[i], 0, sizeof up[i]);
             forget(t, nt->id);
-            char line[FIRC_EVENT_TEXT];
-            snprintf(line, sizeof line, "tunnel %s: not started, its uplink could not be set up (%s)", nt->device,
-                     firc_err_str(err));
-            say(FIRC_LOG_ERROR, false, line);
+            firc_log_from(FIRC_LOG_ERROR, nt->device, "not started, its uplink could not be set up (%s)",
+                          firc_err_str(err));
             continue;
         }
         ok[i] = true;
@@ -871,6 +882,10 @@ void firc_tunrun_stop(firc_tunrun_t *t, int grace_ms)
     if (t == NULL || t->stopped) {
         return;
     }
+    if (t->watch_timer != 0) {
+        (void)firc_loop_del_timer(t->loop, t->watch_timer);
+        t->watch_timer = 0;
+    }
     firc_tunsup_stop(t->sup, grace_ms);
     while (t->n_drains > 0) {
         release(t, t->n_drains - 1);
@@ -901,4 +916,16 @@ void firc_tunrun_free(firc_tunrun_t *t)
 void firc_tunrun_set_list_max_for_test(firc_tunrun_t *t, size_t bytes)
 {
     t->list_max = bytes;
+}
+
+int firc_tunrun_set_watch_for_test(firc_tunrun_t *t, int64_t (*now_ms)(void), int period_ms)
+{
+    t->now = now_ms != NULL ? now_ms : mono_ms;
+    if (t->watch_timer != 0) {
+        (void)firc_loop_del_timer(t->loop, t->watch_timer);
+    }
+    if (firc_loop_add_timer(t->loop, (uint64_t)period_ms, (uint64_t)period_ms, on_watch, t, &t->watch_timer) != FIRC_OK) {
+        t->watch_timer = 0;
+    }
+    return t->watch_timer;
 }

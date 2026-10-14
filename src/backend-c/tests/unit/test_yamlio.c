@@ -8,6 +8,7 @@
 
 #include "firc/yamlio.h"
 #include <unistd.h>
+#include "firc/events.h"
 #include "firc/log.h"
 
 static firc_err_t load_str(firc_config_t *cfg, const char *doc)
@@ -73,13 +74,13 @@ TEST overlay_and_defaults(void)
         "  dnsProxy:\n"
         "    host:\n"
         "      port: 5353\n"
-        "  logLevel: debug\n";
+        "  showAllInterfaces: true\n";
     ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
     ASSERT_EQ(5353, cfg.app.dns_proxy.host.port);
     ASSERT_STR_EQ("[::]", cfg.app.dns_proxy.host.address);
     ASSERT_STR_EQ("127.0.0.1", cfg.app.dns_proxy.upstream.address);
     ASSERT_EQ(53, cfg.app.dns_proxy.upstream.port);
-    ASSERT_STR_EQ("debug", cfg.app.log_level);
+    ASSERT(cfg.app.show_all_interfaces);
     ASSERT_EQ(5000 * FIRC_DURATION_MS, cfg.app.dns_proxy.timeout);
     firc_config_clear(&cfg);
     PASS();
@@ -299,7 +300,6 @@ TEST the_two_halves_hold_the_whole_config(void)
         "    host:\n"
         "      address: 127.0.0.1\n"
         "      port: 9999\n"
-        "  logLevel: debug\n"
         "  link: [br0, eth3]\n"
         "groups:\n"
         "  - id: d663876a\n"
@@ -449,7 +449,6 @@ TEST save_shape_matches_committed_fixture(void)
         "  link:\n"
         "  - br0\n"
         "  showAllInterfaces: false\n"
-        "  logLevel: info\n"
         "  update:\n"
         "    check: false\n"
         "groups:\n"
@@ -516,7 +515,7 @@ TEST fakeip_block_is_read_back(void)
     firc_config_clear(&cfg);
 
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
-    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.1.0\napp:\n  logLevel: info\n"));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.1.0\napp:\n  showAllInterfaces: false\n"));
     ASSERT_STR_EQ("198.18.0.0/15", cfg.app.fakeip.v4.pool);
     ASSERT_EQ_FMT(64u, (unsigned)cfg.app.fakeip.v6.chunk, "%u");
     ASSERT_EQ_FMT((uint64_t)(300 * FIRC_DURATION_SEC), (uint64_t)cfg.app.fakeip.ttl_clamp, "%" PRIu64);
@@ -731,7 +730,7 @@ TEST a_later_load_cannot_launder_a_refused_geometry(void)
 
     ASSERT_EQ_FMTm("the geometry is still the refused one, so this must refuse too",
                    (int)FIRC_ERR_INVAL,
-                   (int)load_str(&cfg, "configVersion: 0.1.0\napp:\n  logLevel: info\n"), "%d");
+                   (int)load_str(&cfg, "configVersion: 0.1.0\napp:\n  showAllInterfaces: false\n"), "%d");
     firc_config_clear(&cfg);
     PASS();
 }
@@ -754,7 +753,7 @@ TEST the_update_check_survives_load_and_save(void)
     ASSERT(back.app.update.check);
     free(out);
     firc_config_clear(&back);
-    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  logLevel: info\n"));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  showAllInterfaces: false\n"));
     ASSERTm("an absent key keeps the earlier value", cfg.app.update.check);
     ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update:\n    check: [1]\n"));
     ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update: 3\n"));
@@ -762,12 +761,17 @@ TEST the_update_check_survives_load_and_save(void)
     PASS();
 }
 
-/* Catches: the loader not asking firc_app_config_check, so an unknown log level loads. */
-TEST a_log_level_the_daemon_does_not_have_is_refused(void)
+/* Catches: a log level still read from the file, refused, or written back. */
+TEST a_log_level_in_the_file_loads_as_an_unknown_key(void)
 {
     firc_config_t cfg;
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
-    ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  logLevel: loud\n"));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  logLevel: loud\n"));
+    char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.7.0", FIRC_CFG_SETTINGS, &out, &out_len));
+    ASSERT(strstr(out, "logLevel") == NULL);
+    free(out);
     firc_config_clear(&cfg);
     PASS();
 }
@@ -847,7 +851,7 @@ TEST a_group_list_in_the_new_shape_loads_quietly(void)
 {
     int fds[2];
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     firc_config_t cfg;
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
@@ -1102,6 +1106,38 @@ TEST an_override_type_unusable_with_its_own_proto_is_dropped(void)
     PASS();
 }
 
+/* Catches: a hand rule whose proto or ports cannot be used loaded without a word, left for every rebuild to say. */
+TEST a_hand_rule_unusable_for_its_ports_is_said_at_load(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    firc_event_reset_for_test();
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    firc_err_t err = load_str(&cfg,
+                              "groups:\n"
+                              "  - id: d663876a\n"
+                              "    name: g\n"
+                              "    interface: nwg0\n"
+                              "    enable: true\n"
+                              "    rules:\n"
+                              "      - id: 6f34ee91\n"
+                              "        type: subnet\n"
+                              "        rule: 10.0.0.0/8\n"
+                              "        enable: true\n"
+                              "        ports: 53\n");
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    ASSERT_EQ(FIRC_OK, err);
+    firc_event_t ev[4];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 4, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)1, n, "%zu");
+    ASSERT_EQ(FIRC_LOG_WARN, ev[0].u.log.level);
+    ASSERTm(ev[0].u.log.text, strstr(ev[0].u.log.text, "ports need a protocol") != NULL);
+    ASSERTm(ev[0].u.log.text, strstr(ev[0].u.log.text, "rule \"10.0.0.0/8\"") != NULL);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 TEST an_override_that_was_only_a_bad_type_is_dropped(void)
 {
     firc_config_t cfg;
@@ -1261,7 +1297,7 @@ static firc_err_t load_str_logged(firc_config_t *cfg, const char *doc, char *out
 {
     int fds[2];
     if (pipe(fds) != 0) { return FIRC_ERR_IO; }
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     firc_err_t err = load_str(cfg, doc);
     firc_log_set_fd(STDOUT_FILENO);
@@ -1620,7 +1656,7 @@ TEST a_group_list_without_a_url_fails_the_load(void)
 
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
     ASSERT_EQ(0, pipe(fds));
-    firc_log_set_level(FIRC_LOG_INFO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
     firc_log_set_fd(fds[1]);
     const char *missing =
         "configVersion: 0.7.0\n"
@@ -1737,6 +1773,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_list_typed_regex_override_key_is_not_folded_without_a_metacharacter);
     RUN_TEST(an_unusable_override_type_does_not_take_the_enable_with_it);
     RUN_TEST(an_override_type_unusable_with_its_own_proto_is_dropped);
+    RUN_TEST(a_hand_rule_unusable_for_its_ports_is_said_at_load);
     RUN_TEST(an_override_that_was_only_a_bad_type_is_dropped);
     RUN_TEST(an_override_with_no_type_writes_no_type_key);
     RUN_TEST(an_override_with_no_spec_writes_no_spec_keys);
@@ -1780,7 +1817,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_clamp_past_182_days_is_refused_naming_its_key);
     RUN_TEST(an_old_idle_window_is_dropped_by_the_next_save);
     RUN_TEST(a_later_load_cannot_launder_a_refused_geometry);
-    RUN_TEST(a_log_level_the_daemon_does_not_have_is_refused);
+    RUN_TEST(a_log_level_in_the_file_loads_as_an_unknown_key);
     RUN_TEST(the_update_check_survives_load_and_save);
     RUN_TEST(an_upstream_that_is_not_an_address_is_refused);
     RUN_TEST(a_conf_that_still_names_a_skin_loads_and_drops_it);

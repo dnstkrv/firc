@@ -15,6 +15,7 @@
 #include "firc/atomic_write.h"
 #include "firc/hash.h"
 #include "firc/log.h"
+#include "firc/logrep.h"
 #include "firc/sub_fetch.h"
 
 #define RETRY_MS 60000
@@ -41,6 +42,7 @@ typedef struct {
     int64_t last_ok_ms, last_try_ms;
     int64_t done_mono;
     char error[160];
+    firc_logrep_t failing;
     bool fetching;
     size_t nodes;
     bool kept, was_wanted;
@@ -411,11 +413,12 @@ static void on_result(firc_loop_t *loop, void *ud)
     e->done_mono = mono_ms(s);
     if (r->err != FIRC_OK) {
         describe(r, e->error, sizeof e->error);
-        FIRC_WARN("tunnel subscription %s: fetch failed: %s", shown, e->error);
+        firc_logrep_fail(&e->failing, FIRC_LOG_WARN, NULL, "tunnel subscription %s: fetch failed: %s", shown, e->error);
         free_result(r);
         return;
     }
     e->error[0] = 0;
+    (void)firc_logrep_ok(&e->failing, NULL, "tunnel subscription %s", shown);
     e->last_ok_ms = r->at_ms;
     if (r->wrote && r->write_err != FIRC_OK) {
         FIRC_WARN("tunnel subscription %s: cache not written: %s", shown, firc_err_str(r->write_err));
@@ -501,7 +504,7 @@ static void enqueue(firc_tunsubs_t *s, entry_t *e)
         free(j);
         free(r);
         free(url);
-        FIRC_ERROR("tunnel subscriptions: out of memory, a fetch is left for the next tick");
+        FIRC_WARN("tunnel subscriptions: out of memory, a fetch is left for the next tick");
         return;
     }
     r->s = s;

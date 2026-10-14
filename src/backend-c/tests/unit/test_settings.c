@@ -35,7 +35,6 @@ static const char EVERY_FIELD[] =
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
     "  showAllInterfaces: true\n"
-    "  logLevel: debug\n"
     "  update: {check: true}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
@@ -125,7 +124,6 @@ static void link_twice(firc_app_config_t *c) {
     c->link[1] = strdup("br0");
     c->n_link = 2;
 }
-static void level_unknown(firc_app_config_t *c) { firc_strset(&c->log_level, "loud"); }
 /* A chain prefix with a quote, which opens a word iptables-restore never sees closed. */
 static void prefix_with_double_quote(firc_app_config_t *c) { firc_strset(&c->netfilter.iptables.chain_prefix, "FI\"RC"); }
 static void prefix_with_single_quote(firc_app_config_t *c) { firc_strset(&c->netfilter.iptables.chain_prefix, "FI'RC"); }
@@ -181,7 +179,6 @@ static const struct {
     {link_long_name, "app.link"},
     {link_with_newline, "app.link"},
     {link_twice, "app.link"},
-    {level_unknown, "app.logLevel"},
     {prefix_with_double_quote, "app.netfilter.iptables.chainPrefix"},
     {prefix_with_single_quote, "app.netfilter.iptables.chainPrefix"},
     {web_port_is_proxy_port, "app.httpWeb.host.port"},
@@ -214,12 +211,6 @@ TEST the_check_passes_what_the_daemon_accepts(void) {
     const char *field = NULL, *why = NULL;
     ASSERT_EQ(FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
 
-    static const char *const levels[] = {"trace", "debug", "info",    "warn",    "error",
-                                         "fatal", "panic", "nolevel", "disabled"};
-    for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
-        ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.log_level, levels[i]));
-        ASSERT_EQm(levels[i], FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
-    }
     ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.dns_proxy.upstream.address, "[::1]"));
     ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.http_web.host.address, "[127.0.0.1]"));
     ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.link[0], "abcdefghijklmno"));
@@ -272,7 +263,6 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.upstream.port", FIRC_APPLY_UPSTREAM},
         {"app.dnsProxy.disableDropAAAA", FIRC_APPLY_PROXY_FLAGS},
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
-        {"app.logLevel", FIRC_APPLY_LOG_LEVEL},
         {"app.showAllInterfaces", FIRC_APPLY_NONE},
         {"app.update.check", FIRC_APPLY_NONE},
     };

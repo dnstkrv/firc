@@ -31,7 +31,6 @@ app:
     - br0
     - br1
   showAllInterfaces: true
-  logLevel: debug
   update:
     check: true
 groups:

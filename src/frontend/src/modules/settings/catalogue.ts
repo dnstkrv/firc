@@ -6,24 +6,11 @@ export type Control =
   | { kind: "text"; placeholder?: () => string; width?: string }
   | { kind: "number"; unit?: () => string; width?: string }
   | { kind: "switch"; invert?: boolean; caption?: string }
-  | { kind: "select"; options: string[] }
   | { kind: "tags" };
 
 export type Field = { key: string; label: () => string; control: Control };
 export type Row = { label: () => string; hint: () => string; fields: Field[]; joiner?: string };
 export type Section = { id: string; title: () => string; rows: Row[] };
-
-export const LOG_LEVELS = [
-  "trace",
-  "debug",
-  "info",
-  "warn",
-  "error",
-  "fatal",
-  "panic",
-  "nolevel",
-  "disabled",
-];
 
 const row = (label: () => string, hint: () => string, fields: Field[], joiner?: string): Row => ({
   label,
@@ -279,23 +266,6 @@ export const SECTIONS: Section[] = [
             key: "app.httpWeb.host.port",
             label: () => t("WebUI port"),
             control: { kind: "number", width: "5.5rem" },
-          },
-        ],
-      ),
-    ],
-  },
-  {
-    id: "journal",
-    title: () => t("Journal"),
-    rows: [
-      row(
-        () => t("Log level"),
-        () => t("Which daemon lines reach the Journal tab"),
-        [
-          {
-            key: "app.logLevel",
-            label: () => t("Log level"),
-            control: { kind: "select", options: LOG_LEVELS },
           },
         ],
       ),
