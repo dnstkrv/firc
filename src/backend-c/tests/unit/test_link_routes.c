@@ -2,10 +2,13 @@
 
 #include <sys/socket.h>
 #include <linux/if.h>
+#include <arpa/inet.h>
 #include <errno.h>
+#include <stdio.h>
 #include <linux/rtnetlink.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "fake_iptables.h"
 #include "fake_rtnl.h"
@@ -1118,6 +1121,145 @@ TEST an_enable_that_rolls_back_writes_no_iptables(void) {
     PASS();
 }
 
+static bool prefixes_from(const char *const *txt, firc_nf_prefixes_t *out) {
+    firc_ipv4_subnet_t v4[4];
+    firc_ipv6_subnet_t v6[4];
+    size_t n4 = 0, n6 = 0;
+    for (size_t i = 0; txt[i] != NULL; i++) {
+        char addr[64];
+        const char *slash = strchr(txt[i], '/');
+        if (slash == NULL || (size_t)(slash - txt[i]) >= sizeof(addr)) { return false; }
+        memcpy(addr, txt[i], (size_t)(slash - txt[i]));
+        addr[slash - txt[i]] = 0;
+        int cidr = atoi(slash + 1);
+        if (strchr(addr, ':') != NULL) {
+            memset(&v6[n6], 0, sizeof(v6[n6]));
+            if (inet_pton(AF_INET6, addr, v6[n6].addr) != 1) { return false; }
+            v6[n6++].cidr = (uint8_t)cidr;
+        } else {
+            memset(&v4[n4], 0, sizeof(v4[n4]));
+            if (inet_pton(AF_INET, addr, v4[n4].addr) != 1) { return false; }
+            v4[n4++].cidr = (uint8_t)cidr;
+        }
+    }
+    return firc_nf_prefixes_of(v4, n4, v6, n6, out) == FIRC_OK;
+}
+
+static void prefixes_text(const firc_nf_prefixes_t *p, char *out, size_t cap) {
+    out[0] = 0;
+    for (size_t i = 0; i < p->n; i++) {
+        char a[INET6_ADDRSTRLEN];
+        inet_ntop(p->v[i].family == 6 ? AF_INET6 : AF_INET, p->v[i].addr, a, sizeof(a));
+        size_t at = strlen(out);
+        snprintf(out + at, cap - at, "%s%s/%u", i == 0 ? "" : " ", a, (unsigned)p->v[i].cidr);
+    }
+}
+
+/* Catches: a covered prefix reported lost, a lost one missed, families mixed, /0 not covering all, or out not overwritten. */
+TEST lost_prefixes_are_those_no_prefix_of_now_covers(void) {
+    static const struct {
+        const char *was[4];
+        const char *now[4];
+        const char *lost;
+    } k[] = {
+        {{"10.1.0.0/16", NULL}, {"10.1.0.0/16", NULL}, ""},
+        {{"10.1.0.0/16", "10.2.0.0/16", NULL}, {"10.2.0.0/16", NULL}, "10.1.0.0/16"},
+        {{"10.1.0.0/16", NULL}, {"10.0.0.0/15", NULL}, ""},
+        {{"10.0.0.0/15", NULL}, {"10.1.0.0/16", NULL}, "10.0.0.0/15"},
+        {{"0.0.0.0/0", NULL}, {"10.0.0.0/8", NULL}, "0.0.0.0/0"},
+        {{"10.0.0.0/8", "192.168.0.0/16", NULL}, {"0.0.0.0/0", NULL}, ""},
+        {{"2001:db8::/32", NULL}, {"0.0.0.0/0", NULL}, "2001:db8::/32"},
+        {{"2001:db8:1::/48", "10.1.0.0/16", NULL}, {"2001:db8::/32", NULL}, "10.1.0.0/16"},
+        {{"2001:db8:1::/48", NULL}, {"::/0", NULL}, ""},
+        {{NULL}, {"10.0.0.0/8", NULL}, ""},
+        {{"10.3.0.0/16", "10.1.0.0/16", "10.2.0.0/16", NULL}, {NULL}, "10.1.0.0/16 10.2.0.0/16 10.3.0.0/16"},
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        static char row[32];
+        snprintf(row, sizeof(row), "row %zu", i + 1);
+        firc_nf_prefixes_t was = {0}, now = {0};
+        firc_nf_prefix_t junk = {.family = 4, .cidr = 8};
+        firc_nf_prefixes_t out = {&junk, 1};
+        if (!prefixes_from(k[i].was, &was) || !prefixes_from(k[i].now, &now)) { FAILm(row); }
+        firc_err_t err = firc_nf_prefixes_lost(&was, &now, &out);
+        char got[256];
+        prefixes_text(&out, got, sizeof(got));
+        if (out.v != &junk) { firc_nf_prefixes_clear(&out); }
+        firc_nf_prefixes_clear(&was);
+        firc_nf_prefixes_clear(&now);
+        if (err != FIRC_OK || strcmp(got, k[i].lost) != 0) {
+            fprintf(stderr, "%s: got \"%s\"\n", row, got);
+            FAILm(row);
+        }
+    }
+    PASS();
+}
+
+static void prefix4(firc_nf_prefix_t *p, uint32_t addr, uint8_t cidr) {
+    memset(p, 0, sizeof(*p));
+    p->family = 4;
+    p->cidr = cidr;
+    p->addr[0] = (uint8_t)(addr >> 24);
+    p->addr[1] = (uint8_t)(addr >> 16);
+    p->addr[2] = (uint8_t)(addr >> 8);
+    p->addr[3] = (uint8_t)addr;
+}
+
+/* Catches: a join that keeps duplicates, takes the other family, loses a prefix of either side, or leaves to unsorted. */
+TEST a_join_is_the_sorted_union_of_one_family(void) {
+    static const char *const was[] = {"10.1.0.0/16", "10.3.0.0/16", "2001:db8::/32", NULL};
+    static const char *const add[] = {"10.2.0.0/16", "10.1.0.0/16", "10.0.0.0/8", "2001:db8:1::/48", NULL};
+    firc_nf_prefixes_t to = {0}, more = {0};
+    ASSERT(prefixes_from(was, &to));
+    ASSERT(prefixes_from(add, &more));
+    firc_nf_prefix_t unsorted[3];
+    unsorted[0] = more.v[0];
+    prefix4(&unsorted[1], 0x0a050000u, 16);
+    prefix4(&unsorted[2], 0x0a040000u, 16);
+    ASSERT_EQ(FIRC_OK, firc_nf_prefixes_join(&to, more.v, more.n, 4));
+    ASSERT_EQ(FIRC_OK, firc_nf_prefixes_join(&to, unsorted, 3, 4));
+    char got[256];
+    prefixes_text(&to, got, sizeof(got));
+    firc_nf_prefixes_clear(&to);
+    firc_nf_prefixes_clear(&more);
+    ASSERT_STR_EQ("10.0.0.0/8 10.1.0.0/16 10.2.0.0/16 10.3.0.0/16 10.4.0.0/16 10.5.0.0/16 2001:db8::/32", got);
+    PASS();
+}
+
+static double mono_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Catches: a join quadratic in its inputs, which blocks the loop for seconds on a list of a hundred thousand prefixes. */
+TEST a_join_of_large_lists_is_not_quadratic(void) {
+    enum { HALF = 150000 };
+    firc_nf_prefix_t *a = calloc(HALF, sizeof(*a)), *b = calloc(HALF, sizeof(*b));
+    ASSERT(a != NULL && b != NULL);
+    for (uint32_t i = 0; i < HALF; i++) {
+        prefix4(&a[i], 0x0a000000u + i * 2u, 32);
+        prefix4(&b[i], 0x0a000000u + (HALF - 1u - i) * 3u, 32);
+    }
+    firc_nf_prefixes_t to = {0};
+    double t0 = mono_s();
+    firc_err_t e1 = firc_nf_prefixes_join(&to, a, HALF, 4);
+    firc_err_t e2 = firc_nf_prefixes_join(&to, b, HALF, 4);
+    double took = mono_s() - t0;
+    size_t n = to.n;
+    bool sorted = true;
+    for (size_t i = 1; i < to.n && sorted; i++) { sorted = memcmp(to.v[i - 1].addr, to.v[i].addr, 4) < 0; }
+    firc_nf_prefixes_clear(&to);
+    free(a);
+    free(b);
+    ASSERT_EQ(FIRC_OK, e1);
+    ASSERT_EQ(FIRC_OK, e2);
+    ASSERT_EQ_FMT((size_t)(HALF + HALF - HALF / 3), n, "%zu");
+    ASSERT(sorted);
+    ASSERT_LTm("well inside the bound a quadratic join takes tens of seconds over", took, 5.0);
+    PASS();
+}
+
 static unsigned two_links(const char *name) {
     if (strcmp(name, "up0") == 0) { return 7; }
     if (strcmp(name, "up1") == 0) { return 8; }
@@ -1355,6 +1497,9 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(link_up_reinstalls_the_interface_route_even_when_nothing_changed);
+    RUN_TEST(lost_prefixes_are_those_no_prefix_of_now_covers);
+    RUN_TEST(a_join_is_the_sorted_union_of_one_family);
+    RUN_TEST(a_join_of_large_lists_is_not_quadratic);
     RUN_TEST(a_groups_own_routes_replace_what_sits_at_the_key);
     RUN_TEST(a_changed_gateway_replaces_the_route);
     RUN_TEST(the_teardown_deletes_the_route_by_the_gateway_it_last_wrote);

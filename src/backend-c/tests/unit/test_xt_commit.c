@@ -260,7 +260,7 @@ TEST a_missing_revision_is_named_and_fails_only_its_rules(void) {
     firc_xt_t *xt = firc_fake_xt_handle(f);
     log_start(FIRC_LOG_INFO);
     ASSERT_EQ_FMT(FIRC_ERR_NOSYS, firc_xt_probe(xt), "%d");
-    ASSERT_EQ_FMT((size_t)12, firc_fake_xt_revision_asks(f), "%zu");
+    ASSERT_EQ_FMT((size_t)14, firc_fake_xt_revision_asks(f), "%zu");
     firc_test_stage_t *s = firc_test_stage_new();
     firc_test_stage_fixture(s, "firmware-firc", FIRC_IPT_PROTO_IPV4);
     ASSERT_EQ_FMT(FIRC_ERR_IO, firc_xt_commit(xt, "nat", &s->stage, NULL), "%d");
@@ -288,6 +288,59 @@ static void note_table(void *ud, const char *table) {
 static void raise_it(void *ud, const char *table) {
     (void)table;
     firc_cancel_raise(ud);
+}
+
+static enum greatest_test_res has_after_lacking(bool target, const char *name, uint8_t rev) {
+    firc_fake_xt_t *f = fake_with("firmware", FIRC_IPT_PROTO_IPV4);
+    firc_fake_xt_lack(f, target, name, rev);
+    firc_xt_t *xt = firc_fake_xt_handle(f);
+    log_start(FIRC_LOG_INFO);
+    ASSERT_EQ_FMT(FIRC_ERR_NOSYS, firc_xt_probe(xt), "%d");
+    free(log_stop());
+    ASSERT_FALSE(firc_xt_has(xt, name));
+    static const char *const others[] = {"REDIRECT", "addrtype", "DNAT", "mark", "MARK"};
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        if (strcmp(others[i], name) != 0) { ASSERTm(others[i], firc_xt_has(xt, others[i])); }
+    }
+    ASSERT_FALSE(firc_xt_has(xt, "SNAT"));
+    firc_xt_free(xt);
+    firc_fake_xt_free(f);
+    PASS();
+}
+
+/* Catches: firc_xt_has answering true for a REDIRECT the probe found missing, or false for what it found. */
+TEST a_missing_redirect_is_reported_by_has(void) {
+    CHECK_CALL(has_after_lacking(true, "REDIRECT", 0));
+    PASS();
+}
+
+/* Catches: firc_xt_has answering true for an addrtype the probe found missing, or asking another revision of it. */
+TEST a_missing_addrtype_is_reported_by_has(void) {
+    CHECK_CALL(has_after_lacking(false, "addrtype", 1));
+    PASS();
+}
+
+/* Catches: a name matched without its case, so the MARK target answers for the mark match or the other way round. */
+TEST has_tells_a_target_from_its_match_by_case(void) {
+    CHECK_CALL(has_after_lacking(true, "MARK", 2));
+    CHECK_CALL(has_after_lacking(false, "mark", 1));
+    PASS();
+}
+
+/* Catches: firc_xt_has answering yes on a v6 handle for REDIRECT or addrtype, which the encoder refuses in v6. */
+TEST has_says_no_for_what_v6_never_writes(void) {
+    for (size_t i = 0; i < 2; i++) {
+        firc_fake_xt_t *f = firc_fake_xt_new(k_fams[i]);
+        firc_xt_t *xt = firc_fake_xt_handle(f);
+        ASSERT_EQ_FMT(FIRC_OK, firc_xt_probe(xt), "%d");
+        ASSERT_EQ(i == 0, firc_xt_has(xt, "REDIRECT"));
+        ASSERT_EQ(i == 0, firc_xt_has(xt, "addrtype"));
+        ASSERT(firc_xt_has(xt, "DNAT"));
+        ASSERT(firc_xt_has(xt, "mark"));
+        firc_xt_free(xt);
+        firc_fake_xt_free(f);
+    }
+    PASS();
 }
 
 /* Catches: a raised cancel ignored, so an aborted pass still replaces the table. */
@@ -492,7 +545,7 @@ TEST a_revision_the_kernel_does_not_support_is_missing(void) {
     ASSERT_EQ_FMTm(text, (size_t)1,
                    count(text, "x_tables: no ipv6 target DNAT revision 1 (EPROTONOSUPPORT): DNAT rules cannot be written"),
                    "%zu");
-    ASSERT_EQ_FMTm(text, (size_t)12, count(text, "x_tables: no ipv6 "), "%zu");
+    ASSERT_EQ_FMTm(text, (size_t)14, count(text, "x_tables: no ipv6 "), "%zu");
     free(text);
     firc_xt_free(xt);
     firc_fake_xt_free(f);
@@ -829,6 +882,7 @@ TEST the_fake_takes_every_golden(void) {
             if (strcmp(firc_test_xt_all[i].name, "m-tap") == 0 && sizeof(long) == 4) { variant = "ilp32"; }
             if (v == 1 && variant == NULL) { continue; }
             for (size_t fi = 0; fi < 2; fi++) {
+                if (!firc_test_xt_in_family(firc_test_xt_all[i].name, k_fams[fi])) { continue; }
                 firc_fake_xt_t *f = firc_fake_xt_new(k_fams[fi]);
                 firc_xt_info_t info, now;
                 uint8_t *blob = NULL;
@@ -1096,6 +1150,10 @@ int main(int argc, char **argv) {
     RUN_TEST(a_missing_table_is_said_once);
     RUN_TEST(a_missing_revision_is_named_and_fails_only_its_rules);
     RUN_TEST(the_barrier_needs_connmark_revision_one);
+    RUN_TEST(a_missing_redirect_is_reported_by_has);
+    RUN_TEST(a_missing_addrtype_is_reported_by_has);
+    RUN_TEST(has_tells_a_target_from_its_match_by_case);
+    RUN_TEST(has_says_no_for_what_v6_never_writes);
     RUN_TEST(a_cancel_stops_the_write);
     RUN_TEST(a_refused_rule_writes_nothing_and_is_quoted);
     RUN_TEST(a_jump_to_a_missing_chain_is_io_and_named);

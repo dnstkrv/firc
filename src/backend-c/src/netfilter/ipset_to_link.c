@@ -449,13 +449,66 @@ static bool prefix_covered(const firc_nf_prefix_t *w, const firc_nf_prefixes_t *
     return false;
 }
 
+static void mark_present(const firc_nf_prefixes_t *now, bool present[2][129]) {
+    for (size_t i = 0; i < now->n; i++) { present[now->v[i].family == 6][now->v[i].cidr] = true; }
+}
+
 bool firc_nf_prefixes_narrow(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now) {
     bool present[2][129] = {{false}};
-    for (size_t i = 0; i < now->n; i++) { present[now->v[i].family == 6][now->v[i].cidr] = true; }
+    mark_present(now, present);
     for (size_t i = 0; i < was->n; i++) {
         if (!prefix_covered(&was->v[i], now, present[was->v[i].family == 6])) { return true; }
     }
     return false;
+}
+
+firc_err_t firc_nf_prefixes_lost(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now, firc_nf_prefixes_t *out) {
+    out->v = NULL;
+    out->n = 0;
+    if (was->n == 0) { return FIRC_OK; }
+    firc_nf_prefix_t *v = malloc(was->n * sizeof(*v));
+    if (v == NULL) { return FIRC_ERR_NOMEM; }
+    bool present[2][129] = {{false}};
+    mark_present(now, present);
+    size_t n = 0;
+    for (size_t i = 0; i < was->n; i++) {
+        if (!prefix_covered(&was->v[i], now, present[was->v[i].family == 6])) { v[n++] = was->v[i]; }
+    }
+    if (n == 0) {
+        free(v);
+        return FIRC_OK;
+    }
+    out->v = v;
+    out->n = n;
+    return FIRC_OK;
+}
+
+firc_err_t firc_nf_prefixes_join(firc_nf_prefixes_t *to, const firc_nf_prefix_t *p, size_t n, uint8_t family) {
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) { m += p[i].family == family; }
+    if (m == 0) { return FIRC_OK; }
+    firc_nf_prefix_t *add = malloc(m * sizeof(*add));
+    firc_nf_prefix_t *out = malloc((to->n + m) * sizeof(*out));
+    if (add == NULL || out == NULL) {
+        free(add);
+        free(out);
+        return FIRC_ERR_NOMEM;
+    }
+    m = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i].family == family) { add[m++] = p[i]; }
+    }
+    qsort(add, m, sizeof(*add), prefix_cmp);
+    size_t i = 0, j = 0, k = 0;
+    while (i < to->n || j < m) {
+        const firc_nf_prefix_t *next = j >= m || (i < to->n && prefix_cmp(&to->v[i], &add[j]) <= 0) ? &to->v[i++] : &add[j++];
+        if (k == 0 || prefix_cmp(&out[k - 1], next) != 0) { out[k++] = *next; }
+    }
+    free(add);
+    free(to->v);
+    to->v = out;
+    to->n = k;
+    return FIRC_OK;
 }
 
 void firc_nf_prefixes_clear(firc_nf_prefixes_t *p) {

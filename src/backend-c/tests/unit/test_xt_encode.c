@@ -51,31 +51,146 @@ static const rule_case_t k_rules[] = {
     {"_NDM_MASQ", 1, "-o ppp0 -j MASQUERADE", "-o ppp0 -j MASQUERADE", FIRC_XT_EXT_MASQUERADE},
 };
 
+static const rule_case_t k_redir_rules[] = {
+    {"FIRC_REDIR", 0, "-p tcp -m mark --mark 0x40050000/0x40ff0000 -j REDIRECT --to-ports 3603", NULL,
+     FIRC_XT_EXT_MARK | FIRC_XT_EXT_REDIRECT},
+    {"FIRC_REDIR", 1, "-p tcp -m mark --mark 0x40060000/0x40ff0000 -j REDIRECT --to-ports 3600-3601", NULL,
+     FIRC_XT_EXT_MARK | FIRC_XT_EXT_REDIRECT},
+    {"PREROUTING", 0, "-p tcp -m mark --mark 0x40000000/0x40000000 -m addrtype ! --dst-type LOCAL -j FIRC_REDIR", NULL,
+     FIRC_XT_EXT_MARK | FIRC_XT_EXT_ADDRTYPE},
+};
+
+static enum greatest_test_res rules_encode_as_golden(const char *fixture, firc_ipt_proto_t fam, const rule_case_t *rules,
+                                                     size_t n) {
+    firc_xt_info_t info;
+    uint8_t *blob = NULL;
+    ASSERTm(fixture, firc_test_xt_read(fixture, fam, &info, &blob));
+    firc_xt_table_t t;
+    const char *why = NULL;
+    ASSERT_EQ_FMT(FIRC_OK, firc_xt_parse(fam, &info, blob, &t, &why), "%d");
+    for (size_t i = 0; i < n; i++) {
+        const char *line = fam == FIRC_IPT_PROTO_IPV4 ? rules[i].v4 : rules[i].v6;
+        firc_xt_chain_t *c = firc_xt_find_chain(&t, rules[i].chain);
+        ASSERTm(line, c != NULL && c->n_rules > rules[i].idx);
+        firc_ipt_rule_t *r = firc_test_rule(line);
+        firc_xt_entry_t e;
+        memset(&e, 0, sizeof(e));
+        uint32_t exts = 0;
+        ASSERT_EQ_FMTm(line, FIRC_OK, firc_xt_encode(fam, 0, r, &e, &exts), "%d");
+        ASSERTm(line, firc_xt_entry_same(fam, &e, &c->rules[rules[i].idx]));
+        ASSERT_EQ_FMTm(line, rules[i].exts, exts, "%u");
+        firc_xt_entry_clear(&e);
+        firc_ipt_rule_free(r);
+    }
+    firc_xt_table_clear(&t);
+    free(blob);
+    PASS();
+}
+
 /* Catches: an encoded rule differing from iptables-restore's bytes for the same words (a field, revision, match order or byte order). */
 TEST every_builder_rule_encodes_as_iptables_restore_wrote_it(void) {
     for (size_t f = 0; f < 2; f++) {
-        firc_xt_info_t info;
-        uint8_t *blob = NULL;
-        ASSERT(firc_test_xt_read("firmware-firc", k_fams[f], &info, &blob));
-        firc_xt_table_t t;
-        const char *why = NULL;
-        ASSERT_EQ_FMT(FIRC_OK, firc_xt_parse(k_fams[f], &info, blob, &t, &why), "%d");
-        for (size_t i = 0; i < sizeof(k_rules) / sizeof(k_rules[0]); i++) {
-            const char *line = f == 0 ? k_rules[i].v4 : k_rules[i].v6;
-            firc_xt_chain_t *c = firc_xt_find_chain(&t, k_rules[i].chain);
-            ASSERTm(line, c != NULL && c->n_rules > k_rules[i].idx);
-            firc_ipt_rule_t *r = firc_test_rule(line);
-            firc_xt_entry_t e;
-            memset(&e, 0, sizeof(e));
-            uint32_t exts = 0;
-            ASSERT_EQ_FMTm(line, FIRC_OK, firc_xt_encode(k_fams[f], 0, r, &e, &exts), "%d");
-            ASSERTm(line, firc_xt_entry_same(k_fams[f], &e, &c->rules[k_rules[i].idx]));
-            ASSERT_EQ_FMTm(line, k_rules[i].exts, exts, "%u");
-            firc_xt_entry_clear(&e);
-            firc_ipt_rule_free(r);
-        }
-        firc_xt_table_clear(&t);
-        free(blob);
+        CHECK_CALL(rules_encode_as_golden("firmware-firc", k_fams[f], k_rules, sizeof(k_rules) / sizeof(k_rules[0])));
+    }
+    CHECK_CALL(rules_encode_as_golden("redir-mark", FIRC_IPT_PROTO_IPV4, k_redir_rules,
+                                      sizeof(k_redir_rules) / sizeof(k_redir_rules[0])));
+    PASS();
+}
+
+static enum greatest_test_res refused(firc_ipt_proto_t fam, const char *line) {
+    firc_ipt_rule_t *r = firc_test_rule(line);
+    firc_xt_entry_t e;
+    memset(&e, 0, sizeof(e));
+    uint32_t exts = 0;
+    ASSERT_EQ_FMTm(line, FIRC_ERR_INVAL, firc_xt_encode(fam, 0, r, &e, &exts), "%d");
+    ASSERTm(line, e.bytes == NULL);
+    firc_ipt_rule_free(r);
+    PASS();
+}
+
+/* Catches: a REDIRECT written without the protocol 1.4.21 demands, with a port or range the kernel would misread, twice, or in v6. */
+TEST redirect_needs_a_protocol_and_a_valid_range(void) {
+    static const char *const v4[] = {
+        "-j REDIRECT --to-ports 3603",
+        "-m mark --mark 0x1/0x1 -j REDIRECT --to-ports 3603",
+        "-p tcp -j REDIRECT --to-ports 0",
+        "-p tcp -j REDIRECT --to-ports 0-5",
+        "-p tcp -j REDIRECT --to-ports 5-4",
+        "-p tcp -j REDIRECT --to-ports 70000",
+        "-p tcp -j REDIRECT --to-ports 3600-70000",
+        "-p tcp -j REDIRECT --to-ports 3600-",
+        "-p tcp -j REDIRECT --to-ports -3600",
+        "-p tcp -j REDIRECT --to-ports 3600:3601",
+        "-p tcp -j REDIRECT --to-ports 3603 --to-ports 3604",
+        "-p tcp -j REDIRECT",
+        "-p tcp -j REDIRECT --to-ports",
+        "-p tcp -j REDIRECT --random",
+    };
+    for (size_t i = 0; i < sizeof(v4) / sizeof(v4[0]); i++) { CHECK_CALL(refused(FIRC_IPT_PROTO_IPV4, v4[i])); }
+    CHECK_CALL(refused(FIRC_IPT_PROTO_IPV6, "-p tcp -j REDIRECT --to-ports 3603"));
+    static const struct { const char *line; uint16_t lo, hi; } ok[] = {
+        {"-p udp -j REDIRECT --to-ports 1", 1, 1},
+        {"-p tcp -j REDIRECT --to-ports 65535", 65535, 65535},
+        {"-p tcp -j REDIRECT --to-ports 7-7", 7, 7},
+    };
+    for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+        firc_xt_entry_t e;
+        uint32_t exts = 0;
+        ASSERT_EQ_FMTm(ok[i].line, FIRC_OK, enc(FIRC_IPT_PROTO_IPV4, ok[i].line, &e, &exts), "%d");
+        ASSERT_EQ_FMTm(ok[i].line, 112u + 56u, e.len, "%u");
+        const uint8_t *t = e.bytes + 112;
+        uint8_t want[24] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                            (uint8_t)(ok[i].lo >> 8), (uint8_t)ok[i].lo, (uint8_t)(ok[i].hi >> 8), (uint8_t)ok[i].hi, 0, 0, 0, 0};
+        uint32_t one = 1, proto = 2;
+        memcpy(want, &one, 4);
+        memcpy(want + 4, &proto, 4);
+        ASSERT_STR_EQm(ok[i].line, "REDIRECT", (const char *)t + 2);
+        ASSERT_MEM_EQm(ok[i].line, want, t + 32, 24);
+        firc_xt_entry_clear(&e);
+    }
+    PASS();
+}
+
+/* Catches: an addrtype word accepted that firc never writes and the golden never checked, or one written in v6. */
+TEST addrtype_takes_only_the_local_destination(void) {
+    static const char *const v4[] = {
+        "-m addrtype ! --dst-type UNICAST -j RETURN",
+        "-m addrtype --dst-type LOCAL,UNICAST -j RETURN",
+        "-m addrtype --src-type LOCAL -j RETURN",
+        "-m addrtype ! --src-type LOCAL -j RETURN",
+        "-m addrtype -j RETURN",
+        "-m addrtype --dst-type -j RETURN",
+        "-m addrtype --dst-type LOCAL --dst-type LOCAL -j RETURN",
+        "-m addrtype ! ! --dst-type LOCAL -j RETURN",
+        "-m addrtype --dst-type LOCAL --limit-iface-in -j RETURN",
+        "-m addrtype --dst-type local -j RETURN",
+        "-m mark ! --dst-type LOCAL -j RETURN",
+    };
+    for (size_t i = 0; i < sizeof(v4) / sizeof(v4[0]); i++) { CHECK_CALL(refused(FIRC_IPT_PROTO_IPV4, v4[i])); }
+    CHECK_CALL(refused(FIRC_IPT_PROTO_IPV6, "-m addrtype ! --dst-type LOCAL -j RETURN"));
+    CHECK_CALL(refused(FIRC_IPT_PROTO_IPV6, "-m addrtype --dst-type LOCAL -j RETURN"));
+    static const struct { const char *line; uint32_t flags; } ok[] = {
+        {"-m addrtype --dst-type LOCAL -j RETURN", 0},
+        {"-m addrtype ! --dst-type LOCAL -j RETURN", 2},
+    };
+    for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+        firc_xt_entry_t e;
+        uint32_t exts = 0;
+        ASSERT_EQ_FMTm(ok[i].line, FIRC_OK, enc(FIRC_IPT_PROTO_IPV4, ok[i].line, &e, &exts), "%d");
+        const uint8_t *m = match_named(FIRC_IPT_PROTO_IPV4, &e, "addrtype");
+        ASSERTm(ok[i].line, m != NULL);
+        ASSERT_EQ_FMTm(ok[i].line, 40u, (unsigned)firc_xt_rd16(m - XT_MATCH_HDR_LEN), "%u");
+        ASSERT_EQ_FMTm(ok[i].line, 1u, (unsigned)m[-1], "%u");
+        uint16_t src, dst;
+        uint32_t flags;
+        memcpy(&src, m, 2);
+        memcpy(&dst, m + 2, 2);
+        memcpy(&flags, m + 4, 4);
+        ASSERT_EQ_FMTm(ok[i].line, 0u, (unsigned)src, "%u");
+        ASSERT_EQ_FMTm(ok[i].line, 4u, (unsigned)dst, "%u");
+        ASSERT_EQ_FMTm(ok[i].line, ok[i].flags, flags, "%u");
+        ASSERT_EQ_FMTm(ok[i].line, (uint32_t)FIRC_XT_EXT_ADDRTYPE, exts, "%u");
+        firc_xt_entry_clear(&e);
     }
     PASS();
 }
@@ -215,6 +330,8 @@ TEST the_probe_list_names_what_the_encoder_writes(void) {
         {FIRC_XT_EXT_STRING, "-m string --algo bm --string x -j RETURN", "-m string --algo bm --string x -j RETURN"},
         {FIRC_XT_EXT_NFLOG, "-j NFLOG", "-j NFLOG"},
         {FIRC_XT_EXT_CONNMARK_MATCH, "-m connmark --mark 1 -j RETURN", "-m connmark --mark 1 -j RETURN"},
+        {FIRC_XT_EXT_REDIRECT, "-p tcp -j REDIRECT --to-ports 1", NULL},
+        {FIRC_XT_EXT_ADDRTYPE, "-m addrtype --dst-type LOCAL -j RETURN", NULL},
     };
     const uint32_t capture = FIRC_XT_EXT_LIMIT | FIRC_XT_EXT_LENGTH | FIRC_XT_EXT_CONNBYTES | FIRC_XT_EXT_STRING |
                              FIRC_XT_EXT_NFLOG;
@@ -227,6 +344,7 @@ TEST the_probe_list_names_what_the_encoder_writes(void) {
         while (u < n_uses && uses[u].bit != x->bit) { u++; }
         ASSERT(u < n_uses);
         for (size_t f = 0; f < 2; f++) {
+            if (f == 1 && uses[u].v6 == NULL) { continue; }
             firc_ipt_rule_t *r = firc_test_rule(f == 0 ? uses[u].v4 : uses[u].v6);
             firc_xt_entry_t e;
             memset(&e, 0, sizeof(e));
@@ -791,6 +909,8 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(every_builder_rule_encodes_as_iptables_restore_wrote_it);
+    RUN_TEST(redirect_needs_a_protocol_and_a_valid_range);
+    RUN_TEST(addrtype_takes_only_the_local_destination);
     RUN_TEST(an_interface_at_the_length_limit_gets_a_full_mask);
     RUN_TEST(an_inverted_interface_sets_its_own_bit);
     RUN_TEST(a_mark_without_a_mask_matches_every_bit);

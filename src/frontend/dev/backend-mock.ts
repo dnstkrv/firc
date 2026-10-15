@@ -664,7 +664,7 @@ let TUNNELS: any[] = [
       },
     ],
     uplink: { kind: "auto", ref: "" },
-    advanced: { ca: "", insecure: false, timeout: 8 },
+    advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
   },
 ];
 
@@ -765,6 +765,7 @@ const tunnelState = (tn: any) => {
     backoffS: status === "backoff" || status === "no_node" ? 12 : 0,
     lastExit: 0,
     uplinkOk: true,
+    tcpPort: 0,
     active: nodes.filter((n: any) => n.state === "active").map((n: any) => n.name),
     groups: [],
     nodes,
@@ -805,6 +806,7 @@ app.put(`${API_BASE}/tunnels`, async (c) => {
   TUNNELS = tunnels.map((tn: any) => ({
     ...tn,
     description: tn.description ?? "",
+    advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, ...tn.advanced },
     sources: (tn.sources ?? []).map((src: any) => ({
       ...src,
       id: src.id || derivedId(src.link ?? src.url ?? ""),

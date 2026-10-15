@@ -8,6 +8,12 @@ static void up_a(void) { ctl_emit_node_up("A", 4); }
 static void down_a(void) { ctl_emit_node_down("A", 4, "x"); }
 static void ack2(void) { ctl_emit_nodes(2); }
 static void full(void) { ctl_emit_pins_full(); }
+static void ready0(void) { ctl_emit_ready("tv0", 0); }
+static void ready_odd(void) { ctl_emit_ready("t\"v\\0", 1); }
+static void ready3600(void) { ctl_emit_ready("tv0", 3600); }
+static void map3(void) { ctl_emit_map(3); }
+static void close2(void) { ctl_emit_close(2); }
+static void miss1(void) { ctl_emit_miss("198.18.0.1"); }
 
 static void capture(char *out, size_t cap, void (*f)(void)) {
     int p[2];
@@ -76,6 +82,18 @@ int main(void) {
     check_str("nodes ack", "{\"type\":\"nodes\",\"count\":2}\n", (capture(ev, sizeof ev, ack2), ev));
     /* catches: a full pin table with no event fircd can act on */
     check_str("pins full", "{\"type\":\"pins_full\"}\n", (capture(ev, sizeof ev, full), ev));
+    /* catches: a ready without the port fircd stages the redirect for, or a port 0 left out */
+    check_str("ready with port 0", "{\"type\":\"ready\",\"dev\":\"tv0\",\"tcpPort\":0}\n",
+              (capture(ev, sizeof ev, ready0), ev));
+    /* catches: a device name put into the ready line unescaped */
+    check_str("ready escapes the device", "{\"type\":\"ready\",\"dev\":\"t\\\"v\\\\0\",\"tcpPort\":1}\n",
+              (capture(ev, sizeof ev, ready_odd), ev));
+    check_str("ready with a port", "{\"type\":\"ready\",\"dev\":\"tv0\",\"tcpPort\":3600}\n",
+              (capture(ev, sizeof ev, ready3600), ev));
+    /* catches: a map, close or miss event fircd cannot parse */
+    check_str("map ack", "{\"type\":\"map\",\"count\":3}\n", (capture(ev, sizeof ev, map3), ev));
+    check_str("close ack", "{\"type\":\"close\",\"count\":2}\n", (capture(ev, sizeof ev, close2), ev));
+    check_str("miss", "{\"type\":\"miss\",\"fake\":\"198.18.0.1\"}\n", (capture(ev, sizeof ev, miss1), ev));
     /* catches: a descriptor inherited from fircd's parent kept open by a tunnel for its lifetime */
     int high = dup2(0, 200);
     int many = 0;

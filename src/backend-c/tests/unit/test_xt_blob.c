@@ -61,6 +61,7 @@ TEST every_golden_reads_and_writes_back_byte_for_byte(void) {
     for (size_t i = 0; i < firc_test_xt_n_fixtures; i++) {
         for (size_t f = 0; f < 2; f++) {
             const char *name = firc_test_xt_fixtures[i];
+            if (!firc_test_xt_in_family(name, k_fams[f])) { continue; }
             firc_xt_info_t info, ni;
             uint8_t *blob = NULL, *nb = NULL;
             int32_t *oi = NULL;

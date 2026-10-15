@@ -96,7 +96,7 @@ const tunnel = (id: string, extra: Record<string, unknown> = {}) => ({
     },
   ],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8 },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
   ...extra,
 });
 
@@ -108,6 +108,7 @@ const stateOf = (id: string, status = "up") => ({
   backoffS: 0,
   lastExit: 0,
   uplinkOk: true,
+  tcpPort: 0,
   active: [],
   groups: [],
   nodes: [],
@@ -348,6 +349,26 @@ describe("TunnelsStore.saveChanges", () => {
     assert.strictEqual(put!.body.tunnels[0].interval, 90);
     assert.strictEqual(store.canSave, false);
     assert.strictEqual(store.data[0].interval, 90);
+  });
+
+  // Catches a WebUI save turning kernelTcp off because normalize dropped it.
+  it("normalize keeps advanced.kernelTcp", async () => {
+    const on = tunnel("main", {
+      advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+    });
+    const s = stub({
+      "/tunnels": (body: any) => (body ? { tunnels: body.tunnels } : { tunnels: [on] }),
+      "/system/interfaces": { interfaces: [{ id: "tunvless0" }] },
+      "/tunnels/state": { tunnels: [stateOf("main")] },
+    });
+    const store = new TunnelsStore();
+    await store.load();
+    assert.strictEqual(store.canSave, false);
+    store.data[0].interval = 90;
+    await store.saveChanges();
+    const put = s.requests.find((r) => r.method === "PUT");
+    assert.strictEqual(put!.body.tunnels[0].advanced.kernelTcp, true);
+    assert.strictEqual(store.data[0].advanced.kernelTcp, true);
   });
 
   // Catches new devices not reaching the group pickers after a save.

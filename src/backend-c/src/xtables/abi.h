@@ -195,6 +195,13 @@ typedef struct firc_xt_nat_range {
 #define XT_TCP_PSH 0x08u
 #define XT_TCP_ACK 0x10u
 #define XT_TCP_URG 0x20u
+#define XT_ADDRTYPE_LOCAL 0x0004u
+#define XT_ADDRTYPE_INVERT_DEST 0x2u
+
+typedef struct firc_xt_addrtype_info_v1 {
+    uint16_t source, dest;
+    uint32_t flags;
+} xt_addrtype_info_v1_t;
 
 typedef struct firc_xt_reject_info {
     uint32_t with;
@@ -329,5 +336,6 @@ _Static_assert(sizeof(xt_string_info_t) == 160, "xt_string_info is 160 bytes on 
 _Static_assert(offsetof(xt_string_info_t, patlen) == 148, "string patlen at 148");
 _Static_assert(offsetof(xt_string_info_t, config) == XT_STRING_USERSPACE, "string's userspace part is 152 bytes");
 _Static_assert(sizeof(xt_nflog_info_t) == 76, "xt_nflog_info is 76 bytes");
+_Static_assert(sizeof(xt_addrtype_info_v1_t) == 8, "xt_addrtype_info_v1 is 8 bytes");
 
 #endif

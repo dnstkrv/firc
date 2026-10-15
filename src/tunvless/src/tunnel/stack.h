@@ -10,6 +10,9 @@ struct tun_cfg {
     const char *dev;    /* name as asked; the kernel's limit is 15 characters */
     uint32_t addr;      /* IPv4 address of the device, network order */
     int prefix;         /* its prefix length */
+    int tcp_port;
+    uint32_t tcp_pool_be;
+    int tcp_pool_len;
 };
 
 /* The device is up, has its address and is ready to carry traffic: called once, from the
@@ -27,5 +30,10 @@ int stack_run(const struct tun_cfg *tc, const struct dialer *d, stack_ready_fn r
  * their own timeout on a hung connection. Callable from any thread; each loop thread notices on its
  * next pass (within a second). */
 void stack_nodes_changed(void);
+
+int stack_tcp_port(void);
+
+/* Wakes every loop to reset its TUN connections and waits for them, at most wait_ms. Any thread. */
+void stack_stop(int wait_ms);
 
 #endif

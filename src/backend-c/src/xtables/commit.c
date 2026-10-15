@@ -43,6 +43,15 @@ firc_ipt_proto_t firc_xt_proto(const firc_xt_t *xt) { return xt->fam; }
 
 uint8_t firc_xt_mac_rev(const firc_xt_t *xt) { return xt->mac_rev; }
 
+bool firc_xt_has(const firc_xt_t *xt, const char *name) {
+    for (size_t i = 0; i < firc_xt_n_exts; i++) {
+        if (strcmp(firc_xt_exts[i].name, name) != 0) { continue; }
+        bool written = xt->fam == FIRC_IPT_PROTO_IPV4 || (firc_xt_exts[i].bit & FIRC_XT_EXT_V4_ONLY) == 0;
+        return written && (xt->missing & firc_xt_exts[i].bit) == 0;
+    }
+    return false;
+}
+
 firc_err_t firc_xt_set_dump_dir(firc_xt_t *xt, const char *dir) {
     free(xt->dump_dir);
     xt->dump_dir = NULL;

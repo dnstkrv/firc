@@ -89,7 +89,24 @@ static void emit1(const char *type, const char *key, const char *val) {
     if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
 }
 
-void ctl_emit_ready(const char *dev) { emit1("ready", "dev", dev); }
+void ctl_emit_ready(const char *dev, int tcp_port) {
+    char v[300], l[1024];
+    ctl_json_str_trunc(v, sizeof v, dev);
+    int n = snprintf(l, sizeof l, "{\"type\":\"ready\",\"dev\":%s,\"tcpPort\":%d}\n", v, tcp_port);
+    if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
+}
+
+static void emit_count(const char *type, int count) {
+    char l[64];
+    int n = snprintf(l, sizeof l, "{\"type\":\"%s\",\"count\":%d}\n", type, count);
+    emit(l, (size_t)n);
+}
+
+void ctl_emit_map(int count) { emit_count("map", count); }
+
+void ctl_emit_close(int count) { emit_count("close", count); }
+
+void ctl_emit_miss(const char *fake) { emit1("miss", "fake", fake); }
 
 void ctl_emit_node_up(const char *node, int index) {
     char a[300], l[1024];
@@ -128,11 +145,7 @@ void ctl_emit_active(const char *const *names, const int *index, size_t cnt) {
     emit(l, o + xo);
 }
 
-void ctl_emit_nodes(int count) {
-    char l[64];
-    int n = snprintf(l, sizeof l, "{\"type\":\"nodes\",\"count\":%d}\n", count);
-    emit(l, (size_t)n);
-}
+void ctl_emit_nodes(int count) { emit_count("nodes", count); }
 
 void ctl_emit_pins_full(void) {
     static const char l[] = "{\"type\":\"pins_full\"}\n";

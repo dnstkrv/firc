@@ -15,6 +15,7 @@ TEST every_table_prints_as_iptables_save_did(void) {
     for (size_t i = 0; i < firc_test_xt_n_all; i++) {
         for (size_t f = 0; f < 2; f++) {
             const firc_test_xt_fixture_t *fx = &firc_test_xt_all[i];
+            if (!firc_test_xt_in_family(fx->name, k_fams[f])) { continue; }
             firc_xt_info_t info;
             uint8_t *blob = NULL;
             ASSERTm(fx->name, firc_test_xt_read(fx->name, k_fams[f], &info, &blob));

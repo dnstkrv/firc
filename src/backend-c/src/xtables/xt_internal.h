@@ -89,7 +89,11 @@ typedef enum firc_xt_ext {
     FIRC_XT_EXT_STRING = 1u << 14,
     FIRC_XT_EXT_NFLOG = 1u << 15,
     FIRC_XT_EXT_CONNMARK_MATCH = 1u << 16,
+    FIRC_XT_EXT_REDIRECT = 1u << 17,
+    FIRC_XT_EXT_ADDRTYPE = 1u << 18,
 } firc_xt_ext_t;
+
+#define FIRC_XT_EXT_V4_ONLY (FIRC_XT_EXT_REDIRECT | FIRC_XT_EXT_ADDRTYPE)
 
 typedef struct firc_xt_ext_desc {
     uint32_t bit;

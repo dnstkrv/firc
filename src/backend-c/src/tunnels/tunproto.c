@@ -1,5 +1,6 @@
 #include "firc/tunproto.h"
 
+#include <arpa/inet.h>
 #include <cjson/cJSON.h>
 #include <stdio.h>
 #include <string.h>
@@ -113,11 +114,29 @@ static bool parse_active(const cJSON *root, firc_tev_t *out)
     return true;
 }
 
+static bool opt_port(const cJSON *root, uint16_t *out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "tcpPort");
+    if (v == NULL)
+        return true;
+    if (!cJSON_IsNumber(v) || !(v->valuedouble >= 0) || v->valuedouble > 65535 ||
+        v->valuedouble != (double)(long)v->valuedouble)
+        return false;
+    *out = (uint16_t)v->valuedouble;
+    return true;
+}
+
+static bool parse_fake(const cJSON *root, uint8_t out[4])
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "fake");
+    return cJSON_IsString(v) && v->valuestring && inet_pton(AF_INET, v->valuestring, out) == 1;
+}
+
 static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
 {
     if (strcmp(type, "ready") == 0) {
         out->kind = FIRC_TEV_READY;
-        return copy_str(root, "dev", out->dev, sizeof(out->dev));
+        return copy_str(root, "dev", out->dev, sizeof(out->dev)) && opt_port(root, &out->tcp_port);
     }
     if (strcmp(type, "active") == 0) {
         out->kind = FIRC_TEV_ACTIVE;
@@ -135,6 +154,14 @@ static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
     if (strcmp(type, "nodes") == 0) {
         out->kind = FIRC_TEV_NODES;
         return count_of(cJSON_GetObjectItemCaseSensitive(root, "count"), &out->count);
+    }
+    if (strcmp(type, "map") == 0 || strcmp(type, "close") == 0) {
+        out->kind = type[0] == 'm' ? FIRC_TEV_MAP : FIRC_TEV_CLOSE;
+        return count_of(cJSON_GetObjectItemCaseSensitive(root, "count"), &out->count);
+    }
+    if (strcmp(type, "miss") == 0) {
+        out->kind = FIRC_TEV_MISS;
+        return parse_fake(root, out->fake);
     }
     if (strcmp(type, "pins_full") == 0) {
         out->kind = FIRC_TEV_PINS_FULL;

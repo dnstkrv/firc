@@ -1,0 +1,6 @@
+*nat
+:FIRC_REDIR - [0:0]
+-A FIRC_REDIR -p tcp -m mark --mark 0x40050000/0x40ff0000 -j REDIRECT --to-ports 3603
+-A FIRC_REDIR -p tcp -m mark --mark 0x40060000/0x40ff0000 -j REDIRECT --to-ports 3600-3601
+-I PREROUTING 1 -p tcp -m mark --mark 0x40000000/0x40000000 -m addrtype ! --dst-type LOCAL -j FIRC_REDIR
+COMMIT

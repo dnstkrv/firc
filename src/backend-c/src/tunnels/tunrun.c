@@ -65,6 +65,11 @@ struct firc_tunrun {
     firc_tunsubs_t *subs;
     size_t list_max;
     bool stopped;
+    bool has_k;
+    firc_tunrun_ktcp_t k;
+    uint16_t ports[FIRC_KTCP_DEVICES];
+    uint8_t drifts[FIRC_KTCP_DEVICES];
+    bool ktcp_unusable;
     int watch_timer;
     int64_t (*now)(void);
 };
@@ -253,6 +258,136 @@ static void track_nodes(firc_tunrun_t *t, const firc_tun_state_t *st, const firc
     }
 }
 
+static int ktcp_dev(const firc_tunnel_t *tun)
+{
+    uint16_t port = firc_tunnel_tcp_port(tun);
+    return port == 0 ? -1 : port - FIRC_TUNNEL_TCP_PORT_BASE;
+}
+
+static void publish(const firc_tunrun_t *t)
+{
+    if (t->has_k && t->k.ports != NULL) {
+        t->k.ports(t->ports, t->k.ud);
+    }
+}
+
+static void set_port(firc_tunrun_t *t, int dev, uint16_t port)
+{
+    if (t->ports[dev] != port) {
+        t->ports[dev] = port;
+        publish(t);
+    }
+}
+
+static int send_cmds(firc_tunrun_t *t, const firc_tunnel_t *tun, firc_tun_cmd_t kind, const firc_ktcp_cmds_t *c)
+{
+    if (c->n_cmds == 0) {
+        return 0;
+    }
+    firc_err_t err = firc_tunsup_command(t->sup, tun->id, kind, c->text, c->len, c->counts, c->n_cmds);
+    if (err != FIRC_OK) {
+        firc_log_from(FIRC_LOG_WARN, tun->device, "command not sent: %s", firc_err_str(err));
+        return 0;
+    }
+    return (int)c->n_cmds;
+}
+
+static void send_mapall(firc_tunrun_t *t, const firc_tunnel_t *tun, int dev, const firc_ktcp_image_t *im)
+{
+    static const firc_ktcp_image_t none = {0};
+    firc_ktcp_cmds_t c = {0};
+    if (firc_ktcp_map_cmds(im != NULL ? im : &none, (uint8_t)dev, true, &c) == FIRC_OK) {
+        send_cmds(t, tun, FIRC_TUN_CMD_MAP, &c);
+    } else {
+        firc_log_from(FIRC_LOG_WARN, tun->device, "out of memory, the address map is not sent");
+    }
+    firc_ktcp_cmds_free(&c);
+}
+
+static const firc_ktcp_image_t *image_now(const firc_tunrun_t *t)
+{
+    return t->has_k && t->k.image != NULL ? t->k.image(t->k.ud) : NULL;
+}
+
+static void ready_port(firc_tunrun_t *t, const firc_tunnel_t *tun, int dev, uint16_t got)
+{
+    uint16_t want = firc_tunnel_tcp_port(tun);
+    t->drifts[dev] = 0;
+    if (want != 0 && got == 0) {
+        firc_log_from(FIRC_LOG_WARN, tun->device, "port %u is taken, TCP stays on the TUN", (unsigned)want);
+    } else if (want != 0 && got != want) {
+        firc_log_from(FIRC_LOG_WARN, tun->device, "tunvless reported port %u, not %u; TCP stays on the TUN",
+                      (unsigned)got, (unsigned)want);
+    }
+    set_port(t, dev, got == want ? want : 0);
+    if (t->ports[dev] != 0) {
+        send_mapall(t, tun, dev, image_now(t));
+    }
+}
+
+static void map_drift(firc_tunrun_t *t, const firc_tunnel_t *tun, int dev, const firc_tev_t *ev)
+{
+    if (t->drifts[dev] >= 2) {
+        return;
+    }
+    if (++t->drifts[dev] == 1) {
+        send_mapall(t, tun, dev, image_now(t));
+        return;
+    }
+    firc_log_from(FIRC_LOG_WARN, tun->device, "tunvless took %d of %d map lines, its map is no longer resent",
+                  ev->count, ev->expect);
+}
+
+static void answer_miss(firc_tunrun_t *t, const firc_tunnel_t *tun, int dev, const uint8_t fake[4])
+{
+    uint8_t real[4];
+    bool known = t->has_k && t->k.real_of != NULL && t->k.real_of((uint8_t)dev, fake, real, t->k.ud);
+    firc_ktcp_cmds_t c = {0};
+    if (firc_ktcp_line(&c, fake, known ? real : NULL) == FIRC_OK) {
+        send_cmds(t, tun, FIRC_TUN_CMD_MAP, &c);
+    }
+    firc_ktcp_cmds_free(&c);
+}
+
+static void ktcp_event(firc_tunrun_t *t, const firc_tun_state_t *st, const firc_tev_t *ev)
+{
+    if (ev == NULL) {
+        return;
+    }
+    ssize_t i = find(&t->cur, st->id);
+    int dev = i < 0 ? -1 : ktcp_dev(&t->cur.t[i]);
+    if (dev < 0 || !firc_tunsup_ready(t->sup, st->id)) {
+        return;
+    }
+    const firc_tunnel_t *tun = &t->cur.t[i];
+    switch (ev->kind) {
+    case FIRC_TEV_READY:
+        if (t->k.ready != NULL) {
+            t->k.ready((uint8_t)dev, t->k.ud);
+        }
+        ready_port(t, tun, dev, ev->tcp_port);
+        break;
+    case FIRC_TEV_MAP:
+        if (ev->drift && t->ports[dev] != 0) {
+            map_drift(t, tun, dev, ev);
+        }
+        break;
+    case FIRC_TEV_MISS:
+        if (t->ports[dev] != 0) {
+            answer_miss(t, tun, dev, ev->fake);
+        }
+        break;
+    case FIRC_TEV_CLOSE:
+        firc_log_from(FIRC_LOG_DEBUG, tun->device, "tunvless closed %d connections", ev->count);
+        if (t->k.closed != NULL) {
+            t->k.closed((uint8_t)dev, t->k.ud);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void watch(firc_tunrun_t *t)
 {
     if (t->stopped || t->ext == NULL) {
@@ -275,6 +410,7 @@ static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
 {
     firc_tunrun_t *t = ud;
     track_nodes(t, st, ev);
+    ktcp_event(t, st, ev);
     ssize_t at = find(&t->cur, st->id);
     firc_logrep_t *no_node = at >= 0 && t->ext != NULL ? &t->ext[at].no_node : NULL;
     char line[FIRC_EVENT_TEXT];
@@ -637,6 +773,25 @@ static void free_ext(ext_t *v, size_t n)
     free(v);
 }
 
+static void drop_ports(firc_tunrun_t *t)
+{
+    bool changed = false;
+    for (int dev = 0; dev < FIRC_KTCP_DEVICES; dev++) {
+        bool kept = false;
+        for (size_t i = 0; i < t->cur.n && t->ports[dev] != 0 && !kept; i++) {
+            kept = firc_tunnel_tcp_port(&t->cur.t[i]) == t->ports[dev];
+        }
+        if (t->ports[dev] != 0 && !kept) {
+            t->ports[dev] = 0;
+            t->drifts[dev] = 0;
+            changed = true;
+        }
+    }
+    if (changed) {
+        publish(t);
+    }
+}
+
 firc_err_t firc_tunrun_apply(firc_tunrun_t *t, firc_tunnels_t *want)
 {
     if (t->stopped) {
@@ -727,6 +882,7 @@ firc_err_t firc_tunrun_apply(firc_tunrun_t *t, firc_tunnels_t *want)
     t->ext = ext;
     want->t = NULL;
     want->n = 0;
+    drop_ports(t);
     free_unheld_fields(t);
     firc_err_t rc = push(t, true);
     firc_tunsubs_sweep(t->subs, &t->cur);
@@ -767,6 +923,9 @@ size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t 
         st->status = t->ext[i].syn;
         st->since_ms = t->ext[i].syn_since;
         st->uplink_ok = !needs_uplink(tun) || (t->ok[i] && t->up[i].routed);
+        int dev = ktcp_dev(tun);
+        uint16_t port = dev < 0 || t->ktcp_unusable ? 0 : t->ports[dev];
+        st->tcp_port = port;
         if (t->ext[i].syn == FIRC_TUN_ST_UPLINK_DOWN || t->ext[i].syn == FIRC_TUN_ST_WAITING) {
             continue;
         }
@@ -774,6 +933,7 @@ size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t 
         for (size_t k = 0; k < n_run; k++) {
             if (strcmp(run[k].id, tun->id) == 0) {
                 *st = run[k];
+                st->tcp_port = port;
                 break;
             }
         }
@@ -936,6 +1096,96 @@ void firc_tunrun_free(firc_tunrun_t *t)
 void firc_tunrun_set_list_max_for_test(firc_tunrun_t *t, size_t bytes)
 {
     t->list_max = bytes;
+}
+
+void firc_tunrun_set_ktcp(firc_tunrun_t *t, const firc_tunrun_ktcp_t *k)
+{
+    t->has_k = k != NULL;
+    if (k != NULL) {
+        t->k = *k;
+        publish(t);
+    }
+}
+
+typedef struct {
+    firc_ktcp_cmds_t per[FIRC_KTCP_DEVICES];
+    const firc_tunnel_t *to[FIRC_KTCP_DEVICES];
+    bool failed[FIRC_KTCP_DEVICES];
+} push_t;
+
+static void delta_line(uint8_t dev, const uint8_t fake[4], const uint8_t *real, void *ud)
+{
+    push_t *p = ud;
+    if (dev < FIRC_KTCP_DEVICES && p->to[dev] != NULL && !p->failed[dev] &&
+        firc_ktcp_line(&p->per[dev], fake, real) != FIRC_OK) {
+        p->failed[dev] = true;
+    }
+}
+
+static const firc_tunnel_t *live_with_port(const firc_tunrun_t *t, int dev)
+{
+    for (size_t i = 0; i < t->cur.n && t->ports[dev] != 0; i++) {
+        if (ktcp_dev(&t->cur.t[i]) == dev && firc_tunsup_ready(t->sup, t->cur.t[i].id)) {
+            return &t->cur.t[i];
+        }
+    }
+    return NULL;
+}
+
+void firc_tunrun_map_pushed(firc_tunrun_t *t, const firc_ktcp_image_t *prev, const firc_ktcp_image_t *next)
+{
+    if (t->stopped) {
+        return;
+    }
+    push_t *p = calloc(1, sizeof *p);
+    if (p == NULL) {
+        FIRC_WARN("tunnels: out of memory, address map changes not sent");
+        return;
+    }
+    bool any = false;
+    for (int dev = 0; dev < FIRC_KTCP_DEVICES; dev++) {
+        p->to[dev] = live_with_port(t, dev);
+        any = any || p->to[dev] != NULL;
+    }
+    if (any) {
+        firc_ktcp_image_diff(prev, next, delta_line, p);
+    }
+    for (int dev = 0; dev < FIRC_KTCP_DEVICES; dev++) {
+        if (p->failed[dev]) {
+            send_mapall(t, p->to[dev], dev, next);
+        } else if (p->to[dev] != NULL) {
+            send_cmds(t, p->to[dev], FIRC_TUN_CMD_MAP, &p->per[dev]);
+        }
+        firc_ktcp_cmds_free(&p->per[dev]);
+    }
+    free(p);
+}
+
+void firc_tunrun_set_ktcp_usable(firc_tunrun_t *t, bool usable)
+{
+    t->ktcp_unusable = !usable;
+}
+
+void firc_tunrun_set_tcp_pool(firc_tunrun_t *t, const uint8_t base[4], uint8_t len)
+{
+    firc_tunsup_set_tcp_pool(t->sup, base, len);
+}
+
+int firc_tunrun_close(firc_tunrun_t *t, uint8_t dev, const firc_nf_prefix_t *p, size_t n)
+{
+    const firc_tunnel_t *tun = t->stopped || dev >= FIRC_KTCP_DEVICES ? NULL : live_with_port(t, dev);
+    if (tun == NULL) {
+        return 0;
+    }
+    firc_ktcp_cmds_t c = {0};
+    int sent = 0;
+    if (firc_ktcp_close_cmd(p, n, &c) == FIRC_OK) {
+        sent = send_cmds(t, tun, FIRC_TUN_CMD_CLOSE, &c);
+    } else {
+        firc_log_from(FIRC_LOG_WARN, tun->device, "out of memory, close not sent");
+    }
+    firc_ktcp_cmds_free(&c);
+    return sent;
 }
 
 int firc_tunrun_set_watch_for_test(firc_tunrun_t *t, int64_t (*now_ms)(void), int period_ms)

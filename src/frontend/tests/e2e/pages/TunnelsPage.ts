@@ -19,7 +19,7 @@ export const tunnel = (id: string, device: string, extra: Json = {}): Json => ({
   exclude: [],
   sources: [],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8 },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
   ...extra,
 });
 
@@ -37,6 +37,7 @@ export const state = (id: string, device: string, extra: Json = {}): Json => ({
   txBps: 0,
   lastExit: 0,
   uplinkOk: true,
+  tcpPort: 0,
   ...extra,
 });
 

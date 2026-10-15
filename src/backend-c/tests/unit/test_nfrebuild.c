@@ -4,17 +4,27 @@
 #include <string.h>
 
 #include <errno.h>
+#include <stdio.h>
+#include <time.h>
 #include <sys/socket.h>
 
 #include "fake_conntrack.h"
+#include "fake_rtnl.h"
 #include "fake_iptables.h"
 #include "fake_xtables.h"
 
 #include "firc/app.h"
+#include "firc/events.h"
 #include "firc/fakeip.h"
 #include "firc/netfilter_cleaner.h"
 #include "firc/pool_reject.h"
 #include "firc/port_remap.h"
+
+unsigned __real_if_nametoindex(const char *name);
+unsigned __wrap_if_nametoindex(const char *name);
+unsigned __wrap_if_nametoindex(const char *name) {
+    return __real_if_nametoindex(strncmp(name, "tunvless", 8) == 0 ? "lo" : name);
+}
 
 typedef struct {
     firc_config_t cfg;
@@ -130,26 +140,6 @@ static size_t count_rule(firc_fake_ipt_t *f, const char *table, const char *chai
 
 static const char *const k_remap_jump[] = {"-j", "FIRC_DNSOR"};
 static const char *const k_foreign_post[] = {"-o", "eth0", "-j", "MASQUERADE"};
-
-TEST rebuild_restores_the_table_after_a_wipe(void) {
-    fixture_t fx;
-    fixture_up(&fx);
-
-    ASSERT(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
-    ASSERT(chain_has_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2));
-
-    firc_fake_ipt_reset(fx.fake);
-    seed_foreign_rules(fx.fake);
-    ASSERT_FALSE(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
-
-    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(fx.app, NULL));
-
-    ASSERT(firc_fake_ipt_chain_exists(fx.fake, "nat", "FIRC_DNSOR"));
-    ASSERT(chain_has_rule(fx.fake, "nat", "PREROUTING", k_remap_jump, 2));
-
-    fixture_down(&fx);
-    PASS();
-}
 
 TEST rebuild_does_not_duplicate_jumps(void) {
     fixture_t fx;
@@ -1005,6 +995,292 @@ TEST the_start_clean_does_not_retry_a_refusal(void) {
     PASS();
 }
 
+typedef struct {
+    firc_config_t cfg;
+    firc_fakeip_t *pool;
+    firc_fake_ipt_t *fake;
+    firc_ipt_t *ipt;
+    fake_rtnl_t *kernel;
+    firc_rtnl_t *rtnl;
+    firc_app_t *app;
+    firc_port_remap_t *remap;
+    uint16_t ports[FIRC_KTCP_DEVICES];
+} tun_rig_t;
+
+static bool tun_rig_up_lacking(tun_rig_t *r, bool target, const char *lack, uint8_t rev) {
+    memset(r, 0, sizeof(*r));
+    r->pool = new_pool();
+    if (r->pool == NULL) { return false; }
+    firc_config_init_defaults(&r->cfg);
+    r->fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
+    seed_foreign_rules(r->fake);
+    if (lack != NULL) { firc_fake_xt_lack(firc_fake_ipt_xt(r->fake), target, lack, rev); }
+    firc_xt_t *xt = firc_fake_ipt_as_xt(r->fake);
+    (void)firc_xt_probe(xt);
+    r->ipt = firc_ipt_new(xt, "FIRC_");
+    firc_netfilter_register_base_chains(r->ipt, NULL);
+    r->kernel = fake_rtnl_start(&r->rtnl);
+    if (r->kernel == NULL) { return false; }
+    fake_rtnl_set_link_flags(r->kernel, 0x1 | 0x10);
+    firc_app_deps_t deps = {.cfg = &r->cfg, .ipt4 = r->ipt, .rtnl = r->rtnl, .pool = r->pool};
+    r->app = firc_app_create(&deps);
+    r->remap = firc_port_remap_new(r->cfg.app.netfilter.iptables.chain_prefix, 53, 3553, NULL, 0, r->ipt, NULL);
+    if (r->app == NULL || firc_port_remap_enable(r->remap) != FIRC_OK) { return false; }
+    firc_app_set_port_remap(r->app, r->remap);
+    firc_app_set_running(r->app, true);
+    return true;
+}
+
+static bool tun_rig_up(tun_rig_t *r) { return tun_rig_up_lacking(r, false, NULL, 0); }
+
+static void tun_rig_down(tun_rig_t *r) {
+    firc_app_destroy(r->app);
+    firc_port_remap_free(r->remap);
+    firc_rtnl_close(r->rtnl);
+    fake_rtnl_stop(r->kernel);
+    firc_ipt_free(r->ipt);
+    firc_fakeip_free(r->pool);
+    firc_config_clear(&r->cfg);
+}
+
+static firc_id_t tag_id(uint8_t tag) { return (firc_id_t){{tag, tag, tag, tag}}; }
+
+static firc_rule_t *a_rule(const char *type, const char *text) {
+    firc_rule_t *rule = firc_rule_new();
+    rule->id = (firc_id_t){{0xee, 0, 0, 0}};
+    rule->id.b[1] = (uint8_t)strlen(text);
+    rule->id.b[2] = (uint8_t)text[0];
+    rule->id.b[3] = (uint8_t)type[0];
+    rule->type = strdup(type);
+    rule->rule = strdup(text);
+    rule->enable = true;
+    return rule;
+}
+
+static bool add_tun_group(tun_rig_t *r, uint8_t tag, const char *iface, const char *name, const char *subnet,
+                          firc_ip_t *fake) {
+    firc_group_t *g = firc_group_new();
+    g->id = tag_id(tag);
+    g->name = strdup("g");
+    g->iface = strdup(iface);
+    g->enable = true;
+    firc_group_add_rule(g, a_rule(FIRC_RULE_DOMAIN, name));
+    if (subnet != NULL) { firc_group_add_rule(g, a_rule(FIRC_RULE_SUBNET, subnet)); }
+    if (firc_app_add_group(r->app, g) != FIRC_OK) { return false; }
+    char gid[FIRC_ID_STR_LEN];
+    firc_id_format(tag_id(tag), gid);
+    const firc_ip_t real = {{93, 184, 216, tag}, 4};
+    return firc_fakeip_get(r->pool, name, gid, (int64_t)time(NULL), fake, NULL) == FIRC_OK &&
+           firc_fakeip_set_reals(r->pool, name, &real, 1) == FIRC_OK &&
+           firc_app_refresh_pool_snapshot(r->app) == FIRC_OK;
+}
+
+static void set_port(tun_rig_t *r, int dev, uint16_t port) {
+    r->ports[dev] = port;
+    firc_app_set_ktcp_ports(r->app, r->ports);
+}
+
+static size_t redirects_of(tun_rig_t *r, uint8_t tag, uint16_t port) {
+    uint32_t field = firc_ruleset_mark_field(firc_app_find_group_by_id(r->app, tag_id(tag)));
+    if (field == 0) { return 0; }
+    char mark[32], to[8];
+    snprintf(mark, sizeof(mark), "0x%x/0x40ff0000", 0x40000000u | field);
+    snprintf(to, sizeof(to), "%u", (unsigned)port);
+    const char *want[] = {"-p", "tcp", "-m", "mark", "--mark", mark, "-j", "REDIRECT", "--to-ports", to};
+    return count_rule(r->fake, "nat", "FIRC_REDIR", want, 10);
+}
+
+static const char *const k_redir_jump[] = {"-p", "tcp", "-m", "mark", "--mark", "0x40000000/0x40000000", "-m",
+                                           "addrtype", "!", "--dst-type", "LOCAL", "-j", "FIRC_REDIR"};
+
+static size_t redir_jumps(tun_rig_t *r) { return count_rule(r->fake, "nat", "PREROUTING", k_redir_jump, 13); }
+
+static bool dnat_of(tun_rig_t *r, const firc_ip_t *fake) {
+    char want[32];
+    snprintf(want, sizeof(want), "-d %u.%u.%u.%u/32", fake->b[0], fake->b[1], fake->b[2], fake->b[3]);
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    bool found = false;
+    if (!firc_fake_ipt_get_rules(r->fake, "nat", "FIRC_DNAT", &rules, &n)) { return false; }
+    for (size_t i = 0; i < n && !found; i++) {
+        char *text = firc_ipt_rule_string(rules[i]);
+        found = text != NULL && strstr(text, want) != NULL;
+        free(text);
+    }
+    return found;
+}
+
+static size_t said_since(uint64_t since, const char *needle) {
+    static firc_event_t ev[256];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(since, ev, sizeof(ev) / sizeof(ev[0]), &next, &dropped), c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ev[i].kind == FIRC_EVENT_LOG && strstr(ev[i].u.log.text, needle) != NULL) { c++; }
+    }
+    return c;
+}
+
+static uint64_t said_mark(void) {
+    static firc_event_t ev[256];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, sizeof(ev) / sizeof(ev[0]), &next, &dropped);
+    return n > 0 ? ev[n - 1].seq : 0;
+}
+
+static size_t index_of_jump(tun_rig_t *r, const char *target) {
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    if (!firc_fake_ipt_get_rules(r->fake, "nat", "PREROUTING", &rules, &n)) { return SIZE_MAX; }
+    for (size_t i = 0; i < n; i++) {
+        if (rules[i]->n_parts >= 2 && strcmp(rules[i]->parts[rules[i]->n_parts - 1], target) == 0) { return i; }
+    }
+    return SIZE_MAX;
+}
+
+/* Catches: a tunnel group with a reported port left without its REDIRECT, or one sent to another port or mark. */
+TEST a_tunnel_group_with_a_port_gets_its_redirect(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0}, f3 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    ASSERT(add_tun_group(&r, 2, "tunvless4", "b.example", NULL, &f2));
+    ASSERT(add_tun_group(&r, 3, "lo", "c.example", NULL, &f3));
+    set_port(&r, 3, 3603);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)1, rule_count(r.fake, "nat", "FIRC_REDIR"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redir_jumps(&r), "%zu");
+    ASSERT(dnat_of(&r, &f1) && dnat_of(&r, &f2) && dnat_of(&r, &f3));
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: TCP blackholed while the port is unknown: a REDIRECT staged with no port, or the DNAT dropped. */
+TEST no_port_no_redirect_and_dnat_stays(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 4, 3604);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, redir_jumps(&r), "%zu");
+    ASSERT(dnat_of(&r, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    set_port(&r, 3, 0);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT(dnat_of(&r, &f1));
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: REDIR staged for a group the kernel refused, or the image of a refused try kept. */
+TEST a_left_out_group_gets_no_redirect(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    ASSERT(add_tun_group(&r, 2, "tunvless4", "b.example", "10.66.0.0/16", &f2));
+    set_port(&r, 3, 3603);
+    set_port(&r, 4, 3604);
+    firc_fake_ipt_refuse_rules_containing(r.fake, "10.66.0.0/16");
+    ASSERT_EQ(FIRC_ERR_IO, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_EQ_FMT((size_t)1, rule_count(r.fake, "nat", "FIRC_REDIR"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    const firc_ktcp_image_t *im = firc_app_ktcp_image(r.app);
+    ASSERT_EQ_FMT((size_t)1, im->n, "%zu");
+    ASSERT_EQ(3, im->v[0].dev);
+    ASSERT_MEM_EQ(f1.b, im->v[0].fake, 4);
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: a kernel refusing the REDIRECT rules failing every pass for every group, or the error said every pass. */
+TEST a_refused_redirect_keeps_nat_written(void) {
+    firc_event_reset_for_test();
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    ASSERT(add_tun_group(&r, 2, "tunvless4", "b.example", NULL, &f2));
+    set_port(&r, 3, 3603);
+    set_port(&r, 4, 3604);
+    firc_fake_ipt_refuse_rules_containing(r.fake, "-j REDIRECT");
+    uint64_t mark = said_mark();
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT(dnat_of(&r, &f1) && dnat_of(&r, &f2));
+    ASSERT(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_DNSOR"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, redir_jumps(&r), "%zu");
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_image(r.app)->n, "%zu");
+    ASSERT_EQ_FMT((size_t)1, said_since(mark, "the kernel refused the kernel TCP redirect; TCP stays on the TUN"), "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
+static enum greatest_test_res missing_extension_keeps_nat(bool target, const char *name, uint8_t rev) {
+    firc_event_reset_for_test();
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up_lacking(&r, target, name, rev));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    uint64_t mark = said_mark();
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT(dnat_of(&r, &f1));
+    ASSERT(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_DNSOR"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, redir_jumps(&r), "%zu");
+    ASSERT_EQ_FMT((size_t)1,
+                  said_since(mark, "kernel TCP needs the REDIRECT target and the addrtype match; TCP stays on the TUN"),
+                  "%zu");
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_image(r.app)->n, "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: nat failing every pass on a kernel without the REDIRECT target, or the error said every pass. */
+TEST a_missing_redirect_target_keeps_nat_written(void) { return missing_extension_keeps_nat(true, "REDIRECT", 0); }
+
+/* Catches: nat failing every pass on a kernel without the addrtype match. */
+TEST a_missing_addrtype_match_keeps_nat_written(void) { return missing_extension_keeps_nat(false, "addrtype", 1); }
+
+/* Catches: a rewritten nat left without DNSOR, REDIR or their jumps, a jump put back twice, or REDIR behind DNAT. */
+TEST rebuild_restores_the_table_after_a_wipe(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT(chain_has_rule(r.fake, "nat", "PREROUTING", k_remap_jump, 2));
+    ASSERT_EQ_FMT((size_t)1, redir_jumps(&r), "%zu");
+
+    firc_fake_ipt_reset(r.fake);
+    seed_foreign_rules(r.fake);
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_DNSOR"));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+        ASSERT(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_DNSOR"));
+        ASSERT_EQ_FMT((size_t)1, count_rule(r.fake, "nat", "PREROUTING", k_remap_jump, 2), "%zu");
+        ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+        ASSERT_EQ_FMT((size_t)1, redir_jumps(&r), "%zu");
+        size_t redir_at = index_of_jump(&r, "FIRC_REDIR"), dnat_at = index_of_jump(&r, "FIRC_DNAT");
+        ASSERT(dnat_at != SIZE_MAX);
+        ASSERT_LT(redir_at, dnat_at);
+    }
+    tun_rig_down(&r);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1036,5 +1312,11 @@ int main(int argc, char **argv) {
     RUN_TEST(a_refused_nat_sweep_leaves_the_marks);
     RUN_TEST(the_start_clean_retries_a_lost_race);
     RUN_TEST(the_start_clean_does_not_retry_a_refusal);
+    RUN_TEST(a_tunnel_group_with_a_port_gets_its_redirect);
+    RUN_TEST(no_port_no_redirect_and_dnat_stays);
+    RUN_TEST(a_left_out_group_gets_no_redirect);
+    RUN_TEST(a_missing_redirect_target_keeps_nat_written);
+    RUN_TEST(a_refused_redirect_keeps_nat_written);
+    RUN_TEST(a_missing_addrtype_match_keeps_nat_written);
     GREATEST_MAIN_END();
 }

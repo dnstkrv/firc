@@ -130,6 +130,10 @@ firc_err_t firc_xt_probe_capture(firc_xt_t *xt);
 /* The mac match revision the probe confirmed: 1 when the kernel has it (Keenetic), else 0. */
 uint8_t firc_xt_mac_rev(const firc_xt_t *xt);
 
+/* False when the probe marked the extension named name (a target or a match, as the kernel spells it) missing,
+ * or firc never writes it in the handle's family. */
+bool firc_xt_has(const firc_xt_t *xt, const char *name);
+
 /* A table the kernel refuses is written to dir/refused-<family>-<table>.bin, one file per table, overwritten; NULL turns it off. */
 firc_err_t firc_xt_set_dump_dir(firc_xt_t *xt, const char *dir);
 

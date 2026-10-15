@@ -82,6 +82,9 @@ size_t firc_fakeip_uncommit_group(firc_fakeip_t *f, const char *group_id);
 
 const char *firc_fakeip_name_of(const firc_fakeip_t *f, const firc_ip_t *addr);
 
+/* The group and real v4 of a live or parked mapping at fake; false when none or no real yet. */
+bool firc_fakeip_pair_of(const firc_fakeip_t *f, const firc_ip_t *fake, const char **group_id, firc_ip_t *real);
+
 /* Called once per (name, family) with a fake address; real is NULL if none recorded yet. */
 typedef void (*firc_fakeip_walk_fn)(void *ud, const char *qname, const char *group_id,
                                     const firc_ip_t *fake, const firc_ip_t *real);

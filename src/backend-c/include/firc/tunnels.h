@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "firc/err.h"
 
@@ -11,6 +12,7 @@
 #define FIRC_TUN_MAX_KEYS 1024
 #define FIRC_TUN_KEY_MAX 191
 #define FIRC_TUN_DESCRIPTION_MAX 63
+#define FIRC_TUNNEL_TCP_PORT_BASE 3600
 
 typedef enum { FIRC_UPLINK_AUTO, FIRC_UPLINK_IFACE, FIRC_UPLINK_TUNNEL } firc_uplink_kind_t;
 
@@ -47,6 +49,7 @@ typedef struct {
     char by[16];
     int interval_s, silence_s, timeout_s;
     bool insecure;
+    bool kernel_tcp;
     char ca[256];
 } firc_tunnel_t;
 
@@ -74,6 +77,9 @@ void firc_tunnels_free(firc_tunnels_t *t);
 
 /* True when tunvless for a would be started with the same options as for b; sources not compared. */
 bool firc_tunnel_same_argv(const firc_tunnel_t *a, const firc_tunnel_t *b);
+
+/* FIRC_TUNNEL_TCP_PORT_BASE plus the device number of t when t is enabled with kernelTcp, else 0. */
+uint16_t firc_tunnel_tcp_port(const firc_tunnel_t *t);
 
 /* True when a and b give tunvless the same nodes: source kinds, links and URLs in order. */
 bool firc_tunnel_same_nodes(const firc_tunnel_t *a, const firc_tunnel_t *b);

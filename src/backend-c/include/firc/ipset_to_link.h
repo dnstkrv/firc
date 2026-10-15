@@ -105,6 +105,11 @@ firc_err_t firc_nf_prefixes_of(const firc_ipv4_subnet_t *v4, size_t n4, const fi
 firc_err_t firc_ipset_to_link_prefixes(const firc_ipset_to_link_t *l, firc_nf_prefixes_t *out);
 /* Whether a prefix of `was` is covered by no prefix of `now` in its family. */
 bool firc_nf_prefixes_narrow(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now);
+/* Prefixes of was not covered by now (same family rules as firc_nf_prefixes_narrow); out overwritten. */
+firc_err_t firc_nf_prefixes_lost(const firc_nf_prefixes_t *was, const firc_nf_prefixes_t *now, firc_nf_prefixes_t *out);
+/* Joins the prefixes of p in family into to, which stays sorted and unique; n log n plus linear in to->n.
+   FIRC_ERR_NOMEM leaves to as it was. */
+firc_err_t firc_nf_prefixes_join(firc_nf_prefixes_t *to, const firc_nf_prefix_t *p, size_t n, uint8_t family);
 void firc_nf_prefixes_clear(firc_nf_prefixes_t *p);
 
 void firc_nf_devices_clear(firc_nf_devices_t *d);

@@ -71,6 +71,11 @@ XTDUMP=${XTCAPTURE_XTDUMP:-$(dirname "$SHIM")/xtdump}
 
 while read -r name bases; do
     [ -n "$name" ] || continue
+    case " $bases " in
+    *" @v4 "*)
+        [ "$FAM" = v4 ] || { echo "skipped $name.$FAM (@v4)"; continue; }
+        bases=$(printf '%s\n' $bases | grep -vx '@v4' | tr '\n' ' ') ;;
+    esac
     if [ "$DRY" = 1 ]; then
         sh "$SELF" --one-dry "$SBIN" "$FX" "$OUT" "$FAM" "$SHIM" "$name" "$TABLE"
     elif [ "$(id -u)" = 0 ]; then

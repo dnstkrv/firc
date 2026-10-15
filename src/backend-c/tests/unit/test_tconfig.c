@@ -763,6 +763,54 @@ TEST an_enable_that_is_not_a_bool_is_refused(void) {
     PASS();
 }
 
+/* catches: a wrong key name, a non-bool coerced, or save leaving kernelTcp out */
+TEST kernel_tcp_loads_saves_and_refuses_a_non_bool(void) {
+    static const char on[] = "tunnels:\n  - id: a1\n    device: tunvless0\n    sources:\n" LINK
+                             "    advanced: { kernelTcp: true }\n";
+    firc_tunnels_t b = {0};
+    char file[4096];
+    ASSERT(save_and_reload(on, &b, file, sizeof file));
+    ASSERT(b.t[0].kernel_tcp);
+    ASSERT(strstr(file, "\n    kernelTcp: true\n") != NULL);
+    firc_tunnels_free(&b);
+    ASSERT(save_and_reload(ONE, &b, file, sizeof file));
+    ASSERT(!b.t[0].kernel_tcp);
+    ASSERT(strstr(file, "\n    kernelTcp: false\n") != NULL);
+    firc_tunnels_free(&b);
+    ASSERT(with_extra("    advanced: { kernelTcp: yes }\n", "tunnels[0].advanced.kernelTcp", "true or false"));
+    ASSERT(with_extra("    advanced: { kernelTcp: 1 }\n", "tunnels[0].advanced.kernelTcp", "true or false"));
+    ASSERT(with_extra("    advanced: { kerneltcp: true }\n", "tunnels[0].advanced.kerneltcp", "unknown key"));
+    PASS();
+}
+
+/* catches: same_argv ignoring kernelTcp, so a toggle neither restarts the child nor gives it a port */
+TEST kernel_tcp_is_argv_affecting(void) {
+    ASSERT_EQ(2, same_after("active: 1", "active: 1\n    advanced: { kernelTcp: true }"));
+    ASSERT_EQ(3, same_after("active: 1", "active: 1\n    advanced: { kernelTcp: false }"));
+    PASS();
+}
+
+static uint16_t port_of(const char *device, bool enable, bool kernel_tcp)
+{
+    firc_tunnel_t t = {0};
+    snprintf(t.device, sizeof t.device, "%s", device);
+    t.enable = enable;
+    t.kernel_tcp = kernel_tcp;
+    return firc_tunnel_tcp_port(&t);
+}
+
+/* catches: an off-by-one in the port, a port for a disabled tunnel, or one without kernelTcp */
+TEST the_tcp_port_is_3600_plus_the_device_number(void) {
+    ASSERT_EQ(3600, FIRC_TUNNEL_TCP_PORT_BASE);
+    ASSERT_EQ(3600, port_of("tunvless0", true, true));
+    ASSERT_EQ(3607, port_of("tunvless7", true, true));
+    ASSERT_EQ(3642, port_of("tunvless42", true, true));
+    ASSERT_EQ(3699, port_of("tunvless99", true, true));
+    ASSERT_EQ(0, port_of("tunvless5", false, true));
+    ASSERT_EQ(0, port_of("tunvless5", true, false));
+    PASS();
+}
+
 /* catches: a link with whitespace splitting into two stdin lines */
 TEST a_link_with_whitespace_is_refused(void) {
     ASSERT(refused_one("a1", "tunvless0", "auto", "1", "site", "      - link: \"vless://u@h:443#a b\"\n",
@@ -848,5 +896,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_link_with_whitespace_is_refused);
     RUN_TEST(an_iface_uplink_on_a_tunvless_device_is_refused);
     RUN_TEST(an_enabled_tunnel_without_sources_is_refused);
+    RUN_TEST(kernel_tcp_loads_saves_and_refuses_a_non_bool);
+    RUN_TEST(kernel_tcp_is_argv_affecting);
+    RUN_TEST(the_tcp_port_is_3600_plus_the_device_number);
     GREATEST_MAIN_END();
 }

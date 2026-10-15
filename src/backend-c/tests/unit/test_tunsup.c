@@ -61,6 +61,13 @@ typedef struct {
     int n_down;
     int act_pos[8];
     size_t n_act;
+    firc_err_t cmd_rc;
+    firc_err_t cmd_rc2;
+    bool in_turn;
+    int map_count[8];
+    int map_expect[8];
+    bool map_drift[8];
+    int n_map;
 } rec_t;
 
 static rec_t *g_open;
@@ -96,6 +103,11 @@ static void env_setup(const char *mode)
     unsetenv("FAKE_EVENTS");
     unsetenv("FAKE_AFTER");
     unsetenv("FAKE_ACK_COUNT");
+    unsetenv("FAKE_MAPCOUNT");
+    unsetenv("FAKE_MISS");
+    unsetenv("FAKE_CLOSED");
+    unsetenv("FAKE_TCPPORT");
+    unsetenv("FAKE_STDIN_DIR");
 }
 
 static void env_teardown(void)
@@ -223,6 +235,12 @@ static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
         r->n_ev++;
         if (ev->kind == FIRC_TEV_NODE_DOWN && r->n_down < 16) {
             r->down_pos[r->n_down++] = ev->pos;
+        }
+        if (ev->kind == FIRC_TEV_MAP && r->n_map < 8) {
+            r->map_count[r->n_map] = ev->count;
+            r->map_expect[r->n_map] = ev->expect;
+            r->map_drift[r->n_map] = ev->drift;
+            r->n_map++;
         }
         if (ev->kind == FIRC_TEV_ACTIVE) {
             r->n_act = ev->n_active;
@@ -514,6 +532,58 @@ TEST argv_minimal_without_options(void)
     read_file(g_argv, buf, sizeof buf);
     ASSERT_STR_EQ("--control\n-d\ntunvless0\n-a\n198.51.100.1/32\n-A\n1\n--by\nlatency\n--interval\n30\n"
                   "--silence\n10\n-t\n5\n",
+                  buf);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+TEST a_kernel_tcp_tunnel_is_spawned_with_its_port_and_pool(void)
+{
+    /* catches: --tcp-port or --tcp-pool missing, a wrong port, or a wrong pool text */
+    env_setup("ok");
+    char *links[] = {"vless://secret@h1:443#one"};
+    firc_tunnel_t t;
+    tun_init(&t, "a", 7, links, 1);
+    t.kernel_tcp = true;
+    firc_tunnels_t set = {&t, 1};
+    uint32_t marks[] = {0};
+    static rec_t r;
+    rec_open(&r);
+    const uint8_t pool[4] = {198, 18, 0, 0};
+    firc_tunsup_set_tcp_pool(r.s, pool, 15);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, marks));
+    run_ms(&r, 700);
+    char buf[512];
+    read_file(g_argv, buf, sizeof buf);
+    ASSERT_STR_EQ("--control\n-d\ntunvless7\n-a\n198.51.100.8/32\n-A\n1\n--by\nlatency\n--interval\n30\n"
+                  "--silence\n10\n-t\n5\n--tcp-port\n3607\n--tcp-pool\n198.18.0.0/15\n",
+                  buf);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+TEST a_kernel_tcp_tunnel_without_a_pool_gets_only_its_port(void)
+{
+    /* catches: a --tcp-pool with an unset pool passed to the child */
+    env_setup("ok");
+    char *links[] = {"vless://secret@h1:443#one"};
+    firc_tunnel_t t;
+    tun_init(&t, "a", 0, links, 1);
+    t.kernel_tcp = true;
+    firc_tunnels_t set = {&t, 1};
+    uint32_t marks[] = {0};
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, marks));
+    run_ms(&r, 700);
+    char buf[512];
+    read_file(g_argv, buf, sizeof buf);
+    ASSERT_STR_EQ("--control\n-d\ntunvless0\n-a\n198.51.100.1/32\n-A\n1\n--by\nlatency\n--interval\n30\n"
+                  "--silence\n10\n-t\n5\n--tcp-port\n3600\n",
                   buf);
     rec_close(&r);
     ASSERT(no_children());
@@ -1703,6 +1773,311 @@ TEST a_terminating_child_has_no_ack_clock(void)
     PASS();
 }
 
+static void ready_cb(firc_loop_t *loop, void *ud)
+{
+    if (firc_tunsup_ready(((rec_t *)ud)->s, "a")) {
+        firc_loop_stop(loop);
+    }
+}
+
+static bool run_until_ready(rec_t *r, uint64_t deadline_ms)
+{
+    int id = 0;
+    firc_loop_add_timer(r->loop, 10, 10, ready_cb, r, &id);
+    run_ms(r, deadline_ms);
+    firc_loop_del_timer(r->loop, id);
+    return firc_tunsup_ready(r->s, "a");
+}
+
+static void pause_ms(int ms)
+{
+    struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+static bool file_has_within(const char *path, const char *needle, size_t cap, int ms)
+{
+    char *buf = malloc(cap);
+    bool has = false;
+    for (int64_t end = now_ms() + ms; !has; pause_ms(10)) {
+        read_file(path, buf, cap);
+        has = strstr(buf, needle) != NULL;
+        if (now_ms() >= end) {
+            break;
+        }
+    }
+    free(buf);
+    return has;
+}
+
+static const char k_one_map[] = "map\n198.18.0.1 192.0.2.1\n\n";
+
+static void command_now_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    size_t one = 1;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_one_map, sizeof k_one_map - 1, &one, 1);
+    r->in_turn = file_has_within(g_stdin, k_one_map, 4096, 2000);
+}
+
+TEST a_command_to_an_idle_child_is_written_before_the_loop_turns(void)
+{
+    /* catches: the write left to the next EPOLLOUT, so a command reaches tunvless only after the loop turns */
+    env_setup("ktcp");
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, command_now_cb, &r, NULL);
+    run_ms(&r, 50);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    ASSERT(r.in_turn);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+#define BIG_LINES 4096
+
+static char g_big[BIG_LINES * 40];
+static size_t g_big_len;
+static const char k_after[] = "map\n198.18.255.1 -\n\n";
+
+static size_t file_size(const char *path)
+{
+    struct stat sb;
+    return stat(path, &sb) == 0 ? (size_t)sb.st_size : 0;
+}
+
+static void partial_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    size_t lines = BIG_LINES;
+    size_t one = 1;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, g_big, g_big_len, &lines, 1);
+    for (int64_t end = now_ms() + 5000; file_size(g_stdin) < 60000 && now_ms() < end;) {
+        pause_ms(10);
+    }
+    r->in_turn = file_size(g_stdin) < g_big_len;
+    r->cmd_rc2 = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_after, sizeof k_after - 1, &one, 1);
+}
+
+TEST a_partial_write_keeps_the_tail_in_order(void)
+{
+    /* catches: the unwritten tail of a command lost, or a later command written ahead of it */
+    env_setup("ktcp");
+    g_big_len = (size_t)snprintf(g_big, sizeof g_big, "map\n");
+    for (unsigned i = 0; i < BIG_LINES; i++) {
+        g_big_len += (size_t)snprintf(g_big + g_big_len, sizeof g_big - g_big_len, "198.18.%u.%u 203.0.113.%u\n",
+                                      i / 256, i % 256, i % 200);
+    }
+    g_big_len += (size_t)snprintf(g_big + g_big_len, sizeof g_big - g_big_len, "\n");
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, partial_cb, &r, NULL);
+    run_ms(&r, 50);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc2);
+    ASSERTm("fixture: the pipe held only part of the big command", r.in_turn);
+    static char want[sizeof g_big + 64];
+    snprintf(want, sizeof want, "vless://u@h1:1#x\n\n%s%s", g_big, k_after);
+    static char got[sizeof want];
+    for (int64_t end = now_ms() + 8000; now_ms() < end;) {
+        run_ms(&r, 50);
+        read_file(g_stdin, got, sizeof got);
+        if (strlen(got) >= strlen(want)) {
+            break;
+        }
+    }
+    ASSERT_STR_EQ(want, got);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static const char k_three[] = "map\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n198.18.0.3 -\n\n";
+
+static void map_then_nodes_cb(firc_loop_t *loop, void *ud)
+{
+    rec_t *r = ud;
+    size_t three = 3;
+    size_t one = 1;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_three, sizeof k_three - 1, &three, 1);
+    apply_cb(loop, ud);
+    r->cmd_rc2 = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_one_map, sizeof k_one_map - 1, &one, 1);
+}
+
+TEST map_acks_do_not_consume_nodes_acks(void)
+{
+    /* catches: one ack queue for both kinds, so a map ack is matched against the node list, or map acks paired out of order */
+    env_setup("ktcp");
+    log_to_file();
+    char *l1[] = {"vless://u@h1:1#x"};
+    char *l2[] = {"vless://u@h1:1#x", "vless://u@h2:1#y"};
+    two_lists(l1, 1, l2, 2);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    r.next = &g_set2;
+    firc_loop_add_timer(r.loop, 10, 0, map_then_nodes_cb, &r, NULL);
+    run_ms(&r, 800);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc2);
+    ASSERT_EQ(FIRC_OK, r.apply_rc);
+    ASSERT_EQ(2, r.n_map);
+    ASSERT_EQ(3, r.map_count[0]);
+    ASSERT_EQ(3, r.map_expect[0]);
+    ASSERT_FALSE(r.map_drift[0]);
+    ASSERT_EQ(1, r.map_count[1]);
+    ASSERT_EQ(1, r.map_expect[1]);
+    ASSERT_FALSE(r.map_drift[1]);
+    char buf[512];
+    read_file(g_stdin, buf, sizeof buf);
+    ASSERT_STR_EQ("vless://u@h1:1#x\n\nmap\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n198.18.0.3 -\n\n"
+                  "nodes\nvless://u@h1:1#x\nvless://u@h2:1#y\n\nmap\n198.18.0.1 192.0.2.1\n\n",
+                  buf);
+    rec_close(&r);
+    log_done();
+    char log[4096];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(0, count_of(log, "node states go by name"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void short_map_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    size_t three = 3;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_three, sizeof k_three - 1, &three, 1);
+}
+
+TEST a_short_map_ack_is_flagged_as_drift(void)
+{
+    /* catches: a map ack passed on without comparing its count with the lines sent, or one that leaves the ack clock running */
+    env_setup("ktcp");
+    setenv("FAKE_MAPCOUNT", "2", 1);
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    firc_tunsup_set_second_ms_for_test(r.s, 50);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, short_map_cb, &r, NULL);
+    run_ms(&r, 1200);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    char starts[512];
+    read_file(g_starts, starts, sizeof starts);
+    ASSERT_EQ(1, count_starts(starts, "tunvless0"));
+    ASSERT_EQ(1, r.n_map);
+    ASSERT_EQ(2, r.map_count[0]);
+    ASSERT_EQ(3, r.map_expect[0]);
+    ASSERT(r.map_drift[0]);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void one_map_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    size_t one = 1;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_one_map, sizeof k_one_map - 1, &one, 1);
+}
+
+TEST an_unanswered_map_restarts_the_child_after_10_s(void)
+{
+    /* catches: a map command left out of the ack clock, the clock run shorter than 10 s, or its count left for the next child */
+    env_setup("ktcp");
+    setenv("FAKE_NOACK", "1", 1);
+    log_to_file();
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    firc_tunsup_set_second_ms_for_test(r.s, 50);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, one_map_cb, &r, NULL);
+    run_ms(&r, 350);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    char buf[512];
+    read_file(g_starts, buf, sizeof buf);
+    ASSERT_EQ(1, count_starts(buf, "tunvless0"));
+    unsetenv("FAKE_NOACK");
+    run_ms(&r, 900);
+    read_file(g_starts, buf, sizeof buf);
+    ASSERT_EQ(2, count_starts(buf, "tunvless0"));
+    ASSERT(gone(nth_pid(buf, "tunvless0", 0)));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, short_map_cb, &r, NULL);
+    run_ms(&r, 400);
+    ASSERT_EQ(1, r.n_map);
+    ASSERT_EQ(3, r.map_expect[0]);
+    ASSERT_FALSE(r.map_drift[0]);
+    rec_close(&r);
+    log_done();
+    char log[4096];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: tunvless did not take the address map in 10 s, restarting\n"));
+    ASSERT_EQ(0, count_of(log, "did not take the node list"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void early_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    size_t one = 1;
+    r->in_turn = firc_tunsup_ready(r->s, "a");
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_MAP, k_one_map, sizeof k_one_map - 1, &one, 1);
+    r->cmd_rc2 = firc_tunsup_command(r->s, "zz", FIRC_TUN_CMD_CLOSE, k_one_map, sizeof k_one_map - 1, NULL, 0);
+}
+
+TEST a_command_before_ready_is_refused(void)
+{
+    /* catches: a command queued to a child still starting, which reads nothing until its first list is up */
+    env_setup("ktcp");
+    setenv("FAKE_SLEEP", "0.6", 1);
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    firc_loop_add_timer(r.loop, 100, 0, early_cb, &r, NULL);
+    run_ms(&r, 200);
+    ASSERT_FALSE(r.in_turn);
+    ASSERT_EQ(FIRC_ERR_STATE, r.cmd_rc);
+    ASSERT_EQ(FIRC_ERR_STATE, r.cmd_rc2);
+    ASSERT(run_until_ready(&r, 2000));
+    run_ms(&r, 200);
+    char buf[512];
+    read_file(g_stdin, buf, sizeof buf);
+    ASSERT_STR_EQ("vless://u@h1:1#x\n\n", buf);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -1714,6 +2089,8 @@ int main(int argc, char **argv)
     RUN_TEST(reap_hook_names_each_child_once_reaped);
     RUN_TEST(argv_full_and_no_link);
     RUN_TEST(argv_minimal_without_options);
+    RUN_TEST(a_kernel_tcp_tunnel_is_spawned_with_its_port_and_pool);
+    RUN_TEST(a_kernel_tcp_tunnel_without_a_pool_gets_only_its_port);
     RUN_TEST(stderr_logged_by_level_without_links);
     RUN_TEST(crash_restarts_with_growing_backoff);
     RUN_TEST(backoff_doubles_up_to_sixty);
@@ -1746,5 +2123,11 @@ int main(int argc, char **argv)
     RUN_TEST(the_index_map_starts_again_with_each_child);
     RUN_TEST(a_short_ack_stops_trusting_node_numbers);
     RUN_TEST(a_terminating_child_has_no_ack_clock);
+    RUN_TEST(a_command_to_an_idle_child_is_written_before_the_loop_turns);
+    RUN_TEST(a_partial_write_keeps_the_tail_in_order);
+    RUN_TEST(map_acks_do_not_consume_nodes_acks);
+    RUN_TEST(a_short_map_ack_is_flagged_as_drift);
+    RUN_TEST(an_unanswered_map_restarts_the_child_after_10_s);
+    RUN_TEST(a_command_before_ready_is_refused);
     GREATEST_MAIN_END();
 }

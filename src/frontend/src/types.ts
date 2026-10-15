@@ -150,7 +150,7 @@ export type TunnelSource = {
   interval?: number;
 };
 
-export type TunnelAdvanced = { ca: string; insecure: boolean; timeout: number };
+export type TunnelAdvanced = { ca: string; insecure: boolean; timeout: number; kernelTcp: boolean };
 
 export type Tunnel = {
   id: string;
@@ -209,6 +209,7 @@ export type TunnelState = {
   backoffS: number;
   lastExit: number;
   uplinkOk: boolean;
+  tcpPort: number;
   active: string[];
   groups: string[];
   nodes: TunnelNodeState[];

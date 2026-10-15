@@ -23,23 +23,33 @@ probe)
     exit 0 ;;
 esac
 IN=${FAKE_STDIN_OUT:-/dev/null}
+[ -n "${FAKE_STDIN_DIR:-}" ] && IN=$FAKE_STDIN_DIR/$3
 : > "$IN"
 while IFS= read -r l; do
     printf '%s\n' "$l" >> "$IN"
     [ -z "$l" ] && break
 done
 answer() {
+    first=1
     while IFS= read -r l; do
-        [ "$l" = nodes ] || continue
-        printf 'nodes\n' >> "$IN"
+        case "$l" in nodes | map | mapall | close) ;; *) continue ;; esac
+        printf '%s\n' "$l" >> "$IN"
         n=0
         while IFS= read -r x; do
             printf '%s\n' "$x" >> "$IN"
             [ -z "$x" ] && break
             n=$((n + 1))
         done
-        [ -n "${FAKE_NOACK:-}" ] || printf '{"type":"nodes","count":%d}\n' "${FAKE_ACK_COUNT:-$n}"
+        if [ -z "${FAKE_NOACK:-}" ]; then
+            case "$l" in
+            nodes) printf '{"type":"nodes","count":%d}\n' "${FAKE_ACK_COUNT:-$n}" ;;
+            close) printf '{"type":"close","count":%d}\n' "${FAKE_CLOSED:-$n}" ;;
+            *) printf '{"type":"map","count":%d}\n' "${FAKE_MAPCOUNT:-$n}" ;;
+            esac
+        fi
         [ -z "${FAKE_AFTER:-}" ] || printf '%s\n' "$FAKE_AFTER"
+        [ -z "$first" ] || [ -z "${FAKE_MISS:-}" ] || printf '%s\n' "$FAKE_MISS"
+        first=
     done
     exec sleep 3600
 }
@@ -49,6 +59,16 @@ nodes)
     sleep "${FAKE_SLEEP:-0}"
     printf '{"type":"ready","dev":"%s"}\n' "$3"
     if [ -n "${FAKE_EVENTS:-}" ]; then printf '%s\n' "$FAKE_EVENTS"; else printf '{"type":"active","nodes":["A"]}\n'; fi
+    answer ;;
+ktcp)
+    sleep "${FAKE_SLEEP:-0}"
+    port=0
+    prev=
+    for a in "$@"; do
+        [ "$prev" = --tcp-port ] && port=$a
+        prev=$a
+    done
+    printf '{"type":"ready","dev":"%s","tcpPort":%s}\n{"type":"active","nodes":["A"]}\n' "$3" "${FAKE_TCPPORT:-$port}"
     answer ;;
 closeafter) exec 0<&-; printf '{"type":"ready","dev":"%s"}\n' "$3"; exec sleep 3600 ;;
 pins)

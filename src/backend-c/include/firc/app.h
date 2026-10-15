@@ -27,6 +27,7 @@
 #include "firc/nflogsock.h"
 #include "firc/resolveroute.h"
 #include "firc/keenetic_resolvers.h"
+#include "firc/ktcp.h"
 
 typedef struct firc_app firc_app_t;
 
@@ -286,6 +287,34 @@ firc_err_t firc_app_force_commit_iptables(firc_app_t *app);
 
 /* lets the rebuild reach the port-53 DNAT chain owned by main(); NULL disables remap53 */
 void firc_app_set_port_remap(firc_app_t *app, firc_port_remap_t *remap);
+
+/* The ports tunvless<N> reported, by N (0: none); a change asks for a pass. Loop thread. */
+void firc_app_set_ktcp_ports(firc_app_t *app, const uint16_t ports[FIRC_KTCP_DEVICES]);
+
+typedef struct {
+    void (*pushed)(const firc_ktcp_image_t *prev, const firc_ktcp_image_t *next, void *ud);
+    int (*close)(uint8_t dev, const firc_nf_prefix_t *p, size_t n, void *ud);
+    void *ud;
+} firc_app_ktcp_sink_t;
+
+/* Hands every completed pass's image to sink before its held answers are released, and a withdrawn tunnel group's
+   prefixes to close ahead of its flush, never at the stop; close returns the commands a live child took. NULL detaches.
+   Loop thread. */
+void firc_app_set_ktcp_sink(firc_app_t *app, const firc_app_ktcp_sink_t *sink);
+
+/* tunvless<dev> acked one close command: the oldest flush waiting on that device's acks counts it. Loop thread. */
+void firc_app_ktcp_closed(firc_app_t *app, uint8_t dev);
+
+/* tunvless<dev> said ready: a new child, so no ack its predecessor owed will come. Loop thread. */
+void firc_app_ktcp_ready(firc_app_t *app, uint8_t dev);
+
+void firc_app_ktcp_due_for_test(firc_app_t *app); /* test seam: what the wait timer does when it fires */
+
+/* The image of the last completed pass, sorted by (dev, fake). Loop thread. */
+const firc_ktcp_image_t *firc_app_ktcp_image(const firc_app_t *app);
+
+/* real of fake when its group is routed into tunvless<dev> with a port; false answers "-". Loop thread. */
+bool firc_app_ktcp_real_of(firc_app_t *app, uint8_t dev, const uint8_t fake[4], uint8_t real[4]);
 
 /* stages the pool's FORWARD reject barrier on both engines without committing; every pass does this */
 firc_err_t firc_app_stage_pool_reject(firc_app_t *app);

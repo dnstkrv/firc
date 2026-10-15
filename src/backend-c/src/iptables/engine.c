@@ -653,4 +653,5 @@ firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *
     return err;
 }
 
+bool firc_ipt_has(const firc_ipt_t *ipt, const char *name) { return ipt != NULL && firc_xt_has(ipt->xt, name); }
 firc_err_t firc_ipt_probe_capture(firc_ipt_t *ipt) { return ipt != NULL ? firc_xt_probe_capture(ipt->xt) : FIRC_ERR_INVAL; }

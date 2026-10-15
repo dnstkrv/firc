@@ -11,17 +11,21 @@
 
 const char *const firc_test_xt_fixtures[] = {
     "empty", "firmware", "firmware-firc", "firmware-firc-remove", "sweep",
-    "dedupe-seed", "dedupe", "kept-seed", "dnat2000-mark", "tiny", "dnat-mark",
+    "dedupe-seed", "dedupe", "kept-seed", "dnat2000-mark", "tiny", "dnat-mark", "redir-mark",
 };
 const size_t firc_test_xt_n_fixtures = sizeof(firc_test_xt_fixtures) / sizeof(firc_test_xt_fixtures[0]);
 
 const firc_test_xt_fixture_t firc_test_xt_all[] = {
     {"empty", "nat"}, {"firmware", "nat"}, {"firmware-firc", "nat"}, {"firmware-firc-remove", "nat"},
     {"sweep", "nat"}, {"dedupe-seed", "nat"}, {"dedupe", "nat"}, {"kept-seed", "nat"}, {"dnat2000-mark", "nat"},
-    {"tiny", "nat"}, {"dnat-mark", "nat"}, {"f-empty", "filter"}, {"f-firmware", "filter"}, {"f-firc", "filter"},
+    {"tiny", "nat"}, {"dnat-mark", "nat"}, {"redir-mark", "nat"}, {"f-empty", "filter"}, {"f-firmware", "filter"}, {"f-firc", "filter"},
     {"f-egress", "filter"}, {"f-egress-list", "filter"}, {"m-empty", "mangle"}, {"m-firmware", "mangle"}, {"m-firc", "mangle"}, {"m-tap", "mangle"}, {"m-firc2", "mangle"},
 };
 const size_t firc_test_xt_n_all = sizeof(firc_test_xt_all) / sizeof(firc_test_xt_all[0]);
+
+bool firc_test_xt_in_family(const char *name, firc_ipt_proto_t fam) {
+    return fam == FIRC_IPT_PROTO_IPV4 || strcmp(name, "redir-mark") != 0;
+}
 
 static const char *const k_hooks[XT_NUMHOOKS] = {"PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"};
 
@@ -101,7 +105,8 @@ static bool host_payload(firc_ipt_proto_t fam, const char *name, uint8_t rev, ui
         for (int i = 0; i < 4; i++) { host16(p + 2 * i); }
         return true;
     }
-    if (target && !v6 && (strcmp(name, "DNAT") == 0 || strcmp(name, "SNAT") == 0 || strcmp(name, "MASQUERADE") == 0) && rev == 0) {
+    if (target && !v6 && (strcmp(name, "DNAT") == 0 || strcmp(name, "SNAT") == 0 || strcmp(name, "MASQUERADE") == 0 ||
+                          strcmp(name, "REDIRECT") == 0) && rev == 0) {
         if (room < sizeof(xt_nat_ipv4_compat_t)) { return false; }
         host32(p);
         host32(p + 4);
@@ -160,6 +165,13 @@ static bool host_payload(firc_ipt_proto_t fam, const char *name, uint8_t rev, ui
     if (!target && strcmp(name, "limit") == 0 && rev == 0) {
         if (room < XT_LIMIT_USERSPACE) { return false; }
         host32(p);
+        host32(p + 4);
+        return true;
+    }
+    if (!target && !v6 && strcmp(name, "addrtype") == 0 && rev == 1) {
+        if (room < sizeof(xt_addrtype_info_v1_t)) { return false; }
+        host16(p);
+        host16(p + 2);
         host32(p + 4);
         return true;
     }
@@ -503,6 +515,11 @@ static bool say_match(out_t *o, bool v6, const char *name, uint8_t rev, const ui
             (unsigned long long)cb.to, modes[cb.what], dirs[cb.direction]);
     } else if (strcmp(name, "string") == 0 && rev == 1) {
         return say_string(o, p);
+    } else if (!v6 && strcmp(name, "addrtype") == 0 && rev == 1) {
+        xt_addrtype_info_v1_t at;
+        memcpy(&at, p, sizeof(at));
+        if (at.source != 0 || at.dest != XT_ADDRTYPE_LOCAL || (at.flags & ~XT_ADDRTYPE_INVERT_DEST) != 0) { return false; }
+        say(o, " -m addrtype%s --dst-type LOCAL", (at.flags & XT_ADDRTYPE_INVERT_DEST) ? " !" : "");
     } else {
         return false;
     }
@@ -530,6 +547,18 @@ static bool say_target(out_t *o, bool v6, const char *tname, uint8_t rev, const 
         memcpy(&c, p, sizeof(c));
         if (c.mode != XT_CONNMARK_MODE_SAVE) { return false; }
         say(o, " -j CONNMARK --save-mark --nfmask 0x%x --ctmask 0x%x", c.nfmask, c.ctmask);
+    } else if (!v6 && strcmp(tname, "REDIRECT") == 0 && rev == 0) {
+        xt_nat_ipv4_compat_t c;
+        memcpy(&c, p, sizeof(c));
+        static const uint8_t none[4];
+        if (c.rangesize != 1 || c.range[0].flags != XT_NAT_PROTO_SPECIFIED || memcmp(c.range[0].min_ip, none, 4) != 0 ||
+            memcmp(c.range[0].max_ip, none, 4) != 0) {
+            return false;
+        }
+        uint16_t lo = ntohs(c.range[0].min_port), hi = ntohs(c.range[0].max_port);
+        if (lo == 0 || lo > hi) { return false; }
+        say(o, " -j REDIRECT --to-ports %u", lo);
+        if (hi != lo) { say(o, "-%u", hi); }
     } else if (strcmp(tname, "NFLOG") == 0 && rev == 0) {
         xt_nflog_info_t n;
         memcpy(&n, p, sizeof(n));

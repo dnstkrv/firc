@@ -285,6 +285,75 @@ TEST embedded_nul_does_not_read_past_len(void)
     PASS();
 }
 
+TEST ready_carries_tcp_port_and_absent_reads_as_zero(void)
+{
+    /* catches: the tcpPort key misspelt, the port not stored, or an absent port left unset */
+    firc_tev_t e = parse("{\"type\":\"ready\",\"dev\":\"tunvless3\",\"tcpPort\":3603}");
+    ASSERT_EQ(FIRC_TEV_READY, e.kind);
+    ASSERT_STR_EQ("tunvless3", e.dev);
+    ASSERT_EQ(3603, e.tcp_port);
+    e = parse("{\"type\":\"ready\",\"dev\":\"tunvless3\",\"tcpPort\":65535}");
+    ASSERT_EQ(FIRC_TEV_READY, e.kind);
+    ASSERT_EQ(65535, e.tcp_port);
+    e = parse("{\"type\":\"ready\",\"dev\":\"tunvless3\",\"tcpPort\":0}");
+    ASSERT_EQ(FIRC_TEV_READY, e.kind);
+    ASSERT_EQ(0, e.tcp_port);
+    e = parse("{\"type\":\"ready\",\"dev\":\"tunvless3\"}");
+    ASSERT_EQ(FIRC_TEV_READY, e.kind);
+    ASSERT_EQ(0, e.tcp_port);
+    PASS();
+}
+
+TEST a_bad_tcp_port_is_bad(void)
+{
+    /* catches: a negative, oversize, fractional or mistyped port accepted or wrapped into 16 bits */
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":-1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":65536}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":3600.5}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":\"3600\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":null}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ready\",\"dev\":\"t\",\"tcpPort\":true}").kind);
+    PASS();
+}
+
+TEST map_and_close_carry_counts(void)
+{
+    /* catches: the map or close ack unrecognised, its count not read, or a bad count accepted */
+    firc_tev_t e = parse("{\"type\":\"map\",\"count\":4096}");
+    ASSERT_EQ(FIRC_TEV_MAP, e.kind);
+    ASSERT_EQ(4096, e.count);
+    e = parse("{\"type\":\"close\",\"count\":2}");
+    ASSERT_EQ(FIRC_TEV_CLOSE, e.kind);
+    ASSERT_EQ(2, e.count);
+    e = parse("{\"type\":\"map\",\"count\":0}");
+    ASSERT_EQ(FIRC_TEV_MAP, e.kind);
+    ASSERT_EQ(0, e.count);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"map\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"map\",\"count\":-1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"close\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"close\",\"count\":\"2\"}").kind);
+    PASS();
+}
+
+TEST miss_needs_a_dotted_quad_fake(void)
+{
+    /* catches: the fake key misspelt, its bytes reversed, or an IPv6, short or garbage fake accepted */
+    firc_tev_t e = parse("{\"type\":\"miss\",\"fake\":\"198.18.11.7\"}");
+    ASSERT_EQ(FIRC_TEV_MISS, e.kind);
+    ASSERT_EQ(198, e.fake[0]);
+    ASSERT_EQ(18, e.fake[1]);
+    ASSERT_EQ(11, e.fake[2]);
+    ASSERT_EQ(7, e.fake[3]);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":\"::1\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":\"198.18.11\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":\"198.18.11.256\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":\"x\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":\"\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\",\"fake\":3322088199}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"miss\"}").kind);
+    PASS();
+}
+
 static const char *rest_of(const char *s, firc_log_level_t *got)
 {
     size_t skip = 99;
@@ -377,6 +446,10 @@ int main(int argc, char **argv)
     RUN_TEST(parse_nodes_ack_and_pins_full);
     RUN_TEST(parse_index_next_to_names);
     RUN_TEST(an_empty_active_list_is_no_live_node);
+    RUN_TEST(ready_carries_tcp_port_and_absent_reads_as_zero);
+    RUN_TEST(a_bad_tcp_port_is_bad);
+    RUN_TEST(map_and_close_carry_counts);
+    RUN_TEST(miss_needs_a_dotted_quad_fake);
     RUN_TEST(each_tag_gives_its_level_and_is_cut);
     RUN_TEST(anything_but_a_whole_tag_is_info_and_kept);
     RUN_TEST(the_tag_is_read_within_len);

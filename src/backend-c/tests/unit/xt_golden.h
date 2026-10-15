@@ -19,6 +19,7 @@ typedef struct firc_test_xt_fixture {
 extern const firc_test_xt_fixture_t firc_test_xt_all[];
 extern const size_t firc_test_xt_n_all;
 
+bool firc_test_xt_in_family(const char *name, firc_ipt_proto_t fam);
 bool firc_test_xt_read(const char *name, firc_ipt_proto_t fam, firc_xt_info_t *info, uint8_t **blob);
 bool firc_test_xt_read_as(const char *name, firc_ipt_proto_t fam, const char *variant, firc_xt_info_t *info,
                           uint8_t **blob);

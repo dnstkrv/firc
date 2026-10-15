@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 
 #include "vless.h"
 #include "vlink.h"
@@ -35,6 +36,7 @@
 #include "control.h"
 #include "nodes.h"
 #include "ctlnodes.h"
+#include "ctlmap.h"
 
 #ifndef TUNVLESS_VERSION
 #define TUNVLESS_VERSION "dev"
@@ -112,6 +114,9 @@ static void usage(FILE *f) {
 "  -r, --route CIDR       route CIDR into the device once it is up; repeatable;\n"
 "                         \"default\" means 0.0.0.0/1 and 128.0.0.0/1\n"
 "  -T, --table N          routing table for --route (default main)\n"
+"      --tcp-port P       accept redirected TCP on port P (0.0.0.0) inside the loop\n"
+"      --tcp-pool CIDR    the fake address pool: a destination in it is mapped to its\n"
+"                         real address by the map commands on stdin\n"
 "\n"
 "Failover (the first candidate that answers is active at startup; a dead active node\n"
 "is replaced by the next candidate that answers, without a restart):\n"
@@ -181,7 +186,25 @@ static int add_nodes(const char *s) {
     }
 }
 
-enum { OPT_NO_PROBE = 256, OPT_INSECURE, OPT_CA, OPT_SILENCE, OPT_NO_RETRY, OPT_BY, OPT_INTERVAL, OPT_CONTROL };
+static int parse_pool(const char *s) {
+    const char *sl = strchr(s, '/');
+    if (!sl || !sl[1] || strlen(sl + 1) > 2 || strspn(sl + 1, "0123456789") != strlen(sl + 1))
+        return -1;
+    if (ifcfg_parse_cidr(s, &g.tc.tcp_pool_be, &g.tc.tcp_pool_len) != 0) return -1;
+    return g.tc.tcp_pool_len ? 0 : -1;
+}
+
+static void raise_nofile(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur >= rl.rlim_max) return;
+    unsigned long was = (unsigned long)rl.rlim_cur;
+    rl.rlim_cur = rl.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0)
+        fprintf(stderr, LOG_W "the open file limit stays at %lu: %s\n", was, strerror(errno));
+}
+
+enum { OPT_NO_PROBE = 256, OPT_INSECURE, OPT_CA, OPT_SILENCE, OPT_NO_RETRY, OPT_BY, OPT_INTERVAL, OPT_CONTROL,
+       OPT_TCP_PORT, OPT_TCP_POOL };
 
 static int parse_args(int argc, char **argv) {
     static const struct option opts[] = {
@@ -204,6 +227,8 @@ static int parse_args(int argc, char **argv) {
         { "by",       required_argument, NULL, OPT_BY },
         { "interval", required_argument, NULL, OPT_INTERVAL },
         { "control",  no_argument,       NULL, OPT_CONTROL },
+        { "tcp-port", required_argument, NULL, OPT_TCP_PORT },
+        { "tcp-pool", required_argument, NULL, OPT_TCP_POOL },
         { "version",  no_argument,       NULL, 'V' },
         { "help",     no_argument,       NULL, 'h' },
         { NULL, 0, NULL, 0 },
@@ -255,6 +280,13 @@ static int parse_args(int argc, char **argv) {
             g.interval_s = (int)v;
             break;
         case OPT_CONTROL: g.control = 1; break;
+        case OPT_TCP_PORT:
+            if (parse_uint(optarg, &v) != 0 || v == 0 || v > 65535) goto bad;
+            g.tc.tcp_port = (int)v;
+            break;
+        case OPT_TCP_POOL:
+            if (parse_pool(optarg) != 0) goto bad;
+            break;
         case 'V': printf("tunvless %s\n", TUNVLESS_VERSION); exit(0);
         case 'h': usage(stdout); exit(0);
         default: usage(stderr); return 2;
@@ -625,7 +657,7 @@ static void *ctl_thread(void *arg) {
 static void ctl_start(void) {
     static const struct ctln_hooks h = {
         .select = pool_select, .ack = ctl_emit_nodes, .pins_full = ctl_emit_pins_full,
-        .resolve_ms = CTL_RESOLVE_MS,
+        .resolve_ms = CTL_RESOLVE_MS, .map_ack = ctl_emit_map,
     };
     int err = ctln_start(&h);
     pthread_attr_t a;
@@ -654,7 +686,7 @@ static void on_ready(void *arg, const char *dev) {
     if (g.routes_n)
         fprintf(stderr, LOG_I "%s: %d of %d routes added%s\n", dev, ok, g.routes_n,
                 g.table ? " (table set with --table)" : "");
-    ctl_emit_ready(dev);
+    ctl_emit_ready(dev, stack_tcp_port());
     if (g.control) ctl_start();
 }
 
@@ -670,6 +702,7 @@ static void *stop_waiter(void *arg) {
     int sig = 0;
     if (sigwait(&g_stop_set, &sig) != 0) return NULL;
     fprintf(stderr, LOG_I "signal %d: stopping\n", sig);
+    stack_stop(200);
     kept_remove();
     _exit(0);
 }
@@ -695,12 +728,14 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     int rc = parse_args(argc, argv);
     if (rc) return rc;
+    raise_nofile();
     ctl_init(g.control);
     if (g.control) {
         ctl_close_inherited_fds();
         prctl(PR_SET_PDEATHSIG, SIGTERM);
         if (getppid() == 1) _exit(1);
     }
+    ctlmap_init(g.tc.tcp_pool_be, g.tc.tcp_pool_len);
 
     /* Before the nodes are parsed: whether allowInsecure nodes are usable depends on it. */
     vless_set_insecure(g.insecure);

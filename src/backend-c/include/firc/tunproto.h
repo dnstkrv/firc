@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "firc/log.h"
 
@@ -31,11 +32,15 @@ typedef enum {
     FIRC_TEV_NO_NODE,
     FIRC_TEV_NODES,
     FIRC_TEV_PINS_FULL,
+    FIRC_TEV_MAP,
+    FIRC_TEV_CLOSE,
+    FIRC_TEV_MISS,
     FIRC_TEV_BAD
 } firc_tev_kind_t;
 
 /* index and active_index are tunvless's node numbers, -1 when absent; pos and active_pos are the
-   positions in the list last given for the tunnel, filled by tunsup, -1 when unknown. */
+   positions in the list last given for the tunnel, filled by tunsup, -1 when unknown. For a map ack,
+   tunsup fills expect with the line count sent and sets drift when count differs from it. */
 typedef struct {
     firc_tev_kind_t kind;
     char dev[16];
@@ -49,6 +54,10 @@ typedef struct {
     int active_index[8];
     int active_pos[8];
     size_t n_active;
+    uint16_t tcp_port;
+    uint8_t fake[4];
+    int expect;
+    bool drift;
 } firc_tev_t;
 
 /* Parses one line; kind is FIRC_TEV_BAD when it is malformed. Never reads past len. */

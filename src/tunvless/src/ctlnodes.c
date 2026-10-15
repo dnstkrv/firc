@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include "ctlmap.h"
 #include "ctlnodes.h"
 #include "nodes.h"
 #include "transport.h"
@@ -197,11 +198,19 @@ void ctln_read(FILE *in) {
     while ((len = getline(&line, &cap, in)) >= 0) {
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
         if (len == 0) continue;
-        if (strcmp(line, "nodes")) {
+        int r;
+        if (!strcmp(line, "nodes")) {
+            r = command(in, &line, &cap);
+        } else if (!strcmp(line, "map") || !strcmp(line, "mapall")) {
+            r = ctlmap_read_cmd(in, &line, &cap, line[3] == 'a');
+            if (r >= 0 && g_cn.h.map_ack) g_cn.h.map_ack(r);
+        } else if (!strcmp(line, "close")) {
+            r = ctlmap_read_close(in, &line, &cap);
+        } else {
             fprintf(stderr, LOG_W "stdin: unknown command — ignored\n");
             continue;
         }
-        if (command(in, &line, &cap) != 0) break;
+        if (r < 0) break;
     }
     sl_set_interner(NULL);
     free(line);

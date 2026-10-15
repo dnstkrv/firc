@@ -9,3 +9,4 @@ kept-seed firmware
 dnat2000-mark
 dnat-mark firmware
 tiny
+redir-mark @v4 firmware

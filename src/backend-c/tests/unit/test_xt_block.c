@@ -477,6 +477,22 @@ TEST the_barrier_is_neither_a_mark_nor_a_rewrite(void) {
     PASS();
 }
 
+/* Catches: a REDIRECT or its addrtype jump taken for a rewrite or a mark, so the coverage check refuses or trusts it. */
+TEST a_redirect_is_neither_a_mark_nor_a_rewrite(void) {
+    static const char *const lines[] = {
+        "-p tcp -m mark --mark 0x40050000/0x40ff0000 -j REDIRECT --to-ports 3603",
+        "-d 198.18.0.0/15 -p tcp -j REDIRECT --to-ports 3600-3601",
+        "-p tcp -m mark --mark 0x40000000/0x40000000 -m addrtype ! --dst-type LOCAL -j FIRC_REDIR",
+    };
+    static const want_role_t want[] = {
+        {FIRC_XT_ROLE_OTHER, NULL, 0},
+        {FIRC_XT_ROLE_OTHER, "198.18.0.0", 15},
+        {FIRC_XT_ROLE_OTHER, NULL, 0},
+    };
+    CHECK_CALL(roles_are(FIRC_IPT_PROTO_IPV4, lines, want, 3));
+    PASS();
+}
+
 /* Catches: a rewrite missed because it has conditions or no destination (its rewrites then counted as covered by nothing to check). */
 TEST every_address_rewrite_is_a_rewrite(void) {
     static const char *const lines[] = {
@@ -784,6 +800,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_conditional_mark_covers_nothing);
     RUN_TEST(every_address_rewrite_is_a_rewrite);
     RUN_TEST(the_barrier_is_neither_a_mark_nor_a_rewrite);
+    RUN_TEST(a_redirect_is_neither_a_mark_nor_a_rewrite);
     RUN_TEST(the_group_chains_say_their_marks);
     RUN_TEST(an_inverted_destination_marks_nothing_and_rewrites_anywhere);
     RUN_TEST(only_the_destination_flag_inverts_the_destination);

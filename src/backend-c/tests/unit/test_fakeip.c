@@ -1896,6 +1896,50 @@ TEST the_reverse_index_agrees_with_a_walk_through_churn(void) {
     PASS();
 }
 
+/* Catches: a parked pair missed, a pair without a real answered, the wrong group, a v6 address taken, or a dropped group's pair kept. */
+TEST pair_of_finds_parked_mappings(void) {
+    firc_fakeip_cfg_t c = base_cfg();
+    firc_fakeip_t *f = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
+    firc_ip_t v4 = {{0}, 0}, v6 = {{0}, 0}, b4 = {{0}, 0};
+    const firc_ip_t real4 = {{93, 184, 216, 34}, 4};
+    const firc_ip_t real6 = {{0x26, 0x06, 0x28, 0, 2, 0x20, 0, 1, 2, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46}, 16};
+    const firc_ip_t both[] = {real4, real6};
+    const char *gid = NULL;
+    firc_ip_t got = {{0}, 0};
+    char b[16];
+
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
+    ASSERT_FALSEm("no real address yet", firc_fakeip_pair_of(f, &v4, &gid, &got));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", both, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &b4, NULL));
+
+    ASSERT(firc_fakeip_pair_of(f, &v4, &gid, &got));
+    ASSERT_STR_EQ("g1", gid);
+    ASSERT_STR_EQ("93.184.216.34", s4(&got, b));
+    ASSERT_FALSEm("a v6 fake is not asked about", firc_fakeip_pair_of(f, &v6, &gid, &got));
+    ASSERT_FALSEm("b.example.com has no real address", firc_fakeip_pair_of(f, &b4, &gid, &got));
+
+    firc_ip_t moved = {{0}, 0};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &moved, NULL));
+    ASSERT_STR_EQ("198.18.1.1", s4(&moved, b));
+    gid = NULL;
+    memset(&got, 0, sizeof(got));
+    ASSERTm("the parked pair is found", firc_fakeip_pair_of(f, &v4, &gid, &got));
+    ASSERT_STR_EQ("g1", gid);
+    ASSERT_STR_EQ("93.184.216.34", s4(&got, b));
+    ASSERT_FALSEm("the new address has no real yet", firc_fakeip_pair_of(f, &moved, &gid, &got));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0, NULL, NULL));
+    ASSERT_FALSEm("a parked address that never had a real", firc_fakeip_pair_of(f, &b4, &gid, &got));
+
+    const firc_ip_t elsewhere = {{198, 18, 0, 200}, 4};
+    ASSERT_FALSE(firc_fakeip_pair_of(f, &elsewhere, &gid, &got));
+    firc_fakeip_drop_group(f, "g1", T0);
+    ASSERT_FALSEm("a dropped group's parked pair is gone", firc_fakeip_pair_of(f, &v4, &gid, &got));
+    firc_fakeip_free(f);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1961,5 +2005,6 @@ int main(int argc, char **argv) {
     RUN_TEST(the_blackhole_names_nothing);
     RUN_TEST(a_released_address_names_nothing_until_issued_again);
     RUN_TEST(the_reverse_index_agrees_with_a_walk_through_churn);
+    RUN_TEST(pair_of_finds_parked_mappings);
     GREATEST_MAIN_END();
 }

@@ -70,6 +70,8 @@ typedef struct slot {
     bool drift;
     size_t *want;
     size_t n_want;
+    size_t *map_want;
+    size_t n_map_want;
 } slot_t;
 
 struct firc_tunsup {
@@ -85,6 +87,8 @@ struct firc_tunsup {
     int second_ms;
     bool stopped;
     uint64_t seq;
+    uint8_t tcp_pool[4];
+    uint8_t tcp_pool_len;
 };
 
 static void spawn(slot_t *sl);
@@ -206,6 +210,7 @@ static void release_io(slot_t *sl)
     drop_timer(sl->s, &sl->ack_timer);
     sl->acks = 0;
     sl->n_want = 0;
+    sl->n_map_want = 0;
     sl->ready = false;
     memset(&sl->out_lines, 0, sizeof sl->out_lines);
     memset(&sl->err_lines, 0, sizeof sl->err_lines);
@@ -218,6 +223,7 @@ static void slot_free(slot_t *sl)
     free_src(sl->cfg.src, sl->cfg.n_src);
     free(sl->ix);
     free(sl->want);
+    free(sl->map_want);
     free(sl);
 }
 
@@ -426,6 +432,18 @@ static void took(slot_t *sl, int count)
     }
 }
 
+static void took_map(slot_t *sl, firc_tev_t *ev)
+{
+    if (sl->n_map_want == 0) {
+        return;
+    }
+    size_t want = sl->map_want[0];
+    memmove(&sl->map_want[0], &sl->map_want[1], (sl->n_map_want - 1) * sizeof *sl->map_want);
+    sl->n_map_want--;
+    ev->expect = (int)want;
+    ev->drift = ev->count < 0 || (size_t)ev->count != want;
+}
+
 static int pos_of(const slot_t *sl, int index)
 {
     if (sl->drift || index < 0 || (size_t)index >= sl->n_ix) {
@@ -446,13 +464,14 @@ static void ack_cb(firc_loop_t *loop, void *ud)
     (void)loop;
     slot_t *sl = ud;
     sl->ack_timer = 0;
-    firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "tunvless did not take the node list in %d s, restarting", ACK_S);
+    firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "tunvless did not take the %s in %d s, restarting",
+                  sl->acks > 0 ? "node list" : "address map", ACK_S);
     restart_child(sl);
 }
 
 static void arm_ack(slot_t *sl)
 {
-    if (sl->ack_timer != 0 || sl->acks == 0 || !sl->ready || sl->terminating) {
+    if (sl->ack_timer != 0 || (sl->acks == 0 && sl->n_map_want == 0) || !sl->ready || sl->terminating) {
         return;
     }
     if (firc_loop_add_timer(sl->s->loop, (uint64_t)ACK_S * (uint64_t)sl->s->second_ms, 0, ack_cb, sl,
@@ -482,6 +501,14 @@ static void on_out_line(const char *line, size_t len, void *ud)
         took(sl, ev.count);
         drop_timer(sl->s, &sl->ack_timer);
         arm_ack(sl);
+        break;
+    case FIRC_TEV_MAP:
+        took_map(sl, &ev);
+        drop_timer(sl->s, &sl->ack_timer);
+        arm_ack(sl);
+        break;
+    case FIRC_TEV_CLOSE:
+    case FIRC_TEV_MISS:
         break;
     case FIRC_TEV_PINS_FULL:
         if (!sl->terminating) {
@@ -812,13 +839,18 @@ static void spawn(slot_t *sl)
     char silence[16];
     char timeout[16];
     char mark[16];
+    char tcp_port[8];
+    char tcp_pool[24];
     snprintf(addr, sizeof addr, "198.51.100.%d/32", 1 + device_index(t->device));
+    snprintf(tcp_port, sizeof tcp_port, "%u", (unsigned)firc_tunnel_tcp_port(t));
+    snprintf(tcp_pool, sizeof tcp_pool, "%u.%u.%u.%u/%u", s->tcp_pool[0], s->tcp_pool[1], s->tcp_pool[2],
+             s->tcp_pool[3], s->tcp_pool_len);
     snprintf(active, sizeof active, "%d", t->active);
     snprintf(interval, sizeof interval, "%d", t->interval_s);
     snprintf(silence, sizeof silence, "%d", t->silence_s);
     snprintf(timeout, sizeof timeout, "%d", t->timeout_s);
     snprintf(mark, sizeof mark, "0x%x", (unsigned)sl->mark);
-    const char *argv[24];
+    const char *argv[32];
     size_t a = 0;
     argv[a++] = s->binary;
     argv[a++] = "--control";
@@ -846,6 +878,14 @@ static void spawn(slot_t *sl)
     if (t->ca[0] != 0) {
         argv[a++] = "--ca";
         argv[a++] = t->ca;
+    }
+    if (firc_tunnel_tcp_port(t) != 0) {
+        argv[a++] = "--tcp-port";
+        argv[a++] = tcp_port;
+        if (s->tcp_pool_len != 0) {
+            argv[a++] = "--tcp-pool";
+            argv[a++] = tcp_pool;
+        }
     }
     argv[a] = NULL;
 
@@ -1342,4 +1382,99 @@ uint64_t firc_tunsup_updated(const firc_tunsup_t *s, const char *id)
 {
     const slot_t *sl = find_slot(s, id);
     return sl != NULL ? sl->update_seq : 0;
+}
+
+void firc_tunsup_set_tcp_pool(firc_tunsup_t *s, const uint8_t base[4], uint8_t len)
+{
+    memcpy(s->tcp_pool, base, sizeof s->tcp_pool);
+    s->tcp_pool_len = len;
+}
+
+static bool live(const slot_t *sl)
+{
+    return sl != NULL && sl->pid > 0 && sl->ready && !sl->terminating && sl->in_fd >= 0;
+}
+
+static firc_err_t write_out(slot_t *sl, const char *text, size_t len, size_t *done)
+{
+    *done = 0;
+    if (sl->in_off < sl->in_len) {
+        return FIRC_OK;
+    }
+    while (*done < len) {
+        ssize_t n = write(sl->in_fd, text + *done, len - *done);
+        if (n > 0) {
+            *done += (size_t)n;
+        } else if (n < 0 && errno == EAGAIN) {
+            return FIRC_OK;
+        } else if (n == 0 || errno != EINTR) {
+            firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "command not delivered: %s", strerror(errno));
+            close_in(sl);
+            kill(sl->pid, SIGTERM);
+            return FIRC_ERR_IO;
+        }
+    }
+    return FIRC_OK;
+}
+
+static firc_err_t keep_tail(slot_t *sl, const char *tail, size_t len)
+{
+    size_t pend = sl->in_len - sl->in_off;
+    char *buf = malloc(pend + len);
+    if (buf == NULL) {
+        return FIRC_ERR_NOMEM;
+    }
+    if (pend > 0) {
+        memcpy(buf, sl->in_buf + sl->in_off, pend);
+    }
+    memcpy(buf + pend, tail, len);
+    free(sl->in_buf);
+    sl->in_buf = buf;
+    sl->in_len = pend + len;
+    sl->in_off = 0;
+    if (firc_loop_mod_fd(sl->s->loop, sl->in_fd, EPOLLOUT) != FIRC_OK) {
+        close_in(sl);
+        kill(sl->pid, SIGTERM);
+        return FIRC_ERR_IO;
+    }
+    return FIRC_OK;
+}
+
+firc_err_t firc_tunsup_command(firc_tunsup_t *s, const char *id, firc_tun_cmd_t kind, const char *text, size_t len,
+                               const size_t *expect, size_t n_expect)
+{
+    assert(pthread_equal(s->loop_thread, pthread_self()));
+    slot_t *sl = find_slot(s, id);
+    if (!live(sl)) {
+        return FIRC_ERR_STATE;
+    }
+    if (kind == FIRC_TUN_CMD_MAP && n_expect > 0) {
+        size_t *grown = realloc(sl->map_want, (sl->n_map_want + n_expect) * sizeof *grown);
+        if (grown == NULL) {
+            return FIRC_ERR_NOMEM;
+        }
+        sl->map_want = grown;
+    }
+    size_t done = 0;
+    firc_err_t err = write_out(sl, text, len, &done);
+    if (err == FIRC_OK && done < len) {
+        err = keep_tail(sl, text + done, len - done);
+    }
+    if (err != FIRC_OK) {
+        if (err != FIRC_ERR_IO && done > 0) {
+            restart_child(sl);
+        }
+        return err;
+    }
+    if (kind == FIRC_TUN_CMD_MAP && n_expect > 0) {
+        memcpy(&sl->map_want[sl->n_map_want], expect, n_expect * sizeof *expect);
+        sl->n_map_want += n_expect;
+        arm_ack(sl);
+    }
+    return FIRC_OK;
+}
+
+bool firc_tunsup_ready(const firc_tunsup_t *s, const char *id)
+{
+    return live(find_slot(s, id));
 }

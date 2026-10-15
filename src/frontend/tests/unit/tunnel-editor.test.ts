@@ -39,7 +39,7 @@ const tn = (id: string, device: string, extra: Partial<Tunnel> = {}): Tunnel => 
   exclude: [],
   sources: [],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8 },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
   ...extra,
 });
 
@@ -289,6 +289,14 @@ describe("which tunnels a save restarts", () => {
     offAfter[1].enable = false;
     offAfter[1].active = 3;
     assert.deepStrictEqual(restartingDevices(offBefore, offAfter), []);
+  });
+
+  // Catches a kernelTcp toggle left out of the comparison, though the daemon restarts the tunnel for it.
+  it("restartingDevices names a kernelTcp toggle", () => {
+    const on = base();
+    on[0].advanced.kernelTcp = true;
+    assert.deepStrictEqual(restartingDevices(base(), on), ["tunvless0"]);
+    assert.deepStrictEqual(restartingDevices(on, base()), ["tunvless0"]);
   });
 });
 

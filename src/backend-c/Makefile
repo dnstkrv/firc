@@ -120,6 +120,7 @@ NETFILTER_SRCS := \
     src/netfilter/ruleset.c \
     src/netfilter/pool_reject.c \
     src/netfilter/dnat.c \
+    src/netfilter/redir.c \
     src/netfilter/checkroute.c \
     src/netlink/rtnl.c \
     src/netlink/watcher.c
@@ -144,6 +145,7 @@ API_SRCS := \
 TUNNELS_SRCS := \
     src/tunnels/tconfig.c \
     src/tunnels/tunproto.c \
+    src/tunnels/ktcp.c \
     src/tunnels/tunsup.c \
     src/tunnels/tunnet.c \
     src/tunnels/tunrun.c \
@@ -282,18 +284,25 @@ $(BUILDDIR)/tests/support/%.o: tests/unit/%.c
 	$(CC) $(CFLAGS) -Itests/unit -c -o $@ $<
 
 # Its own rule: sanitize passes LDFLAGS on the command line, which overrides a target-specific LDFLAGS.
-OOM_WRAP := -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=strdup
+OOM_WRAP := -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=strdup,--wrap=if_nametoindex
 
 $(BUILDDIR)/tests/test_oom: tests/unit/test_oom.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(OOM_WRAP) -o $@ $< \
 	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
 
-APP_WRAP := -Wl,--wrap=firc_dnsproxy_close_group_pools,--wrap=firc_dnsproxy_forget_group
+APP_WRAP := -Wl,--wrap=firc_dnsproxy_close_group_pools,--wrap=firc_dnsproxy_forget_group,--wrap=if_nametoindex
 
 $(BUILDDIR)/tests/test_app: tests/unit/test_app.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(APP_WRAP) -o $@ $< \
+	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
+
+NFREBUILD_WRAP := -Wl,--wrap=if_nametoindex
+
+$(BUILDDIR)/tests/test_nfrebuild: tests/unit/test_nfrebuild.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(NFREBUILD_WRAP) -o $@ $< \
 	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
 
 UPDATE_WRAP := -Wl,--wrap=calloc

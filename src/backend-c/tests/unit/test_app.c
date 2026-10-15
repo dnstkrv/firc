@@ -217,6 +217,12 @@ static firc_nflog_t *tap_fake_open(uint16_t group, uint16_t copy_range) {
     return firc_nflog_open_fd(fd, group, copy_range);
 }
 
+unsigned __real_if_nametoindex(const char *name);
+unsigned __wrap_if_nametoindex(const char *name);
+unsigned __wrap_if_nametoindex(const char *name) {
+    return __real_if_nametoindex(strncmp(name, "tunvless", 8) == 0 ? "lo" : name);
+}
+
 static int g_iface_there = -1;
 static unsigned test_iface_index(const char *name) {
     if (g_iface_there >= 0) { return g_iface_there ? 1u : 0u; }
@@ -6965,6 +6971,1128 @@ TEST the_clean_writes_nothing_left_staged_before_it(void) {
     PASS();
 }
 
+typedef struct {
+    firc_fakeip_t *pool;
+    int calls;
+    size_t pairs;
+    size_t pending_at_push;
+    firc_ktcp_pair_t prev[4][4], next[4][4];
+    size_t prev_n[4], next_n[4];
+} ktcp_rec_t;
+
+static void rec_pushed(const firc_ktcp_image_t *prev, const firc_ktcp_image_t *next, void *ud) {
+    ktcp_rec_t *r = ud;
+    int c = r->calls++;
+    if (c < 4) {
+        r->prev_n[c] = prev->n;
+        r->next_n[c] = next->n;
+        for (size_t i = 0; i < prev->n && i < 4; i++) { r->prev[c][i] = prev->v[i]; }
+        for (size_t i = 0; i < next->n && i < 4; i++) { r->next[c][i] = next->v[i]; }
+    }
+    for (size_t i = 0; i < next->n; i++) {
+        firc_ip_t a = {{0}, 4};
+        memcpy(a.b, next->v[i].fake, 4);
+        const char *name = firc_fakeip_name_of(r->pool, &a);
+        r->pairs++;
+        if (name != NULL && firc_fakeip_needs_commit(r->pool, name, FIRC_FAM_V4)) { r->pending_at_push++; }
+    }
+}
+
+static firc_group_t *tunnel_group(uint8_t tag, const char *host, const char *iface) {
+    firc_group_t *g = activation_group(tag, host, NULL, NULL);
+    free(g->iface);
+    g->iface = strdup(iface);
+    return g;
+}
+
+static bool ktcp_up(locked_app_t *l, firc_loop_t *loop, ktcp_rec_t *rec, firc_ip_t *fake) {
+    if (!locked_app_up_ex(l, loop, tap_fake_open, false)) { return false; }
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_app_set_running(l->app, true);
+    memset(rec, 0, sizeof(*rec));
+    rec->pool = l->pool;
+    firc_app_ktcp_sink_t sink = {.pushed = rec_pushed, .close = NULL, .ud = rec};
+    firc_app_set_ktcp_sink(l->app, &sink);
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[3] = 3603;
+    firc_app_set_ktcp_ports(l->app, ports);
+    return firc_app_add_group(l->app, tunnel_group(1, "a.example", "tunvless3")) == FIRC_OK &&
+           issue_unwritten(l, "a.example", 1, fake) && firc_fakeip_needs_commit(l->pool, "a.example", FIRC_FAM_V4);
+}
+
+static bool pair_is(const firc_ktcp_pair_t *p, uint8_t dev, const firc_ip_t *fake, const uint8_t real[4]) {
+    return p->dev == dev && memcmp(p->fake, fake->b, 4) == 0 && memcmp(p->real, real, 4) == 0;
+}
+
+static const uint8_t k_issued_real[4] = {93, 184, 216, 34};
+
+/* Catches: a delta handed to tunvless after the held answers were released, on the loop path or without a loop. */
+TEST the_map_is_pushed_before_held_answers_are_released(void) {
+    for (int with_loop = 0; with_loop < 2; with_loop++) {
+        firc_loop_t *loop = NULL;
+        if (with_loop) { ASSERT_EQ(FIRC_OK, firc_loop_create(&loop)); }
+        locked_app_t l;
+        ktcp_rec_t rec;
+        firc_ip_t f1 = {{0}, 0};
+        ASSERT(ktcp_up(&l, loop, &rec, &f1));
+        ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+        if (with_loop) {
+            ASSERT_EQ_FMT(0, rec.calls, "%d");
+            ASSERT_EQ(FIRC_OK, firc_loop_post(loop, stop_the_loop, NULL));
+            ASSERT_EQ(FIRC_OK, firc_loop_run(loop));
+        }
+        ASSERT_EQ_FMT(1, rec.calls, "%d");
+        ASSERT_EQ_FMT((size_t)0, rec.prev_n[0], "%zu");
+        ASSERT_EQ_FMT((size_t)1, rec.pairs, "%zu");
+        ASSERT_EQ_FMT((size_t)1, rec.pending_at_push, "%zu");
+        ASSERT_FALSE(firc_fakeip_needs_commit(l.pool, "a.example", FIRC_FAM_V4));
+        locked_app_down(&l);
+        firc_loop_destroy(loop);
+    }
+    PASS();
+}
+
+/* Catches: a non-tunnel group's pairs, a portless tunnel's, a v6 pair or an unresolved name leaking to tunvless. */
+TEST the_image_holds_only_redirect_groups_pairs(void) {
+    locked_app_t l;
+    ktcp_rec_t rec;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0}, f3 = {{0}, 0}, u4 = {{0}, 0}, a6 = {{0}, 0};
+    ASSERT(ktcp_up(&l, NULL, &rec, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_group(2, "b.example", "tunvless4")));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(3, "c.example", NULL, NULL)));
+    ASSERT(issue_unwritten(&l, "b.example", 2, &f2));
+    ASSERT(issue_unwritten(&l, "c.example", 3, &f3));
+    char gid[FIRC_ID_STR_LEN];
+    firc_id_format(tag_id(1), gid);
+    firc_ip_t v4 = {{0}, 0};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(l.pool, "u.example", gid, (int64_t)time(NULL), &u4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(l.pool, "a.example", gid, (int64_t)time(NULL), &v4, &a6));
+    const firc_ip_t both[] = {{{93, 184, 216, 34}, 4},
+                              {{0x26, 0x06, 0x28, 0, 2, 0x20, 0, 1, 2, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46}, 16}};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(l.pool, "a.example", both, 2));
+    ASSERT_EQ(FIRC_OK, firc_app_refresh_pool_snapshot(l.app));
+    ASSERT_EQ(16, a6.len);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    const firc_ktcp_image_t *im = firc_app_ktcp_image(l.app);
+    ASSERT_EQ_FMT((size_t)1, im->n, "%zu");
+    ASSERT(pair_is(&im->v[0], 3, &f1, k_issued_real));
+    ASSERT_EQ_FMT((size_t)1, rec.next_n[0], "%zu");
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: an image handed on in walk order, which the delta against the last one cannot be taken from. */
+TEST the_image_is_sorted_by_device_and_fake(void) {
+    locked_app_t l;
+    ktcp_rec_t rec;
+    firc_ip_t f = {{0}, 0};
+    ASSERT(ktcp_up(&l, NULL, &rec, &f));
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[3] = 3603;
+    ports[1] = 3601;
+    firc_app_set_ktcp_ports(l.app, ports);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_group(4, "d.example", "tunvless1")));
+    static const char *const names3[] = {"a2.example", "a3.example"};
+    static const char *const names1[] = {"d1.example", "d2.example", "d3.example"};
+    for (size_t i = 0; i < 2; i++) { ASSERT(issue_unwritten(&l, names3[i], 1, &f)); }
+    for (size_t i = 0; i < 3; i++) { ASSERT(issue_unwritten(&l, names1[i], 4, &f)); }
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    const firc_ktcp_image_t *im = firc_app_ktcp_image(l.app);
+    ASSERT_EQ_FMT((size_t)6, im->n, "%zu");
+    ASSERT_EQ(1, im->v[0].dev);
+    ASSERT_EQ(3, im->v[5].dev);
+    for (size_t i = 1; i < im->n; i++) {
+        bool up = im->v[i - 1].dev < im->v[i].dev ||
+                  (im->v[i - 1].dev == im->v[i].dev && memcmp(im->v[i - 1].fake, im->v[i].fake, 4) < 0);
+        ASSERT(up);
+    }
+    locked_app_down(&l);
+    PASS();
+}
+
+typedef struct {
+    locked_app_t *l;
+    firc_ip_t *f2;
+    size_t fillers;
+    size_t after_failed_n;
+    bool after_failed_is_first;
+    firc_ip_t *f1;
+    firc_err_t third;
+} post_script_t;
+
+static void a_filler(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    (void)ud;
+}
+
+static void third_pass_then_stop(firc_loop_t *loop, void *ud) {
+    post_script_t *s = ud;
+    s->third = firc_app_rebuild_netfilter_kind(s->l->app, NULL, false);
+    (void)firc_loop_post(loop, stop_the_loop, NULL);
+}
+
+static void second_pass_into_a_full_queue(firc_loop_t *loop, void *ud) {
+    post_script_t *s = ud;
+    (void)issue_unwritten(s->l, "b.example", 1, s->f2);
+    while (firc_loop_post(loop, a_filler, NULL) == FIRC_OK) { s->fillers++; }
+    (void)firc_app_rebuild_netfilter_kind(s->l->app, NULL, false);
+    const firc_ktcp_image_t *im = firc_app_ktcp_image(s->l->app);
+    s->after_failed_n = im->n;
+    s->after_failed_is_first = im->n == 1 && pair_is(&im->v[0], 3, s->f1, k_issued_real);
+    int id = 0;
+    (void)firc_loop_add_timer(loop, 5, 0, third_pass_then_stop, s, &id);
+}
+
+/* Catches: the image of a pass whose report was not posted taken as sent, so the next delta skips its pairs. */
+TEST a_failed_report_post_keeps_the_last_pushed_image(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    locked_app_t l;
+    ktcp_rec_t rec;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0};
+    ASSERT(ktcp_up(&l, loop, &rec, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    post_script_t s = {.l = &l, .f2 = &f2, .f1 = &f1, .third = FIRC_ERR_STATE};
+    ASSERT_EQ(FIRC_OK, firc_loop_post(loop, second_pass_into_a_full_queue, &s));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(loop));
+    ASSERTm("fixture: the queue was filled", s.fillers > 0);
+    ASSERT_EQ(FIRC_OK, s.third);
+    ASSERT(s.after_failed_is_first);
+    ASSERT_EQ_FMT(2, rec.calls, "%d");
+    ASSERT_EQ_FMT((size_t)1, rec.prev_n[1], "%zu");
+    ASSERT(pair_is(&rec.prev[1][0], 3, &f1, k_issued_real));
+    ASSERT_EQ_FMT((size_t)2, rec.next_n[1], "%zu");
+    ASSERT_EQ_FMT((size_t)2, firc_app_ktcp_image(l.app)->n, "%zu");
+    locked_app_down(&l);
+    firc_loop_destroy(loop);
+    PASS();
+}
+
+/* Catches: a report the loop never ran leaking its image when the loop goes. */
+TEST an_undelivered_report_frees_its_image(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    locked_app_t l;
+    ktcp_rec_t rec;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(ktcp_up(&l, loop, &rec, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    locked_app_down(&l);
+    firc_loop_destroy(loop);
+    ASSERT_EQ_FMT(0, rec.calls, "%d");
+    PASS();
+}
+
+static bool redir_there(locked_app_t *l) {
+    firc_app_nf_enter(l->app);
+    bool there = firc_fake_ipt_chain_exists(l->fake, "nat", "FIRC_REDIR");
+    firc_app_nf_leave(l->app);
+    return there;
+}
+
+/* Catches: a newly reported port waiting for an unrelated pass, or an unchanged table asking for one. */
+TEST ports_change_requests_a_pass(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_group(1, "a.example", "tunvless3")));
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
+    ASSERT(wait_written_after(&l, 0));
+    ASSERT_FALSE(redir_there(&l));
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    firc_app_nf_enter(l.app);
+    uint64_t change = firc_app_nf_change_for_test(l.app);
+    firc_app_nf_leave(l.app);
+    firc_app_set_ktcp_ports(l.app, ports);
+    firc_app_nf_enter(l.app);
+    ASSERT_EQ_FMT(change, firc_app_nf_change_for_test(l.app), "%" PRIu64);
+    firc_app_nf_leave(l.app);
+    ports[3] = 3603;
+    firc_app_set_ktcp_ports(l.app, ports);
+    bool there = false;
+    for (int i = 0; i < 500 && !there; i++) {
+        there = redir_there(&l);
+        if (!there) { sleep_ms(10); }
+    }
+    ASSERT(there);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: an unchanged port table entering the netfilter lock, which interrupts a running pass, or a changed one not entering. */
+TEST an_unchanged_port_table_interrupts_no_pass(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[3] = 3603;
+    firc_app_set_ktcp_ports(l.app, ports);
+    uint64_t enters = firc_app_nf_enters_for_test(l.app);
+    firc_app_set_ktcp_ports(l.app, ports);
+    ASSERT_EQ_FMT(enters, firc_app_nf_enters_for_test(l.app), "%" PRIu64);
+    ports[5] = 3605;
+    firc_app_set_ktcp_ports(l.app, ports);
+    ASSERT_EQ_FMT(enters + 1, firc_app_nf_enters_for_test(l.app), "%" PRIu64);
+    locked_app_down(&l);
+    PASS();
+}
+
+typedef struct {
+    int calls;
+    uint8_t dev;
+    size_t n;
+    firc_nf_prefix_t p[8];
+    int sent;
+} close_rec_t;
+
+static int rec_close(uint8_t dev, const firc_nf_prefix_t *p, size_t n, void *ud) {
+    close_rec_t *r = ud;
+    r->calls++;
+    r->dev = dev;
+    r->n = n;
+    for (size_t i = 0; i < n && i < 8; i++) { r->p[i] = p[i]; }
+    return r->sent;
+}
+
+static bool closed(const close_rec_t *r, uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint8_t cidr) {
+    const uint8_t want[4] = {a, b, c, d};
+    for (size_t i = 0; i < r->n && i < 8; i++) {
+        if (r->p[i].family == 4 && r->p[i].cidr == cidr && memcmp(r->p[i].addr, want, 4) == 0) { return true; }
+    }
+    return false;
+}
+
+static close_rec_t close_seen(locked_app_t *l, const close_rec_t *rec) {
+    firc_app_nf_enter(l->app);
+    close_rec_t r = *rec;
+    firc_app_nf_leave(l->app);
+    return r;
+}
+
+static void attach_close(locked_app_t *l, close_rec_t *rec) {
+    memset(rec, 0, sizeof(*rec));
+    firc_app_ktcp_sink_t sink = {.pushed = NULL, .close = rec_close, .ud = rec};
+    firc_app_set_ktcp_sink(l->app, &sink);
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[3] = 3603;
+    firc_app_set_ktcp_ports(l->app, ports);
+}
+
+static firc_group_t *tunnel_subnet_group(uint8_t tag, const char *iface, const char *const *subnets, size_t n) {
+    firc_group_t *g = tunnel_group(tag, "a.example", iface);
+    for (size_t i = 0; i < n; i++) { firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, subnets[i])); }
+    return g;
+}
+
+static bool closing_up(locked_app_t *l, close_rec_t *rec, const char *iface, const char *const *subnets, size_t n) {
+    if (!locked_app_up(l)) { return false; }
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_app_set_running(l->app, true);
+    attach_close(l, rec);
+    firc_ip_t fake = {{0}, 0};
+    return firc_app_add_group(l->app, tunnel_subnet_group(1, iface, subnets, n)) == FIRC_OK && first_pass_done(l) &&
+           issue_unwritten(l, "a.example", 1, &fake);
+}
+
+static const char *const k_closed_subnet[] = {"10.81.0.0/24"};
+
+/* Catches: the prefixes read after the routing was let go (no subnets then), chunks lost before the pay, a v6 prefix sent, or a close before the pass. */
+TEST removing_a_tunnel_group_closes_its_chunks_and_subnets(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(closing_up(&l, &rec, "tunvless3", k_closed_subnet, 1));
+    firc_app_nf_enter(l.app);
+    firc_ruleset_t *rs = firc_app_find_group_by_id(l.app, tag_id(1));
+    firc_group_add_rule(firc_ruleset_group_mut(rs), edit_rule(FIRC_RULE_SUBNET6, "2001:db8:81::/48"));
+    ASSERT_EQ(FIRC_OK, firc_app_sync_group(l.app, rs));
+    firc_app_nf_leave(l.app);
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    int early = rec.calls;
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ_FMTm("nothing before the pass", 0, early, "%d");
+    ASSERT(wait_written_after(&l, started));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ(3, r.dev);
+    ASSERT_EQ_FMT((size_t)2, r.n, "%zu");
+    ASSERTm("its chunk", closed(&r, 198, 18, 0, 0, 24));
+    ASSERTm("its subnet rule's prefix", closed(&r, 10, 81, 0, 0, 24));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a withdrawn device keeping its redirected subnet flow, or a narrowing that closes only the chunks. */
+TEST a_narrowed_selector_closes_chunks_and_subnets(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    g_stub_mark = 0;
+    g_kids_host = false;
+    firc_app_set_device_lookup(l.app, stub_mark, stub_hosts, stub_policy_hosts, NULL, NULL);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    char kids[] = "policy:Kids";
+    char *deny[] = {kids};
+    firc_group_t *g = selector_group(1, NULL, 0, deny, 1);
+    free(g->iface);
+    g->iface = strdup("tunvless3");
+    firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, "10.1.0.0/16"));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g));
+    ASSERT(first_pass_done(&l));
+    firc_ip_t fake = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &fake));
+    plant_group_flows(&l, 1);
+
+    g_kids_host = true;
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_app_devices_changed(l.app);
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: the subnet flow to a real address was flushed", fake_ct_deleted(l.ctk, k_subnet_dst, 4));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ(3, r.dev);
+    ASSERT_EQ_FMT((size_t)2, r.n, "%zu");
+    ASSERTm("its chunk", closed(&r, 198, 18, 0, 0, 24));
+    ASSERTm("the subnet flow's prefix", closed(&r, 10, 1, 0, 0, 16));
+    g_kids_host = false;
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a merge of a teardown and a narrowing that appends the same prefixes twice instead of joining them. */
+TEST a_narrowing_edit_closes_each_prefix_once(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    char *two[] = {k_dev_a, k_dev_b}, *one[] = {k_dev_a};
+    firc_group_t *wide = selector_group(1, two, 2, NULL, 0), *narrow = selector_group(1, one, 1, NULL, 0);
+    firc_group_t *both[] = {wide, narrow};
+    for (size_t i = 0; i < 2; i++) {
+        free(both[i]->iface);
+        both[i]->iface = strdup("tunvless3");
+        firc_group_add_rule(both[i], edit_rule(FIRC_RULE_SUBNET, "10.1.0.0/16"));
+    }
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, wide));
+    ASSERT(first_pass_done(&l));
+    firc_ip_t fake = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &fake));
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), narrow));
+    ASSERT(wait_written_after(&l, started));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ_FMT((size_t)2, r.n, "%zu");
+    ASSERT(closed(&r, 198, 18, 0, 0, 24));
+    ASSERT(closed(&r, 10, 1, 0, 0, 16));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a lost prefix not closed, or the whole group's prefixes closed for one lost subnet, by a PUT or a rules edit. */
+TEST a_lost_subnet_prefix_is_closed(void) {
+    static const char *const both[] = {"10.1.0.0/16", "10.2.0.0/16"};
+    static const char *const keep[] = {"10.2.0.0/16"};
+    for (int by_rules = 0; by_rules < 2; by_rules++) {
+        locked_app_t l;
+        close_rec_t rec;
+        ASSERT(closing_up(&l, &rec, "tunvless3", both, 2));
+        plant_flow(&l, 1, k_gone_dst, k_gone_dst);
+        uint64_t started = firc_app_nf_passes_for_test(l.app);
+        if (by_rules) {
+            firc_app_nf_enter(l.app);
+            firc_ruleset_t *rs = firc_app_find_group_by_id(l.app, tag_id(1));
+            firc_group_t *live = firc_ruleset_group_mut(rs);
+            for (size_t i = 0; i < live->n_rules; i++) { firc_rule_free(live->rules[i]); }
+            free(live->rules);
+            live->rules = NULL;
+            live->n_rules = 0;
+            firc_group_add_rule(live, edit_rule(FIRC_RULE_DOMAIN, "a.example"));
+            firc_group_add_rule(live, edit_rule(FIRC_RULE_SUBNET, keep[0]));
+            ASSERT_EQ(FIRC_OK, firc_app_sync_group(l.app, rs));
+            firc_app_nf_leave(l.app);
+        } else {
+            ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), tunnel_subnet_group(1, "tunvless3", keep, 1)));
+        }
+        ASSERT(wait_written_after(&l, started));
+        ASSERTm("fixture: the sweep took the lost prefix's flow", fake_ct_deleted(l.ctk, k_gone_dst, 4));
+        close_rec_t r = close_seen(&l, &rec);
+        ASSERT_EQ_FMT(1, r.calls, "%d");
+        ASSERT_EQ(3, r.dev);
+        ASSERT_EQ_FMT((size_t)1, r.n, "%zu");
+        ASSERTm("the lost prefix", closed(&r, 10, 1, 0, 0, 16));
+        locked_app_down(&l);
+    }
+    PASS();
+}
+
+/* Catches: a close sent for a group removed and put back, or saved unchanged, before the pass. */
+TEST a_group_routed_again_the_same_way_closes_nothing(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(closing_up(&l, &rec, "tunvless3", k_closed_subnet, 1));
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    firc_app_nf_leave(l.app);
+    ASSERT(wait_written_after(&l, started));
+    started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: routed", group_routed(&l, 1));
+    ASSERT_EQ_FMT(0, close_seen(&l, &rec).calls, "%d");
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the stop's own payment of the queued flushes sending close into a tunnel runner already stopped. */
+TEST the_stop_closes_nothing(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(closing_up(&l, &rec, "tunvless3", k_closed_subnet, 1));
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    plant_flow(&l, 1, sub, sub);
+    firc_fake_ipt_refuse_rules_containing(l.fake, "FIRC_DNAT");
+    size_t calls = firc_fake_ipt_attempts(l.fake);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    ASSERTm("fixture: a pass tried and was refused", a_restore_was_tried(&l, calls));
+    ASSERT_FALSEm("fixture: the flush is still queued", fake_ct_deleted(l.ctk, sub, 4));
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERTm("fixture: the stop paid the flush", fake_ct_deleted(l.ctk, sub, 4));
+    ASSERT_EQ_FMT(0, rec.calls, "%d");
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+static bool removed_with_close_sent(locked_app_t *l, close_rec_t *rec, const uint8_t *sub, int sent) {
+    if (!closing_up(l, rec, "tunvless3", k_closed_subnet, 1)) { return false; }
+    firc_app_nf_enter(l->app);
+    rec->sent = sent;
+    firc_app_nf_leave(l->app);
+    plant_flow(l, 1, sub, sub);
+    uint64_t started = firc_app_nf_passes_for_test(l->app);
+    return firc_app_remove_group_by_id(l->app, tag_id(1)) && wait_written_after(l, started) &&
+           close_seen(l, rec).calls == 1;
+}
+
+/* Catches: a withdrawn tunnel group's flows flushed before tunvless acks its close (its RST then leaves un-NATed), or an ack from another device paying it. */
+TEST a_withdrawn_tunnel_groups_flush_waits_for_the_close_ack(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(removed_with_close_sent(&l, &rec, sub, 1));
+    ASSERT_FALSEm("no flush before the ack", fake_ct_deleted(l.ctk, sub, 4));
+    firc_app_ktcp_closed(l.app, 4);
+    ASSERT_FALSEm("another device's ack", fake_ct_deleted(l.ctk, sub, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("paid on the ack", fake_ct_deleted(l.ctk, sub, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: an unanswered close holding the flush for ever, or paying it before its second is up. */
+TEST an_unanswered_close_pays_the_flush_after_a_second(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(removed_with_close_sent(&l, &rec, sub, 1));
+    g_now_ms += 999;
+    firc_app_ktcp_due_for_test(l.app);
+    ASSERT_FALSEm("999 ms", fake_ct_deleted(l.ctk, sub, 4));
+    g_now_ms += 1;
+    firc_app_ktcp_due_for_test(l.app);
+    ASSERTm("1000 ms", fake_ct_deleted(l.ctk, sub, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a flush that waits for an ack no child will send because none took the close. */
+TEST a_tunnel_group_with_no_live_child_is_flushed_at_once(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    ASSERT(removed_with_close_sent(&l, &rec, sub, 0));
+    ASSERT(fake_ct_deleted(l.ctk, sub, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the stop waiting for a close ack, or leaving the waiting flush unpaid. */
+TEST the_stop_pays_a_flush_waiting_for_its_ack(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(removed_with_close_sent(&l, &rec, sub, 1));
+    ASSERT_FALSEm("fixture: waiting", fake_ct_deleted(l.ctk, sub, 4));
+    firc_app_destroy(l.app);
+    l.app = NULL;
+    ASSERT(fake_ct_deleted(l.ctk, sub, 4));
+    locked_app_down_rest(&l);
+    PASS();
+}
+
+static const char *const k_second_subnet[] = {"10.82.0.0/24"};
+static const uint8_t k_sub_one[4] = {10, 81, 0, 9}, k_sub_two[4] = {10, 82, 0, 9};
+
+static bool two_tunnel_groups_up(locked_app_t *l, close_rec_t *rec) {
+    if (!closing_up(l, rec, "tunvless3", k_closed_subnet, 1)) { return false; }
+    uint64_t started = firc_app_nf_passes_for_test(l->app);
+    if (firc_app_add_group(l->app, tunnel_subnet_group(2, "tunvless3", k_second_subnet, 1)) != FIRC_OK ||
+        !wait_written_after(l, started)) {
+        return false;
+    }
+    firc_app_nf_enter(l->app);
+    rec->sent = 1;
+    firc_app_nf_leave(l->app);
+    plant_flow(l, 1, k_sub_one, k_sub_one);
+    plant_flow(l, 2, k_sub_two, k_sub_two);
+    return true;
+}
+
+static bool remove_in_a_pass(locked_app_t *l, uint8_t tag) {
+    uint64_t started = firc_app_nf_passes_for_test(l->app);
+    return firc_app_remove_group_by_id(l->app, tag_id(tag)) && wait_written_after(l, started);
+}
+
+/* Catches: two withdrawals on one tunnel in one pass paid by one ack, or the second held to its deadline. */
+TEST two_withdrawals_on_one_tunnel_are_paid_on_their_own_acks(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(two_tunnel_groups_up(&l, &rec));
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_app_nf_enter(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(2)));
+    firc_app_nf_leave(l.app);
+    ASSERT(wait_written_after(&l, started));
+    ASSERT_EQ_FMT(2, close_seen(&l, &rec).calls, "%d");
+    ASSERT_FALSE(fake_ct_deleted(l.ctk, k_sub_one, 4) || fake_ct_deleted(l.ctk, k_sub_two, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("the first ack pays the first", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    ASSERT_FALSEm("  and only the first", fake_ct_deleted(l.ctk, k_sub_two, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("the second ack pays the second, no deadline", fake_ct_deleted(l.ctk, k_sub_two, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: an ack arriving after its wait was paid by the deadline paying a newer wait before its own close. */
+TEST a_late_ack_pays_no_newer_wait(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(two_tunnel_groups_up(&l, &rec));
+    ASSERT(remove_in_a_pass(&l, 1));
+    g_now_ms += 1000;
+    firc_app_ktcp_due_for_test(l.app);
+    ASSERTm("fixture: the deadline paid the first", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    ASSERT(remove_in_a_pass(&l, 2));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT_FALSEm("the first's late ack", fake_ct_deleted(l.ctk, k_sub_two, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("its own ack", fake_ct_deleted(l.ctk, k_sub_two, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: acks owed by a child that has since restarted swallowing the new child's acks. */
+TEST a_restarted_child_owes_no_acks(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(two_tunnel_groups_up(&l, &rec));
+    ASSERT(remove_in_a_pass(&l, 1));
+    g_now_ms += 1000;
+    firc_app_ktcp_due_for_test(l.app);
+    firc_app_ktcp_ready(l.app, 3);
+    ASSERT(remove_in_a_pass(&l, 2));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT(fake_ct_deleted(l.ctk, k_sub_two, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+static size_t store_n_after(field_store_t *s, size_t want) {
+    for (int i = 0; i < 50 && field_store_n(s) != want; i++) { sleep_ms(10); }
+    return field_store_n(s);
+}
+
+static bool closing_up_watched(locked_app_t *l, close_rec_t *rec, field_store_t *store, const char *const *subnets,
+                               size_t n) {
+    if (!locked_app_up(l)) { return false; }
+    firc_rtnl_watch_mark_fields(l->rtnl, field_store_cb, store);
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_app_set_running(l->app, true);
+    attach_close(l, rec);
+    firc_ip_t fake = {{0}, 0};
+    return firc_app_add_group(l->app, tunnel_subnet_group(1, "tunvless3", subnets, n)) == FIRC_OK &&
+           first_pass_done(l) && issue_unwritten(l, "a.example", 1, &fake);
+}
+
+static bool watched_removal(locked_app_t *l, close_rec_t *rec, field_store_t *store) {
+    if (!closing_up_watched(l, rec, store, k_closed_subnet, 1)) { return false; }
+    firc_app_nf_enter(l->app);
+    rec->sent = 1;
+    firc_app_nf_leave(l->app);
+    if (store_n_after(store, 1) != 1) { return false; }
+    plant_flow(l, 1, k_sub_one, k_sub_one);
+    return remove_in_a_pass(l, 1);
+}
+
+/* Catches: a withdrawn tunnel group's mark field freed while its flush still waits, so another group can take it first. */
+TEST a_withdrawn_tunnel_groups_field_is_held_until_its_flush(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    field_store_t store = {.mu = PTHREAD_MUTEX_INITIALIZER};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(watched_removal(&l, &rec, &store));
+    sleep_ms(50);
+    ASSERT_EQ_FMTm("held while waiting", (size_t)1, field_store_n(&store), "%zu");
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT_EQ_FMTm("freed with the flush", (size_t)0, store_n_after(&store, 0), "%zu");
+    firc_rtnl_watch_mark_fields(l.rtnl, NULL, NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a waiting flush paid after its group came back the same way, resetting the group's new flows. */
+TEST a_group_routed_back_the_same_way_keeps_its_new_flows(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    field_store_t store = {.mu = PTHREAD_MUTEX_INITIALIZER};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(watched_removal(&l, &rec, &store));
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: routed again", group_routed(&l, 1));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT_FALSEm("its flows kept", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    sleep_ms(50);
+    ASSERT_EQ_FMTm("its field kept", (size_t)1, field_store_n(&store), "%zu");
+    firc_rtnl_watch_mark_fields(l.rtnl, NULL, NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a wait whose deadline passed while its timer could not be armed left unpaid until the stop. */
+TEST a_due_wait_is_paid_by_the_next_pass(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(removed_with_close_sent(&l, &rec, k_sub_one, 1));
+    g_now_ms += 1000;
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT(fake_ct_deleted(l.ctk, k_sub_one, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+static const char *const k_two_subnets[] = {"10.81.0.0/24", "10.83.0.0/24"};
+
+/* Catches: a removal paid at once forgetting a field an older wait of the same group still flushes, or nobody forgetting it after. */
+TEST a_field_waits_for_the_groups_older_flush(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    field_store_t store = {.mu = PTHREAD_MUTEX_INITIALIZER};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(closing_up_watched(&l, &rec, &store, k_two_subnets, 2));
+    ASSERT_EQ_FMT((size_t)1, store_n_after(&store, 1), "%zu");
+    firc_app_nf_enter(l.app);
+    rec.sent = 1;
+    firc_app_nf_leave(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT_EQ_FMTm("fixture: the lost prefix was closed", 1, close_seen(&l, &rec).calls, "%d");
+    firc_app_nf_enter(l.app);
+    rec.sent = 0;
+    firc_app_nf_leave(l.app);
+    ASSERT(remove_in_a_pass(&l, 1));
+    sleep_ms(50);
+    ASSERT_EQ_FMTm("held while the older flush waits", (size_t)1, field_store_n(&store), "%zu");
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT_EQ_FMTm("freed when it is paid", (size_t)0, store_n_after(&store, 0), "%zu");
+    firc_rtnl_watch_mark_fields(l.rtnl, NULL, NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the KEEP recheck applied to a narrowing, whose group always looks routed the same way, so its flush is skipped. */
+TEST a_narrowed_tunnel_groups_flush_is_paid_on_its_ack(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    g_stub_mark = 0;
+    g_kids_host = false;
+    firc_app_set_device_lookup(l.app, stub_mark, stub_hosts, stub_policy_hosts, NULL, NULL);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    rec.sent = 1;
+    char kids[] = "policy:Kids";
+    char *deny[] = {kids};
+    firc_group_t *g = selector_group(1, NULL, 0, deny, 1);
+    free(g->iface);
+    g->iface = strdup("tunvless3");
+    firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, "10.1.0.0/16"));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g));
+    ASSERT(first_pass_done(&l));
+    firc_ip_t fake = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &fake));
+    plant_group_flows(&l, 1);
+    g_kids_host = true;
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_app_devices_changed(l.app);
+    ASSERT(wait_written_after(&l, started));
+    ASSERT_EQ_FMTm("fixture: the narrowing sent its close", 1, close_seen(&l, &rec).calls, "%d");
+    ASSERT_FALSEm("not before the ack", fake_ct_deleted(l.ctk, k_subnet_dst, 4));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("paid on the ack", fake_ct_deleted(l.ctk, k_subnet_dst, 4));
+    g_kids_host = false;
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the KEEP recheck without the interface compare, so a group moved to another tunnel keeps flows routed by the old one. */
+TEST a_group_back_on_another_interface_still_pays(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    field_store_t store = {.mu = PTHREAD_MUTEX_INITIALIZER};
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(closing_up_watched(&l, &rec, &store, k_closed_subnet, 1));
+    firc_app_nf_enter(l.app);
+    rec.sent = 1;
+    firc_app_nf_leave(l.app);
+    uint32_t was = field_of(&l, 1);
+    plant_flow(&l, 1, k_sub_one, k_sub_one);
+    ASSERT(remove_in_a_pass(&l, 1));
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_subnet_group(1, "tunvless4", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: routed again", group_routed(&l, 1));
+    ASSERT_EQ_FMTm("fixture: the same field", was, field_of(&l, 1), "%u");
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERT(fake_ct_deleted(l.ctk, k_sub_one, 4));
+    firc_rtnl_watch_mark_fields(l.rtnl, NULL, NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the loop's pass report not paying an overdue wait, which then waits for its own timer. */
+TEST an_overdue_wait_is_paid_by_the_loops_next_report(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(locked_app_up_with_loop(&l, loop));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    rec.sent = 1;
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT(run_loop_for(loop, 50));
+    plant_flow(&l, 1, k_sub_one, k_sub_one);
+    started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT(run_loop_for(loop, 50));
+    ASSERT_EQ_FMTm("fixture: the close went out on the loop", 1, rec.calls, "%d");
+    ASSERT_FALSEm("fixture: waiting", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    g_now_ms += 1000;
+    started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_force_commit_iptables(l.app));
+    ASSERT(wait_written_after(&l, started));
+    ASSERT(run_loop_for(loop, 100));
+    ASSERTm("paid by the report, long before its timer", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    locked_app_down(&l);
+    firc_loop_destroy(loop);
+    PASS();
+}
+
+static const char *const k_lost_and_kept[] = {"10.81.0.0/24", "10.83.0.0/24"};
+static const uint8_t k_sub_lost[4] = {10, 83, 0, 9};
+
+/* Catches: a merged teardown and sweep skipped whole when its group comes back, so flows to the dropped prefix keep the field. */
+TEST a_kept_group_still_sweeps_the_prefix_it_lost(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(closing_up(&l, &rec, "tunvless3", k_lost_and_kept, 2));
+    firc_app_nf_enter(l.app);
+    rec.sent = 1;
+    firc_app_nf_leave(l.app);
+    plant_flow(&l, 1, k_sub_one, k_sub_one);
+    plant_flow(&l, 1, k_sub_lost, k_sub_lost);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_app_nf_enter(l.app);
+    firc_ruleset_t *rs = firc_app_find_group_by_id(l.app, tag_id(1));
+    firc_group_t *live = firc_ruleset_group_mut(rs);
+    for (size_t i = 0; i < live->n_rules; i++) { firc_rule_free(live->rules[i]); }
+    free(live->rules);
+    live->rules = NULL;
+    live->n_rules = 0;
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_DOMAIN, "a.example"));
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_SUBNET, k_closed_subnet[0]));
+    ASSERT_EQ(FIRC_OK, firc_app_sync_group(l.app, rs));
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    firc_app_nf_leave(l.app);
+    ASSERT(wait_written_after(&l, started));
+    started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_subnet_group(1, "tunvless3", k_closed_subnet, 1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: routed again", group_routed(&l, 1));
+    firc_app_ktcp_closed(l.app, 3);
+    ASSERTm("the dropped prefix's flow is swept", fake_ct_deleted(l.ctk, k_sub_lost, 4));
+    ASSERT_FALSEm("the kept prefix's flow stays", fake_ct_deleted(l.ctk, k_sub_one, 4));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a close sent for a group whose interface is no tunnel. */
+TEST a_non_tunnel_group_sends_no_close(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(closing_up(&l, &rec, "lo", k_closed_subnet, 1));
+    const uint8_t sub[4] = {10, 81, 0, 9};
+    plant_flow(&l, 1, sub, sub);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT(firc_app_remove_group_by_id(l.app, tag_id(1)));
+    ASSERT(wait_written_after(&l, started));
+    ASSERTm("fixture: its flows were flushed", fake_ct_deleted(l.ctk, sub, 4));
+    ASSERT_EQ_FMT(0, close_seen(&l, &rec).calls, "%d");
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a miss answered for another device's group, a portless device, a withdrawn group, or a parked pair refused. */
+TEST a_miss_answers_real_only_for_a_group_routed_into_that_device(void) {
+    locked_app_t l;
+    ktcp_rec_t krec;
+    firc_ip_t f1 = {{0}, 0}, moved = {{0}, 0};
+    ASSERT(ktcp_up(&l, NULL, &krec, &f1));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_group(2, "b.example", "tunvless4")));
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[3] = 3603;
+    ports[4] = 3604;
+    firc_app_set_ktcp_ports(l.app, ports);
+    uint8_t real[4] = {0};
+    ASSERTm("routed into tunvless3", firc_app_ktcp_real_of(l.app, 3, f1.b, real));
+    ASSERT_EQ(0, memcmp(real, k_issued_real, 4));
+    ASSERT_FALSEm("asked by tunvless4", firc_app_ktcp_real_of(l.app, 4, f1.b, real));
+    ports[3] = 0;
+    firc_app_set_ktcp_ports(l.app, ports);
+    ASSERT_FALSEm("tunvless3 has no port", firc_app_ktcp_real_of(l.app, 3, f1.b, real));
+    ports[3] = 3603;
+    firc_app_set_ktcp_ports(l.app, ports);
+
+    ASSERT(issue_unwritten(&l, "a.example", 2, &moved));
+    memset(real, 0, sizeof(real));
+    ASSERTm("the parked pair", firc_app_ktcp_real_of(l.app, 3, f1.b, real));
+    ASSERT_EQ(0, memcmp(real, k_issued_real, 4));
+    ASSERTm("the name's new pair, in tunvless4's group", firc_app_ktcp_real_of(l.app, 4, moved.b, real));
+
+    firc_group_t *off = tunnel_group(1, "a.example", "tunvless3");
+    off->enable = false;
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), off));
+    const char *gid = NULL;
+    firc_ip_t still = {{0}, 0};
+    ASSERTm("fixture: the pool still holds the pair", firc_fakeip_pair_of(l.pool, &f1, &gid, &still));
+    ASSERT_FALSEm("its group is not routed", firc_app_ktcp_real_of(l.app, 3, f1.b, real));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a group left out of a pass flushed by mark while tunvless keeps its redirected sockets, or closed again every pass. */
+TEST a_left_out_tunnel_group_closes_its_chunks_and_subnets(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    firc_ip_t f1 = {{0}, 0}, f2 = {{0}, 0};
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    firc_group_t *two = named_group(2, "refused-two", "b.example", FIRC_RULE_SUBNET, "10.66.0.0/16");
+    free(two->iface);
+    two->iface = strdup("tunvless3");
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, named_group(1, "one", "a.example", NULL, NULL)));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, two));
+    ASSERT(issue_unwritten(&l, "a.example", 1, &f1));
+    ASSERT(issue_unwritten(&l, "b.example", 2, &f2));
+    firc_fake_ipt_refuse_rules_containing(l.fake, "10.66.0.0/16");
+    ASSERT_EQ(FIRC_ERR_IO, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERT_EQ_FMT(0, rec.calls, "%d");
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERT_EQ_FMTm("fixture: left out", 0, group_in_kernel(&l, tag_id(2)), "%d");
+    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT_EQ(3, rec.dev);
+    ASSERT_EQ_FMT((size_t)2, rec.n, "%zu");
+    ASSERTm("its chunk", closed(&rec, 198, 18, 1, 0, 24));
+    ASSERTm("its subnet rule's prefix", closed(&rec, 10, 66, 0, 0, 16));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
+    ASSERT_EQ_FMTm("once, not every pass", 1, rec.calls, "%d");
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a paid flush that sends its close list but not the prefixes a sweep merged into it. */
+TEST a_narrowing_sync_that_also_drops_a_subnet_closes_that_subnet(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    g_stub_mark = 0;
+    g_kids_host = false;
+    firc_app_set_device_lookup(l.app, stub_mark, stub_hosts, stub_policy_hosts, NULL, NULL);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    char kids[] = "policy:Kids";
+    char *deny[] = {kids};
+    firc_group_t *g = selector_group(1, NULL, 0, deny, 1);
+    free(g->iface);
+    g->iface = strdup("tunvless3");
+    firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, "10.1.0.0/16"));
+    firc_group_add_rule(g, edit_rule(FIRC_RULE_SUBNET, "10.2.0.0/16"));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, g));
+    ASSERT(first_pass_done(&l));
+    firc_ip_t fake = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &fake));
+
+    g_kids_host = true;
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_ruleset_t *rs = firc_app_find_group_by_id(l.app, tag_id(1));
+    firc_group_t *live = firc_ruleset_group_mut(rs);
+    for (size_t i = 0; i < live->n_rules; i++) { firc_rule_free(live->rules[i]); }
+    free(live->rules);
+    live->rules = NULL;
+    live->n_rules = 0;
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_DOMAIN, "a.example"));
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_SUBNET, "10.2.0.0/16"));
+    ASSERT_EQ(FIRC_OK, firc_app_sync_group(l.app, rs));
+    firc_app_nf_leave(l.app);
+    ASSERT(wait_written_after(&l, started));
+    char dchain[64];
+    devices_chain_of(&l, tag_id(1), dchain, sizeof(dchain));
+    ASSERTm("fixture: the sync narrowed", mangle_has(&l, dchain, "-s 192.168.1.40/32 -j RETURN"));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ_FMT((size_t)3, r.n, "%zu");
+    ASSERTm("the chunk", closed(&r, 198, 18, 0, 0, 24));
+    ASSERTm("the kept subnet", closed(&r, 10, 2, 0, 0, 16));
+    ASSERTm("the dropped subnet", closed(&r, 10, 1, 0, 0, 16));
+    g_kids_host = false;
+    locked_app_down(&l);
+    PASS();
+}
+
+static bool closing_up_by_hand(locked_app_t *l, close_rec_t *rec, const char *const *subnets, size_t n) {
+    if (!locked_app_up_no_committer(l)) { return false; }
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_app_set_running(l->app, true);
+    attach_close(l, rec);
+    firc_ip_t fake = {{0}, 0};
+    return firc_app_add_group(l->app, tunnel_subnet_group(1, "tunvless3", subnets, n)) == FIRC_OK &&
+           issue_unwritten(l, "a.example", 1, &fake) && firc_app_rebuild_netfilter_kind(l->app, NULL, false) == FIRC_OK;
+}
+
+/* Catches: without a committer, a narrowing that flushes at once but leaves the close to no pass at all. */
+TEST without_a_committer_a_narrowing_closes_at_once(void) {
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(locked_app_up_no_committer(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    attach_close(&l, &rec);
+    char *two[] = {k_dev_a, k_dev_b}, *one[] = {k_dev_a};
+    firc_group_t *wide = selector_group(1, two, 2, NULL, 0), *narrow = selector_group(1, one, 1, NULL, 0);
+    firc_group_t *both[] = {wide, narrow};
+    for (size_t i = 0; i < 2; i++) {
+        free(both[i]->iface);
+        both[i]->iface = strdup("tunvless3");
+        firc_group_add_rule(both[i], edit_rule(FIRC_RULE_SUBNET, "10.1.0.0/16"));
+    }
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, wide));
+    firc_ip_t fake = {{0}, 0};
+    ASSERT(issue_unwritten(&l, "a.example", 1, &fake));
+    ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, tag_id(1), narrow));
+    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT(closed(&rec, 198, 18, 0, 0, 24));
+    ASSERT(closed(&rec, 10, 1, 0, 0, 16));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: without a committer, a lost prefix swept at once but its redirected flows never closed. */
+TEST without_a_committer_a_lost_prefix_closes_at_once(void) {
+    static const char *const both[] = {"10.1.0.0/16", "10.2.0.0/16"};
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(closing_up_by_hand(&l, &rec, both, 2));
+    firc_ruleset_t *rs = firc_app_find_group_by_id(l.app, tag_id(1));
+    firc_group_t *live = firc_ruleset_group_mut(rs);
+    for (size_t i = 0; i < live->n_rules; i++) { firc_rule_free(live->rules[i]); }
+    free(live->rules);
+    live->rules = NULL;
+    live->n_rules = 0;
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_DOMAIN, "a.example"));
+    firc_group_add_rule(live, edit_rule(FIRC_RULE_SUBNET, "10.2.0.0/16"));
+    ASSERT_EQ(FIRC_OK, firc_app_sync_group(l.app, rs));
+    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT_EQ_FMT((size_t)1, rec.n, "%zu");
+    ASSERT(closed(&rec, 10, 1, 0, 0, 16));
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: a device number past the port table read as an index (UBSan's bounds check under make sanitize). */
+TEST a_miss_from_a_device_past_the_table_answers_nothing(void) {
+    locked_app_t l;
+    ktcp_rec_t krec;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(ktcp_up(&l, NULL, &krec, &f1));
+    uint8_t real[4] = {0};
+    ASSERT_FALSE(firc_app_ktcp_real_of(l.app, FIRC_KTCP_DEVICES, f1.b, real));
+    ASSERT_FALSE(firc_app_ktcp_real_of(l.app, 255, f1.b, real));
+    ASSERTm("fixture: the same fake answers for its own device", firc_app_ktcp_real_of(l.app, 3, f1.b, real));
+    locked_app_down(&l);
+    PASS();
+}
+
 static unsigned up_links(const char *name) {
     if (strcmp(name, "up0") == 0) { return 7; }
     if (strcmp(name, "up1") == 0) { return 8; }
@@ -7265,6 +8393,220 @@ TEST live_reads_the_active_entry_s_link(void) {
     PASS();
 }
 
+static unsigned tun_links(const char *name) {
+    if (strcmp(name, "tunvless0") == 0) { return 9; }
+    if (strcmp(name, "tunvless1") == 0) { return 10; }
+    return up_links(name);
+}
+
+static bool redirected_listed_up_ex(locked_app_t *l, close_rec_t *rec, const char *const *names, size_t n,
+                                    bool committer) {
+    if (!(committer ? locked_app_up(l) : locked_app_up_no_committer(l))) { return false; }
+    fake_rtnl_set_link_flags(l->kernel, 0x1 | 0x10);
+    firc_rtnl_set_nametoindex_for_test(tun_links);
+    firc_app_set_running(l->app, true);
+    memset(rec, 0, sizeof(*rec));
+    rec->sent = 1;
+    firc_app_ktcp_sink_t sink = {.pushed = NULL, .close = rec_close, .ud = rec};
+    firc_app_set_ktcp_sink(l->app, &sink);
+    uint16_t ports[FIRC_KTCP_DEVICES] = {0};
+    ports[0] = 3600;
+    firc_app_set_ktcp_ports(l->app, ports);
+    firc_group_t *g = activation_group(1, "a.example", NULL, NULL);
+    firc_group_set_ifaces(g, names, n);
+    firc_ip_t fake = {{0}, 0};
+    return firc_app_add_group(l->app, g) == FIRC_OK && (!committer || first_pass_done(l)) &&
+           issue_unwritten(l, "a.example", 1, &fake);
+}
+
+static bool redirected_listed_up(locked_app_t *l, close_rec_t *rec, const char *const *names, size_t n) {
+    return redirected_listed_up_ex(l, rec, names, n, true);
+}
+
+static uint64_t nf_change_now(locked_app_t *l) {
+    firc_app_nf_enter(l->app);
+    uint64_t change = firc_app_nf_change_for_test(l->app);
+    firc_app_nf_leave(l->app);
+    return change;
+}
+
+static bool nat_has(locked_app_t *l, const char *needle) {
+    firc_app_nf_enter(l->app);
+    char *nat = firc_fake_ipt_print(l->fake, "nat");
+    firc_app_nf_leave(l->app);
+    bool has = nat != NULL && strstr(nat, needle) != NULL;
+    free(nat);
+    return has;
+}
+
+/* Catches: a move onto a redirected tunnel leaving the group's TCP outside the redirect until an unrelated pass. */
+TEST a_move_onto_a_redirected_tunnel_asks_for_a_pass_and_stages_its_redir(void) {
+    static const char *const names[] = {"up0", "tunvless0"};
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(redirected_listed_up(&l, &rec, names, 2));
+    ASSERT_FALSEm("fixture: no redirect on up0", nat_has(&l, "-j REDIRECT"));
+    char want[128];
+    snprintf(want, sizeof(want), "-A FIRC_REDIR -p tcp -m mark --mark 0x%x/0x40ff0000 -j REDIRECT --to-ports 3600",
+             0x40000000u | field_of(&l, 1));
+    firc_app_nf_enter(l.app);
+    uint64_t change = firc_app_nf_change_for_test(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_err_t moved = firc_app_move_group(l.app, k_g1, 1, false);
+    uint64_t after = firc_app_nf_change_for_test(l.app);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, moved);
+    ASSERTm("a pass asked for", after > change);
+    ASSERT(wait_written_after(&l, started));
+    ASSERT(nat_has(&l, want));
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: a move off a redirected tunnel flushing its flows by mark at once, before tunvless closes its sockets, or never closing them. */
+TEST a_move_off_a_redirected_tunnel_closes_before_it_flushes(void) {
+    static const char *const names[] = {"tunvless0", "up0"};
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(redirected_listed_up(&l, &rec, names, 2));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    plant_flow(&l, 1, one, one);
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_err_t moved = firc_app_move_group(l.app, k_g1, 1, false);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, moved);
+    ASSERT_FALSEm("no flush at the move", fake_ct_deleted(l.ctk, one, 4));
+    ASSERT(wait_written_after(&l, started));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ(0, r.dev);
+    ASSERT_EQ_FMT((size_t)1, r.n, "%zu");
+    ASSERTm("its chunk", closed(&r, 198, 18, 0, 0, 24));
+    ASSERT_FALSEm("no flush before the ack", fake_ct_deleted(l.ctk, one, 4));
+    firc_app_ktcp_closed(l.app, 0);
+    ASSERTm("paid on the ack", fake_ct_deleted(l.ctk, one, 4));
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: a move that touches no redirected device asking for a pass, a portless tunnel counted as redirected. */
+TEST a_move_between_plain_interfaces_still_asks_for_no_pass(void) {
+    static const char *const names[] = {"up0", "up1", "tunvless1"};
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(redirected_listed_up(&l, &rec, names, 3));
+    for (size_t to = 1; to < 3; to++) {
+        const uint8_t one[4] = {198, 18, 0, (uint8_t)(5 + to)};
+        plant_flow(&l, 1, one, one);
+        uint64_t change = nf_change_now(&l);
+        ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, to, false));
+        ASSERT_EQ_FMTm("no pass asked for", change, nf_change_now(&l), "%" PRIu64);
+        ASSERTm("flushed at the move", fake_ct_deleted(l.ctk, one, 4));
+    }
+    ASSERT_EQ_FMT(0, close_seen(&l, &rec).calls, "%d");
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: a move off a redirected tunnel and back before the pass closing or flushing flows that never left it. */
+TEST a_move_back_before_the_pass_flushes_nothing(void) {
+    static const char *const names[] = {"tunvless0", "up0"};
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(redirected_listed_up(&l, &rec, names, 2));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    plant_flow(&l, 1, one, one);
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 0, false));
+    firc_app_nf_leave(l.app);
+    ASSERT(wait_written_after(&l, started));
+    ASSERT_EQ_FMT(0, close_seen(&l, &rec).calls, "%d");
+    ASSERT_FALSE(fake_ct_deleted(l.ctk, one, 4));
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: a plain move after a move off a redirected tunnel, before the pass, dropping the queued close. */
+TEST a_second_move_before_the_pass_keeps_the_tunnel_s_close(void) {
+    static const char *const names[] = {"tunvless0", "up0", "up1"};
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(redirected_listed_up(&l, &rec, names, 3));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    plant_flow(&l, 1, one, one);
+    firc_app_nf_enter(l.app);
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    firc_err_t first = firc_app_move_group(l.app, k_g1, 1, false);
+    firc_err_t second = firc_app_move_group(l.app, k_g1, 2, false);
+    bool early = fake_ct_deleted(l.ctk, one, 4);
+    firc_app_nf_leave(l.app);
+    ASSERT_EQ(FIRC_OK, first);
+    ASSERT_EQ(FIRC_OK, second);
+    ASSERT_FALSEm("no flush at the moves", early);
+    ASSERT(wait_written_after(&l, started));
+    close_rec_t r = close_seen(&l, &rec);
+    ASSERT_EQ_FMT(1, r.calls, "%d");
+    ASSERT_EQ(0, r.dev);
+    ASSERTm("its chunk", closed(&r, 198, 18, 0, 0, 24));
+    ASSERT_FALSEm("no flush before the ack", fake_ct_deleted(l.ctk, one, 4));
+    firc_app_ktcp_closed(l.app, 0);
+    ASSERTm("paid on the ack", fake_ct_deleted(l.ctk, one, 4));
+    ASSERT_EQ_FMT(1, close_seen(&l, &rec).calls, "%d");
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: another group's flush queued on a redirected tunnel turning a plain move into a queued one. */
+TEST another_group_s_queued_tunnel_flush_leaves_a_plain_move_immediate(void) {
+    static const char *const names[] = {"up0", "up1"};
+    locked_app_t l;
+    close_rec_t rec;
+    ASSERT(redirected_listed_up(&l, &rec, names, 2));
+    uint64_t started = firc_app_nf_passes_for_test(l.app);
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, tunnel_group(2, "b.example", "tunvless0")));
+    ASSERT(wait_written_after(&l, started));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    plant_flow(&l, 1, one, one);
+    firc_app_nf_enter(l.app);
+    bool removed = firc_app_remove_group_by_id(l.app, tag_id(2));
+    firc_err_t moved = firc_app_move_group(l.app, k_g1, 1, false);
+    bool flushed = fake_ct_deleted(l.ctk, one, 4);
+    firc_app_nf_leave(l.app);
+    ASSERTm("fixture: the tunnel group's flush is queued", removed);
+    ASSERT_EQ(FIRC_OK, moved);
+    ASSERTm("flushed at the move", flushed);
+    listed_down(&l);
+    PASS();
+}
+
+/* Catches: without a committer, a move off a redirected tunnel flushing by mark with no close, or queueing a flush no pass will pay. */
+TEST without_a_committer_a_move_off_a_redirected_tunnel_closes_at_once(void) {
+    static const char *const names[] = {"tunvless0", "up0"};
+    locked_app_t l;
+    close_rec_t rec;
+    g_now_ms = 5000;
+    g_app_mono = test_clock;
+    ASSERT(redirected_listed_up_ex(&l, &rec, names, 2, false));
+    const uint8_t one[4] = {198, 18, 0, 5};
+    plant_flow(&l, 1, one, one);
+    ASSERT_EQ(FIRC_OK, firc_app_move_group(l.app, k_g1, 1, false));
+    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT_EQ(0, rec.dev);
+    ASSERT(closed(&rec, 198, 18, 0, 0, 24));
+    ASSERT_FALSEm("no flush before the ack", fake_ct_deleted(l.ctk, one, 4));
+    firc_app_ktcp_closed(l.app, 0);
+    ASSERTm("paid on the ack", fake_ct_deleted(l.ctk, one, 4));
+    listed_down(&l);
+    PASS();
+}
+
 static int g_hooked;
 static int64_t g_hooked_interval;
 static int64_t g_hooked_timeout;
@@ -7428,6 +8770,41 @@ int main(int argc, char **argv) {
     RUN_TEST(a_save_before_its_pass_still_reads_live);
     RUN_TEST(before_the_first_pass_a_group_reads_not_written);
     RUN_TEST(a_group_the_kernel_refuses_is_left_out_and_the_rest_written);
+    RUN_TEST(the_map_is_pushed_before_held_answers_are_released);
+    RUN_TEST(the_image_holds_only_redirect_groups_pairs);
+    RUN_TEST(the_image_is_sorted_by_device_and_fake);
+    RUN_TEST(a_failed_report_post_keeps_the_last_pushed_image);
+    RUN_TEST(ports_change_requests_a_pass);
+    RUN_TEST(an_undelivered_report_frees_its_image);
+    RUN_TEST(an_unchanged_port_table_interrupts_no_pass);
+    RUN_TEST(removing_a_tunnel_group_closes_its_chunks_and_subnets);
+    RUN_TEST(a_narrowed_selector_closes_chunks_and_subnets);
+    RUN_TEST(a_narrowing_edit_closes_each_prefix_once);
+    RUN_TEST(a_lost_subnet_prefix_is_closed);
+    RUN_TEST(a_group_routed_again_the_same_way_closes_nothing);
+    RUN_TEST(the_stop_closes_nothing);
+    RUN_TEST(a_non_tunnel_group_sends_no_close);
+    RUN_TEST(a_withdrawn_tunnel_groups_flush_waits_for_the_close_ack);
+    RUN_TEST(an_unanswered_close_pays_the_flush_after_a_second);
+    RUN_TEST(a_tunnel_group_with_no_live_child_is_flushed_at_once);
+    RUN_TEST(the_stop_pays_a_flush_waiting_for_its_ack);
+    RUN_TEST(two_withdrawals_on_one_tunnel_are_paid_on_their_own_acks);
+    RUN_TEST(a_late_ack_pays_no_newer_wait);
+    RUN_TEST(a_restarted_child_owes_no_acks);
+    RUN_TEST(a_withdrawn_tunnel_groups_field_is_held_until_its_flush);
+    RUN_TEST(a_group_routed_back_the_same_way_keeps_its_new_flows);
+    RUN_TEST(a_due_wait_is_paid_by_the_next_pass);
+    RUN_TEST(a_field_waits_for_the_groups_older_flush);
+    RUN_TEST(a_narrowed_tunnel_groups_flush_is_paid_on_its_ack);
+    RUN_TEST(a_group_back_on_another_interface_still_pays);
+    RUN_TEST(an_overdue_wait_is_paid_by_the_loops_next_report);
+    RUN_TEST(a_kept_group_still_sweeps_the_prefix_it_lost);
+    RUN_TEST(a_miss_answers_real_only_for_a_group_routed_into_that_device);
+    RUN_TEST(a_left_out_tunnel_group_closes_its_chunks_and_subnets);
+    RUN_TEST(a_narrowing_sync_that_also_drops_a_subnet_closes_that_subnet);
+    RUN_TEST(without_a_committer_a_narrowing_closes_at_once);
+    RUN_TEST(without_a_committer_a_lost_prefix_closes_at_once);
+    RUN_TEST(a_miss_from_a_device_past_the_table_answers_nothing);
     RUN_TEST(a_left_out_group_is_not_tried_again_until_it_changes);
     RUN_TEST(an_edit_the_kernel_takes_brings_the_left_out_group_back);
     RUN_TEST(two_refused_groups_fail_the_whole_pass);
@@ -7539,6 +8916,13 @@ int main(int argc, char **argv) {
     RUN_TEST(an_edit_on_the_second_entry_keeps_it_and_its_flows);
     RUN_TEST(live_reads_the_active_entry_s_tunnel);
     RUN_TEST(live_reads_the_active_entry_s_link);
+    RUN_TEST(a_move_onto_a_redirected_tunnel_asks_for_a_pass_and_stages_its_redir);
+    RUN_TEST(a_move_off_a_redirected_tunnel_closes_before_it_flushes);
+    RUN_TEST(a_move_between_plain_interfaces_still_asks_for_no_pass);
+    RUN_TEST(a_move_back_before_the_pass_flushes_nothing);
+    RUN_TEST(a_second_move_before_the_pass_keeps_the_tunnel_s_close);
+    RUN_TEST(another_group_s_queued_tunnel_flush_leaves_a_plain_move_immediate);
+    RUN_TEST(without_a_committer_a_move_off_a_redirected_tunnel_closes_at_once);
     RUN_TEST(a_live_check_setting_reaches_the_watcher);
     RUN_TEST(a_failed_list_group_is_retried_when_its_second_entry_comes_up);
     GREATEST_MAIN_END();

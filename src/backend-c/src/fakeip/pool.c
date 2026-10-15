@@ -644,6 +644,27 @@ const char *firc_fakeip_name_of(const firc_fakeip_t *f, const firc_ip_t *addr) {
     return NULL;
 }
 
+bool firc_fakeip_pair_of(const firc_fakeip_t *f, const firc_ip_t *fake, const char **group_id, firc_ip_t *real) {
+    if (f == NULL || fake == NULL) { return false; }
+    for (const mapping_t *m = f->by_addr[FAM_V4][addr_bucket(fake)]; m != NULL; m = m->rnext[FAM_V4]) {
+        if (!ip_equal(&m->addr[FAM_V4], fake)) { continue; }
+        if (!m->has_real[FAM_V4]) { return false; }
+        *group_id = m->owner->id;
+        *real = m->real[FAM_V4];
+        return true;
+    }
+    for (const group_t *g = f->groups; g != NULL; g = g->next) {
+        for (const quarantined_t *q = g->fam[FAM_V4].q_head; q != NULL; q = q->next) {
+            if (q->has_real && ip_equal(&q->addr, fake)) {
+                *group_id = g->id;
+                *real = q->real;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool firc_fakeip_overlaps(const firc_fakeip_t *f, const firc_ip_t *addr, uint8_t prefix_len) {
     if (f == NULL || addr == NULL) { return false; }
     unsigned fi = addr->len == 4 ? FAM_V4 : addr->len == 16 ? FAM_V6 : N_FAM;

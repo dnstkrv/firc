@@ -19,6 +19,8 @@ const firc_xt_ext_desc_t firc_xt_exts[] = {
     {FIRC_XT_EXT_MULTIPORT, "multiport", false, 1, 1, false},
     {FIRC_XT_EXT_MAC, "mac", false, 0, 0, false},
     {FIRC_XT_EXT_CONNMARK_MATCH, "connmark", false, 1, 1, false},
+    {FIRC_XT_EXT_REDIRECT, "REDIRECT", true, 0, 0, false},
+    {FIRC_XT_EXT_ADDRTYPE, "addrtype", false, 1, 1, false},
     {FIRC_XT_EXT_LIMIT, "limit", false, 0, 0, true},
     {FIRC_XT_EXT_LENGTH, "length", false, 0, 0, true},
     {FIRC_XT_EXT_CONNBYTES, "connbytes", false, 0, 0, true},
@@ -48,6 +50,8 @@ _Static_assert(sizeof(xt_reject_info_t) <= MAX_PAYLOAD, "REJECT fits an ext_t");
 _Static_assert(sizeof(xt_mark_tginfo2_t) <= MAX_PAYLOAD, "MARK fits an ext_t");
 _Static_assert(sizeof(xt_connmark_tginfo1_t) <= MAX_PAYLOAD, "CONNMARK fits an ext_t");
 _Static_assert(sizeof(xt_nflog_info_t) <= MAX_PAYLOAD, "NFLOG fits an ext_t");
+_Static_assert(sizeof(xt_addrtype_info_v1_t) <= MAX_PAYLOAD, "addrtype fits an ext_t");
+_Static_assert(sizeof(xt_nat_ipv4_compat_t) <= MAX_PAYLOAD, "REDIRECT fits an ext_t");
 #define NOT_MINE (-1)
 #define BAD (-2)
 
@@ -126,12 +130,12 @@ static bool parse_u16(const char *s, uint16_t *v) {
     return true;
 }
 
-static bool parse_ports(const char *s, uint16_t *lo, uint16_t *hi) {
+static bool parse_ports(const char *s, char sep, uint16_t *lo, uint16_t *hi) {
     char buf[16];
     size_t n = strlen(s);
     if (n == 0 || n >= sizeof(buf)) { return false; }
     memcpy(buf, s, n + 1);
-    char *colon = strchr(buf, ':');
+    char *colon = strchr(buf, sep);
     if (colon == NULL) {
         if (!parse_u16(buf, lo)) { return false; }
         *hi = *lo;
@@ -301,6 +305,9 @@ static bool open_match(want_t *w, const char *name) {
         x->seen = 1;
         return true;
     }
+    if (strcmp(name, "addrtype") == 0) {
+        return !w->v6 && open_ext(w, FIRC_XT_EXT_ADDRTYPE, "addrtype", 1, sizeof(xt_addrtype_info_v1_t)) != NULL;
+    }
     if (strcmp(name, "length") == 0) { return open_ext(w, FIRC_XT_EXT_LENGTH, "length", 0, sizeof(xt_length_info_t)) != NULL; }
     if (strcmp(name, "connbytes") == 0) {
         return open_ext(w, FIRC_XT_EXT_CONNBYTES, "connbytes", 0, sizeof(xt_connbytes_info_t)) != NULL;
@@ -422,7 +429,7 @@ static int mark_option(ext_t *x, const char *opt, char *const *a, size_t na, boo
 static int l4_option(ext_t *x, const char *opt, char *const *a, size_t na, bool inv) {
     if (strcmp(opt, "--dport") == 0) {
         uint16_t lo = 0, hi = 0;
-        if (na < 1 || inv || (x->seen & 1u) || !parse_ports(a[0], &lo, &hi)) { return BAD; }
+        if (na < 1 || inv || (x->seen & 1u) || !parse_ports(a[0], ':', &lo, &hi)) { return BAD; }
         memcpy(x->p + 4, &lo, 2);
         memcpy(x->p + 6, &hi, 2);
         x->seen |= 1u;
@@ -674,6 +681,18 @@ static int string_option(ext_t *x, const char *opt, char *const *a, size_t na) {
     return 1;
 }
 
+static int addrtype_option(ext_t *x, const char *opt, char *const *a, size_t na, bool inv) {
+    if (strcmp(opt, "--dst-type") != 0) { return NOT_MINE; }
+    if (na < 1 || x->seen != 0 || strcmp(a[0], "LOCAL") != 0) { return BAD; }
+    xt_addrtype_info_v1_t at;
+    memset(&at, 0, sizeof(at));
+    at.dest = XT_ADDRTYPE_LOCAL;
+    at.flags = inv ? XT_ADDRTYPE_INVERT_DEST : 0u;
+    memcpy(x->p, &at, sizeof(at));
+    x->seen = 1;
+    return 1;
+}
+
 static int match_option(const want_t *w, ext_t *x, const char *opt, char *const *a, size_t na, bool inv) {
     if (x == NULL) { return NOT_MINE; }
     switch (x->bit) {
@@ -688,6 +707,7 @@ static int match_option(const want_t *w, ext_t *x, const char *opt, char *const 
     case FIRC_XT_EXT_LENGTH: return length_option(x, opt, a, na);
     case FIRC_XT_EXT_CONNBYTES: return connbytes_option(x, opt, a, na);
     case FIRC_XT_EXT_STRING: return string_option(x, opt, a, na);
+    case FIRC_XT_EXT_ADDRTYPE: return addrtype_option(x, opt, a, na, inv);
     default: return NOT_MINE;
     }
 }
@@ -737,6 +757,9 @@ static bool open_target(want_t *w, const char *name) {
         *t = (ext_t){.bit = FIRC_XT_EXT_CONNMARK, .name = "CONNMARK", .rev = 1, .size = sizeof(xt_connmark_tginfo1_t)};
     } else if (strcmp(name, "NFLOG") == 0) {
         *t = (ext_t){.bit = FIRC_XT_EXT_NFLOG, .name = "NFLOG", .rev = 0, .size = sizeof(xt_nflog_info_t), .seen = 1};
+    } else if (strcmp(name, "REDIRECT") == 0) {
+        if (w->v6) { return false; }
+        *t = (ext_t){.bit = FIRC_XT_EXT_REDIRECT, .name = "REDIRECT", .rev = 0, .size = sizeof(xt_nat_ipv4_compat_t)};
     } else {
         if (!chain_name_ok(name)) { return false; }
         w->target = T_JUMP;
@@ -831,6 +854,21 @@ static int nflog_option(ext_t *t, const char *opt, char *const *a, size_t na) {
     return 1;
 }
 
+static int redirect_option(ext_t *t, const char *opt, char *const *a, size_t na) {
+    if (strcmp(opt, "--to-ports") != 0 || na < 1 || t->seen != 0) { return BAD; }
+    uint16_t lo = 0, hi = 0;
+    if (!parse_ports(a[0], '-', &lo, &hi) || lo == 0) { return BAD; }
+    xt_nat_ipv4_compat_t c;
+    memset(&c, 0, sizeof(c));
+    c.rangesize = 1;
+    c.range[0].flags = XT_NAT_PROTO_SPECIFIED;
+    c.range[0].min_port = htons(lo);
+    c.range[0].max_port = htons(hi);
+    memcpy(t->p, &c, sizeof(c));
+    t->seen = 1;
+    return 1;
+}
+
 static int target_option(want_t *w, const char *opt, char *const *a, size_t na) {
     if (w->target == T_DNAT) { return dnat_option(w, opt, a, na); }
     if (w->target != T_EXT) { return BAD; }
@@ -839,6 +877,7 @@ static int target_option(want_t *w, const char *opt, char *const *a, size_t na) 
     case FIRC_XT_EXT_MARK_TARGET: return mark_target_option(&w->t, opt, a, na);
     case FIRC_XT_EXT_CONNMARK: return connmark_option(&w->t, opt, a, na);
     case FIRC_XT_EXT_NFLOG: return nflog_option(&w->t, opt, a, na);
+    case FIRC_XT_EXT_REDIRECT: return redirect_option(&w->t, opt, a, na);
     default: return BAD;
     }
 }
@@ -853,6 +892,7 @@ static bool target_complete(const want_t *w) {
         return w->to_addr || w->to_port;
     case T_EXT: {
         if (w->t.seen == 0) { return false; }
+        if (w->t.bit == FIRC_XT_EXT_REDIRECT) { return w->proto == 6 || w->proto == 17; }
         if (w->t.bit != FIRC_XT_EXT_REJECT) { return true; }
         uint32_t with;
         memcpy(&with, w->t.p, sizeof(with));
@@ -911,7 +951,7 @@ static bool is_generic(const char *a) {
 
 static bool invertible(const char *a) {
     return strcmp(a, "--mark") == 0 || strcmp(a, "--ctorigdst") == 0 || strcmp(a, "--mac-source") == 0 ||
-           strcmp(a, "-i") == 0 || strcmp(a, "-o") == 0;
+           strcmp(a, "--dst-type") == 0 || strcmp(a, "-i") == 0 || strcmp(a, "-o") == 0;
 }
 
 static bool read_rule(firc_ipt_proto_t fam, uint8_t mac_rev, const firc_ipt_rule_t *rule, want_t *w) {

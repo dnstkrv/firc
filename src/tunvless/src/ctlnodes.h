@@ -8,6 +8,7 @@ struct ctln_hooks {
     void (*ack)(int count);
     void (*pins_full)(void);
     int resolve_ms;
+    void (*map_ack)(int count);
 };
 
 int ctln_start(const struct ctln_hooks *h);

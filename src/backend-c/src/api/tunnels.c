@@ -123,7 +123,8 @@ static cJSON *tunnel_json(const firc_tunnel_t *t)
     }
     ok = ok && cJSON_AddNumberToObject(adv, "timeout", t->timeout_s) != NULL &&
          cJSON_AddBoolToObject(adv, "insecure", t->insecure) != NULL &&
-         cJSON_AddStringToObject(adv, "ca", t->ca) != NULL;
+         cJSON_AddStringToObject(adv, "ca", t->ca) != NULL &&
+         cJSON_AddBoolToObject(adv, "kernelTcp", t->kernel_tcp) != NULL;
     ok = ok && cJSON_AddStringToObject(o, "id", t->id) != NULL &&
          cJSON_AddStringToObject(o, "device", t->device) != NULL &&
          cJSON_AddStringToObject(o, "description", t->description) != NULL &&
@@ -391,7 +392,8 @@ static const jkey_t TUNNEL_KEYS[] = {
     {"advanced", T_OBJ}, {"description", T_STR},
 };
 static const jkey_t UPLINK_KEYS[] = {{"kind", T_STR}, {"ref", T_STR}};
-static const jkey_t ADVANCED_KEYS[] = {{"timeout", T_NUM}, {"insecure", T_BOOL}, {"ca", T_STR}};
+static const jkey_t ADVANCED_KEYS[] = {
+    {"timeout", T_NUM}, {"insecure", T_BOOL}, {"ca", T_STR}, {"kernelTcp", T_BOOL}};
 static const jkey_t SOURCE_KEYS[] = {{"id", T_STR},   {"kind", T_STR}, {"link", T_STR},
                                      {"name", T_STR}, {"url", T_STR},  {"interval", T_NUM}};
 
@@ -483,7 +485,7 @@ static bool tunnel_typed(const cJSON *t, load_err_t *le)
     const cJSON *up = cJSON_GetObjectItemCaseSensitive(t, "uplink");
     const cJSON *adv = cJSON_GetObjectItemCaseSensitive(t, "advanced");
     if ((cJSON_IsObject(up) && !keys_typed(up, UPLINK_KEYS, 2, "uplink.", le)) ||
-        (cJSON_IsObject(adv) && !keys_typed(adv, ADVANCED_KEYS, 3, "advanced.", le)) ||
+        (cJSON_IsObject(adv) && !keys_typed(adv, ADVANCED_KEYS, 4, "advanced.", le)) ||
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "order"), "order", le) ||
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "exclude"), "exclude", le)) {
         return false;
@@ -880,6 +882,7 @@ static cJSON *tunnel_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t,
          cJSON_AddNumberToObject(o, "backoffS", st->backoff_s) != NULL &&
          cJSON_AddNumberToObject(o, "lastExit", st->last_exit) != NULL &&
          cJSON_AddBoolToObject(o, "uplinkOk", st->uplink_ok) != NULL &&
+         cJSON_AddNumberToObject(o, "tcpPort", st->tcp_port) != NULL &&
          cJSON_AddNumberToObject(o, "rxBps", (double)rx) != NULL &&
          cJSON_AddNumberToObject(o, "txBps", (double)tx) != NULL &&
          put_item(o, "groups", groups_of(ctx, t->device));

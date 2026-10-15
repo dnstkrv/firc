@@ -1116,6 +1116,10 @@ definitions:
         description: 'Accept allowInsecure nodes and skip certificate checks'
         example: false
         type: boolean
+      kernelTcp:
+        description: 'The kernel terminates the TCP of groups routed into this tunnel and hands it to tunvless'
+        example: false
+        type: boolean
       timeout:
         description: 'Probe timeout in seconds, 1..600 (default 8)'
         example: 8
@@ -1333,6 +1337,10 @@ definitions:
         items:
           $ref: '#/definitions/types.TunnelSubState'
         type: array
+      tcpPort:
+        description: 'Local port tunvless takes the kernel-terminated TCP on; 0 for none'
+        example: 0
+        type: integer
       txBps:
         example: 0
         type: integer

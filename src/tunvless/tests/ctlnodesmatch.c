@@ -2,6 +2,7 @@
 #include "unit.h"
 #include "../src/proto/transport/trdial.c"
 #include "../src/ctlnodes.h"
+#include "../src/ctlmap.h"
 #include "nodes.h"
 #include "vless.h"
 #include <pthread.h>
@@ -37,7 +38,7 @@ static void release(int k) {
 
 struct pub { int n; int c[8]; };
 static struct pub g_pub[32];
-static int g_pub_n, g_acks[16], g_ack_n, g_full;
+static int g_pub_n, g_acks[16], g_ack_n, g_full, g_map_acks[4], g_map_ack_n;
 static int64_t g_ack_ms[16];
 
 static int64_t ms_now(void) {
@@ -61,6 +62,13 @@ static int on_select(const int *sel, size_t n) {
 static void on_ack(int count) {
     pthread_mutex_lock(&g_mu);
     if (g_ack_n < 16) { g_ack_ms[g_ack_n] = ms_now(); g_acks[g_ack_n++] = count; }
+    pthread_cond_broadcast(&g_cv);
+    pthread_mutex_unlock(&g_mu);
+}
+
+static void on_map_ack(int count) {
+    pthread_mutex_lock(&g_mu);
+    if (g_map_ack_n < 4) g_map_acks[g_map_ack_n++] = count;
     pthread_cond_broadcast(&g_cv);
     pthread_mutex_unlock(&g_mu);
 }
@@ -134,7 +142,8 @@ int main(void) {
     nodes_init(sizeof(struct vless_node));
     transport_pin_host("pinned1");
     transport_pin_host("pinned2");
-    static const struct ctln_hooks h = { on_select, on_ack, on_full, 2000 };
+    ctlmap_init(htonl(0xc6120000u), 15);
+    static const struct ctln_hooks h = { on_select, on_ack, on_full, 2000, on_map_ack };
     check("resolver thread started", 0, ctln_start(&h));
     int p[2];
     if (pipe(p) != 0) return 2;
@@ -143,8 +152,19 @@ int main(void) {
     pthread_t rt;
     pthread_create(&rt, NULL, reader, in);
 
+    put("map\n198.18.0.1 1.2.3.4\n198.18.0.2 -\n\nclose\n198.18.0.0/24\n\nmapall\n198.18.0.3 1.2.3.4\n\n");
     cmd((const char *[]){ "hold1", "bad1" }, 2);
     check("ack: one per command, with the usable count", 2, wait_for(&g_ack_n, 1, 1000) == 1 ? g_acks[0] : -1);
+    uint32_t cb[2];
+    uint8_t cl[2];
+    /* catches: map and close lines read as nodes, or a nodes command read as map lines */
+    check("map and mapall acked apart from nodes", 1,
+          wait_for(&g_map_ack_n, 2, 1000) == 2 && g_map_acks[0] == 2 && g_map_acks[1] == 1);
+    uint32_t real = 0;
+    check("mapall read as mapall", 1, ctlmap_lookup(htonl(0xc6120001u), &real) == CM_NONE &&
+          ctlmap_lookup(htonl(0xc6120003u), &real) == CM_REAL);
+    check("close posted, not acked", 1,
+          ctlmap_take_closes(cb, cl, 2, NULL) == 1 && cb[0] == htonl(0xc6120000u) && cl[0] == 24);
     settle();
     /* catches: an empty or partial set published before any of its nodes resolves */
     check("nothing pinned yet: nothing published", 0, g_pub_n);

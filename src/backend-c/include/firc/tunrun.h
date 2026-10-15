@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "firc/err.h"
+#include "firc/ktcp.h"
 #include "firc/log.h"
 #include "firc/loop.h"
 #include "firc/rtnl.h"
@@ -70,6 +71,31 @@ void firc_tunrun_refresh_uplinks(firc_tunrun_t *t, const char *ifname);
 void firc_tunrun_stop(firc_tunrun_t *t, int grace_ms);
 
 void firc_tunrun_free(firc_tunrun_t *t);
+
+typedef struct firc_tunrun_ktcp {
+    void (*ports)(const uint16_t ports[FIRC_KTCP_DEVICES], void *ud);
+    const firc_ktcp_image_t *(*image)(void *ud);
+    bool (*real_of)(uint8_t dev, const uint8_t fake[4], uint8_t real[4], void *ud);
+    void *ud;
+    void (*closed)(uint8_t dev, void *ud);
+    void (*ready)(uint8_t dev, void *ud);
+} firc_tunrun_ktcp_t;
+
+/* Takes a copy of k and calls its ports() with the port table at once and on every change; NULL detaches. */
+void firc_tunrun_set_ktcp(firc_tunrun_t *t, const firc_tunrun_ktcp_t *k);
+
+/* Sends each ready tunvless with a port the lines of its device that changed from prev to next (both sorted). */
+void firc_tunrun_map_pushed(firc_tunrun_t *t, const firc_ktcp_image_t *prev, const firc_ktcp_image_t *next);
+
+/* Passes base/len as --tcp-pool to kernel-TCP tunnels from their next start; len 0 passes none. */
+void firc_tunrun_set_tcp_pool(firc_tunrun_t *t, const uint8_t base[4], uint8_t len);
+
+/* Sends the v4 prefixes of p as close to tunvless<dev> when it is ready with a port; dropped otherwise. Returns the
+   commands sent, each acked by one closed() call; 0 when dropped. */
+int firc_tunrun_close(firc_tunrun_t *t, uint8_t dev, const firc_nf_prefix_t *p, size_t n);
+
+/* false: the kernel cannot redirect (no REDIRECT or addrtype), so states report tcpPort 0. True by default. */
+void firc_tunrun_set_ktcp_usable(firc_tunrun_t *t, bool usable);
 
 void firc_tunrun_set_list_max_for_test(firc_tunrun_t *t, size_t bytes); /* test seam: tunvless's stdin limit */
 /* Test seam: the clock and the period of the check for a tunnel with no working node; returns its timer, 0 none. */

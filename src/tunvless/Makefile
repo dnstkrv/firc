@@ -24,7 +24,7 @@ PREFIXMAP := -ffile-prefix-map=$(CURDIR)/=
 ALL_CFLAGS = $(CFLAGS) $(WARN) $(INC) $(PREFIXMAP) -ffunction-sections -fdata-sections
 DEFS     := -DTUNVLESS_VERSION='"$(VERSION)"'
 
-TUNNEL_SRC    := src/tunnel/tun.c src/tunnel/stack.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/tunnel/pool.c src/tunnel/nodes.c src/control.c
+TUNNEL_SRC    := src/tunnel/tun.c src/tunnel/stack.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/tunnel/pool.c src/tunnel/nodes.c src/control.c src/ctlmap.c
 VLESS_SRC     := src/proto/vless/vldial.c src/proto/vless/client.c src/proto/vless/vless_proto.c src/proto/vless/vlink.c \
                  src/proto/vless/vision.c src/proto/vless/sublink.c src/proto/vless/sub.c
 TRANSPORT_SRC := src/proto/transport/transport.c src/proto/transport/trdial.c \
@@ -80,7 +80,7 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch dialmatch ratelogmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch dialmatch ratelogmatch
 CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch
 
 test: unit-test crypto-test
@@ -155,6 +155,10 @@ $(T)/ctlmatch: tests/ctlmatch.c src/control.c src/control.h
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/ctlmatch.c src/control.c -lpthread
 
+$(T)/ctlmapmatch: tests/ctlmapmatch.c src/ctlmap.c src/ctlmap.h
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/ctlmapmatch.c src/ctlmap.c -lpthread
+
 $(T)/nodesmatch: tests/nodesmatch.c src/tunnel/nodes.c src/proto/transport/trdial.c $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/nodesmatch.c src/tunnel/nodes.c -lpthread
@@ -167,7 +171,7 @@ $(T)/dialmatch: tests/dialmatch.c src/proto/transport/trdial.c $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/dialmatch.c -lpthread
 
-CTLN_SRC := src/ctlnodes.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
+CTLN_SRC := src/ctlnodes.c src/ctlmap.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
             src/proto/vless/vless_proto.c $(SUB_SRC)
 $(T)/ctlnodesmatch: tests/ctlnodesmatch.c src/proto/transport/trdial.c $(CTLN_SRC) $(HDR)
 	@mkdir -p $(T)
@@ -177,7 +181,7 @@ $(T)/rtxmatch: tests/rtxmatch.c src/tunnel/rtx.c src/tunnel/rtx.h
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/rtxmatch.c src/tunnel/rtx.c
 
-TUNNEL_TEST_SRC := src/control.c src/tunnel/tun.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/proto/vless/vless_proto.c \
+TUNNEL_TEST_SRC := src/control.c src/ctlmap.c src/tunnel/tun.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/proto/vless/vless_proto.c \
                    src/proto/vless/vision.c src/proto/vless/vldial.c src/lib/osrand.c
 $(T)/tunnelmatch: tests/tunnelmatch.c src/tunnel/stack.c src/tunnel/pool.c $(TUNNEL_TEST_SRC) $(HDR)
 	@mkdir -p $(T)

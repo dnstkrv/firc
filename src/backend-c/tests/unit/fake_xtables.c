@@ -181,6 +181,8 @@ static const kext_t k_exts[] = {
     {"SNAT", true, 1, 6, 0, sizeof(xt_nat_range_t), HOOK_POST | HOOK_IN, "nat"},
     {"MASQUERADE", true, 0, 4, 0, sizeof(xt_nat_ipv4_compat_t), HOOK_POST, "nat"},
     {"MASQUERADE", true, 0, 6, 0, sizeof(xt_nat_range_t), HOOK_POST, "nat"},
+    {"REDIRECT", true, 0, 4, 0, sizeof(xt_nat_ipv4_compat_t), HOOK_PRE | HOOK_OUT, "nat"},
+    {"REDIRECT", true, 0, 6, 0, sizeof(xt_nat_range_t), HOOK_PRE | HOOK_OUT, "nat"},
     {"REJECT", true, 0, 4, 0, sizeof(xt_reject_info_t), HOOK_IN | HOOK_FWD | HOOK_OUT, "filter"},
     {"REJECT", true, 0, 6, 0, sizeof(xt_reject_info_t), HOOK_IN | HOOK_FWD | HOOK_OUT, "filter"},
     {"MARK", true, 2, 0, 0, sizeof(xt_mark_tginfo2_t), ALL_HOOKS, NULL},
@@ -202,6 +204,8 @@ static const kext_t k_exts[] = {
     {"length", false, 0, 6, 0, sizeof(xt_length_info_t), ALL_HOOKS, NULL},
     {"connbytes", false, 0, 0, 0, sizeof(xt_connbytes_info_t), ALL_HOOKS, NULL},
     {"string", false, 1, 0, 0, sizeof(xt_string_info_t), ALL_HOOKS, NULL},
+    {"addrtype", false, 0, 4, 0, 12u, ALL_HOOKS, NULL},
+    {"addrtype", false, 1, 0, 0, sizeof(xt_addrtype_info_v1_t), ALL_HOOKS, NULL},
 };
 
 static const kext_t *kext_find(bool v6, bool target, const char *name, uint8_t rev, int *miss) {

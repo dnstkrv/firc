@@ -73,6 +73,8 @@ int firc_ipt_refusal(const firc_ipt_t *ipt);
 /* Writes chain (unjumped) into table and takes it away again, outside the registrations; FIRC_ERR_IO when refused. */
 firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *chain, firc_ipt_rule_t *const *rules,
                                 size_t n);
+/* firc_xt_has on the engine's handle; false for a NULL engine. */
+bool firc_ipt_has(const firc_ipt_t *ipt, const char *name);
 /* firc_xt_probe_capture on the engine's handle. */
 firc_err_t firc_ipt_probe_capture(firc_ipt_t *ipt);
 

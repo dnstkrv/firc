@@ -186,6 +186,41 @@ static bool tunnel_down(void *ud, const char *iface)
     return firc_tunrun_device_down(ud, iface);
 }
 
+static void ktcp_ports(const uint16_t ports[FIRC_KTCP_DEVICES], void *ud)
+{
+    firc_app_set_ktcp_ports(ud, ports);
+}
+
+static const firc_ktcp_image_t *ktcp_image(void *ud)
+{
+    return firc_app_ktcp_image(ud);
+}
+
+static bool ktcp_real_of(uint8_t dev, const uint8_t fake[4], uint8_t real[4], void *ud)
+{
+    return firc_app_ktcp_real_of(ud, dev, fake, real);
+}
+
+static void ktcp_pushed(const firc_ktcp_image_t *prev, const firc_ktcp_image_t *next, void *ud)
+{
+    firc_tunrun_map_pushed(ud, prev, next);
+}
+
+static void ktcp_closed(uint8_t dev, void *ud)
+{
+    firc_app_ktcp_closed(ud, dev);
+}
+
+static void ktcp_ready(uint8_t dev, void *ud)
+{
+    firc_app_ktcp_ready(ud, dev);
+}
+
+static int ktcp_close(uint8_t dev, const firc_nf_prefix_t *p, size_t n, void *ud)
+{
+    return firc_tunrun_close(ud, dev, p, n);
+}
+
 static size_t iw_n_groups(void *ud) { return firc_app_user_group_count(((struct daemon *)ud)->app); }
 
 static const firc_group_t *iw_group_at(void *ud, size_t i) {
@@ -254,6 +289,8 @@ static void iw_settings(void *ud, const firc_app_config_t *run) {
 static void daemon_teardown(struct daemon *d)
 {
     firc_update_cancel(d->update);
+    firc_app_set_ktcp_sink(d->app, NULL);
+    if (d->tunrun != NULL) { firc_tunrun_set_ktcp(d->tunrun, NULL); }
     firc_app_set_ifaces(d->app, NULL);
     firc_ifcheck_free(d->ifcheck);
     d->ifcheck = NULL;
@@ -1401,6 +1438,17 @@ int main(int argc, char **argv)
         }
         firc_tunrun_set_subs(d.tunrun, d.tunsubs);
         firc_app_set_tunnel_down(d.app, tunnel_down, d.tunrun);
+        firc_ip_t pool4;
+        uint8_t pool4_len = 0;
+        if (firc_fakeip_pool_prefix(d.pool, FIRC_FAM_V4, &pool4, &pool4_len)) {
+            firc_tunrun_set_tcp_pool(d.tunrun, pool4.b, pool4_len);
+        }
+        const firc_tunrun_ktcp_t hooks = {ktcp_ports, ktcp_image, ktcp_real_of, d.app, ktcp_closed, ktcp_ready};
+        firc_tunrun_set_ktcp(d.tunrun, &hooks);
+        firc_tunrun_set_ktcp_usable(d.tunrun, d.ipt4 != NULL && firc_ipt_has(d.ipt4, "REDIRECT") &&
+                                                      firc_ipt_has(d.ipt4, "addrtype"));
+        const firc_app_ktcp_sink_t sink = {ktcp_pushed, ktcp_close, d.tunrun};
+        firc_app_set_ktcp_sink(d.app, &sink);
         firc_tunnels_t tunnels = {0};
         if (load_tunnels(&tunnels, "starting with no tunnels")) {
             (void)firc_tunrun_apply(d.tunrun, &tunnels);

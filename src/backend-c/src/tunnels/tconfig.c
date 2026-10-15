@@ -506,6 +506,10 @@ static firc_err_t parse_advanced(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *
             if (!parse_bool(v, &t->insecure)) {
                 return fail(c, "must be true or false", "tunnels[%zu].advanced.insecure", ti);
             }
+        } else if (strcmp(text(k), "kernelTcp") == 0) {
+            if (!parse_bool(v, &t->kernel_tcp)) {
+                return fail(c, "must be true or false", "tunnels[%zu].advanced.kernelTcp", ti);
+            }
         } else if (strcmp(text(k), "ca") == 0) {
             if (!copy_str(v, t->ca, sizeof t->ca)) {
                 return fail(c, "a path under 256 bytes", "tunnels[%zu].advanced.ca", ti);
@@ -983,6 +987,7 @@ static void emit_tunnel(em_t *e, const firc_tunnel_t *t)
     kv_secs(e, "timeout", t->timeout_s);
     kv(e, "insecure", t->insecure ? "true" : "false", false);
     kv(e, "ca", t->ca, true);
+    kv(e, "kernelTcp", t->kernel_tcp ? "true" : "false", false);
     map_end(e);
     map_end(e);
 }
@@ -1039,7 +1044,8 @@ bool firc_tunnel_same_argv(const firc_tunnel_t *a, const firc_tunnel_t *b)
     return strcmp(a->id, b->id) == 0 && strcmp(a->device, b->device) == 0 && a->enable == b->enable &&
            a->uplink == b->uplink && strcmp(a->uplink_ref, b->uplink_ref) == 0 && a->active == b->active &&
            strcmp(a->by, b->by) == 0 && a->interval_s == b->interval_s && a->silence_s == b->silence_s &&
-           a->timeout_s == b->timeout_s && a->insecure == b->insecure && strcmp(a->ca, b->ca) == 0;
+           a->timeout_s == b->timeout_s && a->insecure == b->insecure && strcmp(a->ca, b->ca) == 0 &&
+           a->kernel_tcp == b->kernel_tcp;
 }
 
 bool firc_tunnel_same_nodes(const firc_tunnel_t *a, const firc_tunnel_t *b)
@@ -1055,4 +1061,18 @@ bool firc_tunnel_same_nodes(const firc_tunnel_t *a, const firc_tunnel_t *b)
         }
     }
     return true;
+}
+
+uint16_t firc_tunnel_tcp_port(const firc_tunnel_t *t)
+{
+    bool prefix;
+    if (!t->enable || !t->kernel_tcp || !device_ok(t->device, &prefix)) {
+        return 0;
+    }
+    const char *d = t->device + 8;
+    int n = d[0] - '0';
+    if (d[1] != '\0') {
+        n = n * 10 + (d[1] - '0');
+    }
+    return (uint16_t)(FIRC_TUNNEL_TCP_PORT_BASE + n);
 }

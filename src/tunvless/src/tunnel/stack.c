@@ -37,6 +37,7 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 
 #include "tun.h"
@@ -44,7 +45,13 @@
 #include "dialer.h"
 #include "stack.h"
 #include "ifcfg.h"
+#include "../control.h"
+#include "../ctlmap.h"
 #include "ratelog.h"
+
+#ifndef SO_ORIGINAL_DST
+#define SO_ORIGINAL_DST 80
+#endif
 
 /* ---- leveled log ----------------------------------------------------------------------
  *
@@ -148,6 +155,8 @@ struct conn {
     /* The client's SYN had the window scale option, so OUR window is scaled too: the window
      * field to it is the window >> g_rcv_shift (rcv_win_field). Without it, 16 bits as they are. */
     uint8_t ws_on;
+    uint8_t sock;
+    uint8_t carmed;
     /* The client's window field as received; scaled by client_wscale. */
     uint16_t client_win;
     /* Position in g_live and the next slot in the hash chain. Indexes, not pointers: two bytes
@@ -178,6 +187,8 @@ struct conn {
      * epoll_wait belong to the slot's previous connection. */
     uint32_t born_turn;
     int fd;                   /* copy of the session's socket, for epoll_ctl and poll */
+    int cfd;
+    uint32_t odst;
     int done;                 /* the connector has finished: read only with ACQUIRE */
     int rc;                   /* its result: 0 or the dialer's error code */
     /* When the server closed: the start of the wait for ACKs (CLOSE_DRAIN_MS).
@@ -1239,7 +1250,7 @@ static struct conn *conn_new(const struct tun_dev *tun) {
     /* RST only to an evicted TCP connection: its client waits for an answer on an open
      * connection and without a refusal would sit until its timeout. A UDP flow has no such wait,
      * and an RST for a datagram is a packet the client's stack would not understand. */
-    if (!old->is_udp) {
+    if (!old->is_udp && !old->sock) {
         unsigned char rst[64];
         size_t rl = tcp_build(rst, sizeof(rst), old->key.dst, old->key.src,
                               old->key.dport, old->key.sport,
@@ -1265,9 +1276,20 @@ static struct conn *conn_new(const struct tun_dev *tun) {
 
 /* Free the slot. close() removes the descriptor from epoll by itself: no epoll_ctl is needed,
  * and one after close would hand the kernel a closed number. */
+static void sock_linger(int fd, int rst) {
+    struct linger lg = { rst, 0 };
+    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+}
+
+static void sock_rst(int fd) {
+    sock_linger(fd, 1);
+    close(fd);
+}
+
 static void conn_drop(struct conn *c) {
     TR("closing conn#%ld fd=%d\n", (long)(c - g_conns), c->fd);
     if (g_up.c == c) g_up.c = NULL;                 /* gathered bytes: never acknowledged */
+    if (c->sock && c->cfd >= 0) sock_rst(c->cfd);
     if (c->used) {
         g_dl->ops->close(SESS(c));
         conn_unlink(c);
@@ -1280,6 +1302,7 @@ static void conn_drop(struct conn *c) {
      * for the next connection (clear), touching only its start. */
     memset(c, 0, sizeof(*c));
     c->fd = -1;
+    c->cfd = -1;
     c->livepos = -1;
     c->hnext = -1;
     g_dl->ops->clear(SESS(c));
@@ -1314,8 +1337,7 @@ static void send_synack(struct conn *c, const struct tun_dev *tun) {
 
 /* RST to the client, and free the record. A UDP flow has nothing to reset: the client has no
  * connection, and learns of the close by the lack of answers, as of any lost datagram. */
-static void conn_reset(struct conn *c, const struct tun_dev *tun) {
-    if (c->is_udp) { conn_drop(c); return; }
+static void conn_rst(const struct conn *c, const struct tun_dev *tun) {
     unsigned char rst[64];
     /* The client accepts RST only with a sequence number EQUAL to the expected one (RFC 5961);
      * one inside the window but not equal draws a challenge ACK, and the connection stays. With
@@ -1333,6 +1355,10 @@ static void conn_reset(struct conn *c, const struct tun_dev *tun) {
                           c->our_seq, c->client_seq, TCP_RST | TCP_ACK,
                           NULL, 0, 0, 0, -1);
     if (rl) tun_write_ctl(tun, rst, rl);
+}
+
+static void conn_reset(struct conn *c, const struct tun_dev *tun) {
+    if (!c->is_udp && !c->sock) conn_rst(c, tun);
     conn_drop(c);
 }
 
@@ -1535,6 +1561,66 @@ static int emit_stream(void *arg, const unsigned char *p, size_t n) {
     return 0;
 }
 
+static void sock_cut(struct conn *c) {
+    c->aborted = 1;
+    if (!c->srv_closed) {
+        c->srv_closed = 1;
+        c->closed_at = g_now_ns;
+    }
+}
+
+static int sock_again(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR; }
+
+static int emit_sock(void *arg, const unsigned char *p, size_t n) {
+    struct emit_ctx *e = arg;
+    struct conn *c = e->c;
+    e->total += n;
+    if (!c->rtx.len) {
+        ssize_t w = send(c->cfd, p, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w < 0 && !sock_again()) {
+            sock_cut(c);
+            return -1;
+        }
+        if (w > 0) {
+            p += w;
+            n -= (size_t)w;
+            c->last = g_now_s;
+        }
+    }
+    if (!n) return 0;
+    if (!c->rtx.cap && rtx_init(&c->rtx, RTX_START) != 0) {
+        sock_cut(c);
+        return -1;
+    }
+    if (rtx_room(&c->rtx) < n && c->rtx.cap < RTX_CAP) rtx_grow(&c->rtx, RTX_CAP);
+    if (rtx_room(&c->rtx) < n) {
+        sock_cut(c);
+        return -1;
+    }
+    rtx_push(&c->rtx, p, (uint32_t)n);
+    return 0;
+}
+
+static void sock_flush(struct conn *c) {
+    while (c->rtx.len) {
+        const unsigned char *p = NULL;
+        uint32_t n = rtx_peek(&c->rtx, c->rtx.len, &p);
+        ssize_t w = send(c->cfd, p, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w < 0) {
+            if (!sock_again()) sock_cut(c);
+            return;
+        }
+        rtx_drop(&c->rtx, (uint32_t)w);
+        c->last = g_now_s;
+        if ((uint32_t)w < n) return;
+    }
+}
+
+static int conn_can_take(struct conn *c) {
+    if (c->sock) return !c->rtx.len;
+    return c->is_udp || client_can_take_record(c);
+}
+
 /* Read from the server and pass it to the client as TCP (or as UDP datagrams).
  *
  * Two dialer steps, not one: read, then deliver. Between them the stack counts bytes from the
@@ -1563,7 +1649,7 @@ static int downstream_pump(struct conn *c, const struct tun_dev *tun) {
      * traffic and a "did not fit" limit. */
     struct emit_ctx e = { .c = c, .tun = tun, .total = 0 };
     if (g_dl->ops->deliver(g_dl->ctx, s, c->is_udp, rx, got,
-                           c->is_udp ? emit_dgram : emit_stream, &e) != 0)
+                           c->is_udp ? emit_dgram : c->sock ? emit_sock : emit_stream, &e) != 0)
         return -1;
     if (c->is_udp) return 0;
 
@@ -2292,7 +2378,7 @@ static void flush_acks(const struct tun_dev *tun) {
 static __thread int g_win_woke;
 
 static void room_watch(struct conn *c) {
-    if (c->is_udp || c->srv_closed || !c->used) return;
+    if (c->is_udp || c->sock || c->srv_closed || !c->used) return;
     long r = conn_room(c);
     if (r < 0) return;
     uint32_t now_r = r > 0x7FFFFFFF ? 0x7FFFFFFFu : (uint32_t)r;
@@ -2338,7 +2424,7 @@ static void drain_conn_reads(struct conn *c, const struct tun_dev *tun) {
             c->rx_ready = (uint8_t)(d->has_data(s) != 0);
             return;
         }
-        if (!c->is_udp && !client_can_take_record(c)) {
+        if (!conn_can_take(c)) {
             c->rx_ready = (uint8_t)(d->has_data(s) != 0);
             return;
         }
@@ -2349,6 +2435,42 @@ static void drain_conn_reads(struct conn *c, const struct tun_dev *tun) {
         struct pollfd sp = { .fd = c->fd, .events = POLLIN };
         if (poll(&sp, 1, 0) <= 0 || !(sp.revents & POLLIN)) return;
     }
+}
+
+static int sock_read(struct conn *c, const struct tun_dev *tun) {
+    static __thread unsigned char buf[UP_MAX];
+    size_t total = 0;
+    while (!c->early && !c->client_fin && !c->srv_closed && total < DRAIN_MAX_BYTES) {
+        size_t cap = EARLY_CAP - c->early_n;
+        if (cap > UP_MAX) cap = UP_MAX;
+        long room = conn_room(c);
+        if (room >= 0 && (size_t)room < cap) cap = (size_t)room;
+        if (!cap) return 0;
+        ssize_t n = recv(c->cfd, buf, cap, MSG_DONTWAIT);
+        if (n < 0) {
+            if (sock_again()) return 0;
+            conn_reset(c, tun);
+            return 1;
+        }
+        c->last = g_now_s;
+        if (n == 0) {
+            c->client_fin = 1;
+            return 0;
+        }
+        int sr = upstream_send(c, buf, (size_t)n);
+        if (sr == SEND_AGAIN) {
+            if (early_hold(c, buf, (size_t)n) == 0) return 0;
+            conn_reset(c, tun);
+            return 1;
+        }
+        if (sr != SEND_OK) {
+            conn_node_lost(c);
+            conn_reset(c, tun);
+            return 1;
+        }
+        total += (size_t)n;
+    }
+    return 0;
 }
 
 /* A connector reported on connection c (done): the link is ready or failed. Called by the loop's
@@ -2394,6 +2516,7 @@ static int conn_ready(struct conn *c, const struct tun_dev *tun) {
     }
     c->last = g_now_s;
     TR("flow ready (conn#%ld), early data sent\n", (long)(c - g_conns));
+    if (c->sock) return sock_read(c, tun);
     return 0;
 }
 
@@ -2473,6 +2596,22 @@ static int conn_deadlines(struct conn *c, const struct tun_dev *tun, uint64_t no
         c->closed_at = now;
     }
 
+    if (c->srv_closed && c->sock) {
+        if (c->rtx.len && (now - c->closed_at) / 1000000 < CLOSE_DRAIN_MS) return 0;
+        if (c->rtx.len) {
+            conn_reset(c, tun);
+            return 1;
+        }
+        sock_linger(c->cfd, 0);
+        shutdown(c->cfd, SHUT_WR);
+        unsigned char sink[4096];
+        for (int i = 0; i < 16 && recv(c->cfd, sink, sizeof sink, MSG_DONTWAIT) > 0; i++) {}
+        close(c->cfd);
+        c->cfd = -1;
+        conn_drop(c);
+        return 1;
+    }
+
     /* Closed by the server: once the client has acknowledged everything, FIN and close. If it has
      * not within the allowed time, close anyway: the client may be gone. */
     if (c->srv_closed) {
@@ -2533,17 +2672,657 @@ struct worker {
     int served;
 };
 
+#define TUN_TOKEN ((uint32_t)MAX_CONNS)
+#define EFD_TOKEN ((uint32_t)MAX_CONNS + 1)
+#define LST_TOKEN ((uint32_t)MAX_CONNS + 2)
+#define CTL_TOKEN ((uint32_t)MAX_CONNS + 3)
+#define STOP_TOKEN ((uint32_t)MAX_CONNS + 4)
+#define CFD_BASE ((uint32_t)MAX_CONNS + 5)
+#define EVS_MAX (2 * MAX_CONNS + 5)
+_Static_assert(CFD_BASE > STOP_TOKEN, "socket slots start after the fixed tokens");
+#define ACCEPT_MAX 64
+#define PARK_MAX 256
+#define PARK_MS 300
+#define FD_RESERVE (2 * MAX_CONNS + SPARE_MAX + 32)
+#define MISS_WINDOW_NS 60000000000ull
+
+struct loop {
+    struct tun_dev tun;
+    int ep, efd, ctl;
+    uint8_t lst_off, own, stop_in;
+    uint64_t stats_at, loop_at, spare_at;
+    unsigned nodes_seen;
+    struct epoll_event evs[EVS_MAX];
+    unsigned char pkt[TUNNEL_BUF];
+};
+
+struct parked {
+    int fd;
+    uint32_t peer, od;
+    uint16_t pport, oport;
+    uint64_t at;
+};
+
+static int g_lst_fd = -1;
+static int g_tcp_port;
+static int g_park_cap = PARK_MAX;
+static struct parked g_park[PARK_MAX];
+static int g_park_n;
+static struct {
+    uint64_t since, max_ms;
+    unsigned miss, answered, timed_out;
+} g_miss;
+
+int stack_tcp_port(void) { return g_tcp_port; }
+
+static int g_stop_efd = -1;
+static int g_stop_loops;
+
+static int stop_fd(void) {
+    int fd = __atomic_load_n(&g_stop_efd, __ATOMIC_ACQUIRE);
+    if (fd >= 0) return fd;
+    int nfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (nfd < 0) return -1;
+    int none = -1;
+    if (__atomic_compare_exchange_n(&g_stop_efd, &none, nfd, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return nfd;
+    close(nfd);
+    return none;
+}
+
+static void stop_reset(const struct tun_dev *tun, int own) {
+    if (own && g_lst_fd >= 0) {
+        close(g_lst_fd);
+        g_lst_fd = -1;
+    }
+    for (int li = 0; li < g_live_n; li++) {
+        const struct conn *c = &g_conns[g_live[li]];
+        if (c->sock) {
+            sock_linger(c->cfd, !c->srv_closed || c->rtx.len);
+        } else if (!c->is_udp) {
+            conn_rst(c, tun);
+        }
+    }
+    for (int i = 0; own && i < g_park_n; i++) sock_linger(g_park[i].fd, 1);
+}
+
+void stack_stop(int wait_ms) {
+    int fd = __atomic_load_n(&g_stop_efd, __ATOMIC_ACQUIRE);
+    if (fd < 0) return;
+    uint64_t one = 1;
+    if (write(fd, &one, sizeof one) != (ssize_t)sizeof one) return;
+    struct timespec ts = { 0, 1000000 };
+    for (int i = 0; i < wait_ms && __atomic_load_n(&g_stop_loops, __ATOMIC_ACQUIRE) > 0; i++) nanosleep(&ts, NULL);
+}
+
+static int lst_open(int port) {
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int one = 1;
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+    socklen_t al = sizeof a;
+    if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+        bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 128) != 0 ||
+        getsockname(fd, (struct sockaddr *)&a, &al) != 0) {
+        int err = errno;
+        if (fd >= 0) close(fd);
+        fprintf(stderr, LOG_W "cannot listen on port %d: %s, TCP stays on the TUN\n", port,
+                strerror(err));
+        return -1;
+    }
+    g_lst_fd = fd;
+    g_tcp_port = ntohs(a.sin_port);
+    return 0;
+}
+
+static void park_cap_init(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur >= (rlim_t)(FD_RESERVE + PARK_MAX))
+        g_park_cap = PARK_MAX;
+    else if (rl.rlim_cur <= (rlim_t)FD_RESERVE)
+        g_park_cap = 0;
+    else
+        g_park_cap = (int)(rl.rlim_cur - FD_RESERVE);
+}
+
+static void sock_open(const struct tun_dev *tun, int fd, uint32_t peer, uint16_t pport, uint32_t dst,
+                      uint32_t od, uint16_t oport) {
+    struct conn *c = conn_new(tun);
+    if (!c) {
+        sock_rst(fd);
+        return;
+    }
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->sock = 1;
+    c->cfd = fd;
+    c->fd = -1;
+    c->hnext = -1;
+    c->born_turn = g_turn;
+    c->room_seen = UINT32_MAX;
+    c->key.src = peer;
+    c->key.dst = dst;
+    c->key.sport = pport;
+    c->key.dport = oport;
+    c->key.proto = 6;
+    c->odst = od;
+    c->livepos = (int16_t)g_live_n;
+    g_live[g_live_n++] = (uint16_t)(c - g_conns);
+    c->last = g_now_s;
+    c->estab_ns = g_now_ns ? g_now_ns : 1;
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    if (g_dl->ops->flow_open(g_dl->ctx, SESS(c), &c->key, 0) != 0) {
+        conn_drop(c);
+        return;
+    }
+    if (g_spare_want > 0 && spare_checkout(SESS(c)) == 0) {
+        c->fd = g_dl->ops->fd(SESS(c));
+        node_sock_silence(c->fd);
+    } else if (conn_submit(c) == 0) {
+        c->pending = 1;
+    } else {
+        conn_drop(c);
+    }
+    spare_refill();
+}
+
+static int park_has(uint32_t od) {
+    for (int i = 0; i < g_park_n; i++)
+        if (g_park[i].od == od) return 1;
+    return 0;
+}
+
+static struct parked park_take(int i) {
+    struct parked q = g_park[i];
+    g_park[i] = g_park[--g_park_n];
+    if (!park_has(q.od)) ctlmap_unask(q.od);
+    return q;
+}
+
+static void park(const struct tun_dev *tun, int fd, uint32_t peer, uint16_t pport, uint32_t od,
+                 uint16_t oport) {
+    g_miss.miss++;
+    if (g_park_n >= g_park_cap) {
+        sock_rst(fd);
+        return;
+    }
+    int a = ctlmap_ask(od);
+    if (a < 0) {
+        uint32_t real;
+        if (ctlmap_lookup(od, &real) == CM_REAL) sock_open(tun, fd, peer, pport, real, od, oport);
+        else sock_rst(fd);
+        return;
+    }
+    if (a > 0) {
+        char s[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &od, s, sizeof s)) ctl_emit_miss(s);
+    }
+    g_park[g_park_n++] = (struct parked){ fd, peer, od, pport, oport, g_now_ns };
+}
+
+static void park_pass(const struct tun_dev *tun) {
+    for (int i = 0; i < g_park_n;) {
+        uint32_t real = 0;
+        int st = ctlmap_answer(g_park[i].od, &real);
+        uint64_t age = (g_now_ns - g_park[i].at) / 1000000;
+        if (st == CM_REAL || st == CM_DENIED) {
+            g_miss.answered++;
+            if (age > g_miss.max_ms) g_miss.max_ms = age;
+        } else if (age < PARK_MS) {
+            i++;
+            continue;
+        } else {
+            g_miss.timed_out++;
+        }
+        struct parked q = park_take(i);
+        if (st == CM_REAL) sock_open(tun, q.fd, q.peer, q.pport, real, q.od, q.oport);
+        else sock_rst(q.fd);
+    }
+}
+
+static int park_wait_ms(int wait_ms) {
+    for (int i = 0; i < g_park_n; i++) {
+        uint64_t age = (g_now_ns - g_park[i].at) / 1000000;
+        int left = age >= PARK_MS ? 0 : (int)(PARK_MS - age);
+        if (left < wait_ms) wait_ms = left;
+    }
+    return wait_ms;
+}
+
+static void miss_report(uint64_t now) {
+    if (now - g_miss.since < MISS_WINDOW_NS) return;
+    if (g_miss.miss)
+        fprintf(stderr, LOG_W "%u misses in the last minute, %u answered (max %llu ms), %u timed out\n",
+                g_miss.miss, g_miss.answered, (unsigned long long)g_miss.max_ms, g_miss.timed_out);
+    memset(&g_miss, 0, sizeof g_miss);
+    g_miss.since = now;
+}
+
+static void sock_take(const struct tun_dev *tun, int fd, const struct sockaddr_in *pa) {
+    struct sockaddr_in od, me;
+    socklen_t ol = sizeof od, ml = sizeof me;
+    sock_linger(fd, 1);
+    if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &od, &ol) != 0 || od.sin_family != AF_INET ||
+        getsockname(fd, (struct sockaddr *)&me, &ml) != 0 ||
+        (od.sin_addr.s_addr == me.sin_addr.s_addr && od.sin_port == me.sin_port)) {
+        sock_rst(fd);
+        return;
+    }
+    uint32_t dst = od.sin_addr.s_addr;
+    uint16_t pport = ntohs(pa->sin_port), oport = ntohs(od.sin_port);
+    if (ctlmap_in_pool(dst) && ctlmap_lookup(od.sin_addr.s_addr, &dst) != CM_REAL) {
+        park(tun, fd, pa->sin_addr.s_addr, pport, od.sin_addr.s_addr, oport);
+        return;
+    }
+    sock_open(tun, fd, pa->sin_addr.s_addr, pport, dst, od.sin_addr.s_addr, oport);
+}
+
+static void lst_arm(struct loop *L) {
+    struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = LST_TOKEN } };
+    L->lst_off = g_lst_fd >= 0 && !(epoll_ctl(L->ep, EPOLL_CTL_ADD, g_lst_fd, &e) == 0 || errno == EEXIST);
+}
+
+static void lst_accept(struct loop *L) {
+    for (int i = 0; i < ACCEPT_MAX; i++) {
+        struct sockaddr_in pa;
+        socklen_t pl = sizeof pa;
+        int fd = accept4(g_lst_fd, (struct sockaddr *)&pa, &pl, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            if (errno == EMFILE || errno == ENFILE) {
+                epoll_ctl(L->ep, EPOLL_CTL_DEL, g_lst_fd, NULL);
+                L->lst_off = 1;
+            }
+            return;
+        }
+        sock_take(&L->tun, fd, &pa);
+    }
+}
+
+static int in_prefixes(uint32_t a, const uint32_t *base, const uint8_t *len, size_t k) {
+    for (size_t i = 0; i < k; i++) {
+        uint32_t m = len[i] ? htonl(~0u << (32 - len[i])) : 0;
+        if ((a & m) == base[i]) return 1;
+    }
+    return 0;
+}
+
+static void ctl_pass(struct loop *L) {
+    uint64_t v;
+    ssize_t rd = read(L->ctl, &v, sizeof v);
+    (void)rd;
+    TR("map applied at %llu ms\n", (unsigned long long)(g_now_ns / 1000000));
+    uint32_t base[64];
+    uint8_t len[64];
+    size_t k;
+    int n = 0, ends = 0;
+    while ((k = ctlmap_take_closes(base, len, 64, &ends)) > 0 || ends > 0) {
+        for (int li = 0; li < g_live_n;) {
+            struct conn *c = &g_conns[g_live[li]];
+            if (!c->sock || !in_prefixes(c->odst, base, len, k)) {
+                li++;
+                continue;
+            }
+            if (c->pending) {
+                if (!c->client_gone) n++;
+                c->client_gone = 1;
+                li++;
+                continue;
+            }
+            conn_reset(c, &L->tun);
+            n++;
+        }
+        for (int i = 0; i < g_park_n;) {
+            if (!in_prefixes(g_park[i].od, base, len, k)) {
+                i++;
+                continue;
+            }
+            sock_rst(park_take(i).fd);
+            n++;
+        }
+        for (; ends > 0; ends--) {
+            ctl_emit_close(n);
+            n = 0;
+        }
+    }
+}
+
+static void sock_arm(struct loop *L, struct conn *c) {
+    long room = conn_room(c);
+    unsigned arm = (!c->early && !c->client_fin && !c->srv_closed && room != 0 ? ARM_IN : 0u) |
+                   (c->rtx.len ? ARM_OUT : 0u);
+    if (arm == c->carmed) return;
+    struct epoll_event e = { .events = (arm & ARM_IN ? EPOLLIN : 0u) | (arm & ARM_OUT ? EPOLLOUT : 0u),
+                             .data = { .u32 = CFD_BASE + (uint32_t)(c - g_conns) } };
+    int op = !c->carmed ? EPOLL_CTL_ADD : !arm ? EPOLL_CTL_DEL : EPOLL_CTL_MOD;
+    if (epoll_ctl(L->ep, op, c->cfd, &e) == 0 || !arm) c->carmed = (uint8_t)arm;
+}
+
+static void sock_event(struct conn *c, uint32_t events, const struct tun_dev *tun) {
+    if ((events & (EPOLLOUT | EPOLLERR | EPOLLHUP)) && c->rtx.len) sock_flush(c);
+    if ((events & (EPOLLIN | EPOLLERR | EPOLLHUP)) && (c->carmed & ARM_IN)) sock_read(c, tun);
+}
+
+/* epoll, not poll. poll takes the whole descriptor LIST on every call: with 320 live
+ * connections and two thousand turns a second that is 640 thousand descriptor checks a
+ * second, of which a few matter, and on a router one poll over 320 descriptors costs hundreds
+ * of microseconds — the loop hit it before the crypto. epoll keeps the set in the kernel and
+ * returns ONLY what is ready; in exchange the set must be maintained, which is what the armed
+ * field is for: epoll_ctl on a state change, not on every turn.
+ *
+ * The TUN and eventfd tokens cannot collide with a connection index: there are MAX_CONNS
+ * slots, the tokens are above.
+ *
+ * Wakeups from connectors: without them a finished handshake waits for the 20 ms poll, adding
+ * up to 20 ms to EVERY new connection. If the kernel gives no eventfd, polling remains the
+ * fallback, at that cost. */
+static int loop_open(struct loop *L, const struct tun_dev *tun, int own) {
+    memset(L, 0, offsetof(struct loop, evs));
+    L->tun = *tun;
+    L->efd = L->ctl = -1;
+    L->own = (uint8_t)(own != 0);
+    L->stats_at = g_stats ? now_ns() : 0;
+    L->nodes_seen = __atomic_load_n(&g_nodes_epoch, __ATOMIC_ACQUIRE);
+    L->ep = epoll_create1(0);
+    if (L->ep < 0) return -1;
+    struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = TUN_TOKEN } };
+    if (tun->fd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, tun->fd, &e) != 0) {
+        int err = errno;
+        close(L->ep);
+        errno = err;
+        return -2;
+    }
+    L->efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    e.data.u32 = EFD_TOKEN;
+    if (L->efd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, L->efd, &e) != 0) {
+        close(L->efd);
+        L->efd = -1;
+    }
+    g_conn_efd = L->efd;
+    int sfd = stop_fd();
+    e.data.u32 = STOP_TOKEN;
+    if (sfd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, sfd, &e) == 0) {
+        L->stop_in = 1;
+        __atomic_add_fetch(&g_stop_loops, 1, __ATOMIC_ACQ_REL);
+    }
+    if (own) {
+        if (g_lst_fd >= 0) lst_arm(L);
+        int cfd = ctlmap_wake_fd();
+        e.data.u32 = CTL_TOKEN;
+        if (cfd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, cfd, &e) == 0) L->ctl = cfd;
+    }
+    return 0;
+}
+
+static void loop_close(struct loop *L) {
+    if (L->stop_in) __atomic_sub_fetch(&g_stop_loops, 1, __ATOMIC_ACQ_REL);
+    if (L->efd >= 0) close(L->efd);
+    g_conn_efd = -1;
+    close(L->ep);
+}
+
+static int loop_turn(struct loop *L, int max_ms) {
+    struct tun_dev *tun = &L->tun;
+    /* Time is read ONCE per turn into g_now_ns/g_now_s; why, see their declaration. */
+    uint64_t now = now_ns();
+    g_now_ns = now;
+    g_now_s = (time_t)(now / 1000000000ull);
+
+    /* Turn period: the time since the last wait returned, i.e. the WORKING part, not the time
+     * waiting: the RTO floor must cover how long we are busy, and a sleep is cut short by an
+     * arriving ACK anyway. 1/8 smoothing, as in TCP's RTT estimate, so that one long turn
+     * does not raise the floor for long. */
+    if (L->loop_at) {
+        uint64_t busy64 = (now - L->loop_at) / 1000000;
+        uint32_t busy = busy64 > 5000 ? 5000 : (uint32_t)busy64;
+        /* Up with rounding up, so on noticing load the floor rises by at least a
+         * millisecond at once; down with rounding down, to avoid jitter. */
+        if (busy > g_loop_ms) g_loop_ms += (busy - g_loop_ms + 7) / 8;
+        else                  g_loop_ms -= (g_loop_ms - busy) / 8;
+    }
+
+    /* ONE pass over the live connections before the wait (see struct conn for why). It
+     * computes everything the wait needs: the epoll set, the number of pending jobs, the
+     * connections with data already read, and the nearest retransmission deadline. */
+    int pend = 0, forced = 0;
+    /* Wait until the nearest retransmission deadline, not always a second: otherwise a
+     * resend waits for the loop to wake by itself. With live traffic that is at once, but
+     * after the last segment is lost nothing wakes it — exactly the case the timer is for. */
+    int wait_ms = max_ms;
+    for (int li = 0; li < g_live_n; li++) {
+        struct conn *c = &g_conns[g_live[li]];
+        if (c->pending) { pend++; continue; }
+
+        /* Window and in-flight are recorded ALWAYS, not only on a refused read: a flow can
+         * also stall with the window open, and only both numbers tell the two cases
+         * apart. */
+        if (g_stats) {
+            uint32_t room = client_room(c);
+            uint32_t infl = c->our_seq - c->client_ack;
+            if (room < g_st.win_min) g_st.win_min = room;
+            if (room > g_st.win_max) g_st.win_max = room;
+            if (infl > g_st.inflight_max) g_st.inflight_max = infl;
+            g_st.wscale_seen = c->client_wscale;
+        }
+
+        /* Do not ask the server for more while the client has not taken what it got. This is
+         * the only flow control we have: what we read must go to the device at once, and the
+         * device queue is finite; overflowing it loses a segment, and the client waits for a
+         * retransmission (measured on a router: without this check a transfer stopped at the
+         * second megabyte). Connections closed by the server have nothing to read: they live
+         * only to finish delivering.
+         *
+         * A UDP flow has no window and so no reason not to read: a datagram goes to the client
+         * at once and whole. */
+        int want = !c->srv_closed && conn_can_take(c);
+        if (!want && !c->srv_closed && g_stats) g_st.win_skips++;
+        /* The ACK is held (ack_hold): wait until the descriptor becomes writable, which is
+         * the client's window. If the ACK left another way (data to the client carries it in
+         * its header, emit_to_client), there is nothing to wait for: a level-triggered
+         * EPOLLOUT on a writable descriptor would wake the loop on every turn for nothing. */
+        if (c->ack_hold && !c->ack_due) c->ack_hold = 0;
+        unsigned arm = (want ? ARM_IN : 0u) | (c->ack_hold ? ARM_OUT : 0u);
+        if (arm != c->armed) {
+            struct epoll_event e = { .events = (arm & ARM_IN ? EPOLLIN : 0u) |
+                                               (arm & ARM_OUT ? EPOLLOUT : 0u),
+                                     .data = { .u32 = (uint32_t)(c - g_conns) } };
+            int op = !c->armed ? EPOLL_CTL_ADD : !arm ? EPOLL_CTL_DEL : EPOLL_CTL_MOD;
+            if (epoll_ctl(L->ep, op, c->fd, &e) == 0 || !arm)
+                c->armed = (uint8_t)arm;
+        }
+        if (c->sock) sock_arm(L, c);
+        /* Data is already here and the kernel will not report it: process it without
+         * waiting. */
+        if (want && c->rx_ready) forced++;
+
+        if (c->rtx.len && c->rtx_at) {
+            int64_t left = (int64_t)c->rto_ms - (int64_t)((now - c->rtx_at) / 1000000);
+            if (left < 0) left = 0;
+            if (left < wait_ms) wait_ms = (int)left;
+        }
+    }
+    if (g_stats) g_st.conns = (uint32_t)g_live_n;
+
+    /* Pending jobs do not force frequent wakeups: a connector wakes the loop through the
+     * eventfd, and the result is handled at once. Polling every 20 ms remains the FALLBACK
+     * for when the kernel gave no eventfd, so its failure costs latency, not a hung
+     * handshake. */
+    if (pend && L->efd < 0 && wait_ms > 20) wait_ms = 20;
+    if (L->own) wait_ms = park_wait_ms(wait_ms);
+    if (L->lst_off && wait_ms > 10) wait_ms = 10;
+    if (forced) wait_ms = 0;
+
+    /* Up to two more events per turn than connections: TUN and the wakeup are descriptors
+     * too. A smaller limit would not lose an event (level-triggered epoll reports it again)
+     * but would delay it by a turn. */
+    int r = epoll_wait(L->ep, L->evs, EVS_MAX, wait_ms);
+    g_turn++;
+    uint64_t after_poll = now_ns();
+    L->loop_at = after_poll;
+    g_now_ns = after_poll;
+    g_now_s = (time_t)(after_poll / 1000000000ull);
+    if (g_stats) {
+        g_st.poll_ns += after_poll - now;
+        g_st.iters++;
+        if (after_poll - L->stats_at >= 2000000000ull) {
+            stats_dump(after_poll - L->stats_at);
+            L->stats_at = after_poll;
+        }
+    }
+    if (r < 0) return errno == EINTR ? 0 : -1;
+
+    /* Finished jobs. The SYN-ACK went to the client on SYN: here the flow to the node is
+     * either ready (and gets the early data from the buffer) or failed (and the client gets
+     * RST). Done BEFORE reading TUN, so fresh client data goes in this same turn. Walks the
+     * live connections only when there are jobs at all.
+     *
+     * The index moves BY HAND: conn_drop moves the last element of g_live into the freed
+     * place, and a plain li++ would skip it. */
+    for (int li = 0; pend && li < g_live_n; ) {
+        struct conn *c = &g_conns[g_live[li]];
+        if (!c->pending || !__atomic_load_n(&c->done, __ATOMIC_ACQUIRE)) { li++; continue; }
+        pend--;
+        if (!conn_ready(c, tun)) li++;
+    }
+
+    /* Look for TUN readiness among the events. TUN is handled FIRST, before reading from the
+     * servers: client ACKs open the window, and handled earlier they let us take the
+     * server's next portion in this same turn. The wakeup counter is just drained: the event
+     * has done its job by waking epoll_wait. */
+    int tun_ready = 0, lst = 0, ctl = 0, stop = 0;
+    if (L->lst_off) {
+        lst_arm(L);
+        lst = 1;
+    }
+    for (int i = 0; i < r; i++) {
+        if (L->evs[i].data.u32 == TUN_TOKEN) tun_ready = 1;
+        else if (L->evs[i].data.u32 == EFD_TOKEN && L->efd >= 0) {
+            uint64_t drained;
+            ssize_t rd = read(L->efd, &drained, sizeof(drained));
+            (void)rd;
+        } else if (L->evs[i].data.u32 == LST_TOKEN) lst = 1;
+        else if (L->evs[i].data.u32 == CTL_TOKEN) ctl = 1;
+        else if (L->evs[i].data.u32 == STOP_TOKEN) stop = 1;
+    }
+    if (stop && L->stop_in) {
+        stop_reset(tun, L->own);
+        epoll_ctl(L->ep, EPOLL_CTL_DEL, g_stop_efd, NULL);
+        L->stop_in = 0;
+        __atomic_sub_fetch(&g_stop_loops, 1, __ATOMIC_ACQ_REL);
+    }
+
+    if (tun_ready) {
+        /* DRAIN the device rather than read one packet per turn. During a download the
+         * client's ACKs come from TUN, and they open the window; one per turn tied the speed
+         * to the turn rate (measured: 1900 turns/s x ~2920 bytes per ACK = 5.5 MB/s, exactly
+         * the ceiling seen). The device is non-blocking, so "nothing more" comes as EAGAIN.
+         * The per-turn limit keeps one client's packets from starving the server reads. */
+        int k;
+        for (k = 0; k < TUN_DRAIN_MAX; k++) {
+            uint64_t t0 = g_stats ? now_ns() : 0;
+            ssize_t rn = tun_read_packet(tun, L->pkt, sizeof(L->pkt));
+            uint64_t t1 = g_stats ? now_ns() : 0;
+            if (rn <= 0) break;
+            if (g_stats) { g_st.tun_reads++; g_st.tun_read_ns += t1 - t0; }
+            handle_packet(tun, L->pkt, (size_t)rn);
+            if (g_stats) g_st.pkt_ns += now_ns() - t1;
+        }
+        /* Before the ACKs of this batch, so they already carry the window it calls for. */
+        g_tun_backlog = k == TUN_DRAIN_MAX;
+        up_flush(tun);
+        flush_acks(tun);
+    }
+    if (lst && g_lst_fd >= 0 && !L->lst_off) lst_accept(L);
+    if (ctl) ctl_pass(L);
+    int out_woke = 0;
+    for (int i = 0; i < r; i++) {
+        uint32_t t = L->evs[i].data.u32;
+        if (t >= CFD_BASE && t < CFD_BASE + MAX_CONNS) {
+            struct conn *c = &g_conns[t - CFD_BASE];
+            if (c->used && c->sock && !c->pending && c->born_turn != g_turn)
+                sock_event(c, L->evs[i].events, tun);
+            continue;
+        }
+        if (t >= (uint32_t)MAX_CONNS) continue;  /* TUN and eventfd */
+        struct conn *c = &g_conns[t];
+        /* The slot may have been freed in this same turn (an RST from the client, a failed
+         * send, an eviction) and even given to a new connection: conn_new hands out the most
+         * recently freed slot first. Skip a free slot, a connection waiting for its connector
+         * (its session must not be touched), and any connection born in this turn: the event
+         * was its predecessor's. Without the last check a new connection that took a spare
+         * session read its fresh link, which is blocking with no data yet, and stalled the
+         * whole loop for up to CONNECT_TIMEOUT_S. */
+        if (!c->used || c->pending || c->born_turn == g_turn) continue;
+        /* The queue to the node has room: the held ACK can go (flush_acks below rechecks
+         * readiness itself). Writability alone means nothing to read, so skip the read. */
+        if (L->evs[i].events & EPOLLOUT) out_woke = 1;
+        if (!(L->evs[i].events & ~(uint32_t)EPOLLOUT)) continue;
+        /* Data already read is handled by the second pass below; skipped here so that one
+         * connection does not get a double share per turn at the expense of the others. */
+        if (c->rx_ready) continue;
+        /* Readiness was computed BEFORE the TUN batch, which may have carried an ACK with a
+         * smaller window. Then reading is not allowed: the receiver silently drops what goes
+         * beyond its window, and the hole costs a retransmission. The check is cheap and does
+         * not depend on whether epoll has learned of the change.
+         *
+         * A UDP flow has no window: asking about it would mean NEVER reading, since its
+         * window is zero by definition (see client_room). */
+        if (c->srv_closed || !conn_can_take(c)) continue;
+        drain_conn(c, tun);
+    }
+    if (out_woke) flush_acks(tun);
+
+    /* Connections with data already in the buffer: the kernel will not report them, and
+     * without this pass the record would wait for new bytes from the server. Done only when
+     * there are any; they were counted before the wait. */
+    for (int li = 0; forced && li < g_live_n; li++) {
+        struct conn *c = &g_conns[g_live[li]];
+        if (!c->rx_ready || c->pending) continue;
+        forced--;
+        drain_conn(c, tun);
+    }
+    /* The node's room grew back (drain_conn): the window update to the client now, not with
+     * the next TUN batch, which an upload stopped by a zero window will never send. */
+    if (g_win_woke) {
+        g_win_woke = 0;
+        flush_acks(tun);
+    }
+
+    /* One pass for all deadlines: retransmission, close after the server, idle cleanup.
+     * The time is refreshed: the TUN batch and the server reads since the wait may have
+     * taken milliseconds. */
+    g_now_ns = now_ns();
+    g_now_s = (time_t)(g_now_ns / 1000000000ull);
+    now = g_now_ns;
+    /* A stale spare is a deadline too. Once a second, not every turn: there are thousands of
+     * turns under traffic, and a spare goes stale in seconds. */
+    if (now - L->spare_at >= 1000000000ull) {
+        L->spare_at = now;
+        spare_sweep();
+    }
+    nodes_sweep(&L->nodes_seen, now);
+    if (L->own) {
+        park_pass(tun);
+        miss_report(now);
+    }
+    for (int li = 0; li < g_live_n; ) {
+        struct conn *c = &g_conns[g_live[li]];
+        /* A job in progress: the connector writes into the session, do not touch. */
+        if (c->pending || !conn_deadlines(c, tun, now)) li++;
+    }
+    /* Window updates for rooms that grew without a read of ours (room_watch). */
+    if (g_win_woke) {
+        g_win_woke = 0;
+        flush_acks(tun);
+    }
+    return 0;
+}
+
 static void *worker_loop(void *arg) {
     struct worker *w = arg;
-    struct tun_dev tun = w->tun;
-    int tun_fd = tun.fd;
+    int tun_fd = w->tun.fd;
     g_worker = w->id;
 
     g_st.win_min = 0xFFFFFFFFu;
-    uint64_t stats_at = g_stats ? now_ns() : 0;
-    uint64_t loop_at = 0;   /* when the last wait returned: for the turn period */
-    uint64_t spare_at = 0;  /* when stale spares were last thrown out */
-    unsigned nodes_seen = __atomic_load_n(&g_nodes_epoch, __ATOMIC_ACQUIRE);
     /* The thread's tables are in the heap (see "loop thread tables" at g_conns), so allocating
      * them can fail. The failure is handled like the epoll one below: the thread does not start,
      * and its queue is left to the others. */
@@ -2553,296 +3332,37 @@ static void *worker_loop(void *arg) {
         close(tun_fd);
         return NULL;
     }
-    unsigned char pkt[TUNNEL_BUF];
 
-    /* epoll, not poll. poll takes the whole descriptor LIST on every call: with 320 live
-     * connections and two thousand turns a second that is 640 thousand descriptor checks a
-     * second, of which a few matter, and on a router one poll over 320 descriptors costs hundreds
-     * of microseconds — the loop hit it before the crypto. epoll keeps the set in the kernel and
-     * returns ONLY what is ready; in exchange the set must be maintained, which is what the armed
-     * field is for: epoll_ctl on a state change, not on every turn.
-     *
-     * The queue MUST be closed on every exit from here. The kernel spreads flows over queues by
+    /* The queue MUST be closed on every exit from here. The kernel spreads flows over queues by
      * a flow hash scaled to numqueues, and numqueues counts ATTACHED queues, not read ones. A
      * descriptor left open keeps a share of the traffic going into a queue nobody reads: the
      * connections in it silently vanish, and the same sites (the hash is stable) never open.
      * close() detaches the queue (tun_detach in the kernel decrements numqueues), and the flows
      * spread over the live ones; checked: after closing the second of two queues all 40 flows
      * came to the first. */
-    int ep = epoll_create1(0);
-    if (ep < 0) {
-        fprintf(stderr, LOG_W "epoll unavailable (%s) — thread not started, "
-                        "its queue is left to the others\n", strerror(errno));
+    struct loop lp;
+    struct loop *L = &lp;
+    int rc = loop_open(L, &w->tun, w->id == 0);
+    if (rc != 0) {
+        fprintf(stderr, LOG_W "%s (%s) — thread not started, its queue is left to the others\n",
+                rc == -1 ? "epoll unavailable" : "cannot add TUN to epoll", strerror(errno));
         conn_table_free();
         close(tun_fd);
         return NULL;
     }
-    /* The TUN and eventfd tokens cannot collide with a connection index: there are MAX_CONNS
-     * slots, the tokens are above. */
-    const uint32_t TUN_TOKEN = MAX_CONNS;
-    const uint32_t EFD_TOKEN = MAX_CONNS + 1;
-    {
-        struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = TUN_TOKEN } };
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, tun_fd, &e) != 0) {
-            fprintf(stderr, LOG_W "cannot add TUN to epoll (%s) — thread not started, "
-                            "its queue is left to the others\n", strerror(errno));
-            close(ep);
-            conn_table_free();
-            close(tun_fd);
-            return NULL;
-        }
-    }
-    /* Wakeups from connectors: without them a finished handshake waits for the 20 ms poll, adding
-     * up to 20 ms to EVERY new connection. If the kernel gives no eventfd, polling remains the
-     * fallback, at that cost. */
-    int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (efd >= 0) {
-        struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = EFD_TOKEN } };
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, efd, &e) != 0) { close(efd); efd = -1; }
-    }
-    g_conn_efd = efd;
-    struct epoll_event evs[MAX_CONNS + 2];
     w->served = 1;      /* the queue is in epoll: from now on it carries traffic */
 
-    for (;;) {
-        /* Time is read ONCE per turn into g_now_ns/g_now_s; why, see their declaration. */
-        uint64_t now = now_ns();
-        g_now_ns = now;
-        g_now_s = (time_t)(now / 1000000000ull);
-
-        /* Turn period: the time since the last wait returned, i.e. the WORKING part, not the time
-         * waiting: the RTO floor must cover how long we are busy, and a sleep is cut short by an
-         * arriving ACK anyway. 1/8 smoothing, as in TCP's RTT estimate, so that one long turn
-         * does not raise the floor for long. */
-        if (loop_at) {
-            uint64_t busy64 = (now - loop_at) / 1000000;
-            uint32_t busy = busy64 > 5000 ? 5000 : (uint32_t)busy64;
-            /* Up with rounding up, so on noticing load the floor rises by at least a
-             * millisecond at once; down with rounding down, to avoid jitter. */
-            if (busy > g_loop_ms) g_loop_ms += (busy - g_loop_ms + 7) / 8;
-            else                  g_loop_ms -= (g_loop_ms - busy) / 8;
-        }
-
-        /* ONE pass over the live connections before the wait (see struct conn for why). It
-         * computes everything the wait needs: the epoll set, the number of pending jobs, the
-         * connections with data already read, and the nearest retransmission deadline. */
-        int pend = 0, forced = 0;
-        /* Wait until the nearest retransmission deadline, not always a second: otherwise a
-         * resend waits for the loop to wake by itself. With live traffic that is at once, but
-         * after the last segment is lost nothing wakes it — exactly the case the timer is for. */
-        int wait_ms = 1000;
-        for (int li = 0; li < g_live_n; li++) {
-            struct conn *c = &g_conns[g_live[li]];
-            if (c->pending) { pend++; continue; }
-
-            /* Window and in-flight are recorded ALWAYS, not only on a refused read: a flow can
-             * also stall with the window open, and only both numbers tell the two cases
-             * apart. */
-            if (g_stats) {
-                uint32_t room = client_room(c);
-                uint32_t infl = c->our_seq - c->client_ack;
-                if (room < g_st.win_min) g_st.win_min = room;
-                if (room > g_st.win_max) g_st.win_max = room;
-                if (infl > g_st.inflight_max) g_st.inflight_max = infl;
-                g_st.wscale_seen = c->client_wscale;
-            }
-
-            /* Do not ask the server for more while the client has not taken what it got. This is
-             * the only flow control we have: what we read must go to the device at once, and the
-             * device queue is finite; overflowing it loses a segment, and the client waits for a
-             * retransmission (measured on a router: without this check a transfer stopped at the
-             * second megabyte). Connections closed by the server have nothing to read: they live
-             * only to finish delivering.
-             *
-             * A UDP flow has no window and so no reason not to read: a datagram goes to the client
-             * at once and whole. */
-            int want = !c->srv_closed && (c->is_udp || client_can_take_record(c));
-            if (!want && !c->srv_closed && g_stats) g_st.win_skips++;
-            /* The ACK is held (ack_hold): wait until the descriptor becomes writable, which is
-             * the client's window. If the ACK left another way (data to the client carries it in
-             * its header, emit_to_client), there is nothing to wait for: a level-triggered
-             * EPOLLOUT on a writable descriptor would wake the loop on every turn for nothing. */
-            if (c->ack_hold && !c->ack_due) c->ack_hold = 0;
-            unsigned arm = (want ? ARM_IN : 0u) | (c->ack_hold ? ARM_OUT : 0u);
-            if (arm != c->armed) {
-                struct epoll_event e = { .events = (arm & ARM_IN ? EPOLLIN : 0u) |
-                                                   (arm & ARM_OUT ? EPOLLOUT : 0u),
-                                         .data = { .u32 = (uint32_t)(c - g_conns) } };
-                int op = !c->armed ? EPOLL_CTL_ADD : !arm ? EPOLL_CTL_DEL : EPOLL_CTL_MOD;
-                if (epoll_ctl(ep, op, c->fd, &e) == 0 || !arm)
-                    c->armed = (uint8_t)arm;
-            }
-            /* Data is already here and the kernel will not report it: process it without
-             * waiting. */
-            if (want && c->rx_ready) forced++;
-
-            if (c->rtx.len && c->rtx_at) {
-                int64_t left = (int64_t)c->rto_ms - (int64_t)((now - c->rtx_at) / 1000000);
-                if (left < 0) left = 0;
-                if (left < wait_ms) wait_ms = (int)left;
-            }
-        }
-        if (g_stats) g_st.conns = (uint32_t)g_live_n;
-
-        /* Pending jobs do not force frequent wakeups: a connector wakes the loop through the
-         * eventfd, and the result is handled at once. Polling every 20 ms remains the FALLBACK
-         * for when the kernel gave no eventfd, so its failure costs latency, not a hung
-         * handshake. */
-        if (pend && efd < 0 && wait_ms > 20) wait_ms = 20;
-        if (forced) wait_ms = 0;
-
-        /* Up to two more events per turn than connections: TUN and the wakeup are descriptors
-         * too. A smaller limit would not lose an event (level-triggered epoll reports it again)
-         * but would delay it by a turn. */
-        int r = epoll_wait(ep, evs, MAX_CONNS + 2, wait_ms);
-        g_turn++;
-        uint64_t after_poll = now_ns();
-        loop_at = after_poll;
-        g_now_ns = after_poll;
-        g_now_s = (time_t)(after_poll / 1000000000ull);
-        if (g_stats) {
-            g_st.poll_ns += after_poll - now;
-            g_st.iters++;
-            if (after_poll - stats_at >= 2000000000ull) {
-                stats_dump(after_poll - stats_at);
-                stats_at = after_poll;
-            }
-        }
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-
-        /* Finished jobs. The SYN-ACK went to the client on SYN: here the flow to the node is
-         * either ready (and gets the early data from the buffer) or failed (and the client gets
-         * RST). Done BEFORE reading TUN, so fresh client data goes in this same turn. Walks the
-         * live connections only when there are jobs at all.
-         *
-         * The index moves BY HAND: conn_drop moves the last element of g_live into the freed
-         * place, and a plain li++ would skip it. */
-        for (int li = 0; pend && li < g_live_n; ) {
-            struct conn *c = &g_conns[g_live[li]];
-            if (!c->pending || !__atomic_load_n(&c->done, __ATOMIC_ACQUIRE)) { li++; continue; }
-            pend--;
-            if (!conn_ready(c, &tun)) li++;
-        }
-
-        /* Look for TUN readiness among the events. TUN is handled FIRST, before reading from the
-         * servers: client ACKs open the window, and handled earlier they let us take the
-         * server's next portion in this same turn. The wakeup counter is just drained: the event
-         * has done its job by waking epoll_wait. */
-        int tun_ready = 0;
-        for (int i = 0; i < r; i++) {
-            if (evs[i].data.u32 == TUN_TOKEN) tun_ready = 1;
-            else if (evs[i].data.u32 == EFD_TOKEN && efd >= 0) {
-                uint64_t drained;
-                ssize_t rd = read(efd, &drained, sizeof(drained));
-                (void)rd;
-            }
-        }
-
-        if (tun_ready) {
-            /* DRAIN the device rather than read one packet per turn. During a download the
-             * client's ACKs come from TUN, and they open the window; one per turn tied the speed
-             * to the turn rate (measured: 1900 turns/s x ~2920 bytes per ACK = 5.5 MB/s, exactly
-             * the ceiling seen). The device is non-blocking, so "nothing more" comes as EAGAIN.
-             * The per-turn limit keeps one client's packets from starving the server reads. */
-            int k;
-            for (k = 0; k < TUN_DRAIN_MAX; k++) {
-                uint64_t t0 = g_stats ? now_ns() : 0;
-                ssize_t rn = tun_read_packet(&tun, pkt, sizeof(pkt));
-                uint64_t t1 = g_stats ? now_ns() : 0;
-                if (rn <= 0) break;
-                if (g_stats) { g_st.tun_reads++; g_st.tun_read_ns += t1 - t0; }
-                handle_packet(&tun, pkt, (size_t)rn);
-                if (g_stats) g_st.pkt_ns += now_ns() - t1;
-            }
-            /* Before the ACKs of this batch, so they already carry the window it calls for. */
-            g_tun_backlog = k == TUN_DRAIN_MAX;
-            up_flush(&tun);
-            flush_acks(&tun);
-        }
-        int out_woke = 0;
-        for (int i = 0; i < r; i++) {
-            if (evs[i].data.u32 >= (uint32_t)MAX_CONNS) continue;  /* TUN and eventfd */
-            struct conn *c = &g_conns[evs[i].data.u32];
-            /* The slot may have been freed in this same turn (an RST from the client, a failed
-             * send, an eviction) and even given to a new connection: conn_new hands out the most
-             * recently freed slot first. Skip a free slot, a connection waiting for its connector
-             * (its session must not be touched), and any connection born in this turn: the event
-             * was its predecessor's. Without the last check a new connection that took a spare
-             * session read its fresh link, which is blocking with no data yet, and stalled the
-             * whole loop for up to CONNECT_TIMEOUT_S. */
-            if (!c->used || c->pending || c->born_turn == g_turn) continue;
-            /* The queue to the node has room: the held ACK can go (flush_acks below rechecks
-             * readiness itself). Writability alone means nothing to read, so skip the read. */
-            if (evs[i].events & EPOLLOUT) out_woke = 1;
-            if (!(evs[i].events & ~(uint32_t)EPOLLOUT)) continue;
-            /* Data already read is handled by the second pass below; skipped here so that one
-             * connection does not get a double share per turn at the expense of the others. */
-            if (c->rx_ready) continue;
-            /* Readiness was computed BEFORE the TUN batch, which may have carried an ACK with a
-             * smaller window. Then reading is not allowed: the receiver silently drops what goes
-             * beyond its window, and the hole costs a retransmission. The check is cheap and does
-             * not depend on whether epoll has learned of the change.
-             *
-             * A UDP flow has no window: asking about it would mean NEVER reading, since its
-             * window is zero by definition (see client_room). */
-            if (c->srv_closed || (!c->is_udp && !client_can_take_record(c))) continue;
-            drain_conn(c, &tun);
-        }
-        if (out_woke) flush_acks(&tun);
-
-        /* Connections with data already in the buffer: the kernel will not report them, and
-         * without this pass the record would wait for new bytes from the server. Done only when
-         * there are any; they were counted before the wait. */
-        for (int li = 0; forced && li < g_live_n; li++) {
-            struct conn *c = &g_conns[g_live[li]];
-            if (!c->rx_ready || c->pending) continue;
-            forced--;
-            drain_conn(c, &tun);
-        }
-        /* The node's room grew back (drain_conn): the window update to the client now, not with
-         * the next TUN batch, which an upload stopped by a zero window will never send. */
-        if (g_win_woke) {
-            g_win_woke = 0;
-            flush_acks(&tun);
-        }
-
-        /* One pass for all deadlines: retransmission, close after the server, idle cleanup.
-         * The time is refreshed: the TUN batch and the server reads since the wait may have
-         * taken milliseconds. */
-        g_now_ns = now_ns();
-        g_now_s = (time_t)(g_now_ns / 1000000000ull);
-        now = g_now_ns;
-        /* A stale spare is a deadline too. Once a second, not every turn: there are thousands of
-         * turns under traffic, and a spare goes stale in seconds. */
-        if (now - spare_at >= 1000000000ull) {
-            spare_at = now;
-            spare_sweep();
-        }
-        nodes_sweep(&nodes_seen, now);
-        for (int li = 0; li < g_live_n; ) {
-            struct conn *c = &g_conns[g_live[li]];
-            /* A job in progress: the connector writes into the session, do not touch. */
-            if (c->pending || !conn_deadlines(c, &tun, now)) li++;
-        }
-        /* Window updates for rooms that grew without a read of ours (room_watch). */
-        if (g_win_woke) {
-            g_win_woke = 0;
-            flush_acks(&tun);
-        }
-    }
+    while (loop_turn(L, 1000) == 0) {}
     /* Release the connectors first, and only then close the sessions; otherwise we close what
      * they work with (see connq_release). The eventfd too: a connector writes to it when done,
      * and a number closed too early could already belong to someone else. */
+    if (w->id == 0)
+        while (g_park_n) sock_rst(park_take(g_park_n - 1).fd);
     if (connq_release(g_conns) == 0) {
         while (g_live_n) conn_drop(&g_conns[g_live[0]]);
         conn_table_free();
     }
-    if (efd >= 0) close(efd);
-    g_conn_efd = -1;
-    close(ep);
+    loop_close(L);
     close(tun_fd);
     return NULL;
 }
@@ -2928,6 +3448,8 @@ int stack_run(const struct tun_cfg *tc, const struct dialer *d, stack_ready_fn r
         workers[i].id = i;
     }
     ifcfg_bring_up(dev, tc->addr, tc->prefix);
+    park_cap_init();
+    if (tc->tcp_port) lst_open(tc->tcp_port);
 
     /* The device is up and has its address: the caller adds its routes into it now (tunvless:
      * --route), before the loop threads start — first the device, then the routes into it. */

@@ -43,6 +43,7 @@ export function normalizeTunnel(raw: Partial<Tunnel>): Tunnel {
       ca: raw.advanced?.ca ?? "",
       insecure: raw.advanced?.insecure ?? false,
       timeout: raw.advanced?.timeout ?? 8,
+      kernelTcp: raw.advanced?.kernelTcp ?? false,
     },
   };
 }

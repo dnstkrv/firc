@@ -33,7 +33,9 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -95,19 +97,48 @@ static int g_recv_calls;
 static int g_recv_rc;                 /* what transport_read_zc returns: 0 or -1 (end of stream) */
 static unsigned char g_recv_buf[4096];
 static size_t g_recv_n;               /* bytes returned once when g_recv_rc == 0 */
+static int g_own_fd;
+static int g_connect_ms;
+static int g_connect_hold;
+static int g_connect_in;
+static int g_send_hold;
+static int g_wire_on;
+static unsigned char g_wire[256 * 1024];
+static size_t g_wire_n;
+static struct { const struct transport *t; size_t off, n; } g_wlog[8192];
+static int g_wlog_n;
 
 int vless_connect(const struct vless_node *node, struct transport *conn, int timeout_s) {
     (void)node; (void)timeout_s;
+    __atomic_add_fetch(&g_connect_in, 1, __ATOMIC_ACQ_REL);
+    struct timespec tick = { 0, 1000000L };
+    while (__atomic_load_n(&g_connect_hold, __ATOMIC_ACQUIRE)) nanosleep(&tick, NULL);
+    int ms = __atomic_load_n(&g_connect_ms, __ATOMIC_ACQUIRE);
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        if ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 >= ms) break;
+        nanosleep(&tick, NULL);
+    }
     memset(conn, 0, sizeof(*conn));
-    conn->link.fd = g_sess_pipe[0];
+    conn->link.fd = __atomic_load_n(&g_own_fd, __ATOMIC_ACQUIRE) ? eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)
+                                                                 : g_sess_pipe[0];
     conn->link.plain = 1;
     return 0;
 }
 int transport_write(struct transport *c, const unsigned char *d, size_t n) {
-    (void)c; (void)d;
     g_send_calls++;
     g_send_last_n = n;
+    if (g_send_hold) return H2_EWINDOW;
     if (g_send_again_n > 0) { g_send_again_n--; return H2_EWINDOW; }
+    if (!g_send_rc && g_wire_on && g_wire_n + n <= sizeof g_wire && g_wlog_n < 8192) {
+        g_wlog[g_wlog_n].t = c;
+        g_wlog[g_wlog_n].off = g_wire_n;
+        g_wlog[g_wlog_n++].n = n;
+        memcpy(g_wire + g_wire_n, d, n);
+        g_wire_n += n;
+    }
     return g_send_rc;
 }
 int transport_read_zc(struct transport *c, unsigned char *buf, size_t cap,
@@ -124,7 +155,11 @@ int transport_read_zc(struct transport *c, unsigned char *buf, size_t cap,
 }
 int transport_has_data(const struct transport *c) { (void)c; return 0; }
 long transport_room(struct transport *c) { (void)c; return g_room; }
-void transport_close(struct transport *c) { c->link.fd = -1; }   /* shared pipe: keep it open */
+void transport_close(struct transport *c) {
+    if (__atomic_load_n(&g_own_fd, __ATOMIC_ACQUIRE) && c->link.fd >= 0 && c->link.fd != g_sess_pipe[0])
+        close(c->link.fd);
+    c->link.fd = -1;
+}
 void transport_moved(struct transport *c) { (void)c; }
 void transport_direct(struct transport *c) { c->link.rx_direct = 1; }
 const char *vless_strerror(int rc) { (void)rc; return "stub"; }
@@ -1004,7 +1039,7 @@ static int f_send(const void *ctx, void *sess, const struct flow_key *k, int udp
                   const unsigned char *d, size_t n) {
     (void)ctx; (void)k; (void)udp;
     struct fsess *s = sess;
-    return send(s->fd, d, n, MSG_NOSIGNAL) == (ssize_t)n ? SEND_OK : SEND_FATAL;
+    return n == 0 || send(s->fd, d, n, MSG_NOSIGNAL) == (ssize_t)n ? SEND_OK : SEND_FATAL;
 }
 static size_t f_dgram_frame(const unsigned char *p, size_t n, unsigned char *out, size_t cap) {
     if (n + 2 > cap) return 0;
@@ -1961,6 +1996,120 @@ static void pool_part(void) {
     t_pool_threads();
 }
 
+static struct conn *side_conn(uint16_t sport, int udp, int sock) {
+    struct conn *c = conn_new(&g_tun);
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->fd = -1;
+    c->cfd = -1;
+    c->key = cli_key();
+    c->key.sport = sport;
+    c->key.proto = udp ? 17 : 6;
+    c->is_udp = (uint8_t)udp;
+    c->sock = (uint8_t)sock;
+    c->our_seq = 5000;
+    c->client_ack = 4000;
+    c->client_seq = 6000;
+    conn_link(c);
+    return c;
+}
+
+static int stop_rsts(uint16_t dport, uint32_t *seq, uint32_t *ack, int cap, int *wrong) {
+    unsigned char p[70000];
+    int n = 0;
+    *wrong = 0;
+    for (;;) {
+        ssize_t r = recv(g_dev_peer, p, sizeof(p), MSG_DONTWAIT);
+        if (r <= 0) break;
+        struct flow_key k;
+        size_t off;
+        if (ip_parse(p, (size_t)r, &k, &off) != 0) continue;
+        if (k.src != SRV_IP || k.dst != CLI_IP || k.sport != SRV_PORT || k.dport != dport ||
+            k.tcp_flags != (TCP_RST | TCP_ACK)) {
+            (*wrong)++;
+            continue;
+        }
+        if (n < cap) {
+            seq[n] = k.seq;
+            ack[n] = k.ack;
+        }
+        n++;
+    }
+    return n;
+}
+
+/* Catches: an orderly stop leaving open TUN connections hanging, an RST the client refuses (tuple or numbers), or one sent for a socket or UDP connection. */
+static void t_stop_resets(void) {
+    struct conn *c = open_conn(65535);
+    if (!c) {
+        check(0, "fixture: an open TUN connection with data in flight");
+        return;
+    }
+    uint32_t a = c->client_ack, o = c->our_seq, q = c->client_seq;
+    side_conn(40001, 0, 1);
+    side_conn(40002, 1, 0);
+    dev_drain(NULL);
+    stop_reset(&g_tun, 0);
+    uint32_t seq[4], ack[4];
+    int wrong;
+    int n = stop_rsts(CLI_PORT, seq, ack, 4, &wrong);
+    check(a != o && n == 2 && wrong == 0 && seq[0] == a && seq[1] == o && ack[0] == q && ack[1] == q,
+          "stop: RST|ACK to the TUN client at client_ack then our_seq, nothing for a socket or UDP");
+    while (g_live_n) conn_drop(&g_conns[g_live[0]]);
+    int before = __atomic_load_n(&g_stop_loops, __ATOMIC_ACQUIRE), mid = -1;
+    struct loop L;
+    if (loop_open(&L, &g_tun, 0) == 0) {
+        mid = __atomic_load_n(&g_stop_loops, __ATOMIC_ACQUIRE);
+        loop_close(&L);
+    }
+    check(mid == before + 1 && __atomic_load_n(&g_stop_loops, __ATOMIC_ACQUIRE) == before,
+          "stop: an open loop is counted, a closed one no longer is");
+}
+
+static int g_stop_ms = -1;
+static void *stop_thread(void *arg) {
+    (void)arg;
+    uint64_t t0 = now_ns();
+    stack_stop(2000);
+    __atomic_store_n(&g_stop_ms, (int)((now_ns() - t0) / 1000000ull), __ATOMIC_RELEASE);
+    return NULL;
+}
+
+/* Catches: a stop that never wakes an idle loop, so it waits out its deadline and the RSTs never leave. */
+static void t_stop_wakes_the_loop(void) {
+    struct loop L;
+    if (loop_open(&L, &g_tun, 0) != 0) {
+        check(0, "fixture: a loop");
+        return;
+    }
+    struct conn *c = open_conn(65535);
+    if (!c) {
+        check(0, "fixture: an open TUN connection with data in flight");
+        loop_close(&L);
+        return;
+    }
+    uint32_t a = c->client_ack, o = c->our_seq;
+    dev_drain(NULL);
+    pthread_t t;
+    if (pthread_create(&t, NULL, stop_thread, NULL) != 0) {
+        check(0, "fixture: a thread");
+        loop_close(&L);
+        return;
+    }
+    for (int i = 0; i < 50 && __atomic_load_n(&g_stop_ms, __ATOMIC_ACQUIRE) < 0; i++) loop_turn(&L, 100);
+    pthread_join(t, NULL);
+    uint64_t v;
+    ssize_t rd = read(g_stop_efd, &v, sizeof v);
+    (void)rd;
+    uint32_t seq[4], ack[4];
+    int wrong;
+    int n = stop_rsts(CLI_PORT, seq, ack, 4, &wrong);
+    check(g_stop_ms >= 0 && g_stop_ms < 1000 && n == 2 && seq[0] == a && seq[1] == o,
+          "stop: the loop is woken, resets its TUN connection, and the stop returns at once");
+    while (g_live_n) conn_drop(&g_conns[g_live[0]]);
+    loop_close(&L);
+}
+
 /* ---- stack --------------------------------------------------------------------------------- */
 
 static void t_stack_abort(void) {
@@ -2418,6 +2567,1049 @@ static int stack_part(void) {
     return 0;
 }
 
+struct odent { uint16_t cport; uint32_t a; uint16_t p; };
+static struct odent g_od[1024];
+static int g_od_n;
+static struct loop g_L;
+static int g_kport;
+
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len) {
+    static int (*real)(int, int, int, void *, socklen_t *);
+    if (!real) real = (int (*)(int, int, int, void *, socklen_t *))dlsym(RTLD_NEXT, "getsockopt");
+    if (level != SOL_IP || opt != SO_ORIGINAL_DST) return real(fd, level, opt, val, len);
+    struct sockaddr_in p;
+    socklen_t pl = sizeof p;
+    if (getpeername(fd, (struct sockaddr *)&p, &pl) == 0 && *len >= sizeof(struct sockaddr_in))
+        for (int i = g_od_n - 1; i >= 0; i--) {
+            if (g_od[i].cport != ntohs(p.sin_port)) continue;
+            struct sockaddr_in o = { .sin_family = AF_INET, .sin_port = htons(g_od[i].p) };
+            o.sin_addr.s_addr = g_od[i].a;
+            memcpy(val, &o, sizeof o);
+            *len = sizeof o;
+            return 0;
+        }
+    errno = ENOENT;
+    return -1;
+}
+
+static uint32_t ip4(int a, int b, int c, int d) {
+    return htonl((uint32_t)a << 24 | (uint32_t)b << 16 | (uint32_t)c << 8 | (uint32_t)d);
+}
+
+static int k_sock(uint32_t a, uint16_t p, int reg) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in me = { .sin_family = AF_INET };
+    me.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t ml = sizeof me;
+    if (fd < 0) return -1;
+    if (bind(fd, (struct sockaddr *)&me, sizeof me) != 0 ||
+        getsockname(fd, (struct sockaddr *)&me, &ml) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (reg && g_od_n < 1024) g_od[g_od_n++] = (struct odent){ ntohs(me.sin_port), a, p };
+    return fd;
+}
+
+static int k_connect(int fd) {
+    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons((uint16_t)g_kport) };
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&to, sizeof to) != 0) return -1;
+    return fd;
+}
+
+static int k_dial(uint32_t a, uint16_t p, int reg) {
+    int fd = k_sock(a, p, reg);
+    if (fd >= 0 && k_connect(fd) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void spin(int n) {
+    for (int i = 0; i < n; i++) loop_turn(&g_L, 10);
+}
+
+static int k_seen(int fd) {
+    char b;
+    ssize_t r = recv(fd, &b, 1, MSG_DONTWAIT | MSG_PEEK);
+    if (r > 0) return 'D';
+    if (r == 0) return 'F';
+    if (errno == ECONNRESET) return 'R';
+    return errno == EAGAIN || errno == EWOULDBLOCK ? 'W' : 'E';
+}
+
+static int k_wait(int fd, int turns) {
+    for (int i = 0; i < turns; i++) {
+        loop_turn(&g_L, 10);
+        int s = k_seen(fd);
+        if (s != 'W') return s;
+    }
+    return 'W';
+}
+
+static struct conn *k_conn_of(int fd) {
+    struct sockaddr_in me;
+    socklen_t ml = sizeof me;
+    if (fd < 0 || getsockname(fd, (struct sockaddr *)&me, &ml) != 0) return NULL;
+    for (int li = 0; li < g_live_n; li++) {
+        struct conn *c = &g_conns[g_live[li]];
+        if (c->sock && c->key.sport == ntohs(me.sin_port)) return c;
+    }
+    return NULL;
+}
+
+static struct conn *k_ready(int fd, int turns) {
+    for (int i = 0; i < turns; i++) {
+        loop_turn(&g_L, 10);
+        struct conn *c = k_conn_of(fd);
+        if (c && !c->pending && c->fd >= 0) return c;
+    }
+    return NULL;
+}
+
+static void k_reset(void) {
+    for (int i = 0; i < 300; i++) {
+        int p = 0;
+        for (int li = 0; li < g_live_n; li++) p += g_conns[g_live[li]].pending;
+        if (!p) break;
+        loop_turn(&g_L, 10);
+    }
+    while (g_park_n) sock_rst(park_take(g_park_n - 1).fd);
+    while (g_live_n) conn_drop(&g_conns[g_live[0]]);
+    g_od_n = 0;
+    loop_turn(&g_L, 0);
+}
+
+static void k_cmd(const char *body, int close_cmd) {
+    FILE *f = fmemopen((void *)body, strlen(body), "r");
+    char *line = NULL;
+    size_t cap = 0;
+    if (!f) return;
+    if (close_cmd) ctlmap_read_close(f, &line, &cap);
+    else ctlmap_read_cmd(f, &line, &cap, 0);
+    free(line);
+    fclose(f);
+}
+
+static int g_out_save = -1, g_out_pipe[2];
+static void out_start(void) {
+    fflush(stdout);
+    if (pipe(g_out_pipe) != 0) return;
+    g_out_save = dup(1);
+    dup2(g_out_pipe[1], 1);
+    ctl_init(1);
+}
+static void out_end(char *buf, size_t cap) {
+    ctl_init(0);
+    dup2(g_out_save, 1);
+    close(g_out_save);
+    close(g_out_pipe[1]);
+    ssize_t r = read(g_out_pipe[0], buf, cap - 1);
+    close(g_out_pipe[0]);
+    buf[r > 0 ? r : 0] = 0;
+}
+
+static int count_of(const char *hay, const char *needle) {
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle)) n++;
+    return n;
+}
+
+static size_t wire_of(const struct conn *c, unsigned char *out, size_t cap) {
+    const struct transport *t = &((const struct vl_sess *)SESS(c))->t;
+    size_t n = 0;
+    for (int i = 0; i < g_wlog_n; i++) {
+        if (g_wlog[i].t != t || n + g_wlog[i].n > cap) continue;
+        memcpy(out + n, g_wire + g_wlog[i].off, g_wlog[i].n);
+        n += g_wlog[i].n;
+    }
+    return n;
+}
+
+static int header_is(const unsigned char *w, size_t n, uint32_t a, uint16_t p) {
+    const unsigned char *q = (const unsigned char *)&a;
+    return n >= 26 && w[0] == 0 && w[17] == 0 && w[18] == 1 && w[19] == (p >> 8) && w[20] == (p & 255) &&
+           w[21] == 1 && !memcmp(w + 22, q, 4);
+}
+
+static void k_vless(void) {
+    k_reset();
+    __atomic_store_n(&g_own_fd, 1, __ATOMIC_RELEASE);
+    g_spare_want = 0;
+    stack_setup(&g_dial);
+    g_recv_rc = 0;
+    g_recv_n = 0;
+    g_room = -1;
+    g_send_rc = 0;
+    g_send_again_n = 0;
+    g_send_hold = 0;
+    g_wire_on = 1;
+    g_wire_n = 0;
+    g_wlog_n = 0;
+}
+
+static void k_fake(void) {
+    k_reset();
+    fake_new();
+    all_alive();
+}
+
+static unsigned char pat(size_t i) { return (unsigned char)(i * 7 + i / 251); }
+
+#define FAKE(x) ip4(198, 18, 0, x)
+
+/* Catches serving the open port: a connection with no original destination must be reset. */
+static void t_k_direct(void) {
+    k_vless();
+    int fd = k_dial(0, 0, 0);
+    check(fd >= 0 && k_wait(fd, 50) == 'R' && g_live_n == 0 && g_park_n == 0,
+          "a direct connection is reset (no original destination)");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a loop through the listener: its own address and port as the destination is reset. */
+static void t_k_listener_itself(void) {
+    k_vless();
+    int fd = k_dial(htonl(INADDR_LOOPBACK), (uint16_t)g_kport, 1);
+    check(fd >= 0 && k_wait(fd, 50) == 'R' && g_live_n == 0 && g_park_n == 0,
+          "the listener itself as the destination is reset");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches dialling the fake address: the node must be asked for the mapped real one. */
+static void t_k_mapped(void) {
+    k_vless();
+    k_cmd("198.18.0.10 10.1.2.3\n\n", 0);
+    unsigned miss0 = g_miss.miss;
+    int fd = k_dial(FAKE(10), 443, 1);
+    struct conn *c = k_ready(fd, 200);
+    if (fd >= 0 && send(fd, "hello", 5, 0) != 5) check(0, "fixture: client send failed");
+    static unsigned char w[4096];
+    size_t n = 0;
+    for (int i = 0; c && i < 100 && n < 31; i++) {
+        spin(1);
+        n = wire_of(c, w, sizeof w);
+    }
+    check(c && c->odst == FAKE(10) && c->key.dst == ip4(10, 1, 2, 3) && n == 31 && g_miss.miss == miss0 &&
+              header_is(w, n, ip4(10, 1, 2, 3), 443) && !memcmp(w + 26, "hello", 5),
+          "a mapped fake dials the real address (VLESS header carries 10.1.2.3:443)");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a destination outside the pool being parked or rewritten instead of dialled as is. */
+static void t_k_real(void) {
+    k_vless();
+    int fd = k_dial(ip4(93, 184, 216, 34), 80, 1);
+    struct conn *c = k_ready(fd, 200);
+    static unsigned char w[4096];
+    int nd = 0;
+    socklen_t nl = sizeof nd;
+    if (c) getsockopt(c->cfd, IPPROTO_TCP, TCP_NODELAY, &nd, &nl);
+    check(c && nd == 1, "an accepted socket has TCP_NODELAY");
+    uint64_t t0 = now_ns();
+    while (c && (now_ns() - t0) / 1000000 < SERVER_FIRST_MS + 50) spin(1);
+    size_t n = c ? wire_of(c, w, sizeof w) : 0;
+    check(n == 26 && header_is(w, n, ip4(93, 184, 216, 34), 80),
+          "a silent client: the header goes alone after 100 ms (server speaks first)");
+    if (fd >= 0 && send(fd, "GET", 3, 0) != 3) check(0, "fixture: client send failed");
+    for (int i = 0; c && i < 100 && n < 29; i++) {
+        spin(1);
+        n = wire_of(c, w, sizeof w);
+    }
+    check(c && n == 29 && header_is(w, n, ip4(93, 184, 216, 34), 80) && !memcmp(w + 26, "GET", 3),
+          "a real destination dials as is (93.184.216.34:80)");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a client read past the node's room, and a socket connection woken by room_watch onto the TUN. */
+static void t_k_room(void) {
+    k_vless();
+    int fd = k_dial(ip4(93, 184, 216, 41), 443, 1);
+    struct conn *c = k_ready(fd, 200);
+    g_room = 64;
+    static unsigned char d[100];
+    memset(d, 'r', sizeof d);
+    if (fd >= 0 && send(fd, d, sizeof d, 0) != (ssize_t)sizeof d) check(0, "fixture: client send failed");
+    uint64_t t0 = now_ns();
+    loop_turn(&g_L, 50);
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    int none = g_wlog_n == 0 && ms >= 40;
+    g_room = 74;
+    spin(3);
+    int first = g_wlog_n >= 1 ? (int)g_wlog[0].n : -1;
+    dev_drain(NULL);
+    g_room = 1 << 20;
+    spin(5);
+    unsigned char w[256];
+    size_t n = c ? wire_of(c, w, sizeof w) : 0;
+    check(none && first == 36 && n == 126 && dev_drain(NULL) == 0,
+          "the node's room bounds the client read (0: none, 10: 10 bytes), nothing on the TUN");
+    g_room = -1;
+    if (fd >= 0) close(fd);
+}
+
+/* Catches an evicted socket connection reset on the TUN instead of on its socket. */
+static void t_k_evict(void) {
+    k_vless();
+    int a = k_dial(ip4(93, 184, 216, 42), 443, 1);
+    struct conn *ca = k_ready(a, 200);
+    if (ca) ca->last = g_now_s - IDLE_EVICT_S - 5;
+    dev_drain(NULL);
+    int n0 = g_free_n;
+    uint16_t f0 = g_freelist[0];
+    g_free_n = 0;
+    int b = k_dial(ip4(93, 184, 216, 43), 443, 1);
+    for (int i = 0; i < 20 && !k_conn_of(b); i++) loop_turn(&g_L, 10);
+    struct conn *cb = k_conn_of(b);
+    g_freelist[0] = f0;
+    g_free_n = n0;
+    check(ca && cb && cb == ca && k_wait(a, 5) == 'R' && dev_drain(NULL) == 0,
+          "an evicted socket connection is reset on its socket, nothing on the TUN");
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+}
+
+/* Catches the client's first bytes left unread when the connector reports, so the header goes alone. */
+static void t_k_spoke_early(void) {
+    k_vless();
+    __atomic_store_n(&g_connect_ms, 150, __ATOMIC_RELEASE);
+    int fd = k_dial(ip4(93, 184, 216, 39), 443, 1);
+    if (fd >= 0 && send(fd, "hi", 2, 0) != 2) check(0, "fixture: client send failed");
+    struct conn *c = k_ready(fd, 200);
+    __atomic_store_n(&g_connect_ms, 0, __ATOMIC_RELEASE);
+    spin(2);
+    const struct transport *t = c ? &((const struct vl_sess *)SESS(c))->t : NULL;
+    int first = -1;
+    for (int i = 0; t && i < g_wlog_n && first < 0; i++)
+        if (g_wlog[i].t == t) first = i;
+    check(first >= 0 && g_wlog[first].n == 28 && !memcmp(g_wire + g_wlog[first].off + 26, "hi", 2),
+          "bytes sent during the handshake go with the header");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a half-closed client left armed: its end of stream would wake the loop every turn. */
+static void t_k_half_close(void) {
+    k_vless();
+    int fd = k_dial(ip4(93, 184, 216, 40), 443, 1);
+    struct conn *c = k_ready(fd, 200);
+    if (fd >= 0) shutdown(fd, SHUT_WR);
+    spin(3);
+    uint64_t t0 = now_ns();
+    loop_turn(&g_L, 50);
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    check(c && k_conn_of(fd) == c && c->client_fin && !(c->carmed & ARM_IN) && ms >= 40,
+          "a client half-close stops reading it, the connection stays");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches the prototype's handshake per flow (+110 ms): a ready spare is taken at accept. */
+static void t_k_spare(void) {
+    k_vless();
+    void *old = g_spares[0].sess;
+    g_spare_want = 1;
+    stack_setup(&g_dial);
+    free(old);
+    g_spare_syn_ns = 0;
+    spare_refill();
+    spare_refill();
+    int ready = 0;
+    for (int i = 0; i < 500 && !ready; i++) {
+        pthread_mutex_lock(&g_spare_mu);
+        ready = g_spares[0].state == SPARE_READY;
+        pthread_mutex_unlock(&g_spare_mu);
+        if (!ready) usleep(2000);
+    }
+    check(ready, "fixture: one spare session is ready");
+    int fd = k_dial(ip4(93, 184, 216, 35), 443, 1);
+    struct conn *c = NULL;
+    for (int i = 0; i < 50 && !c; i++) {
+        loop_turn(&g_L, 10);
+        c = k_conn_of(fd);
+    }
+    check(c && !c->pending && c->fd >= 0, "a new connection takes a spare (no connector job)");
+    if (fd >= 0) close(fd);
+    k_reset();
+    for (int i = 0, filling = 1; i < 500 && filling; i++) {
+        filling = 0;
+        pthread_mutex_lock(&g_spare_mu);
+        for (int j = 0; j < SPARE_MAX; j++) filling |= g_spares[j].state == SPARE_FILLING;
+        pthread_mutex_unlock(&g_spare_mu);
+        if (filling) usleep(2000);
+    }
+    g_spare_want = 0;
+    stack_setup(&g_dial);
+}
+
+/* Catches a miss emitted per socket instead of once per fake. */
+static void t_k_ask_once(int *a, int *b) {
+    k_vless();
+    char out[4096];
+    out_start();
+    *a = k_dial(FAKE(20), 443, 1);
+    *b = k_dial(FAKE(20), 443, 1);
+    spin(5);
+    out_end(out, sizeof out);
+    check(*a >= 0 && *b >= 0 && g_park_n == 2 && count_of(out, "\"miss\"") == 1 &&
+              strstr(out, "{\"type\":\"miss\",\"fake\":\"198.18.0.20\"}") != NULL,
+          "two accepts to one unmapped fake: both parked, one miss asked");
+}
+
+/* Catches fail-open and an ask let go while a parked socket still waits for it. */
+static void t_k_answer(int a, int b) {
+    k_cmd("198.18.0.20 10.9.9.9\n\n", 0);
+    for (int i = 0; i < 10 && g_park_n; i++) spin(1);
+    struct conn *ca = k_conn_of(a), *cb = k_conn_of(b);
+    uint32_t r = 0;
+    check(!g_park_n && ca && cb && ca->key.dst == ip4(10, 9, 9, 9) && cb->key.dst == ip4(10, 9, 9, 9) &&
+              ca->odst == FAKE(20) && k_seen(a) == 'W' && k_seen(b) == 'W' &&
+              ctlmap_answer(FAKE(20), &r) == CM_NONE,
+          "an answer opens both parked connections and the ask is let go after the last");
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+}
+
+/* Catches a dash read as "no answer yet": the parked socket must go at once, not at the deadline. */
+static void t_k_dash(void) {
+    k_vless();
+    int fd = k_dial(FAKE(21), 443, 1);
+    for (int i = 0; i < 10 && !g_park_n; i++) spin(1);
+    if (g_park_n) g_park[0].at -= 50000000ull;
+    unsigned ans = g_miss.answered, tmo = g_miss.timed_out;
+    uint64_t t0 = now_ns();
+    k_cmd("198.18.0.21 -\n\n", 0);
+    int s = k_wait(fd, 40);
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    check(g_park_n == 0 && s == 'R' && ms < 150, "a dash resets the parked connection at once");
+    check(g_miss.answered == ans + 1 && g_miss.timed_out == tmo && g_miss.max_ms >= 50,
+          "  counted as answered, its wait in the max");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a miss that never times out, or a loop that sleeps through the 300 ms deadline. */
+static void t_k_deadline(void) {
+    k_vless();
+    uint64_t t0 = now_ns();
+    int fd = k_dial(FAKE(22), 443, 1);
+    for (int i = 0; i < 10 && !g_park_n; i++) spin(1);
+    unsigned ans = g_miss.answered, tmo = g_miss.timed_out;
+    while ((now_ns() - t0) / 1000000 < 250) spin(1);
+    int early = k_seen(fd) == 'W' && g_park_n == 1;
+    uint64_t t1 = now_ns();
+    for (int i = 0; i < 3 && g_park_n; i++) loop_turn(&g_L, 1000);
+    uint64_t ms = (now_ns() - t1) / 1000000;
+    check(early && g_park_n == 0 && k_wait(fd, 3) == 'R' && ms < 400,
+          "300 ms without an answer resets it (not before, and the loop wakes for it)");
+    check(g_miss.timed_out == tmo + 1 && g_miss.answered == ans, "  counted as timed out");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches an unbounded parked set: past 256 the socket is reset at once. */
+static void t_k_park_cap(void) {
+    k_vless();
+    static int fds[PARK_MAX + 1];
+    int ok = 1;
+    for (int i = 0; i < PARK_MAX; i++) {
+        fds[i] = k_dial(FAKE(23), 443, 1);
+        if (fds[i] < 0) ok = 0;
+        if (i % 32 == 31) {
+            spin(1);
+            for (int j = 0; j < g_park_n; j++) g_park[j].at = now_ns();
+        }
+    }
+    for (int i = 0; i < 20 && g_park_n < PARK_MAX; i++) {
+        spin(1);
+        for (int j = 0; j < g_park_n; j++) g_park[j].at = now_ns();
+    }
+    check(ok && g_park_n == PARK_MAX, "fixture: 256 connections parked");
+    fds[PARK_MAX] = k_dial(FAKE(23), 443, 1);
+    int s = k_wait(fds[PARK_MAX], 10);
+    check(s == 'R' && g_park_n == PARK_MAX && k_seen(fds[0]) == 'W' && k_seen(fds[PARK_MAX - 1]) == 'W',
+          "the 257th parked is reset at once, the 256 stay parked");
+    k_cmd("198.18.0.23 -\n\n", 0);
+    spin(3);
+    for (int i = 0; i <= PARK_MAX; i++)
+        if (fds[i] >= 0) close(fds[i]);
+}
+
+/* Catches a read past EARLY_CAP - early_n (bytes lost) and a read while early holds a byte (bytes swapped). */
+static void t_k_send_again(void) {
+    static unsigned char buf[40960], w[64 * 1024];
+    for (size_t i = 0; i < sizeof buf; i++) buf[i] = pat(i);
+    k_vless();
+    int fd = k_dial(ip4(93, 184, 216, 36), 443, 1);
+    struct conn *c = k_ready(fd, 200);
+    g_send_hold = 1;
+    if (fd >= 0 && send(fd, buf, sizeof buf, 0) != (ssize_t)sizeof buf) check(0, "fixture: client send failed");
+    spin(20);
+    int unread = -1;
+    if (c) ioctl(c->cfd, FIONREAD, &unread);
+    check(c && c->used && c->sock && !c->aborted && c->early_n == EARLY_CAP && unread == 40960 - EARLY_CAP,
+          "SEND_AGAIN: one read of 8192 held, the client is not read further");
+    g_send_hold = 0;
+    size_t n = 0;
+    for (int i = 0; c && i < 300 && n < 26 + sizeof buf; i++) {
+        spin(1);
+        n = wire_of(c, w, sizeof w);
+    }
+    check(n == 26 + sizeof buf && !memcmp(w + 26, buf, sizeof buf),
+          "SEND_AGAIN released: the node received all 40 KB in order");
+    if (fd >= 0) close(fd);
+
+    k_vless();
+    fd = k_dial(ip4(93, 184, 216, 37), 443, 1);
+    c = k_ready(fd, 200);
+    g_send_hold = 1;
+    if (fd >= 0 && send(fd, buf, 3000, 0) != 3000) check(0, "fixture: client send failed");
+    spin(10);
+    int held = c && c->early_n == 3000;
+    if (fd >= 0 && send(fd, buf + 3000, sizeof buf - 3000, 0) != (ssize_t)(sizeof buf - 3000))
+        check(0, "fixture: client send failed");
+    spin(5);
+    unread = -1;
+    if (c) ioctl(c->cfd, FIONREAD, &unread);
+    uint64_t t0 = now_ns();
+    loop_turn(&g_L, 50);
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    check(held && unread == (int)sizeof buf - 3000 && ms >= 40,
+          "SEND_AGAIN: no read while early holds a byte, and no wake for the waiting bytes");
+    g_send_hold = 0;
+    n = 0;
+    for (int i = 0; c && i < 300 && n < 26 + sizeof buf; i++) {
+        spin(1);
+        n = wire_of(c, w, sizeof w);
+    }
+    check(n == 26 + sizeof buf && !memcmp(w + 26, buf, sizeof buf),
+          "SEND_AGAIN released: the held 3000 bytes go before the rest");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a listener left disarmed past the next turn, or never disarmed (a spinning loop). */
+static void t_k_fd_table(void) {
+    k_vless();
+    struct rlimit save, rl;
+    getrlimit(RLIMIT_NOFILE, &save);
+    rl = save;
+    rl.rlim_cur = 780;
+    setrlimit(RLIMIT_NOFILE, &rl);
+    park_cap_init();
+    int cap100 = g_park_cap;
+    rl.rlim_cur = 680;
+    setrlimit(RLIMIT_NOFILE, &rl);
+    park_cap_init();
+    int cap0 = g_park_cap;
+    setrlimit(RLIMIT_NOFILE, &save);
+    park_cap_init();
+    check(cap100 == 100 && cap0 == 0 && g_park_cap == PARK_MAX, "the parked cap follows the fd limit");
+
+    int fd = k_sock(ip4(93, 184, 216, 38), 443, 1);
+    int top = open("/dev/null", O_RDONLY);
+    static int fill[256];
+    int nf = 0;
+    rl = save;
+    rl.rlim_cur = (rlim_t)top + 8;
+    setrlimit(RLIMIT_NOFILE, &rl);
+    int x;
+    while (nf < 256 && (x = open("/dev/null", O_RDONLY)) >= 0) fill[nf++] = x;
+    k_connect(fd);
+    for (int i = 0; i < 3; i++) loop_turn(&g_L, 0);
+    int off = g_L.lst_off;
+    uint64_t t0 = now_ns();
+    loop_turn(&g_L, 1000);
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    check(off && g_L.lst_off && ms >= 5 && !k_conn_of(fd), "EMFILE disarms the listener, the loop does not spin");
+    for (int i = 0; i < 4 && nf; i++) close(fill[--nf]);
+    t0 = now_ns();
+    loop_turn(&g_L, 1000);
+    ms = (now_ns() - t0) / 1000000;
+    check(k_conn_of(fd) != NULL && !g_L.lst_off && ms < 100,
+          "a full fd table does not stop accepting: an idle loop accepts within 100 ms");
+    setrlimit(RLIMIT_NOFILE, &save);
+    while (nf) close(fill[--nf]);
+    close(top);
+    if (fd >= 0) close(fd);
+}
+
+/* Catches unbounded buffering: a client that does not read must stop the reads from the node. */
+static void t_k_full_client(void) {
+    static unsigned char big[1 << 20], got[1 << 20];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = pat(i);
+    k_fake();
+    int fd = k_sock(ip4(10, 0, 0, 9), 443, 1);
+    int small = 4096;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    k_connect(fd);
+    struct conn *c = k_ready(fd, 300);
+    if (!c) { check(0, "fixture: full-client connection did not open"); close(fd); return; }
+    setsockopt(c->cfd, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    int s = pm_srv_of(c);
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    size_t off = 0;
+    uint64_t rx0 = g_rx_total;
+    for (int i = 0; i < 300; i++) {
+        ssize_t w = send(s, big + off, sizeof big - off, MSG_DONTWAIT);
+        if (w > 0) off += (size_t)w;
+        loop_turn(&g_L, 2);
+    }
+    int left = 0;
+    ioctl(c->fd, FIONREAD, &left);
+    check(k_conn_of(fd) == c && !c->aborted && c->rtx.len > 0 && c->rtx.len <= RTX_CAP &&
+              !(c->armed & ARM_IN) && left > 0 && g_rx_total - rx0 < 128 * 1024,
+          "a full client socket stops reading the node (tail held, node not armed)");
+    size_t rx = 0;
+    for (int i = 0; i < 20000 && rx < sizeof big; i++) {
+        if (off < sizeof big) {
+            ssize_t w = send(s, big + off, sizeof big - off, MSG_DONTWAIT);
+            if (w > 0) off += (size_t)w;
+        }
+        loop_turn(&g_L, 1);
+        ssize_t r = recv(fd, got + rx, sizeof got - rx, MSG_DONTWAIT);
+        if (r > 0) rx += (size_t)r;
+    }
+    check(rx == sizeof big && !memcmp(got, big, sizeof big), "  then the client gets all of it, in order");
+    close(fd);
+}
+
+/* Catches a close that resets outside its prefixes, skips parked sockets or miscounts. */
+static void t_k_close(void) {
+    k_vless();
+    k_cmd("198.18.4.1 10.4.4.1\n198.18.5.1 10.5.5.1\n\n", 0);
+    int a = k_dial(ip4(198, 18, 4, 1), 443, 1);
+    int b = k_dial(ip4(198, 18, 5, 1), 443, 1);
+    int d = k_dial(ip4(10, 0, 0, 7), 443, 1);
+    int p = k_dial(ip4(198, 18, 4, 9), 443, 1);
+    struct conn *ca = k_ready(a, 200), *cb = k_ready(b, 200), *cd = k_ready(d, 200);
+    check(ca && cb && cd && g_park_n == 1, "fixture: three open, one parked");
+    char out[4096];
+    out_start();
+    for (int j = 0; j < g_park_n; j++) g_park[j].at = now_ns();
+    k_cmd("198.18.4.0/24\n10.0.0.0/8\n\n", 1);
+    spin(3);
+    out_end(out, sizeof out);
+    check(strstr(out, "{\"type\":\"close\",\"count\":3}") != NULL && k_wait(a, 5) == 'R' &&
+              k_wait(d, 5) == 'R' && k_wait(p, 5) == 'R' && k_seen(b) == 'W' && k_conn_of(b) == cb &&
+              g_park_n == 0 && ctlmap_answer(ip4(198, 18, 4, 9), &(uint32_t){ 0 }) == CM_NONE,
+          "close resets only inside the prefixes and counts them (3)");
+    close(a); close(b); close(d); close(p);
+}
+
+/* Catches: two close commands drained in one pass acked once, so fircd waits out the second's deadline. */
+static void t_k_close_two_cmds(void) {
+    k_vless();
+    k_cmd("198.18.6.1 10.6.6.1\n198.18.7.1 10.7.7.1\n198.18.7.2 10.7.7.2\n\n", 0);
+    int a = k_dial(ip4(198, 18, 6, 1), 443, 1);
+    int b = k_dial(ip4(198, 18, 7, 1), 443, 1);
+    int c = k_dial(ip4(198, 18, 7, 2), 443, 1);
+    check(k_ready(a, 200) && k_ready(b, 200) && k_ready(c, 200), "fixture: three open");
+    char out[4096];
+    out_start();
+    k_cmd("198.18.6.0/24\n\n", 1);
+    k_cmd("198.18.7.0/24\n\n", 1);
+    k_cmd("\n", 1);
+    spin(3);
+    out_end(out, sizeof out);
+    const char *one = strstr(out, "{\"type\":\"close\",\"count\":1}");
+    const char *two = one ? strstr(one, "{\"type\":\"close\",\"count\":2}") : NULL;
+    const char *empty = two ? strstr(two, "{\"type\":\"close\",\"count\":0}") : NULL;
+    check(count_of(out, "\"type\":\"close\"") == 3 && one && two && empty,
+          "three close commands in one pass: three acks, in order, each with its own count (1, 2, 0)");
+    close(a); close(b); close(c);
+}
+
+/* Catches freeing a pending record under its connector (use after free). */
+static void t_k_close_pending(void) {
+    k_vless();
+    int in0 = __atomic_load_n(&g_connect_in, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&g_connect_hold, 1, __ATOMIC_RELEASE);
+    int fd = k_dial(ip4(10, 0, 0, 8), 443, 1);
+    for (int i = 0; i < 500 && __atomic_load_n(&g_connect_in, __ATOMIC_ACQUIRE) == in0; i++) spin(1);
+    struct conn *c = k_conn_of(fd);
+    int pend = c && c->pending;
+    if (!pend)
+        fprintf(stderr, "close during a connector job: fd %d conn %s pending %d done %d connects %d seen %c\n", fd,
+                c ? "found" : "gone", c ? c->pending : -1, c ? __atomic_load_n(&c->done, __ATOMIC_ACQUIRE) : -1,
+                __atomic_load_n(&g_connect_in, __ATOMIC_ACQUIRE) - in0, k_seen(fd));
+    char out[4096];
+    out_start();
+    k_cmd("10.0.0.0/8\n\n", 1);
+    spin(2);
+    out_end(out, sizeof out);
+    int marked = k_conn_of(fd) == c && c && c->pending && c->client_gone && k_seen(fd) == 'W';
+    __atomic_store_n(&g_connect_hold, 0, __ATOMIC_RELEASE);
+    int s = k_wait(fd, 100);
+    check(fd >= 0 && pend, "close during a connector job: fixture: the connection is with its connector");
+    check(marked && strstr(out, "{\"type\":\"close\",\"count\":1}") != NULL,
+          "  the close marks it and counts it, without touching it");
+    check(s == 'R' && !k_conn_of(fd), "  reset after the connector reports");
+    close(fd);
+}
+
+/* Catches a cut node link passed on as a clean end. */
+static void t_k_aborted(void) {
+    k_fake();
+    int fd = k_dial(ip4(10, 0, 0, 10), 443, 1);
+    struct conn *c = k_ready(fd, 300);
+    int s = c ? pm_srv_of(c) : -1;
+    if (s < 0 || send(s, "abc", 3, 0) != 3) { check(0, "fixture: node send failed"); close(fd); return; }
+    char b[8];
+    int st = k_wait(fd, 50);
+    ssize_t r = recv(fd, b, sizeof b, MSG_DONTWAIT);
+    pm_srv_rst(s);
+    check(st == 'D' && r == 3 && k_wait(fd, 50) == 'R', "an aborted node resets the client");
+    close(fd);
+}
+
+/* Catches a truncated download looking whole: FIN only after the held tail is written. */
+static void t_k_fin(void) {
+    static unsigned char big[200000], got[200000];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = pat(i + 3);
+    k_fake();
+    int fd = k_sock(ip4(10, 0, 0, 11), 443, 1);
+    int small = 4096;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    k_connect(fd);
+    struct conn *c = k_ready(fd, 300);
+    if (!c) { check(0, "fixture: FIN connection did not open"); close(fd); return; }
+    setsockopt(c->cfd, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    int s = pm_srv_of(c);
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    size_t off = 0, rx = 0;
+    int shut = 0, end = 'W';
+    for (int i = 0; i < 40000 && end == 'W'; i++) {
+        if (off < sizeof big) {
+            ssize_t w = send(s, big + off, sizeof big - off, MSG_DONTWAIT);
+            if (w > 0) off += (size_t)w;
+        } else if (!shut) {
+            shutdown(s, SHUT_WR);
+            shut = 1;
+        }
+        loop_turn(&g_L, 1);
+        if (i % 4) continue;
+        ssize_t r = recv(fd, got + rx, sizeof got - rx > 1000 ? 1000 : sizeof got - rx, MSG_DONTWAIT);
+        if (r > 0) rx += (size_t)r;
+        else if (r == 0) end = 'F';
+        else if (errno == ECONNRESET) end = 'R';
+    }
+    check(end == 'F' && rx == sizeof big && !memcmp(got, big, sizeof big),
+          "a closed node ends with FIN after the whole tail");
+    close(fd);
+    close(s);
+}
+
+/* Catches: an accepted socket closed with a FIN when the process dies, so an unfinished download reads as complete. */
+static void t_k_killed_resets(void) {
+    k_vless();
+    k_cmd("198.18.0.15 10.1.2.7\n\n", 0);
+    int fd = k_dial(FAKE(15), 443, 1);
+    struct conn *c = k_ready(fd, 200);
+    if (!c || c->cfd < 0) {
+        check(0, "fixture: an open socket connection");
+        if (fd >= 0) close(fd);
+        return;
+    }
+    pid_t kid = fork();
+    if (kid == 0) {
+        for (;;) pause();
+    }
+    close(c->cfd);
+    c->cfd = -1;
+    kill(kid, SIGKILL);
+    waitpid(kid, NULL, 0);
+    check(k_seen(fd) == 'R', "a killed process holding an unfinished redirected download resets it");
+    close(fd);
+}
+
+/* Catches a second loop opening the same parked socket: only the listener's loop owns the park list. */
+static int g_w1_stop, g_w1_turns, g_w1_most = -1;
+static void *w1_loop(void *arg) {
+    (void)arg;
+    static struct loop l1;
+    struct tun_dev t;
+    memset(&t, 0, sizeof t);
+    t.fd = -1;
+    if (conn_table_init() != 0 || loop_open(&l1, &t, 0) != 0) return NULL;
+    int most = 0;
+    while (!__atomic_load_n(&g_w1_stop, __ATOMIC_ACQUIRE)) {
+        loop_turn(&l1, 5);
+        if (g_live_n > most) most = g_live_n;
+        __atomic_add_fetch(&g_w1_turns, 1, __ATOMIC_RELEASE);
+    }
+    while (g_live_n) conn_drop(&g_conns[g_live[0]]);
+    loop_close(&l1);
+    conn_table_free();
+    __atomic_store_n(&g_w1_most, most, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void t_k_two_loops(void) {
+    k_vless();
+    pthread_t t;
+    if (pthread_create(&t, NULL, w1_loop, NULL) != 0) { check(0, "fixture: second loop thread"); return; }
+    while (__atomic_load_n(&g_w1_turns, __ATOMIC_ACQUIRE) < 3) usleep(1000);
+    int fd = k_dial(FAKE(24), 443, 1);
+    for (int i = 0; i < 10 && !g_park_n; i++) spin(1);
+    int parked = g_park_n;
+    k_cmd("198.18.0.24 10.2.4.6\n\n", 0);
+    usleep(60000);
+    int kept = g_park_n;
+    for (int i = 0; i < 10 && !k_conn_of(fd); i++) spin(1);
+    struct conn *c = k_conn_of(fd);
+    __atomic_store_n(&g_w1_stop, 1, __ATOMIC_RELEASE);
+    pthread_join(t, NULL);
+    check(parked == 1 && kept == 1 && c && c->key.dst == ip4(10, 2, 4, 6) && k_seen(fd) == 'W' &&
+              __atomic_load_n(&g_w1_most, __ATOMIC_ACQUIRE) == 0,
+          "two loops: only the listener's loop opens a parked socket, once");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a client error during the ring flush left to idle eviction instead of a reset. */
+static void t_k_flush_error(void) {
+    static unsigned char big[1 << 19];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = pat(i);
+    k_fake();
+    int fd = k_sock(ip4(10, 0, 0, 13), 443, 1);
+    int small = 4096;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    k_connect(fd);
+    struct conn *c = k_ready(fd, 300);
+    if (!c) { check(0, "fixture: flush-error connection did not open"); close(fd); return; }
+    setsockopt(c->cfd, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    int s = pm_srv_of(c);
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    size_t off = 0;
+    for (int i = 0; i < 100 && !c->rtx.len; i++) {
+        ssize_t w = send(s, big + off, sizeof big - off, MSG_DONTWAIT);
+        if (w > 0) off += (size_t)w;
+        loop_turn(&g_L, 2);
+    }
+    int held = c->rtx.len > 0;
+    sock_rst(fd);
+    int gone = 0;
+    for (int i = 0; i < 20 && !gone; i++) {
+        loop_turn(&g_L, 10);
+        gone = !c->used || !c->sock;
+    }
+    check(held && gone, "a client error while the tail is held resets the connection");
+}
+
+/* Catches a prefix match that drops the length guard (/0) or ignores the mask (/32, /24). */
+static void t_k_prefixes(void) {
+    uint32_t b[3] = { 0, ip4(10, 0, 0, 7), ip4(192, 168, 1, 0) };
+    uint8_t l[3] = { 0, 32, 24 };
+    check(in_prefixes(ip4(203, 0, 113, 9), b, l, 1) && in_prefixes(ip4(10, 0, 0, 7), b + 1, l + 1, 1) &&
+              !in_prefixes(ip4(10, 0, 0, 6), b + 1, l + 1, 1) && in_prefixes(ip4(192, 168, 1, 255), b + 2, l + 2, 1) &&
+              !in_prefixes(ip4(192, 168, 2, 0), b + 2, l + 2, 1),
+          "close prefixes: /0 takes all, /32 one address, /24 its block only");
+}
+
+/* Catches a failed connect left open instead of reset. */
+static void t_k_no_node(void) {
+    k_fake();
+    g_fn[0].alive = 0;
+    int fd = k_dial(ip4(10, 0, 0, 12), 443, 1);
+    int s = k_wait(fd, 100);
+    g_fn[0].alive = 1;
+    check(s == 'R' && !k_conn_of(fd), "no active node: the connection is reset when the connector reports");
+    close(fd);
+}
+
+static void miss_set(void) {
+    g_miss.since = 1;
+    g_miss.miss = 3;
+    g_miss.answered = 2;
+    g_miss.timed_out = 1;
+    g_miss.max_ms = 17;
+}
+
+static void miss_early(void *arg) {
+    (void)arg;
+    miss_set();
+    miss_report(60000000000ull);
+}
+
+static void miss_line(void *arg) {
+    (void)arg;
+    miss_set();
+    miss_report(60000000001ull);
+}
+
+static void quiet_minute(void *arg) {
+    (void)arg;
+    memset(&g_miss, 0, sizeof g_miss);
+    g_miss.since = 1;
+    miss_report(60000000001ull);
+}
+
+static void lst_busy(void *arg) { lst_open(*(int *)arg); }
+
+/* Catches: a socket connection in slot 0 taken for the stop token, which resets every TUN connection and spends the stop. */
+static void t_k_slot0_not_stop(void) {
+    k_vless();
+    k_cmd("198.18.0.11 10.1.2.3\n\n", 0);
+    for (int i = 0; i < g_free_n; i++) {
+        if (g_freelist[i] != 0) continue;
+        g_freelist[i] = g_freelist[g_free_n - 1];
+        g_freelist[g_free_n - 1] = 0;
+        break;
+    }
+    int fd = k_dial(FAKE(11), 443, 1);
+    struct conn *s = k_ready(fd, 200);
+    struct conn *t = s && s - g_conns == 0 ? open_conn(65535) : NULL;
+    if (!t || g_L.stop_in != 1) {
+        check(0, "fixture: a socket connection in slot 0, a TUN connection, the loop armed for stop");
+        if (fd >= 0) close(fd);
+        return;
+    }
+    uint32_t a = t->client_ack, o = t->our_seq;
+    dev_drain(NULL);
+    if (send(fd, "hello", 5, 0) != 5) check(0, "fixture: client send failed");
+    static unsigned char w[4096];
+    size_t n = 0;
+    for (int i = 0; i < 100 && n < 31; i++) {
+        spin(1);
+        n = wire_of(s, w, sizeof w);
+    }
+    uint32_t seq[4], ack[4];
+    int wrong;
+    int rst = stop_rsts(CLI_PORT, seq, ack, 4, &wrong);
+    check(n == 31 && !memcmp(w + 26, "hello", 5) && rst == 0 && g_L.stop_in == 1,
+          "socket slot 0 readable: its data is pumped, no TUN connection is reset, the stop stays armed");
+    uint64_t one = 1;
+    if (write(g_stop_efd, &one, sizeof one) != (ssize_t)sizeof one) check(0, "fixture: stop write");
+    spin(2);
+    rst = stop_rsts(CLI_PORT, seq, ack, 4, &wrong);
+    check(rst == 2 && seq[0] == a && seq[1] == o && g_L.stop_in == 0, "  and the stop itself still resets the TUN connection");
+    uint64_t t0 = now_ns();
+    loop_turn(&g_L, 40);
+    check(now_ns() - t0 >= 30 * 1000000ull, "  a loop that answered the stop no longer wakes on it");
+    uint64_t v;
+    ssize_t rd = read(g_stop_efd, &v, sizeof v);
+    (void)rd;
+    close(fd);
+    if (lst_open(0) != 0) check(0, "fixture: listener reopened");
+    g_kport = stack_tcp_port();
+    lst_arm(&g_L);
+}
+
+/* Catches: a stop that lets exit close redirected sockets with a FIN, so a cut download without a length looks complete. */
+static void t_k_stop_resets_sockets(void) {
+    k_vless();
+    k_cmd("198.18.0.12 10.1.2.4\n\n", 0);
+    k_cmd("198.18.0.13 10.1.2.5\n198.18.0.14 10.1.2.6\n\n", 0);
+    int fd = k_dial(FAKE(12), 443, 1);
+    struct conn *s = k_ready(fd, 200);
+    int dfd = k_dial(FAKE(13), 443, 1);
+    struct conn *d = k_ready(dfd, 200);
+    int tfd = k_dial(FAKE(14), 443, 1);
+    struct conn *t = k_ready(tfd, 200);
+    int pfd = k_dial(FAKE(23), 443, 1);
+    for (int i = 0; i < 10 && !g_park_n; i++) spin(1);
+    if (!s || s->cfd < 0 || !d || d->cfd < 0 || !t || t->cfd < 0 || g_park_n != 1) {
+        check(0, "fixture: three open socket connections and one parked");
+        if (fd >= 0) close(fd);
+        if (dfd >= 0) close(dfd);
+        if (tfd >= 0) close(tfd);
+        if (pfd >= 0) close(pfd);
+        return;
+    }
+    d->srv_closed = 1;
+    t->srv_closed = 1;
+    t->rtx.len = 10;
+    stop_reset(&g_L.tun, 1);
+    t->rtx.len = 0;
+    close(s->cfd);
+    s->cfd = -1;
+    close(d->cfd);
+    d->cfd = -1;
+    close(t->cfd);
+    t->cfd = -1;
+    close(g_park[0].fd);
+    g_park_n = 0;
+    check(k_seen(fd) == 'R' && k_seen(pfd) == 'R',
+          "stop: an open and a parked redirected socket are reset when the process closes them");
+    /* catches: a finished node's tail still in rtx taken as done, so the client reads a short body as complete */
+    check(k_seen(tfd) == 'R', "  a finished node whose tail is still held is reset");
+    close(tfd);
+    /* catches: a connection already finishing at the stop cut by linger 0, losing its unsent tail */
+    check(k_seen(dfd) == 'F', "  a connection the node already finished ends with a FIN");
+    int late = k_sock(FAKE(12), 443, 1);
+    /* catches: the listener left armed, so a connection accepted in the exit window ends with a FIN */
+    check(g_lst_fd < 0 && k_connect(late) < 0, "  and the listener is closed, so nothing is accepted after the stop");
+    if (late >= 0) close(late);
+    close(fd);
+    close(dfd);
+    close(pfd);
+}
+
+static void sock_part(void) {
+    int fl = fcntl(g_tun.fd, F_GETFL, 0);
+    fcntl(g_tun.fd, F_SETFL, fl | O_NONBLOCK);
+    signal(SIGPIPE, SIG_IGN);
+    check(sizeof(struct conn) <= 192, "the hot record stays within 192 bytes");
+
+    int busy = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ba = { .sin_family = AF_INET };
+    socklen_t bl = sizeof ba;
+    int bport = -1;
+    if (busy >= 0 && bind(busy, (struct sockaddr *)&ba, sizeof ba) == 0 && listen(busy, 1) == 0 &&
+        getsockname(busy, (struct sockaddr *)&ba, &bl) == 0)
+        bport = ntohs(ba.sin_port);
+    char want[96];
+    snprintf(want, sizeof want, "tunvless[warn] tunnel: cannot listen on port %d: ", bport);
+    check(bport > 0 && stderr_has(lst_busy, &bport, want) && stack_tcp_port() == 0 && g_lst_fd < 0,
+          "a taken port: tcpPort 0 and one warn line");
+    if (busy >= 0) close(busy);
+
+    check(!stderr_has(miss_early, NULL, "misses"), "misses: nothing before the minute is over");
+    check(stderr_has(miss_line, NULL,
+                     "tunvless[warn] tunnel: 3 misses in the last minute, 2 answered (max 17 ms), 1 timed out\n") &&
+              g_miss.miss == 0,
+          "misses: one line a minute with answered, max and timed out");
+    check(!stderr_has(quiet_minute, NULL, "misses"), "  and none for a minute without misses");
+
+    ctlmap_init(ip4(198, 18, 0, 0), 15);
+    if (lst_open(0) != 0 || loop_open(&g_L, &g_tun, 1) != 0) {
+        check(0, "fixture: listener and loop");
+        return;
+    }
+    g_kport = stack_tcp_port();
+    park_cap_init();
+    check(g_kport > 0 && g_L.ctl >= 0, "fixture: the listener and the map wake are in the loop");
+
+    int a = -1, b = -1;
+    t_k_direct();
+    t_k_listener_itself();
+    t_k_mapped();
+    t_k_real();
+    t_k_spare();
+    t_k_spoke_early();
+    t_k_room();
+    t_k_evict();
+    t_k_half_close();
+    t_k_ask_once(&a, &b);
+    t_k_answer(a, b);
+    t_k_dash();
+    t_k_deadline();
+    t_k_park_cap();
+    t_k_send_again();
+    t_k_fd_table();
+    t_k_close();
+    t_k_close_two_cmds();
+    t_k_close_pending();
+    t_k_full_client();
+    t_k_aborted();
+    t_k_fin();
+    t_k_killed_resets();
+    t_k_no_node();
+    t_k_two_loops();
+    t_k_flush_error();
+    t_k_prefixes();
+    t_k_slot0_not_stop();
+    t_k_stop_resets_sockets();
+    k_reset();
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);       /* a crash or a hang keeps the checks printed so far */
     int sp[2];
@@ -2452,7 +3644,10 @@ int main(void) {
     t_server_first();
     t_room_window();
     t_gather();
+    t_stop_resets();
+    t_stop_wakes_the_loop();
     if (stack_part() != 0) check(0, "fixture: loopback listener failed");
+    sock_part();
 
     printf(g_fail ? "\ntunnelmatch: FAIL\n" : "\nall checks passed\n");
     return g_fail;

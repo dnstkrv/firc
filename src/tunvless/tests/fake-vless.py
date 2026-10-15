@@ -93,6 +93,9 @@ class Handler(socketserver.BaseRequestHandler):
         uuid, cmd, port, addr = req
         if uuid != self.server.uuid:
             return                          # wrong key: stay silent, like a real server
+        if self.server.log_dst:
+            with open(self.server.log_dst, "a") as f:
+                f.write("%s:%d\n" % (addr, port))
 
         if cmd == CMD_UDP:
             if self.server.udp_relay:
@@ -324,6 +327,7 @@ def main():
     ap.add_argument("--kbps", type=int, default=0, help="send rate limit, KB/s (0 — none)")
     ap.add_argument("--udp-relay", action="store_true",
                     help="forward UDP (command 2) to the address in the request instead of echoing")
+    ap.add_argument("--log-dst", help="append each requested address:port to this file")
     a = ap.parse_args()
 
     srv = Server((a.bind, a.port), Handler)
@@ -331,6 +335,7 @@ def main():
     srv.body_n = a.mb * 1024 * 1024
     srv.udp_relay = a.udp_relay
     srv.kbps = a.kbps
+    srv.log_dst = a.log_dst
     srv.filler = FILLER
     print("fake-vless: %s:%d, serves %d MB" % (a.bind, a.port, a.mb), flush=True)
     try:

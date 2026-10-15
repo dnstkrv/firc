@@ -19,7 +19,7 @@ check() {
     fi
 }
 cleanup() {
-    for p in ${TP:-} ${TS:-} ${SRV_A:-} ${SRV_B:-} ${S2A:-} ${S2B:-} ${S2C:-} ${LONG:-}; do kill "$p" 2>/dev/null; done
+    for p in ${TP:-} ${TK:-} ${TB:-} ${HOLD:-} ${TS:-} ${SRV_A:-} ${SRV_B:-} ${S2A:-} ${S2B:-} ${S2C:-} ${LONG:-}; do kill "$p" 2>/dev/null; done
     ip netns pids $H 2>/dev/null | xargs -r kill 2>/dev/null
     ip netns pids $N 2>/dev/null | xargs -r kill 2>/dev/null
     ip netns del $H 2>/dev/null; ip netns del $N 2>/dev/null
@@ -112,7 +112,7 @@ tv_pid() {
 }
 HX "$BIN" --control -d tvc0 -A 1 --interval 5 < "$W/nodes" > "$W/ev" 2> "$W/tun.log" 9< "$W/nodes" & TP=$!
 sleep 4
-check "ready line" '{"type":"ready","dev":"tvc0"}' "$(grep '"ready"' "$W/ev" | head -1)"
+check "ready line" '{"type":"ready","dev":"tvc0","tcpPort":0}' "$(grep '"ready"' "$W/ev" | head -1)"
 check "first active" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev" | head -1)"
 TV=$(tv_pid)
 check "inherited fd 9 closed" "${TV:-none} no" "${TV:-none} $([ -e "/proc/$TV/fd/9" ] && echo yes || echo no)"
@@ -141,6 +141,67 @@ check "--control with --list exits 2" 2 "$?"
 # catches: a refused --control combination told as a warning
 check "--control with --list: an error line" \
     "tunvless[error]: --control does not combine with --list or --probe" "$(cat "$W/list.err")"
+wait_in() {
+    i=0
+    while [ $i -lt 50 ] && ! grep -qF "$2" "$1"; do sleep 0.2; i=$((i + 1)); done
+}
+mkfifo "$W/ink"
+ip netns exec $H sh -c 'ulimit -Sn 512; exec "$@"' sh "$BIN" --control -d tvk0 -A 1 -t 3 --tcp-port 3600 \
+    --tcp-pool 198.18.0.0/15 < "$W/ink" > "$W/evk" 2> "$W/tunk.log" & TK=$!
+exec 7> "$W/ink"
+cat "$W/nodes" >&7
+wait_in "$W/evk" '"ready"'
+check "--tcp-port and --tcp-pool: ready" '{"type":"ready","dev":"tvk0","tcpPort":3600}' "$(grep '"ready"' "$W/evk" | head -1)"
+check "the open file limit is raised to the hard limit" raised \
+    "$(awk '/^Max open files/ { print ($4 == $5) ? "raised" : $4 " of " $5 }' "/proc/$TK/limits" 2>/dev/null)"
+check "a direct connection to the port is reset" reset "$(HX python3 -c '
+import socket
+s = socket.create_connection(("127.0.0.1", 3600), 3)
+s.settimeout(3)
+try:
+    print("eof" if s.recv(1) == b"" else "data")
+except ConnectionResetError:
+    print("reset")
+except socket.timeout:
+    print("timeout")
+')"
+printf 'map\n198.18.0.5 10.0.0.1\n198.18.0.6 -\n\n' >&7
+wait_in "$W/evk" '"type":"map"'
+check "a map command is acknowledged with its count" '{"type":"map","count":2}' "$(grep '"type":"map"' "$W/evk" | head -1)"
+printf 'close\n198.18.0.0/24\n\n' >&7
+wait_in "$W/evk" '"type":"close"'
+check "a close command is acknowledged by the loop" '{"type":"close","count":0}' "$(grep '"type":"close"' "$W/evk" | head -1)"
+exec 7>&-
+kill "$TK" 2>/dev/null; wait "$TK" 2>/dev/null; TK=""
+ip netns exec $H python3 -c '
+import socket, time
+s = socket.socket()
+s.bind(("0.0.0.0", 3601))
+s.listen(1)
+time.sleep(30)
+' & HOLD=$!
+sleep 0.5
+ip netns exec $H "$BIN" --control -d tvk2 -A 1 -t 3 --tcp-port 3601 < "$W/nodes" > "$W/evb" 2> "$W/tunb.log" & TB=$!
+wait_in "$W/evb" '"ready"'
+check "a taken port: ready with tcpPort 0" '{"type":"ready","dev":"tvk2","tcpPort":0}' "$(grep '"ready"' "$W/evb" | head -1)"
+check "a taken port: one warn line" 1 "$(grep -c 'tunvless\[warn\] tunnel: cannot listen on port 3601: .*, TCP stays on the TUN' "$W/tunb.log")"
+kill "$TB" "$HOLD" 2>/dev/null; wait "$TB" "$HOLD" 2>/dev/null; TB="" HOLD=""
+ip netns exec $H "$BIN" --control -d tvk3 -A 1 -t 3 --tcp-port 65535 < "$W/nodes" > "$W/evm" 2> /dev/null & TB=$!
+wait_in "$W/evm" '"ready"'
+check "--tcp-port 65535 is taken" '{"type":"ready","dev":"tvk3","tcpPort":65535}' "$(grep '"ready"' "$W/evm" | head -1)"
+kill "$TB" 2>/dev/null; wait "$TB" 2>/dev/null; TB=""
+bad_tcp() {
+    HX timeout 15 "$BIN" --control -d tvk1 "$1" "$2" < "$W/nodes" > /dev/null 2> "$W/badk.log"
+    echo "$? $(grep -c "bad option value: $2" "$W/badk.log")"
+}
+check "--tcp-port 0 is a usage error" "2 1" "$(bad_tcp --tcp-port 0)"
+check "--tcp-port 70000 is a usage error" "2 1" "$(bad_tcp --tcp-port 70000)"
+check "--tcp-port 65536 is a usage error" "2 1" "$(bad_tcp --tcp-port 65536)"
+check "--tcp-pool without a length is a usage error" "2 1" "$(bad_tcp --tcp-pool 198.18.0.0)"
+check "--tcp-pool 198.18.0.0/+15 is a usage error" "2 1" "$(bad_tcp --tcp-pool 198.18.0.0/+15)"
+check "--tcp-pool 0.0.0.0/0 is a usage error" "2 1" "$(bad_tcp --tcp-pool 0.0.0.0/0)"
+check "--tcp-pool 198.18.0.0/33 is a usage error" "2 1" "$(bad_tcp --tcp-pool 198.18.0.0/33)"
+check "--tcp-pool ::/0 is a usage error" "2 1" "$(bad_tcp --tcp-pool ::/0)"
 P2=10801 C=10.75.0.3
 ip netns exec $N ip addr add $C/32 dev lo
 srv2() {

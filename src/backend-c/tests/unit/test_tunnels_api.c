@@ -501,12 +501,12 @@ TEST get_answers_every_tunnel_in_the_agreed_shape(void)
                      "\"interval\":3600}],"
                      "\"filter\":\"^(A|B)$\",\"order\":[\"0000000b:B\"],\"exclude\":[\"0000000b:C\"],"
                      "\"active\":2,\"by\":\"site\",\"interval\":30,\"silence\":10,"
-                     "\"advanced\":{\"timeout\":5,\"insecure\":true,\"ca\":\"/etc/ca.pem\"}},"
+                     "\"advanced\":{\"timeout\":5,\"insecure\":true,\"ca\":\"/etc/ca.pem\",\"kernelTcp\":false}},"
                      "{\"id\":\"b\",\"device\":\"tunvless1\",\"description\":\"\",\"enable\":false,"
                      "\"uplink\":{\"kind\":\"iface\",\"ref\":\"eth9\"},\"sources\":[],"
                      "\"filter\":\"\",\"order\":[],\"exclude\":[],"
                      "\"active\":1,\"by\":\"connection\",\"interval\":60,\"silence\":20,"
-                     "\"advanced\":{\"timeout\":8,\"insecure\":false,\"ca\":\"\"}}]}"));
+                     "\"advanced\":{\"timeout\":8,\"insecure\":false,\"ca\":\"\",\"kernelTcp\":false}}]}"));
     cJSON_Delete(ans);
     PASS();
 }
@@ -1016,6 +1016,76 @@ TEST wrong_json_types_are_refused_with_their_field(void)
     PASS();
 }
 
+/* catches: a quoted "true" for advanced.kernelTcp coerced by the YAML parser instead of refused */
+TEST kernel_tcp_must_be_a_bool(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+#define KT_BAD(v) "{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,\"advanced\":{\"kernelTcp\":" v "}}"
+    static const char *const bad[] = {KT_BAD("\"true\""), KT_BAD("1"), KT_BAD("\"\"")};
+#undef KT_BAD
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        cJSON *ans = NULL;
+        ASSERT_EQm(bad[i], 400, put_field_error(bad[i], &ans));
+        ASSERTm(bad[i], same_json(ans, "{\"error\":\"must be true or false\","
+                                        "\"field\":\"advanced.kernelTcp\",\"tunnel\":\"a\"}"));
+        cJSON_Delete(ans);
+    }
+    ASSERT_EQ(-1, access(g_hx->path, F_OK));
+    PASS();
+}
+
+/* catches: kernelTcp missing from the GET answer, or dropped on the way from a PUT to the file */
+TEST get_put_get_keeps_kernel_tcp(void)
+{
+    ASSERT(hx_start(FULL_TUN, 0) != NULL);
+    cJSON *first = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &first));
+    ASSERT(cJSON_IsFalse(at(at(tunnel_named(first, "a"), "advanced"), "kernelTcp")));
+    ASSERT(cJSON_IsFalse(at(at(tunnel_named(first, "b"), "advanced"), "kernelTcp")));
+    cJSON *adv = (cJSON *)at(tunnel_named(first, "b"), "advanced");
+    ASSERT(cJSON_ReplaceItemInObjectCaseSensitive(adv, "kernelTcp", cJSON_CreateTrue()));
+    char *body = cJSON_PrintUnformatted(first);
+    cJSON *put = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", body, &put));
+    free(body);
+    cJSON_Delete(put);
+    firc_tunnels_t saved = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_file(&saved, g_hx->path, NULL));
+    ASSERT(!saved.t[0].kernel_tcp);
+    ASSERT(saved.t[1].kernel_tcp);
+    firc_tunnels_free(&saved);
+    cJSON *second = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &second));
+    ASSERT(cJSON_Compare(first, second, true));
+    ASSERT(cJSON_IsTrue(at(at(tunnel_named(second, "b"), "advanced"), "kernelTcp")));
+    cJSON_Delete(first);
+    cJSON_Delete(second);
+    PASS();
+}
+
+/* catches: tcpPort missing from the state, renamed, not a number, or not the port the ready child reported */
+TEST state_reports_tcp_port(void)
+{
+    setenv("FAKE_MODE", "ktcp", 1);
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless4\n    advanced: { kernelTcp: true }\n    sources:\n"
+                    "      - id: 0000000a\n        link: \"" LINK_A "\"\n"
+                    "  - id: b\n    device: tunvless5\n    sources:\n"
+                    "      - id: 0000000b\n        link: \"" LINK_B "\"\n",
+                    0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    ASSERT(wait_for_status("b", "up", 3000));
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT_EQ(2, cJSON_GetArraySize(at(ans, "tunnels")));
+    const cJSON *a = tunnel_named(ans, "a");
+    const cJSON *b = tunnel_named(ans, "b");
+    ASSERT(cJSON_IsNumber(at(a, "tcpPort")) && cJSON_IsNumber(at(b, "tcpPort")));
+    ASSERT_EQ(3604, at(a, "tcpPort")->valueint);
+    ASSERT_EQ(0, at(b, "tcpPort")->valueint);
+    cJSON_Delete(ans);
+    PASS();
+}
+
 /* catches: a description over 63 bytes or with a control character saved instead of refused with its field */
 TEST a_bad_description_is_refused_with_its_field(void)
 {
@@ -1107,6 +1177,9 @@ SUITE(tunnels_api)
     RUN_TEST(a_get_answer_put_back_reads_the_same);
     RUN_TEST(a_bad_description_is_refused_with_its_field);
     RUN_TEST(a_description_edit_is_saved_and_restarts_nothing);
+    RUN_TEST(kernel_tcp_must_be_a_bool);
+    RUN_TEST(get_put_get_keeps_kernel_tcp);
+    RUN_TEST(state_reports_tcp_port);
 }
 
 GREATEST_MAIN_DEFS();

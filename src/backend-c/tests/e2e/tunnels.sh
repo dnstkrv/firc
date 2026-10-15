@@ -32,9 +32,11 @@ check() {
 }
 cleanup() {
     [ -n "${FP:-}" ] && kill "$FP" 2>/dev/null && wait "$FP" 2>/dev/null
-    for p in ${SRV_A:-} ${SRV_B:-} ${WEB:-}; do kill "$p" 2>/dev/null; done
-    ip netns pids $N 2>/dev/null | xargs -r kill 2>/dev/null
-    ip netns del $N 2>/dev/null
+    for p in ${SRV_A:-} ${SRV_B:-} ${WEB:-} ${STUB:-} ${SQ:-} ${LOC:-}; do kill "$p" 2>/dev/null; done
+    for ns in $N ${X:-}; do
+        ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
+        ip netns del "$ns" 2>/dev/null
+    done
     if [ "$fail" != 0 ]; then
         echo "--- fircd log (tail)"; tail -n 40 "$W/fircd.log" 2>/dev/null
         echo "--- journal"; cat "$W/ev" 2>/dev/null; echo
@@ -375,6 +377,469 @@ kill -TERM "$FP"
 wait "$FP"
 FP=
 check "no tunvless process is left after the subscription case" "" "$(ours)"
+
+X=tfl
+LAN=10.80.0.1 CL=10.80.0.2 C=10.79.0.3 REAL=10.85.0.9 STUBP=5354 DNSP=13597
+LX() { ip netns exec $X "$@"; }
+miss=
+command -v iptables-legacy >/dev/null && command -v iptables-legacy-save >/dev/null || miss=" iptables-legacy"
+iptables-legacy -t nat -N KTCP_PROBE >/dev/null 2>&1
+iptables-legacy -t nat -A KTCP_PROBE -p tcp -j REDIRECT --to-ports 3600 >/dev/null 2>&1 || miss="$miss xt_REDIRECT"
+iptables-legacy -t nat -A KTCP_PROBE -m addrtype ! --dst-type LOCAL -j RETURN >/dev/null 2>&1 || miss="$miss xt_addrtype"
+iptables-legacy -t nat -F KTCP_PROBE >/dev/null 2>&1
+iptables-legacy -t nat -X KTCP_PROBE >/dev/null 2>&1
+# catches: kernel TCP checks skipped on a host whose kernel lacks the modules a user namespace cannot load
+check "the kernel takes REDIRECT and addrtype from a user namespace" "" "$miss"
+if [ -n "$miss" ]; then
+    echo "kernel TCP e2e cannot run: missing$miss; load on the host: modprobe xt_REDIRECT xt_addrtype"
+    echo "tunnels e2e: $pass ok, $fail fail"
+    exit 1
+fi
+
+cat > "$W/kt.py" <<'EOF'
+import errno
+import socket
+import struct
+import sys
+import time
+
+
+def qname(q, i):
+    labels = []
+    while q[i]:
+        labels.append(q[i + 1:i + 1 + q[i]].decode())
+        i += 1 + q[i]
+    return ".".join(labels).lower(), i + 1
+
+
+def serve(port, name, addr):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", int(port)))
+    raw = socket.inet_aton(addr)
+    while True:
+        q, peer = s.recvfrom(4096)
+        n, end = qname(q, 12)
+        hit = n == name and struct.unpack("!H", q[end:end + 2])[0] == 1
+        hdr = q[:2] + struct.pack("!HHHHH", 0x8180 if n == name else 0x8183, 1, int(hit), 0, 0)
+        ans = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + raw if hit else b""
+        s.sendto(hdr + q[12:end + 4] + ans, peer)
+
+
+def q(server, port, name):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(3)
+    m = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    m += b"".join(bytes([len(l)]) + l.encode() for l in name.split(".")) + b"\x00\x00\x01\x00\x01"
+    s.sendto(m, (server, int(port)))
+    r = s.recv(4096)
+    _, i = qname(r, 12)
+    i += 4
+    for _ in range(struct.unpack("!H", r[6:8])[0]):
+        i += 2
+        t, _, _, ln = struct.unpack("!HHIH", r[i:i + 10])
+        i += 10
+        if t == 1:
+            print(socket.inet_ntoa(r[i:i + 4]))
+        i += ln
+
+
+def conn(host, port, wait, sport="0", started=""):
+    t0 = time.monotonic()
+    got, kind = b"", "data"
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(float(wait))
+    try:
+        if int(sport):
+            s.bind(("0.0.0.0", int(sport)))
+        s.connect((host, int(port)))
+        s.sendall(b"GET / HTTP/1.0\r\nHost: t\r\n\r\n")
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            if started and not got:
+                open(started, "w").close()
+            got += b
+    except ConnectionRefusedError:
+        kind = "refused"
+    except ConnectionResetError:
+        kind = "reset"
+    except socket.timeout:
+        kind = "timeout"
+    except OSError as e:
+        kind = "unreach" if e.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH) else "errno%d" % e.errno
+    _, sep, body = got.partition(b"\r\n\r\n")
+    if kind == "data" and not got:
+        kind = "eof"
+    print("%s %d %d" % (kind, len(body) if sep else len(got), (time.monotonic() - t0) * 1000), flush=True)
+
+
+def listen(port, log):
+    s = socket.socket()
+    s.bind(("0.0.0.0", int(port)))
+    s.listen(16)
+    print("listening", flush=True)
+    while True:
+        c, peer = s.accept()
+        c.recv(4096)
+        with open(log, "a") as f:
+            f.write("%s:%d\n" % peer)
+        c.sendall(b"HTTP/1.0 200 OK\r\n\r\nlocal")
+        c.close()
+
+
+def attrs(buf):
+    i = 0
+    while i + 4 <= len(buf):
+        ln, t = struct.unpack("=HH", buf[i:i + 4])
+        if ln < 4:
+            break
+        yield t & 0x3fff, buf[i + 4:i + ln]
+        i += (ln + 3) & ~3
+
+
+def tup(buf):
+    out = {}
+    for t, v in attrs(buf):
+        for t2, v2 in attrs(v):
+            if t == 1 and t2 in (1, 2):
+                out[t2] = socket.inet_ntoa(v2)
+            elif t == 2 and t2 == 1:
+                out["p"] = v2[0]
+            elif t == 2 and t2 in (2, 3):
+                out[t2 + 1] = struct.unpack("!H", v2)[0]
+    return out
+
+
+def ct():
+    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 12)
+    s.bind((0, 0))
+    s.send(struct.pack("=IHHII", 20, 0x101, 0x301, 1, 0) + struct.pack("=BBH", 2, 0, 0))
+    while True:
+        data = s.recv(1 << 16)
+        i = 0
+        while i + 16 <= len(data):
+            ln, typ = struct.unpack("=IH", data[i:i + 6])
+            if typ == 3:
+                return
+            if typ == 2:
+                sys.exit("conntrack dump refused: %d" % struct.unpack("=i", data[i + 16:i + 20])[0])
+            o = r = {}
+            for t, v in attrs(data[i + 20:i + ln]):
+                if t == 1:
+                    o = tup(v)
+                elif t == 2:
+                    r = tup(v)
+            if o.get("p") == 6:
+                print("%s:%s>%s:%s reply %s:%s>%s:%s" % (o.get(1), o.get(3), o.get(2), o.get(4),
+                                                        r.get(1), r.get(3), r.get(2), r.get(4)))
+            i += (ln + 3) & ~3
+
+
+if __name__ == "__main__":
+    {"serve": serve, "q": q, "conn": conn, "listen": listen, "ct": ct}[sys.argv[1]](*sys.argv[2:])
+EOF
+KT="$W/kt.py"
+
+ip route del prohibit $B/32
+sysctl -qw net.ipv4.ip_forward=1
+mkdir -p /run/ktsys && mount -t sysfs sysfs /run/ktsys
+ip netns add $X
+ip link add v2 type veth peer name v3 netns $X
+ip addr add $LAN/24 dev v2
+ip link set v2 up
+LX ip link set lo up
+LX sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
+LX ip addr add $CL/24 dev v3
+LX ip link set v3 up
+LX ip route add default via $LAN
+NX ip addr add $C/32 dev lo
+NX python3 "$TV/tests/fake-vless.py" --port $PORT --uuid $UUID --mb 1 --bind $A --log-dst "$W/dst" \
+    > "$W/srv-A.log" 2>&1 &
+SRV_A=$!
+NX python3 "$TV/tests/fake-vless.py" --port $PORT --uuid $UUID --mb 16 --kbps 256 --bind $C \
+    --log-dst "$W/dst-slow" > "$W/srv-C.log" 2>&1 &
+python3 "$KT" serve $STUBP dl.test $REAL &
+STUB=$!
+: > "$W/dst"
+: > "$W/dst-slow"
+
+cat > /etc/firc/firc.conf <<EOF
+configVersion: 0.7.0
+app:
+  httpWeb:
+    enabled: false
+  dnsProxy:
+    host:
+      address: "$LAN"
+      port: $DNSP
+    upstream:
+      address: 127.0.0.1
+      port: $STUBP
+    disableRemap53: true
+  netfilter:
+    iptables:
+      chainPrefix: FIRC_
+  link: [v2]
+  logLevel: debug
+EOF
+groups() {
+    {
+        echo "configVersion: 0.7.0"
+        echo "groups:"
+        [ "$1" = without0 ] || cat <<EOF
+  - id: 0000aa01
+    name: G0
+    interface: tunvless0
+    enable: true
+    rules:
+      - { id: 0000ab01, type: domain, rule: dl.test, enable: true }
+      - { id: 0000ab02, type: subnet, rule: 10.81.0.0/24, enable: true }
+${2:-}
+EOF
+        cat <<EOF
+  - id: 0000aa02
+    name: G1
+    interface: tunvless1
+    enable: true
+    rules:
+      - { id: 0000ab11, type: subnet, rule: 10.82.0.0/24, enable: true }
+EOF
+    } > /etc/firc/groups.yaml
+}
+ktun() {
+    cat > /etc/firc/tunnels.yaml <<EOF
+tunnels:
+  - id: t0
+    device: tunvless0
+    enable: true
+    uplink: auto
+    sources:
+      - link: "vless://$UUID@$1:$PORT?security=none&type=tcp#N0"
+    active: 1
+    interval: 5s
+    advanced: { timeout: 3s, kernelTcp: $2 }
+  - id: t1
+    device: tunvless1
+    enable: true
+    uplink: auto
+    sources:
+      - link: "vless://$UUID@$A:$PORT?security=none&type=tcp#N1"
+    active: 1
+    interval: 5s
+    advanced: { timeout: 3s, kernelTcp: true }
+EOF
+}
+tstate() {
+    curl -s --unix-socket "$SOCK" http://firc/api/v1/tunnels/state 2>/dev/null | python3 -c '
+import json, sys
+t = [t for t in json.load(sys.stdin)["tunnels"] if t["device"] == sys.argv[1]]
+print(" ".join(str(t[0][k]) for k in sys.argv[2:]) if t else "none")' "$@" 2>/dev/null
+}
+wait_state() {
+    i=0
+    while [ $i -lt $(($2 * 5)) ]; do
+        [ "$(tstate "$1" status tcpPort)" = "$3" ] && return 0
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+nat() { iptables-legacy-save -t nat 2>&1; }
+wait_redirect() {
+    i=0
+    while [ $i -lt 50 ]; do
+        nat | grep -q -- "-j REDIRECT --to-ports $1\$" && return 0
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+rx() { cat "/run/ktsys/class/net/$1/statistics/rx_bytes"; }
+seen() { grep -cxF "$2" "$1"; }
+lines() { cat "$1" 2>/dev/null | wc -l; }
+wait_file() {
+    i=0
+    while [ $i -lt $(($2 * 10)) ]; do
+        [ -s "$1" ] && return 0
+        sleep 0.1; i=$((i + 1))
+    done
+    return 1
+}
+JUMP='-A PREROUTING -p tcp -m mark --mark 0x40000000/0x40000000 -m addrtype ! --dst-type LOCAL -j FIRC_REDIR'
+DNATJ='-A PREROUTING -d 198.18.0.0/15 -j FIRC_DNAT'
+
+groups with0
+ktun $A true
+python3 "$KT" listen 3601 "$W/squat" > "$W/squat.out" 2>&1 &
+SQ=$!
+wait_file "$W/squat.out" 5
+FIRC_TUNVLESS_BIN="$TV/out/tunvless" "$BE/build/host/fircd" --config /etc/firc/firc.conf >> "$W/fircd.log" 2>&1 &
+FP=$!
+wait_state tunvless0 15 "up 3600"
+# catches: the READY port never reaching /state, or a port other than 3600+N
+check "/state reports tcpPort 3600 for tunvless0" 3600 "$(tstate tunvless0 tcpPort)"
+wait_redirect 3600
+nat > "$W/nat"
+rc=$?
+# catches: an unreadable nat table (iptables-save on an nf_tables host) passing the rule checks below as empty
+check "iptables-legacy-save reads the nat table firc wrote" "0 1" "$rc $(grep -c '^:FIRC_REDIR ' "$W/nat")"
+jl=$(grep -nxF -- "$JUMP" "$W/nat" | cut -d: -f1)
+dl=$(grep -nxF -- "$DNATJ" "$W/nat" | cut -d: -f1)
+# catches: the REDIR jump missing its local exclusion, or standing after the DNAT jump so DNAT binds the flow first
+check "the REDIR jump with addrtype ! LOCAL precedes the DNAT jump" yes \
+    "$([ -n "$jl" ] && [ -n "$dl" ] && [ "$jl" -lt "$dl" ] && echo yes || echo "no (jump $jl, dnat $dl)")"
+M0=$(iptables-legacy-save -t mangle | sed -n 's|^-A FIRC_0000aa01 -d 10.81.0.0/24 .*--set-xmark \(0x40[0-9a-f]*\)/0x40ff0000$|\1|p')
+# catches: a REDIRECT to the wrong port or under another group's mark
+check "one REDIRECT, G0's mark to 3600" "1 1" \
+    "$(grep -c -- '-j REDIRECT' "$W/nat") $(grep -cxF -- "-A FIRC_REDIR -p tcp -m mark --mark $M0/0x40ff0000 -j REDIRECT --to-ports 3600" "$W/nat")"
+
+F=$(LX python3 "$KT" q $LAN $DNSP dl.test)
+# catches: an rx check that proves nothing because the netns's counters cannot be read
+check "tunvless0 and tunvless1 have rx counters in this netns" "yes yes" \
+    "$([ -r /run/ktsys/class/net/tunvless0/statistics/rx_bytes ] && echo yes || echo no) $([ -r /run/ktsys/class/net/tunvless1/statistics/rx_bytes ] && echo yes || echo no)"
+RX0=$(rx tunvless0)
+# catches: the map not used, so the node is asked for the fake address instead of the real one
+check "a 1 MB download to the fake reaches the node as the real address" "data 1048576 1 0" \
+    "$(LX python3 "$KT" conn "$F" 80 10 | cut -d' ' -f1,2) $(seen "$W/dst" "$REAL:80") $(grep -c '^198\.18\.' "$W/dst")"
+# catches: a subnet flow sent to the map or reset instead of dialled as it is
+check "a 1 MB download to a subnet address reaches the node as it is" "data 1048576 1" \
+    "$(LX python3 "$KT" conn 10.81.0.5 80 10 | cut -d' ' -f1,2) $(seen "$W/dst" "10.81.0.5:80")"
+RXD=$(($(rx tunvless0) - RX0))
+# catches: the flows silently taking the TUN path while the downloads still succeed
+check "tunvless0's rx grew by less than 64 KB over 2 MB of downloads ($RXD)" yes "$([ "$RXD" -lt 65536 ] && echo yes || echo no)"
+U=${F%.*}.200
+r=$(LX python3 "$KT" conn "$U" 80 3)
+# catches: an unmapped fake address served, dialled, or left to time out instead of reset
+check "an unmapped fake address in G0's chunk is reset within 1 s ($r)" "reset yes" \
+    "${r%% *} $([ "${r##* }" -lt 1000 ] && echo yes || echo no)"
+
+P0=$(tpid tunvless0)
+kill -STOP "$P0"
+kill -9 "$P0"
+wait_ev "\"source\":\"tunvless0\",\"message\":\"exited (137), restart in 3 s" 3
+inside=$?
+r=$(LX python3 "$KT" conn "$F" 80 2)
+alive=$(tpid tunvless0)
+# catches: the port dropped on exit, so the REDIRECT goes and new TCP leaks to the DNAT/TUN path or times out
+check "inside the restart window a new connection is refused at once ($r)" "0 refused yes 1 none" \
+    "$inside ${r%% *} $([ "${r##* }" -lt 500 ] && echo yes || echo no) $(nat | grep -c -- "--to-ports 3600") ${alive:-none}"
+wait_state tunvless0 15 "up 3600"
+# catches: the restarted child taking another port, or fircd forgetting it
+check "after the restart tunvless0 is up on 3600 again" "up 3600" "$(tstate tunvless0 status tcpPort)"
+# catches: a restarted child with an empty map, or a REDIRECT left pointing at nothing
+check "a download through the restarted child works" "data 1048576" "$(LX python3 "$KT" conn "$F" 80 10 | cut -d' ' -f1,2)"
+
+RX1=$(rx tunvless1)
+wait_ev "\"source\":\"tunvless1\",\"message\":\"port 3601 is taken, TCP stays on the TUN" 5
+# catches: a busy port not journalled
+check "a taken 3601 is journalled" 0 "$?"
+# catches: a stale or assumed port staged for a child that could not bind it, handing G1's TCP to the squatter
+check "tunvless1 reports tcpPort 0 and no REDIRECT is staged for it" "0 0" \
+    "$(tstate tunvless1 tcpPort) $(nat | grep -c -- '--to-ports 3601')"
+r=$(LX python3 "$KT" conn 10.82.0.5 80 10 | cut -d' ' -f1,2)
+RXD=$(($(rx tunvless1) - RX1))
+# catches: a group whose tunnel has no port losing TCP instead of keeping the TUN path
+check "G1's download works over the TUN and the squatter saw nothing" "data 1048576 yes 0" \
+    "$r $([ "$RXD" -ge 1048576 ] && echo yes || echo "no ($RXD)") $(lines "$W/squat")"
+kill "$SQ"; wait "$SQ" 2>/dev/null; SQ=
+
+python3 "$KT" listen 8099 "$W/local" > "$W/local.out" 2>&1 &
+LOC=$!
+wait_file "$W/local.out" 5
+groups with0 '      - { id: 0000ab03, type: subnet, rule: 0.0.0.0/0, enable: true }'
+kill -HUP "$FP"
+i=0
+while [ $i -lt 25 ] && [ "$(seen "$W/dst" "10.86.0.4:80")" = 0 ]; do
+    LX python3 "$KT" conn 10.86.0.4 80 3 >/dev/null
+    sleep 0.2; i=$((i + 1))
+done
+# catches: a local-exclusion check that proves nothing because 0.0.0.0/0 never took effect
+check "with subnet 0.0.0.0/0 an outside address is redirected to the node" 1 "$(seen "$W/dst" "10.86.0.4:80")"
+# catches: the jump without addrtype ! LOCAL, so a covered device loses the router's own services to tunvless
+check "a connection to the router's own address reaches its listener" "data 5 1" \
+    "$(LX python3 "$KT" conn $LAN 8099 3 | cut -d' ' -f1,2) $(lines "$W/local")"
+kill "$LOC"; wait "$LOC" 2>/dev/null; LOC=
+
+LX python3 "$KT" conn "$F" 9 10 > "$W/idle" &
+i=0
+while [ $i -lt 50 ] && [ "$(seen "$W/dst" "$REAL:9")" = 0 ]; do sleep 0.1; i=$((i + 1)); done
+kill -TERM "$FP"
+wait "$FP"
+FP=
+wait_file "$W/idle" 3
+# catches: a stop that ends an open redirected connection with a FIN, so a cut download without a length looks complete
+check "the stop resets an open redirected connection" "1 reset" "$(seen "$W/dst" "$REAL:9") $(cut -d' ' -f1 "$W/idle")"
+nat > "$W/nat"
+# catches: a stop that leaves the REDIR chain or its jump redirecting into a dead port
+check "the SIGTERM stop leaves no FIRC_REDIR" "1 0" "$(grep -c '^\*nat' "$W/nat") $(grep -c FIRC_REDIR "$W/nat")"
+
+groups with0
+ktun $C false
+: > "$W/dst-slow"
+FIRC_TUNVLESS_BIN="$TV/out/tunvless" "$BE/build/host/fircd" --config /etc/firc/firc.conf >> "$W/fircd.log" 2>&1 &
+FP=$!
+wait_ev "\"source\":\"tunvless0\",\"message\":\"active N0" 15
+wait_state tunvless0 15 "up 0"
+F=$(LX python3 "$KT" q $LAN $DNSP dl.test)
+RX0=$(rx tunvless0)
+LX python3 "$KT" conn "$F" 80 30 0 "$W/st1" > "$W/slow1" &
+S1=$!
+i=0
+while [ $i -lt 50 ] && [ ! -e "$W/st1" ]; do sleep 0.1; i=$((i + 1)); done
+sleep 1
+RXD=$(($(rx tunvless0) - RX0))
+# catches: a toggle check that proves nothing because the first flow never took the TUN path
+check "with kernelTcp off the open download runs over tunvless0 ($RXD bytes)" "0 yes" \
+    "$(nat | grep -c -- '--to-ports 3600') $([ "$RXD" -ge 65536 ] && echo yes || echo no)"
+ktun $C true
+kill -HUP "$FP"
+wait_file "$W/slow1" 10
+# catches: a toggle that leaves an open TUN download hanging instead of ending it
+check "turning kernelTcp on ends the open TUN download with a reset" reset "$(cut -d' ' -f1 "$W/slow1")"
+kill "$S1" 2>/dev/null; wait "$S1" 2>/dev/null
+wait_redirect 3600
+N0=$(seen "$W/dst-slow" "$REAL:80")
+RX0=$(rx tunvless0)
+LX python3 "$KT" conn "$F" 80 30 40002 "$W/st2" > "$W/slow2" &
+S2=$!
+i=0
+while [ $i -lt 50 ] && [ ! -e "$W/st2" ]; do sleep 0.1; i=$((i + 1)); done
+sleep 1
+python3 "$KT" ct > "$W/ct"
+RXD=$(($(rx tunvless0) - RX0))
+# catches: a toggle that leaves new flows on DNAT, or a flush added to the toggle that kills the new flow
+check "after the toggle a new flow is redirected, not DNATed" "1 1 0 yes" \
+    "$(($(seen "$W/dst-slow" "$REAL:80") - N0)) $(grep -c "^$CL:40002>$F:80 reply $LAN:3600>$CL:40002\$" "$W/ct") \
+$(grep -c "^$CL:40002>.* reply $REAL:" "$W/ct") $([ "$RXD" -lt 32768 ] && echo yes || echo "no ($RXD)")"
+
+N0=$(seen "$W/dst-slow" "$REAL:80")
+groups without0
+kill -HUP "$FP"
+wait_file "$W/slow2" 5
+# catches: a withdrawn group's redirected flow kept open on routing it lost
+check "removing G0 resets its open redirected download within a pass" reset "$(cut -d' ' -f1 "$W/slow2")"
+kill "$S2" 2>/dev/null; wait "$S2" 2>/dev/null
+r=$(LX python3 "$KT" conn "$F" 80 3 | cut -d' ' -f1)
+# catches: a removed group's REDIRECT left in place, so its fake still reaches the node
+check "after the removal a new connection to the fake fails and reaches no node" "no $N0" \
+    "$([ "$r" = data ] && echo yes || echo no) $(seen "$W/dst-slow" "$REAL:80")"
+
+groups with0
+kill -HUP "$FP"
+wait_redirect 3600
+kill -9 "$FP"
+wait "$FP" 2>/dev/null
+FP=
+i=0
+while [ $i -lt 10 ] && [ -n "$(ours)" ]; do sleep 0.2; i=$((i + 1)); done
+# catches: a purge check that proves nothing because the killed daemon left no REDIR behind
+check "the killed daemon left FIRC_REDIR and its jump" "1 1" \
+    "$(nat | grep -c '^:FIRC_REDIR ') $(nat | grep -cxF -- "$JUMP")"
+"$BE/build/host/fircd" --config /etc/firc/firc.conf --purge >> "$W/fircd.log" 2>&1
+rc=$?
+nat > "$W/nat"
+# catches: --purge leaving the REDIR chain or its jump
+check "fircd --purge drops FIRC_REDIR and its jump" "0 1 0 0" \
+    "$rc $(grep -c '^\*nat' "$W/nat") $(grep -c '^:FIRC_REDIR ' "$W/nat") $(grep -cxF -- "$JUMP" "$W/nat")"
 
 echo "tunnels e2e: $pass ok, $fail fail"
 [ "$fail" = 0 ]

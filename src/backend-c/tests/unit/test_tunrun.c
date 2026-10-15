@@ -1,5 +1,6 @@
 #include "greatest.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -95,6 +96,13 @@ static bool fx_up(fx_t *f, unsigned link_flags)
     unsetenv("FAKE_EVENTS");
     unsetenv("FAKE_AFTER");
     unsetenv("FAKE_STDIN_OUT");
+    unsetenv("FAKE_STDIN_DIR");
+    unsetenv("FAKE_SLEEP");
+    unsetenv("FAKE_TCPPORT");
+    unsetenv("FAKE_MAPCOUNT");
+    unsetenv("FAKE_MISS");
+    unsetenv("FAKE_NOACK");
+    unsetenv("FAKE_CLOSED");
     f->kernel = fake_rtnl_start(&f->rtnl);
     if (f->kernel == NULL || firc_loop_create(&f->loop) != FIRC_OK) {
         return false;
@@ -133,6 +141,11 @@ static void fx_down(fx_t *f)
         f->kernel = NULL;
     }
     if (f->dir[0] != 0) {
+        for (int i = 0; i < 4; i++) {
+            char dev[96];
+            snprintf(dev, sizeof dev, "%s/tunvless%d", f->dir, i);
+            unlink(dev);
+        }
         unlink(f->starts);
         unlink(f->argv);
         rmdir(f->dir);
@@ -141,9 +154,12 @@ static void fx_down(fx_t *f)
     g_fx = NULL;
 }
 
+static void kx_reset(void);
+
 static void teardown(void *ud)
 {
     (void)ud;
+    kx_reset();
     g_watch_pid = 0;
     g_watch_pid2 = 0;
     unsetenv("FAKE_STUBBORN_DEV");
@@ -1089,6 +1105,32 @@ static int journal_count(const char *source, const char *text)
     return c;
 }
 
+static int journal_from(const char *source, const char *text)
+{
+    static firc_event_t ev[64];
+    uint64_t since = 0, dropped = 0;
+    int c = 0;
+    for (;;) {
+        uint64_t next = since;
+        size_t n = firc_event_read(since, ev, 64, &next, &dropped);
+        for (size_t i = 0; i < n; i++) {
+            if (ev[i].kind == FIRC_EVENT_LOG && (source == NULL || strcmp(ev[i].u.log.source, source) == 0) &&
+                strstr(ev[i].u.log.text, text) != NULL) {
+                c++;
+            }
+        }
+        if (n == 0 || next == since) {
+            return c;
+        }
+        since = next;
+    }
+}
+
+static int journal_all(const char *text)
+{
+    return journal_from(NULL, text);
+}
+
 /* catches: a body landing after a save built from the config it was fetched for, or a tunnel started with no nodes */
 TEST a_save_during_a_refresh_takes_the_new_config(void)
 {
@@ -1677,6 +1719,568 @@ TEST a_removed_tunnel_is_not_down_while_its_child_ends(void)
     PASS();
 }
 
+typedef struct {
+    uint16_t ports[FIRC_KTCP_DEVICES];
+    int n_ports;
+    const firc_ktcp_image_t *cur;
+    firc_ktcp_image_t im[3];
+    firc_ktcp_image_t real;
+    int closed[FIRC_KTCP_DEVICES];
+    int ready[FIRC_KTCP_DEVICES];
+} kx_t;
+
+static kx_t g_kx;
+
+static void kx_reset(void)
+{
+    for (int i = 0; i < 3; i++) {
+        firc_ktcp_image_free(&g_kx.im[i]);
+    }
+    firc_ktcp_image_free(&g_kx.real);
+    memset(&g_kx, 0, sizeof g_kx);
+}
+
+static void kx_ports(const uint16_t ports[FIRC_KTCP_DEVICES], void *ud)
+{
+    (void)ud;
+    memcpy(g_kx.ports, ports, sizeof g_kx.ports);
+    g_kx.n_ports++;
+}
+
+static const firc_ktcp_image_t *kx_image(void *ud)
+{
+    (void)ud;
+    return g_kx.cur != NULL ? g_kx.cur : &g_kx.im[0];
+}
+
+static bool kx_real_of(uint8_t dev, const uint8_t fake[4], uint8_t real[4], void *ud)
+{
+    (void)ud;
+    for (size_t i = 0; i < g_kx.real.n; i++) {
+        if (g_kx.real.v[i].dev == dev && memcmp(g_kx.real.v[i].fake, fake, 4) == 0) {
+            memcpy(real, g_kx.real.v[i].real, 4);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void kx_closed(uint8_t dev, void *ud)
+{
+    (void)ud;
+    if (dev < FIRC_KTCP_DEVICES) {
+        g_kx.closed[dev]++;
+    }
+}
+
+static void kx_ready(uint8_t dev, void *ud)
+{
+    (void)ud;
+    if (dev < FIRC_KTCP_DEVICES) {
+        g_kx.ready[dev]++;
+    }
+}
+
+static void kx_attach(fx_t *f)
+{
+    firc_tunrun_ktcp_t k = {kx_ports, kx_image, kx_real_of, NULL, kx_closed, kx_ready};
+    firc_tunrun_set_ktcp(f->run, &k);
+}
+
+static void pair(firc_ktcp_image_t *im, uint8_t dev, const char *fake, const char *real)
+{
+    uint8_t a[4];
+    uint8_t b[4];
+    inet_pton(AF_INET, fake, a);
+    inet_pton(AF_INET, real, b);
+    (void)firc_ktcp_image_add(im, dev, a, b);
+    firc_ktcp_image_sort(im);
+}
+
+static void ktcp_env(fx_t *f)
+{
+    setenv("FAKE_MODE", "ktcp", 1);
+    setenv("FAKE_STDIN_DIR", f->dir, 1);
+}
+
+#define KT_TUN(id, n, extra)                                                                 \
+    "  - id: " id "\n    device: tunvless" n "\n" extra "    sources:\n"                       \
+    "      - id: 0000000a\n        link: \"vless://" U "@a.example:443?security=none#A\"\n"
+#define KT_ON "    advanced: { kernelTcp: true }\n"
+#define KT_FIRST "vless://" U "@a.example:443?type=tcp&security=none#A\n\n"
+
+typedef bool (*cond_fn)(fx_t *f, const void *arg);
+
+typedef struct {
+    fx_t *f;
+    cond_fn fn;
+    const void *arg;
+    int64_t deadline;
+    bool met;
+} cond_wait_t;
+
+static void cond_cb(firc_loop_t *loop, void *ud)
+{
+    cond_wait_t *w = ud;
+    w->met = w->fn(w->f, w->arg);
+    if (w->met || now_ms() >= w->deadline) {
+        firc_loop_stop(loop);
+    }
+}
+
+static bool run_until(fx_t *f, cond_fn fn, const void *arg, int ms)
+{
+    cond_wait_t w = {f, fn, arg, now_ms() + ms, false};
+    int timer = 0;
+    firc_loop_add_timer(f->loop, 20, 20, cond_cb, &w, &timer);
+    firc_loop_run(f->loop);
+    firc_loop_del_timer(f->loop, timer);
+    return w.met;
+}
+
+static char g_in[16384];
+
+static const char *stdin_of(fx_t *f, const char *dev)
+{
+    char path[128];
+    snprintf(path, sizeof path, "%s/%s", f->dir, dev);
+    slurp(path, g_in, sizeof g_in);
+    return g_in;
+}
+
+typedef struct {
+    const char *dev;
+    const char *text;
+} dev_text_t;
+
+static bool ends_with(fx_t *f, const void *arg)
+{
+    const dev_text_t *d = arg;
+    const char *in = stdin_of(f, d->dev);
+    size_t a = strlen(in);
+    size_t b = strlen(d->text);
+    return a >= b && strcmp(in + a - b, d->text) == 0;
+}
+
+static bool run_until_tail(fx_t *f, const char *dev, const char *text, int ms)
+{
+    dev_text_t d = {dev, text};
+    return run_until(f, ends_with, &d, ms);
+}
+
+static bool contains(fx_t *f, const void *arg)
+{
+    const dev_text_t *d = arg;
+    return strstr(stdin_of(f, d->dev), d->text) != NULL;
+}
+
+static int occurrences(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(hay, needle); p != NULL; p = strstr(p + 1, needle)) {
+        n++;
+    }
+    return n;
+}
+
+static uint16_t tcp_port_of(fx_t *f, const char *id)
+{
+    firc_tun_state_t st[8];
+    size_t n = firc_tunrun_states(f->run, st, 8);
+    for (size_t i = 0; i < n && i < 8; i++) {
+        if (strcmp(st[i].id, id) == 0) {
+            return st[i].tcp_port;
+        }
+    }
+    return 0xffff;
+}
+
+static bool port_is(fx_t *f, const void *arg)
+{
+    (void)f;
+    const uint16_t *want = arg;
+    return g_kx.ports[want[0]] == want[1];
+}
+
+static bool run_until_port(fx_t *f, uint16_t dev, uint16_t port, int ms)
+{
+    uint16_t want[2] = {dev, port};
+    return run_until(f, port_is, want, ms);
+}
+
+/* catches: no map pushed on ready, a plain map that leaves stale entries of a previous child, or another device's pairs */
+TEST ready_with_a_port_publishes_it_and_sends_mapall(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    kx_attach(&f);
+    pair(&g_kx.im[0], 0, "198.18.0.2", "192.0.2.2");
+    pair(&g_kx.im[0], 0, "198.18.0.1", "192.0.2.1");
+    pair(&g_kx.im[0], 1, "198.18.1.1", "192.0.2.9");
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT(run_until_tail(&f, "tunvless0", "\n\nmapall\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n\n", 3000));
+    ASSERT_STR_EQ(KT_FIRST "mapall\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n\n", stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    ASSERT_EQ(3600, tcp_port_of(&f, "a"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: /state showing a listening port while the kernel lacks REDIRECT or addrtype, so nothing is ever redirected to it */
+TEST a_kernel_without_redirect_reports_no_port(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    kx_attach(&f);
+    firc_tunrun_set_ktcp_usable(f.run, false);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT(run_until_tail(&f, "tunvless0", "mapall\n\n", 3000));
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    ASSERT_EQ(0, tcp_port_of(&f, "a"));
+    firc_tunrun_set_ktcp_usable(f.run, true);
+    ASSERT_EQ(3600, tcp_port_of(&f, "a"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a READY naming a port other than the tunnel's trusted, which would send its TCP to someone else's socket, or said to be a taken port */
+TEST a_ready_naming_another_port_publishes_nothing(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    setenv("FAKE_TCPPORT", "3655", 1);
+    kx_attach(&f);
+    static const char foreign[] = "tunvless reported port 3655, not 3600; TCP stays on the TUN";
+    int taken0 = journal_all("port 3600 is taken"), foreign0 = journal_from("tunvless0", foreign);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    run_ms(&f, 300);
+    ASSERT_EQ(0, g_kx.ports[0]);
+    ASSERT_EQ(0, g_kx.ports[55]);
+    ASSERT_EQ(0, tcp_port_of(&f, "a"));
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(taken0, journal_all("port 3600 is taken"));
+    ASSERT_EQ(foreign0 + 1, journal_from("tunvless0", foreign));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the port dropped while the child is down, so the rule vanishes and flows fall to the TUN unseen */
+TEST the_port_survives_an_exit_and_backoff(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    kx_attach(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT(run_until_port(&f, 0, 3600, 3000));
+    int calls = g_kx.n_ports;
+    setenv("FAKE_MODE", "late", 1);
+    setenv("FAKE_SLEEP", "5", 1);
+    kill(last_pid(&f, "tunvless0"), SIGKILL);
+    ASSERT_EQ(FIRC_TUN_ST_BACKOFF, run_until_status(&f, "a", FIRC_TUN_ST_BACKOFF, 2000));
+    ASSERT_EQ(3600, tcp_port_of(&f, "a"));
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 2000));
+    run_ms(&f, 200);
+    ASSERT_EQ(FIRC_TUN_ST_STARTING, status_of(&f, "a"));
+    ASSERT_EQ(3600, tcp_port_of(&f, "a"));
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    ASSERT_EQ(calls, g_kx.n_ports);
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a port kept after tunvless could not bind it, so the rule hands the group's TCP to whoever holds it */
+TEST a_zero_port_is_journalled_and_clears_the_port(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    kx_attach(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT(run_until_port(&f, 0, 3600, 3000));
+    ASSERT(run_until_tail(&f, "tunvless0", "mapall\n\n", 2000));
+    static const char line[] = "port 3600 is taken, TCP stays on the TUN";
+    int before = journal_from("tunvless0", line);
+    setenv("FAKE_TCPPORT", "0", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT(run_until_port(&f, 0, 0, 3000));
+    ASSERT_EQ(0, tcp_port_of(&f, "a"));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    pair(&g_kx.im[1], 0, "198.18.0.1", "192.0.2.1");
+    firc_tunrun_map_pushed(f.run, &g_kx.im[0], &g_kx.im[1]);
+    run_ms(&f, 300);
+    ASSERT_EQ(before + 1, journal_from("tunvless0", line));
+    ASSERT_EQ(0, journal_all("vless://"));
+    ASSERT_EQ(0, journal_all(U));
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a port kept for a tunnel removed, disabled or switched to the TUN, or one dropped by an unchanged apply */
+TEST disable_remove_or_kernel_tcp_off_clears_the_port(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    kx_attach(&f);
+    static const char on[] = "tunnels:\n" KT_TUN("a", "0", KT_ON);
+    static const char line[] = "port 3600 is taken, TCP stays on the TUN";
+    int before = journal_all(line);
+    apply_yaml(&f, on);
+    ASSERT(run_until_port(&f, 0, 3600, 3000));
+    int calls = g_kx.n_ports;
+    apply_yaml(&f, on);
+    run_ms(&f, 300);
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    ASSERT_EQ(calls, g_kx.n_ports);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", ""));
+    ASSERTm("kernelTcp off", g_kx.ports[0] == 0 && tcp_port_of(&f, "a") == 0);
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    run_ms(&f, 200);
+    ASSERT_EQ(0, g_kx.ports[0]);
+    apply_yaml(&f, on);
+    ASSERT(run_until_port(&f, 0, 3600, 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON "    enable: false\n"));
+    ASSERTm("disabled", g_kx.ports[0] == 0 && tcp_port_of(&f, "a") == 0);
+    apply_yaml(&f, on);
+    ASSERT(run_until_port(&f, 0, 3600, 3000));
+    apply(&f, NULL, 0);
+    ASSERTm("removed", g_kx.ports[0] == 0);
+    ASSERT_EQ(before, journal_all(line));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a delta sent to a child still starting, to a tunnel without a port, or with another device's lines */
+TEST deltas_go_only_to_ready_children_with_a_port(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    setenv("FAKE_SLEEP", "0.8", 1);
+    kx_attach(&f);
+    firc_ktcp_image_t *im1 = &g_kx.im[0];
+    firc_ktcp_image_t *im2 = &g_kx.im[1];
+    firc_ktcp_image_t *im3 = &g_kx.im[2];
+    pair(im2, 0, "198.18.0.1", "192.0.2.1");
+    pair(im2, 0, "198.18.0.2", "192.0.2.2");
+    pair(im2, 1, "198.18.1.1", "192.0.2.11");
+    pair(im2, 2, "198.18.2.1", "192.0.2.21");
+    pair(im3, 0, "198.18.0.2", "192.0.2.22");
+    pair(im3, 0, "198.18.0.3", "192.0.2.3");
+    pair(im3, 1, "198.18.1.2", "192.0.2.12");
+    pair(im3, 2, "198.18.2.1", "192.0.2.31");
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON) KT_TUN("b", "1", "") KT_TUN("c", "2", KT_ON));
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless1", 1, 2000));
+    run_ms(&f, 100);
+    firc_tunrun_map_pushed(f.run, im1, im2);
+    g_kx.cur = im2;
+    ASSERT(run_until_tail(&f, "tunvless0", "\nmapall\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n\n", 3000));
+    ASSERT(run_until_tail(&f, "tunvless2", "\nmapall\n198.18.2.1 192.0.2.21\n\n", 3000));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "b", FIRC_TUN_ST_UP, 3000));
+    firc_tunrun_map_pushed(f.run, im2, im3);
+    g_kx.cur = im3;
+    ASSERT(run_until_tail(&f, "tunvless0", "\nmap\n198.18.0.1 -\n198.18.0.2 192.0.2.22\n198.18.0.3 192.0.2.3\n\n", 2000));
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST "mapall\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n\n"
+                           "map\n198.18.0.1 -\n198.18.0.2 192.0.2.22\n198.18.0.3 192.0.2.3\n\n",
+                  stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless1"));
+    ASSERT_STR_EQ(KT_FIRST "mapall\n198.18.2.1 192.0.2.21\n\nmap\n198.18.2.1 192.0.2.31\n\n", stdin_of(&f, "tunvless2"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an endless mapall loop at a short count, no resend, the warning repeated, or no resend for the next child */
+TEST a_map_count_drift_resends_mapall_once(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    setenv("FAKE_MAPCOUNT", "1", 1);
+    kx_attach(&f);
+    pair(&g_kx.im[0], 0, "198.18.0.1", "192.0.2.1");
+    pair(&g_kx.im[0], 0, "198.18.0.2", "192.0.2.2");
+    pair(&g_kx.im[0], 0, "198.18.0.3", "192.0.2.3");
+    pair(&g_kx.im[1], 0, "198.18.0.1", "192.0.2.1");
+    static const char line[] = "map lines, its map is no longer resent";
+    static const char first[] = "tunvless took 1 of 3 map lines, its map is no longer resent";
+    int before = journal_from("tunvless0", line);
+    int before_first = journal_from("tunvless0", first);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    dev_text_t two = {"tunvless0", "mapall\n198.18.0.1 192.0.2.1\n198.18.0.2 192.0.2.2\n198.18.0.3 192.0.2.3\n\nmapall\n"};
+    ASSERT(run_until(&f, contains, &two, 3000));
+    run_ms(&f, 400);
+    firc_tunrun_map_pushed(f.run, &g_kx.im[0], &g_kx.im[1]);
+    g_kx.cur = &g_kx.im[1];
+    ASSERT(run_until_tail(&f, "tunvless0", "\nmap\n198.18.0.2 -\n198.18.0.3 -\n\n", 2000));
+    run_ms(&f, 400);
+    ASSERT_EQ(2, occurrences(stdin_of(&f, "tunvless0"), "mapall\n"));
+    ASSERT_EQ(before + 1, journal_from("tunvless0", line));
+    ASSERT_EQ(before_first + 1, journal_from("tunvless0", first));
+    g_kx.cur = &g_kx.im[0];
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
+    ASSERT(run_until(&f, contains, &two, 3000));
+    run_ms(&f, 400);
+    ASSERT_EQ(2, occurrences(stdin_of(&f, "tunvless0"), "mapall\n"));
+    ASSERT_EQ(before + 2, journal_from("tunvless0", line));
+    ASSERT_EQ(0, journal_all("vless://"));
+    ASSERT_EQ(0, journal_all(U));
+    fx_down(&f);
+    PASS();
+}
+
+static void miss_setup(fx_t *f)
+{
+    ktcp_env(f);
+    setenv("FAKE_MISS", "{\"type\":\"miss\",\"fake\":\"198.18.1.7\"}", 1);
+    kx_attach(f);
+}
+
+/* catches: a miss left unanswered, answered with more than its line, or looked up on another device */
+TEST a_miss_is_answered_with_one_line(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    miss_setup(&f);
+    pair(&g_kx.real, 0, "198.18.1.7", "192.0.2.66");
+    pair(&g_kx.real, 1, "198.18.1.7", "192.0.2.77");
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "1", KT_ON));
+    ASSERT(run_until_tail(&f, "tunvless1", "\nmap\n198.18.1.7 192.0.2.77\n\n", 3000));
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST "mapall\n\nmap\n198.18.1.7 192.0.2.77\n\n", stdin_of(&f, "tunvless1"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a miss answered with any pool pair rather than one routed into the asking device */
+TEST a_miss_for_another_device_s_group_gets_a_dash(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    miss_setup(&f);
+    pair(&g_kx.real, 0, "198.18.1.7", "192.0.2.66");
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "1", KT_ON));
+    ASSERT(run_until_tail(&f, "tunvless1", "\nmap\n198.18.1.7 -\n\n", 3000));
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST "mapall\n\nmap\n198.18.1.7 -\n\n", stdin_of(&f, "tunvless1"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a miss answered for a tunnel without a port, which redirects nothing */
+TEST a_miss_from_a_child_without_a_port_is_ignored(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    miss_setup(&f);
+    setenv("FAKE_TCPPORT", "0", 1);
+    pair(&g_kx.real, 2, "198.18.1.7", "192.0.2.88");
+    pair(&g_kx.real, 3, "198.18.1.7", "192.0.2.89");
+    apply_yaml(&f, "tunnels:\n" KT_TUN("b", "2", "") KT_TUN("c", "3", KT_ON));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "b", FIRC_TUN_ST_UP, 3000));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "c", FIRC_TUN_ST_UP, 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("b", "2", "")
+                   "      - id: 0000000b\n        link: \"vless://" U "@b.example:443?security=none#B\"\n"
+                   KT_TUN("c", "3", KT_ON)
+                   "      - id: 0000000b\n        link: \"vless://" U "@b.example:443?security=none#B\"\n");
+    dev_text_t b_nodes = {"tunvless2", "\nnodes\n"};
+    dev_text_t c_nodes = {"tunvless3", "\nnodes\n"};
+    ASSERT(run_until(&f, contains, &b_nodes, 2000));
+    ASSERT(run_until(&f, contains, &c_nodes, 2000));
+    run_ms(&f, 400);
+    ASSERT_EQ(1, starts_of(&f, "tunvless2"));
+    ASSERT_EQ(1, starts_of(&f, "tunvless3"));
+    ASSERT(strstr(stdin_of(&f, "tunvless2"), "\nmap\n") == NULL);
+    ASSERT(strstr(stdin_of(&f, "tunvless3"), "\nmap\n") == NULL);
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: close queued to a child still starting, sent to one whose port was not bound, a wrong sent count, its ack not logged or not handed on, or a new child not reported */
+TEST close_goes_to_the_live_child_only(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    static const char acked[] = "tunvless closed 1 connections";
+    int before = journal_from("tunvless0", acked);
+    ktcp_env(&f);
+    setenv("FAKE_SLEEP", "0.6", 1);
+    kx_attach(&f);
+    firc_nf_prefix_t p = {.family = 4, .cidr = 24, .addr = {198, 18, 0, 0}};
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
+    run_ms(&f, 100);
+    ASSERT_EQ(0, firc_tunrun_close(f.run, 0, &p, 1));
+    ASSERT(run_until_tail(&f, "tunvless0", "mapall\n\n", 3000));
+    ASSERT_EQ(1, firc_tunrun_close(f.run, 0, &p, 1));
+    ASSERT_EQ(0, firc_tunrun_close(f.run, 5, &p, 1));
+    ASSERT(run_until_tail(&f, "tunvless0", "close\n198.18.0.0/24\n\n", 2000));
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST "mapall\n\nclose\n198.18.0.0/24\n\n", stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(before + 1, journal_from("tunvless0", acked));
+    ASSERT_EQ(1, g_kx.closed[0]);
+    ASSERT_EQ(0, g_kx.closed[5]);
+    ASSERT_EQ(1, g_kx.ready[0]);
+    unsetenv("FAKE_SLEEP");
+    setenv("FAKE_TCPPORT", "0", 1);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
+    ASSERT_EQ(FIRC_TUN_ST_UP, run_until_status(&f, "a", FIRC_TUN_ST_UP, 3000));
+    ASSERT_EQ(0, firc_tunrun_close(f.run, 0, &p, 1));
+    run_ms(&f, 300);
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(2, g_kx.ready[0]);
+    fx_down(&f);
+    PASS();
+}
+
+static bool state_port_is(fx_t *f, const void *arg)
+{
+    return tcp_port_of(f, "a") == *(const uint16_t *)arg;
+}
+
+/* catches: hooks attached after a child reported its port left without that port until the next change */
+TEST attaching_the_hooks_publishes_the_ports_held(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    static const uint16_t want = 3600;
+    ASSERT(run_until(&f, state_port_is, &want, 3000));
+    ASSERT_EQ(0, g_kx.n_ports);
+    kx_attach(&f);
+    ASSERT_EQ(1, g_kx.n_ports);
+    ASSERT_EQ(3600, g_kx.ports[0]);
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the pool set through the tunnel runner never reaching a kernel-TCP child's --tcp-pool */
+TEST the_pool_set_on_the_runner_reaches_the_child(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    static const uint8_t base[4] = {198, 18, 0, 0};
+    firc_tunrun_set_tcp_pool(f.run, base, 15);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 2000));
+    ASSERT(argv_has(&f, "--tcp-pool"));
+    ASSERT(argv_has(&f, "198.18.0.0/15"));
+    fx_down(&f);
+    PASS();
+}
+
 SUITE(tunrun)
 {
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
@@ -1724,6 +2328,20 @@ SUITE(tunrun)
     RUN_TEST(the_watch_follows_the_childs_events);
     RUN_TEST(a_stop_takes_the_watch_timer_off_the_loop);
     RUN_TEST(a_removed_tunnel_is_not_down_while_its_child_ends);
+    RUN_TEST(ready_with_a_port_publishes_it_and_sends_mapall);
+    RUN_TEST(a_kernel_without_redirect_reports_no_port);
+    RUN_TEST(a_ready_naming_another_port_publishes_nothing);
+    RUN_TEST(the_port_survives_an_exit_and_backoff);
+    RUN_TEST(a_zero_port_is_journalled_and_clears_the_port);
+    RUN_TEST(disable_remove_or_kernel_tcp_off_clears_the_port);
+    RUN_TEST(deltas_go_only_to_ready_children_with_a_port);
+    RUN_TEST(a_map_count_drift_resends_mapall_once);
+    RUN_TEST(a_miss_is_answered_with_one_line);
+    RUN_TEST(a_miss_for_another_device_s_group_gets_a_dash);
+    RUN_TEST(a_miss_from_a_child_without_a_port_is_ignored);
+    RUN_TEST(close_goes_to_the_live_child_only);
+    RUN_TEST(attaching_the_hooks_publishes_the_ports_held);
+    RUN_TEST(the_pool_set_on_the_runner_reaches_the_child);
 }
 
 GREATEST_MAIN_DEFS();
