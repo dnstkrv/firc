@@ -469,12 +469,92 @@ static int do_xtdump(const char *table, const char *fam_text) {
     return 0;
 }
 
+static uint16_t fold_sum(uint32_t sum, const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i + 1 < n; i += 2) { sum += (uint32_t)((b[i] << 8) | b[i + 1]); }
+    if (n % 2 != 0) { sum += (uint32_t)(b[n - 1] << 8); }
+    while (sum >> 16 != 0) { sum = (sum & 0xffffu) + (sum >> 16); }
+    return (uint16_t)~sum;
+}
+
+static int do_inject(const char *src_ip, const char *sport, const char *dst_ip, const char *dport, const char *mark_hex)
+{
+    struct sockaddr_storage src, dst;
+    socklen_t sl = 0, dl = 0;
+    if (addr_of(src_ip, sport, &src, &sl) != 0 || addr_of(dst_ip, "0", &dst, &dl) != 0 ||
+        src.ss_family != dst.ss_family) {
+        return 3;
+    }
+    char *end = NULL;
+    unsigned long sp_l = strtoul(sport, &end, 10);
+    if (*sport == '\0' || *end != '\0' || sp_l == 0 || sp_l > 65535) { return 3; }
+    unsigned long dp_l = strtoul(dport, &end, 10);
+    if (*dport == '\0' || *end != '\0' || dp_l == 0 || dp_l > 65535) { return 3; }
+    unsigned long mark_l = strtoul(mark_hex, &end, 16);
+    if (*mark_hex == '\0' || *end != '\0' || mark_l > 0xffffffffUL) { return 3; }
+    uint32_t mark = (uint32_t)mark_l;
+    bool v6 = dst.ss_family == AF_INET6;
+    size_t ip_len = v6 ? 40 : 20;
+    uint8_t pkt[64] = {0};
+    uint8_t *udp = pkt + ip_len;
+    const uint8_t payload[4] = {'z', 'a', 'p', 'r'};
+    uint16_t udp_len = (uint16_t)(8 + sizeof(payload));
+    uint16_t sp = (uint16_t)sp_l, dp = (uint16_t)dp_l;
+    udp[0] = (uint8_t)(sp >> 8); udp[1] = (uint8_t)sp;
+    udp[2] = (uint8_t)(dp >> 8); udp[3] = (uint8_t)dp;
+    udp[4] = (uint8_t)(udp_len >> 8); udp[5] = (uint8_t)udp_len;
+    memcpy(udp + 8, payload, sizeof(payload));
+    uint8_t pseudo[40] = {0};
+    size_t alen = v6 ? 16 : 4;
+    const void *sa = v6 ? (const void *)&((struct sockaddr_in6 *)&src)->sin6_addr
+                        : (const void *)&((struct sockaddr_in *)&src)->sin_addr;
+    const void *da = v6 ? (const void *)&((struct sockaddr_in6 *)&dst)->sin6_addr
+                        : (const void *)&((struct sockaddr_in *)&dst)->sin_addr;
+    memcpy(pseudo, sa, alen);
+    memcpy(pseudo + alen, da, alen);
+    uint32_t sum = 17u + udp_len;
+    for (size_t i = 0; i < 2 * alen; i += 2) { sum += (uint32_t)((pseudo[i] << 8) | pseudo[i + 1]); }
+    uint16_t ck = fold_sum(sum, udp, udp_len);
+    if (ck == 0) { ck = 0xffff; }
+    udp[6] = (uint8_t)(ck >> 8); udp[7] = (uint8_t)ck;
+    if (v6) {
+        pkt[0] = 0x60;
+        pkt[4] = (uint8_t)(udp_len >> 8); pkt[5] = (uint8_t)udp_len;
+        pkt[6] = 17;
+        pkt[7] = 64;
+        memcpy(pkt + 8, sa, 16);
+        memcpy(pkt + 24, da, 16);
+    } else {
+        pkt[0] = 0x45;
+        pkt[3] = (uint8_t)(ip_len + udp_len);
+        pkt[8] = 64;
+        pkt[9] = 17;
+        memcpy(pkt + 12, sa, 4);
+        memcpy(pkt + 16, da, 4);
+    }
+    int fd = socket(dst.ss_family, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW);
+    if (fd < 0) { perror("raw socket"); return 3; }
+    int rc = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark)) != 0) {
+        perror("SO_MARK");
+        rc = 3;
+    } else if (sendto(fd, pkt, ip_len + udp_len, 0, (struct sockaddr *)&dst, dl) < 0) {
+        perror("sendto");
+        rc = 3;
+    }
+    close(fd);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     if ((argc == 5 || argc == 6) && strcmp(argv[1], "send") == 0) {
         return do_send(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : NULL);
     }
     if (argc == 3 && strcmp(argv[1], "barrier") == 0) { return do_barrier(argv[2]); }
+    if (argc == 7 && strcmp(argv[1], "inject") == 0) {
+        return do_inject(argv[2], argv[3], argv[4], argv[5], argv[6]);
+    }
     if (argc == 4 && strcmp(argv[1], "egress") == 0) { return do_egress(argv[2], argv[3]); }
     if ((argc == 4 || argc == 5) && strcmp(argv[1], "serve") == 0) {
         return do_serve(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
@@ -484,7 +564,7 @@ int main(int argc, char **argv)
     if (argc == 4 && strcmp(argv[1], "xtparse") == 0) { return do_xtparse(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtnat") == 0) { return do_xtnat(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtdump") == 0) { return do_xtdump(argv[2], argv[3]); }
-    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> [source port] | barrier v4|v6 | egress v4|v6 <iface> | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
+    fprintf(stderr, "usage: %s send <ipv4> <port> <mark-hex> [source port] | barrier v4|v6 | inject <src> <sport> <dst> <dport> <mark-hex> | egress v4|v6 <iface> | serve <ipv4> <port> [tag] | ask <ipv4> <port> | "
                     "devchain <field> [...] | xtparse <file> v4|v6 | xtnat write|output|sweep|probe v4|v6 | xtdump <table> v4|v6\n", argv[0]);
     return 64;
 }

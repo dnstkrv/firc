@@ -15,9 +15,10 @@
 -A FORWARD -j FIRC_g1
 -A FORWARD -j FIRC_bh
 -A ACME_FWD -i br0 -o ppp0 -j ACCEPT
--A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP
 -A FIRC_POOLREJECT -d 198.18.0.0/15 -p tcp -j REJECT --reject-with tcp-reset
 -A FIRC_POOLREJECT -d 198.18.0.0/15 -j REJECT --reject-with icmp-host-unreachable
+-A FIRC_POOLREJECT -m connmark --mark 0x40000000/0x40ff0000 -j RETURN
+-A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP
 -A FIRC_g1 -o nwg1 -m mark --mark 0x10000/0xff0000 -j ACCEPT
 -A _NDM_ACL_IN -i br0 -j ACCEPT
 -A _NDM_FORWARD -o ppp0 -m mark --mark 0x1/0x1 -j DROP

@@ -38,6 +38,8 @@ ip link set lo up
 "$SAVE6" -t filter > "$T/save6" || fail "$SAVE6 cannot read the table firc wrote"
 grep -qxF -- '-A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP' "$T/save6" ||
     fail "the v6 barrier has no drop of unmarked firc flows: $(cat "$T/save6")"
+grep -qxF -- '-A FIRC_POOLREJECT -m connmark --mark 0x40000000/0x40ff0000 -j RETURN' "$T/save6" ||
+    fail "the v6 barrier does not let a handled bit without a field through: $(cat "$T/save6")"
 
 netns() {
     unshare -n sleep 600 >/dev/null 2>&1 &
@@ -76,6 +78,12 @@ nsenter -t "$FAR" -n "$HELPER" serve 9.9.9.9 53 &
 PIDS="$PIDS $!"
 nsenter -t "$FAR" -n "$HELPER" serve 2001:db8:9::9 53 &
 PIDS="$PIDS $!"
+in_ns "$FAR" ip addr add 198.18.0.5/32 dev lo
+in_ns "$FAR" ip addr add fd37:9a00::5/128 dev lo
+nsenter -t "$FAR" -n "$HELPER" serve 198.18.0.5 53 &
+PIDS="$PIDS $!"
+nsenter -t "$FAR" -n "$HELPER" serve fd37:9a00::5 53 &
+PIDS="$PIDS $!"
 
 ip link add lan0 type veth peer name lan0c
 ip link set lan0c netns "$LAN"
@@ -90,6 +98,8 @@ in_ns "$LAN" ip route add default via 10.10.1.1
 in_ns "$LAN" ip -6 route add default via fd10::1
 ip route add 9.9.9.9/32 via 10.99.0.2 dev tun0
 ip -6 route add 2001:db8:9::9/128 via fd99::2 dev tun0
+ip route add 198.18.0.5/32 via 10.99.0.2 dev tun0
+ip -6 route add fd37:9a00::5/128 via fd99::2 dev tun0
 i=0
 while ip -6 addr | grep -q tentative || in_ns "$FAR" ip -6 addr | grep -q tentative || in_ns "$LAN" ip -6 addr | grep -q tentative; do
     i=$((i + 1))
@@ -102,6 +112,8 @@ sleep 0.2
 "$SAVE" -t filter > "$T/save4" || fail "$SAVE cannot read the table firc wrote"
 grep -qxF -- '-A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP' "$T/save4" ||
     fail "the v4 barrier has no drop of unmarked firc flows: $(cat "$T/save4")"
+grep -qxF -- '-A FIRC_POOLREJECT -m connmark --mark 0x40000000/0x40ff0000 -j RETURN' "$T/save4" ||
+    fail "the v4 barrier does not let a handled bit without a field through: $(cat "$T/save4")"
 
 marks_on() { # <iptables> <source>
     $1 -t mangle -A PREROUTING -s "$2" -j MARK --set-xmark 0x40010000/0x40ff0000
@@ -122,6 +134,19 @@ barrier() { # <family> <iptables> <destination> <source>
     send "$1: the flow resumes once its marks are back" "$3" "$4" 40000 yes
 }
 
+zapret() {
+    $2 -t mangle -F PREROUTING
+    $2 -t mangle -I POSTROUTING 1 -m mark --mark 0x40000000/0x40000000 -j CONNMARK --or-mark 0x40000000
+    send "$1: an ordinary flow passes before zapret sends for it" "$3" "$5" 40030 yes
+    "$HELPER" inject "$5" 40030 "$3" 53 0x40000000 || fail "$1: the raw packet was not sent"
+    send "$1: a flow zapret connmarked with the handled bit alone keeps passing" "$3" "$5" 40030 yes
+    "$HELPER" inject "$5" 40031 "$4" 53 0x40000000 || fail "$1: the raw packet to the pool was not sent"
+    send "$1: a pool-addressed flow zapret connmarked is still rejected" "$4" "$5" 40031 no
+    $2 -t mangle -D POSTROUTING 1
+}
+
 barrier v4 "$IPT" 9.9.9.9 10.10.1.2
 barrier v6 "$IPT6" 2001:db8:9::9 fd10::2
+zapret v4 "$IPT" 9.9.9.9 198.18.0.5 10.10.1.2
+zapret v6 "$IPT6" 2001:db8:9::9 fd37:9a00::5 fd10::2
 echo "PASS: barrier routing"

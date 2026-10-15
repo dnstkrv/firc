@@ -66,17 +66,21 @@ firc_err_t firc_pool_reject_build_rules(firc_ipt_t *ipt, const char *chain_prefi
     }
     firc_err_t err = firc_ipt_register_chain_override(ipt, "filter", chain);
     if (err != FIRC_OK) { return err; }
-    char handled[32];
+    char handled[32], fieldless[32];
     snprintf(handled, sizeof(handled), "0x%x/0x%x", FIRC_MARK_HANDLED, FIRC_MARK_HANDLED);
-    const char *unmarked[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark", handled,
-                              "-m", "mark", "!", "--mark", handled, "-j", "DROP"};
-    err = firc_ipt_append(ipt, "filter", chain, unmarked, 15);
-    if (err != FIRC_OK) { return err; }
+    snprintf(fieldless, sizeof(fieldless), "0x%x/0x%x", FIRC_MARK_HANDLED, FIRC_MARK_WRITE_MASK);
     const char *tcp[] = {"-d", cidr, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"};
     err = firc_ipt_append(ipt, "filter", chain, tcp, 8);
     if (err != FIRC_OK) { return err; }
     const char *rest[] = {"-d", cidr, "-j", "REJECT", "--reject-with", v6 ? "icmp6-addr-unreachable" : "icmp-host-unreachable"};
     err = firc_ipt_append(ipt, "filter", chain, rest, 6);
+    if (err != FIRC_OK) { return err; }
+    const char *foreign[] = {"-m", "connmark", "--mark", fieldless, "-j", "RETURN"};
+    err = firc_ipt_append(ipt, "filter", chain, foreign, 6);
+    if (err != FIRC_OK) { return err; }
+    const char *unmarked[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark", handled,
+                              "-m", "mark", "!", "--mark", handled, "-j", "DROP"};
+    err = firc_ipt_append(ipt, "filter", chain, unmarked, 15);
     if (err != FIRC_OK) { return err; }
     const char *jump[] = {"-j", chain};
     return firc_ipt_insert(ipt, "filter", "FORWARD", 1, jump, 2);

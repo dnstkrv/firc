@@ -74,7 +74,7 @@ typedef struct {
     bool no_memory;
     bool tuple_too_big;
     scan_mode_t mode;
-    uint32_t mark_value, mark_mask;
+    uint32_t mark_value, mark_mask, field_mask;
     const uint8_t *v4;
     uint8_t v4_len;
     const uint8_t *v6;
@@ -364,7 +364,8 @@ static bool wanted(const struct nlmsghdr *h, scan_t *s, ct_hit_t *out) {
         }
     }
     if (s->mode == SCAN_BY_MARK &&
-        (!have_mark || (mark & s->mark_mask) != (s->mark_value & s->mark_mask))) {
+        (!have_mark || (mark & s->mark_mask) != (s->mark_value & s->mark_mask) ||
+         (s->field_mask != 0 && (mark & s->field_mask) == 0))) {
         return false;
     }
     if (orig == NULL) { return false; }
@@ -679,6 +680,18 @@ firc_err_t firc_ct_flush_by_mark(firc_ct_t *ct, uint32_t value, uint32_t mask, s
     /* Masked here: the kernel tests (ct->mark & mask) == value without masking value. */
     s.filter_value = value & mask;
     s.filter_mask = mask;
+    return flush(ct, &s, deleted);
+}
+
+firc_err_t firc_ct_flush_handled_with_field(firc_ct_t *ct, uint32_t field_mask, size_t *deleted) {
+    scan_t s = {0};
+    s.mode = SCAN_BY_MARK;
+    s.mark_value = FIRC_MARK_HANDLED;
+    s.mark_mask = FIRC_MARK_HANDLED;
+    s.field_mask = field_mask;
+    s.filter_mark = true;
+    s.filter_value = FIRC_MARK_HANDLED;
+    s.filter_mask = FIRC_MARK_HANDLED;
     return flush(ct, &s, deleted);
 }
 

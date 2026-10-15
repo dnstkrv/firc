@@ -635,19 +635,25 @@ TEST the_stop_keeps_only_the_barrier(void) {
     PASS();
 }
 
-static bool first_rule_is_unmarked_drop(firc_fake_ipt_t *f) {
-    static const char *const want[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark",
+static bool rule_is(const firc_ipt_rule_t *r, const char *const *want, size_t n) {
+    if (r->n_parts != n) { return false; }
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(r->parts[i], want[i]) != 0) { return false; }
+    }
+    return true;
+}
+
+static bool rejects_then_fieldless_return_then_unmarked_drop(firc_fake_ipt_t *f) {
+    static const char *const ret[] = {"-m", "connmark", "--mark", "0x40000000/0x40ff0000", "-j", "RETURN"};
+    static const char *const drop[] = {"-m", "conntrack", "--ctdir", "ORIGINAL", "-m", "connmark", "--mark",
                                        "0x40000000/0x40000000", "-m", "mark", "!", "--mark", "0x40000000/0x40000000",
                                        "-j", "DROP"};
     firc_ipt_rule_t *const *rules = NULL;
     size_t n = 0;
-    if (!firc_fake_ipt_get_rules(f, "filter", "FIRC_POOLREJECT", &rules, &n) || n == 0 || rules[0]->n_parts != 15) {
-        return false;
-    }
-    for (size_t i = 0; i < 15; i++) {
-        if (strcmp(rules[0]->parts[i], want[i]) != 0) { return false; }
-    }
-    return true;
+    if (!firc_fake_ipt_get_rules(f, "filter", "FIRC_POOLREJECT", &rules, &n) || n != 4) { return false; }
+    return strcmp(rules[0]->parts[rules[0]->n_parts - 3], "REJECT") == 0 &&
+           strcmp(rules[1]->parts[rules[1]->n_parts - 3], "REJECT") == 0 && rule_is(rules[2], ret, 6) &&
+           rule_is(rules[3], drop, 15);
 }
 
 /* Catches: the pool reject barrier missing from FORWARD, or behind the firmware's accepts. */
@@ -672,14 +678,14 @@ TEST a_pass_puts_the_pool_reject_barrier_first_in_forward(void) {
     static const char *rest4[] = {"-d", "198.18.0.0/15", "-j", "REJECT", "--reject-with", "icmp-host-unreachable"};
     ASSERT(chain_has_rule(fake, "filter", "FIRC_POOLREJECT", tcp4, 8));
     ASSERT(chain_has_rule(fake, "filter", "FIRC_POOLREJECT", rest4, 6));
-    ASSERT_EQ_FMT((size_t)3, rule_count(fake, "filter", "FIRC_POOLREJECT"), "%zu");
-    ASSERTm("the established-flow drop comes before the rejects", first_rule_is_unmarked_drop(fake));
+    ASSERT_EQ_FMT((size_t)4, rule_count(fake, "filter", "FIRC_POOLREJECT"), "%zu");
+    ASSERTm("the rejects first, the drop last behind its return", rejects_then_fieldless_return_then_unmarked_drop(fake));
     static const char *tcp6[] = {"-d", "fd37:9a00::/48", "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"};
     static const char *rest6[] = {"-d", "fd37:9a00::/48", "-j", "REJECT", "--reject-with", "icmp6-addr-unreachable"};
     ASSERT(chain_has_rule(fake6, "filter", "FIRC_POOLREJECT", tcp6, 8));
     ASSERT(chain_has_rule(fake6, "filter", "FIRC_POOLREJECT", rest6, 6));
-    ASSERT_EQ_FMT((size_t)3, rule_count(fake6, "filter", "FIRC_POOLREJECT"), "%zu");
-    ASSERTm("in both families", first_rule_is_unmarked_drop(fake6));
+    ASSERT_EQ_FMT((size_t)4, rule_count(fake6, "filter", "FIRC_POOLREJECT"), "%zu");
+    ASSERTm("in both families", rejects_then_fieldless_return_then_unmarked_drop(fake6));
     ASSERT_EQ_FMT((size_t)1, forward_jumps(fake6, "FIRC_POOLREJECT"), "%zu");
 
     firc_app_destroy(app);

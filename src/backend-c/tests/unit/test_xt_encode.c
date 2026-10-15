@@ -619,6 +619,7 @@ TEST conntrack_mark_and_tcp_words_encode_as_in_the_capture(void) {
 TEST the_barrier_encodes_as_iptables_restore_wrote_it(void) {
     static const char *const line =
         "-m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP";
+    static const char *const fieldless = "-m connmark --mark 0x40000000/0x40ff0000 -j RETURN";
     for (size_t f = 0; f < 2; f++) {
         firc_xt_info_t info;
         uint8_t *blob = NULL;
@@ -627,12 +628,17 @@ TEST the_barrier_encodes_as_iptables_restore_wrote_it(void) {
         const char *why = NULL;
         ASSERT_EQ_FMT(FIRC_OK, firc_xt_parse(k_fams[f], &info, blob, &t, &why), "%d");
         firc_xt_chain_t *c = firc_xt_find_chain(&t, "FIRC_POOLREJECT");
-        ASSERT(c != NULL && c->n_rules == 3);
+        ASSERT(c != NULL && c->n_rules == 4);
         firc_xt_entry_t e;
         uint32_t exts = 0;
         ASSERT_EQ_FMT(FIRC_OK, enc(k_fams[f], line, &e, &exts), "%d");
-        ASSERT(firc_xt_entry_same(k_fams[f], &e, &c->rules[0]));
+        ASSERT(firc_xt_entry_same(k_fams[f], &e, &c->rules[3]));
         ASSERT_EQ_FMT((uint32_t)(FIRC_XT_EXT_CONNTRACK | FIRC_XT_EXT_CONNMARK_MATCH | FIRC_XT_EXT_MARK), exts, "%u");
+        firc_xt_entry_clear(&e);
+        exts = 0;
+        ASSERT_EQ_FMT(FIRC_OK, enc(k_fams[f], fieldless, &e, &exts), "%d");
+        ASSERT(firc_xt_entry_same(k_fams[f], &e, &c->rules[2]));
+        ASSERT_EQ_FMT((uint32_t)FIRC_XT_EXT_CONNMARK_MATCH, exts, "%u");
         firc_xt_entry_clear(&e);
         firc_xt_table_clear(&t);
         free(blob);

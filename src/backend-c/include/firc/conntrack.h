@@ -22,6 +22,9 @@ void firc_ct_close(firc_ct_t *ct);
 /* Deletes entries with (ct->mark & mask) == value; *deleted (optional) counts confirmed deletes. */
 firc_err_t firc_ct_flush_by_mark(firc_ct_t *ct, uint32_t value, uint32_t mask, size_t *deleted);
 
+/* Deletes entries with the handled bit and a nonzero (ct->mark & field_mask). */
+firc_err_t firc_ct_flush_handled_with_field(firc_ct_t *ct, uint32_t field_mask, size_t *deleted);
+
 /* Deletes entries whose reply source is in a pool prefix; a prefix with len 0 is skipped. */
 firc_err_t firc_ct_flush_pool_replies(firc_ct_t *ct, const uint8_t v4[4], uint8_t v4_len,
                                       const uint8_t v6[16], uint8_t v6_len, size_t *deleted);

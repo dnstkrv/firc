@@ -2,9 +2,10 @@
 :FIRC_POOLREJECT - [0:0]
 :FIRC_bh - [0:0]
 :FIRC_g1 - [0:0]
--A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP
 -A FIRC_POOLREJECT -d fd37:9a00::/48 -p tcp -j REJECT --reject-with tcp-reset
 -A FIRC_POOLREJECT -d fd37:9a00::/48 -j REJECT --reject-with icmp6-addr-unreachable
+-A FIRC_POOLREJECT -m connmark --mark 0x40000000/0x40ff0000 -j RETURN
+-A FIRC_POOLREJECT -m conntrack --ctdir ORIGINAL -m connmark --mark 0x40000000/0x40000000 -m mark ! --mark 0x40000000/0x40000000 -j DROP
 -A FIRC_g1 -o nwg1 -m mark --mark 0x10000/0xff0000 -j ACCEPT
 -I FORWARD 1 -j FIRC_POOLREJECT
 -A FORWARD -j FIRC_g1

@@ -179,7 +179,7 @@ firc_err_t firc_stale_marks_sweep(firc_ct_t *ct, const firc_fakeip_t *pool, bool
     if (ct == NULL || pool == NULL) { return FIRC_OK; }
     if (!fields_loaded) {
         FIRC_INFO("no mark field map was loaded: every flow firc marked is reset once");
-        return firc_ct_flush_by_mark(ct, FIRC_MARK_HANDLED, FIRC_MARK_HANDLED, dropped);
+        return firc_ct_flush_handled_with_field(ct, mask, dropped);
     }
     if (!pool_state_trusted) {
         FIRC_INFO("not checking flows to the pool marked by a previous run: the pool state this run holds "

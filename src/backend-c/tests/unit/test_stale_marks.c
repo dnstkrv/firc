@@ -148,6 +148,23 @@ TEST without_the_field_map_every_handled_flow_goes(void) {
     PASS();
 }
 
+TEST without_the_field_map_a_handled_bit_with_no_field_is_not_firc_s(void) {
+    fx_t f;
+    ASSERT(up(&f));
+    const uint8_t src[4] = {192, 168, 1, 10}, zapret[4] = {10, 1, 2, 5}, ours[4] = {10, 1, 2, 6};
+    fake_ct_add(f.kernel, AF_INET, src, zapret, zapret, FIRC_MARK_HANDLED);
+    fake_ct_add(f.kernel, AF_INET, src, ours, ours, 0x40030000u);
+
+    size_t dropped = 0;
+    ASSERT_EQ(FIRC_OK, firc_stale_marks_sweep(f.ct, f.pool, true, false, NULL, 0, FIRC_MARK_GROUP_MASK, &dropped));
+    ASSERT_EQ_FMT((size_t)1, dropped, "%zu");
+    ASSERT(fake_ct_deleted(f.kernel, ours, 4));
+    ASSERT_FALSE(fake_ct_deleted(f.kernel, zapret, 4));
+    ASSERT_EQ_FMT((size_t)1, fake_ct_remaining(f.kernel), "%zu");
+    down(&f);
+    PASS();
+}
+
 /* Catches: a flow kept for a group that holds no field this run. */
 TEST a_group_that_holds_no_field_loses_its_flows(void) {
     fx_t f;
@@ -567,6 +584,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_group_that_is_gone_loses_its_flows);
     RUN_TEST(an_untrusted_pool_state_keeps_only_held_fields_inside_the_pool);
     RUN_TEST(without_the_field_map_every_handled_flow_goes);
+    RUN_TEST(without_the_field_map_a_handled_bit_with_no_field_is_not_firc_s);
     RUN_TEST(a_group_that_holds_no_field_loses_its_flows);
     RUN_TEST(a_flow_to_a_subnet_its_field_holder_cannot_reach_goes);
     RUN_TEST(a_flow_inside_its_field_holder_s_subnet_stays);

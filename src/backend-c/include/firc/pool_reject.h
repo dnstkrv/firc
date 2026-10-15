@@ -9,8 +9,8 @@
 #define FIRC_POOL_REJECT_METRIC_GROUP 5u
 #define FIRC_POOL_REJECT_METRIC_MAIN 4096u
 
-/* Stages the FORWARD barrier, inserted first: drops original packets of a flow firc handled that lost the
- * handled bit, then rejects pool traffic that foreign tables routed. No commit.
+/* Stages the FORWARD barrier, inserted first: rejects pool traffic that foreign tables routed, then drops
+ * original packets of a flow firc marked (handled bit and a group field) that lost the bit. No commit.
  * filter/FORWARD must already be a patch chain (firc_netfilter_register_base_chains), else FIRC_ERR_STATE. */
 #define FIRC_POOL_REJECT_CHAIN_SUFFIX "POOLREJECT"
 firc_err_t firc_pool_reject_build_rules(firc_ipt_t *ipt, const char *chain_prefix, const firc_ip_t *base,
