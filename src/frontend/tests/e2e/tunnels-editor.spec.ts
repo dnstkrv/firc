@@ -78,23 +78,29 @@ test.describe("Tunnel editor", () => {
     expect(daemon.puts[0].tunnels[0].order).toEqual(["0000000a:B", "0000000a:A", "0000000a:C"]);
   });
 
-  // Catches probe latencies not shown, or "By latency" not ordering by them.
-  test("checking nodes fills latencies and By latency sorts by them", async ({ page }) => {
+  // Catches the column or "By latency" reading the handshake, which ranks a near relay first.
+  test("checking nodes shows first byte and to the node, and By latency sorts by first byte", async ({
+    page,
+  }) => {
     const { daemon, tunnels } = await saved(page);
     daemon.probeAnswer = (_body, route) =>
       route.fulfill({
         json: {
           nodes: [
-            { key: "0000000a:A", ok: true, handshakeMs: 90, firstByteMs: 120, why: "" },
+            { key: "0000000a:A", ok: true, handshakeMs: 18, firstByteMs: 1400, why: "" },
             { key: "0000000a:B", ok: false, handshakeMs: null, firstByteMs: null, why: "timeout" },
-            { key: "0000000a:C", ok: true, handshakeMs: 30, firstByteMs: 50, why: "" },
+            { key: "0000000a:C", ok: true, handshakeMs: 113, firstByteMs: 300, why: "" },
           ],
         },
       });
     const card = tunnels.card("a");
     await card.locator("button", { hasText: "Check nodes" }).click();
-    await expect(tunnels.nodeRows("a").nth(0).locator(".lat")).toHaveText("90 ms");
-    await expect(tunnels.nodeRows("a").nth(2).locator(".lat")).toHaveText("30 ms");
+    await expect(tunnels.nodeRows("a").nth(0).locator(".lat")).toHaveText(
+      /^1400 ms\s*to the node 18 ms$/,
+    );
+    await expect(tunnels.nodeRows("a").nth(2).locator(".lat")).toHaveText(
+      /^300 ms\s*to the node 113 ms$/,
+    );
     expect(daemon.probes[0].tunnel.id).toBe("a");
 
     await card.locator("button", { hasText: "By latency" }).click();
@@ -102,6 +108,120 @@ test.describe("Tunnel editor", () => {
     await tunnels.save.click();
     await expect(page.getByText("Saved")).toBeVisible();
     expect(daemon.puts[0].tunnels[0].order).toEqual(["0000000a:C", "0000000a:A", "0000000a:B"]);
+  });
+
+  // Catches the second number shown without the words that tell it from the first, at any width.
+  test("the to-the-node number explains both numbers on a phone too", async ({ page }) => {
+    const { daemon, tunnels } = await saved(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    daemon.probeAnswer = (_body, route) =>
+      route.fulfill({
+        json: {
+          nodes: [{ key: "0000000a:A", ok: true, handshakeMs: 18, firstByteMs: 1400, why: "" }],
+        },
+      });
+    await tunnels.card("a").locator("button", { hasText: "Check nodes" }).click();
+    await tunnels.nodeRows("a").nth(0).getByText("to the node 18 ms").hover();
+    const bubble = page.locator("#global-tooltip");
+    await expect(bubble).toBeVisible();
+    await expect(bubble).toContainText("first byte through the node");
+    await expect(bubble).toContainText("nearby relay");
+  });
+
+  // Catches the reset leaving the saved order in the save, or the rows in the sorted order.
+  test("As in the subscription empties order and puts the rows back in source order", async ({
+    page,
+  }) => {
+    const { daemon, tunnels } = await saved(page, {
+      order: ["0000000a:C", "0000000a:B", "0000000a:A"],
+    });
+    await expect(tunnels.nodeNames("a")).toHaveText(["C", "B", "A"]);
+    const reset = tunnels.card("a").locator("button", { hasText: "As in the subscription" });
+    await expect(reset).not.toHaveClass(/inactive/);
+
+    await reset.click();
+    await expect(tunnels.nodeNames("a")).toHaveText(["A", "B", "C"]);
+    await expect(reset).toHaveClass(/inactive/);
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+    expect(daemon.puts[0].tunnels[0].order).toEqual([]);
+  });
+
+  // Catches the reset offered when there is no saved order to drop.
+  test("As in the subscription is inactive while the order is empty", async ({ page }) => {
+    const { tunnels } = await saved(page);
+    const reset = tunnels.card("a").locator("button", { hasText: "As in the subscription" });
+    await expect(reset).toHaveClass(/inactive/);
+  });
+
+  // Catches a repeated key from the daemon blanking the section or showing a node twice.
+  test("a preview repeating a key lists each node once", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const row = (key: string, name: string, extra = {}) => ({
+      key,
+      name,
+      source: "Provider",
+      excluded: false,
+      isNew: false,
+      missing: false,
+      overCap: false,
+      skipReason: "",
+      ...extra,
+    });
+    const daemon = await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB] })],
+      states: [state("a", "tunvless0")],
+    });
+    daemon.previewAnswer = (_body, route) =>
+      route.fulfill({
+        json: {
+          matched: 3,
+          total: 3,
+          subscriptions: [],
+          nodes: [
+            row("0000000a:C", "C"),
+            row("0000000a:A", "A", { missing: true }),
+            row("0000000a:A", "A", { isNew: true }),
+            row("0000000a:B", "B"),
+          ],
+        },
+      });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    await expect(tunnels.nodeNames("a")).toHaveText(["C", "A", "B"]);
+    await expect(tunnels.nodeRows("a").nth(1)).toContainText("not in the sources");
+    expect(errors).toEqual([]);
+  });
+
+  // Catches the list blanking or repeating rows after a latency sort is saved and reopened.
+  test("a saved latency order lists every node once after collapse and expand", async ({
+    page,
+  }) => {
+    const { daemon, tunnels } = await saved(page);
+    daemon.probeAnswer = (_body, route) =>
+      route.fulfill({
+        json: {
+          nodes: [
+            { key: "0000000a:A", ok: true, handshakeMs: 10, firstByteMs: 300, why: "" },
+            { key: "0000000a:B", ok: true, handshakeMs: 10, firstByteMs: 200, why: "" },
+            { key: "0000000a:C", ok: true, handshakeMs: 10, firstByteMs: 100, why: "" },
+          ],
+        },
+      });
+    const card = tunnels.card("a");
+    await card.locator("button", { hasText: "Check nodes" }).click();
+    await expect(tunnels.nodeRows("a").nth(2).locator(".lat")).not.toHaveText("");
+    await card.locator("button", { hasText: "By latency" }).click();
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+    expect(daemon.puts[0].tunnels[0].order).toEqual(["0000000a:C", "0000000a:B", "0000000a:A"]);
+
+    await card.getByRole("button", { name: "Collapse", exact: true }).click();
+    await expect(tunnels.nodeRows("a")).toHaveCount(0);
+    await tunnels.expand("a");
+    await expect(tunnels.nodeNames("a")).toHaveText(["C", "B", "A"]);
   });
 
   // Catches a probe answer outliving the sources it measured.
@@ -115,7 +235,9 @@ test.describe("Tunnel editor", () => {
       });
     const card = tunnels.card("a");
     await card.locator("button", { hasText: "Check nodes" }).click();
-    await expect(tunnels.nodeRows("a").nth(0).locator(".lat")).toHaveText("90 ms");
+    await expect(tunnels.nodeRows("a").nth(0).locator(".lat")).toHaveText(
+      /^120 ms\s*to the node 90 ms$/,
+    );
 
     await card
       .locator(".src")

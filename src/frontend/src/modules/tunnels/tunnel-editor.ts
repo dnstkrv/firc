@@ -35,7 +35,7 @@ export function keepHidden(newVisible: string[], order: string[]): string[] {
 }
 
 export function latencyOf(row: TunnelProbeRow | undefined): number | null {
-  return row && row.ok && row.handshakeMs !== null ? row.handshakeMs : null;
+  return row && row.ok && row.firstByteMs !== null ? row.firstByteMs : null;
 }
 
 export function orderByLatency(
@@ -236,4 +236,9 @@ export function subscriptionProblem(
 
 export function linkProblem(link: string, t: T): string | null {
   return /^vless:\/\/\S+$/.test(link) ? null : t("One vless:// link");
+}
+
+export function uniqueByKey<R extends { key: string }>(rows: R[]): R[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => !seen.has(row.key) && Boolean(seen.add(row.key)));
 }

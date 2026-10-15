@@ -439,7 +439,8 @@ static void emit(emit_t *e, firc_tun_node_t *row, bool is_new)
         e->sent++;
     }
     e->out->v[e->out->n++] = *row;
-    memset(row, 0, sizeof *row);
+    row->link = NULL;
+    row->link_len = 0;
 }
 
 static bool order_seen(const firc_tunnel_t *t, size_t i)

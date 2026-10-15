@@ -7,7 +7,12 @@
   import type { TunnelsStore } from "../tunnels.svelte";
   import NodeRow from "./NodeRow.svelte";
 
-  import { Activity, LoaderCircle, SortByLatency } from "../../../components/ui/icons";
+  import {
+    Activity,
+    LoaderCircle,
+    SortByLatency,
+    SortBySource,
+  } from "../../../components/ui/icons";
   import type { Tunnel, TunnelPreview, TunnelProbeRow } from "../../../types";
   import { HttpError } from "../../../utils/fetcher";
   import {
@@ -15,6 +20,7 @@
     orderAfterDrop,
     orderByLatency,
     toggleExclude,
+    uniqueByKey,
     type NodeDnD,
   } from "../tunnel-editor";
   import { fieldRefusal, plain, type ClientTunnel } from "../tunnels-data";
@@ -35,7 +41,7 @@
   const fetched = $derived(
     (live?.subscriptions ?? []).map((s) => `${s.name}:${s.lastOk}`).join("|"),
   );
-  const rows = $derived(preview?.nodes ?? []);
+  const rows = $derived(uniqueByKey(preview?.nodes ?? []));
   const visible = $derived(rows.map((r) => r.key));
   const measured = $derived(Object.keys(probes).length > 0);
   const saved = $derived(store.isSaved(tunnel.id));
@@ -145,6 +151,23 @@
         {t("By latency")}
       </Button>
     </Tooltip>
+    <Tooltip
+      value={t(
+        tunnel.order.length > 0
+          ? "Drop the saved order: nodes go as the sources list them"
+          : "The nodes already go as the sources list them",
+      )}
+    >
+      <Button
+        small
+        class="text-btn"
+        inactive={tunnel.order.length === 0}
+        onclick={() => (tunnel.order = [])}
+      >
+        <SortBySource size={15} />
+        {t("As in the subscription")}
+      </Button>
+    </Tooltip>
   </div>
 
   {#if previewError && !filterRefused}
@@ -214,6 +237,7 @@
 <style>
   .sec-h {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 8px 14px;
@@ -231,6 +255,7 @@
     background: var(--bg-light-extra);
     color: var(--text);
     padding: 0.25rem 0.6rem;
+    white-space: nowrap;
   }
   .spin {
     display: inline-flex;
@@ -289,7 +314,7 @@
   }
   .head {
     display: grid;
-    grid-template-columns: 1.5rem minmax(0, 3fr) minmax(0, 1.4fr) minmax(0, 2fr) 4.5rem 4rem;
+    grid-template-columns: 1.5rem minmax(0, 3fr) minmax(0, 1.4fr) minmax(0, 2fr) 7.5rem 4rem;
     gap: 0.5rem;
     padding: 0.35rem 0.6rem;
     color: var(--text-2);

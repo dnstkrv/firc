@@ -471,6 +471,58 @@ TEST a_body_reads_at_most_1024_nodes(void)
     PASS();
 }
 
+static int flat_and_unique(void)
+{
+    for (size_t i = 0; i < g_nodes.n; i++) {
+        if (g_nodes.v[i].missing || g_nodes.v[i].is_new) {
+            return 0;
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(g_nodes.v[i].key, g_nodes.v[j].key) == 0) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+TEST a_reversed_order_lists_every_node_once(void)
+{
+    /* catches: an emitted node blanking its key in the sorted index, so later order keys miss and nodes repeat */
+    const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:C\", \"aaaaaaaa:B\", \"aaaaaaaa:A\"]\n");
+    firc_tun_body_t b = {"https://a.example", 0, B64_ABC, sizeof B64_ABC - 1};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    const char *want[] = {"aaaaaaaa:C", "aaaaaaaa:B", "aaaaaaaa:A"};
+    ASSERT(keys_are(want, 3));
+    ASSERT(flat_and_unique());
+    ASSERT_EQ(3u, sendable());
+    PASS();
+}
+
+TEST ten_nodes_in_reverse_order_keep_the_saved_order(void)
+{
+    /* catches: a partial fix of the index, leaving some of ten reversed keys missed or repeated */
+    const char *names[] = {"n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"};
+    char *body = names_body(names, 10);
+    char extra[512] = "    order: [";
+    char want_keys[10][16];
+    const char *want[10];
+    for (int i = 0; i < 10; i++) {
+        snprintf(want_keys[i], sizeof want_keys[i], "aaaaaaaa:n%d", 9 - i);
+        want[i] = want_keys[i];
+        size_t off = strlen(extra);
+        snprintf(extra + off, sizeof extra - off, "%s\"%s\"", i ? ", " : "", want_keys[i]);
+    }
+    strcat(extra, "]\n");
+    const firc_tunnel_t *t = tunnel(SUB_A, extra);
+    firc_tun_body_t b = {"https://a.example", 0, body, strlen(body)};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    free(body);
+    ASSERT(keys_are(want, 10));
+    ASSERT(flat_and_unique());
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -500,5 +552,7 @@ int main(int argc, char **argv)
     RUN_TEST(subscriptions_keep_their_config_order);
     RUN_TEST(a_key_repeated_in_order_counts_once);
     RUN_TEST(a_body_reads_at_most_1024_nodes);
+    RUN_TEST(a_reversed_order_lists_every_node_once);
+    RUN_TEST(ten_nodes_in_reverse_order_keep_the_saved_order);
     GREATEST_MAIN_END();
 }

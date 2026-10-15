@@ -18,6 +18,7 @@ import {
   subscriptionIntervals,
   subscriptionProblem,
   toggleExclude,
+  uniqueByKey,
   uplinkOptions,
   uplinkValue,
   wouldCycle,
@@ -95,7 +96,16 @@ describe("keys the filter hides", () => {
 });
 
 describe("sorting by latency", () => {
-  // Catches a sort by name or by first byte instead of the measured handshake.
+  // Catches a sort by the handshake, which ranks a near relay of a far exit first.
+  it("ranks by the first byte through the node, not the handshake to it", () => {
+    const probes = {
+      jp: { key: "jp", ok: true, why: "", handshakeMs: 18, firstByteMs: 1400 },
+      nl: { key: "nl", ok: true, why: "", handshakeMs: 113, firstByteMs: 300 },
+    };
+    assert.deepStrictEqual(orderByLatency(["jp", "nl"], probes), ["nl", "jp"]);
+  });
+
+  // Catches a sort by name instead of the measured latency.
   it("puts measured nodes first, fastest first", () => {
     const probes = {
       a: probe("a", 90),
@@ -127,6 +137,24 @@ describe("sorting by latency", () => {
   it("keeps the order of nodes with the same latency", () => {
     const probes = { a: probe("a", 30), b: probe("b", 30), c: probe("c", 5) };
     assert.deepStrictEqual(orderByLatency(["a", "b", "c"], probes), ["c", "a", "b"]);
+  });
+});
+
+describe("rows from the daemon", () => {
+  // Catches a repeated key kept, or the later copy kept instead of the first.
+  it("keeps the first row of each key in its place", () => {
+    const rows = [
+      { key: "c", n: 1 },
+      { key: "a", n: 2 },
+      { key: "a", n: 3 },
+      { key: "b", n: 4 },
+      { key: "c", n: 5 },
+    ];
+    assert.deepStrictEqual(uniqueByKey(rows), [
+      { key: "c", n: 1 },
+      { key: "a", n: 2 },
+      { key: "b", n: 4 },
+    ]);
   });
 });
 
@@ -376,9 +404,12 @@ describe("the card's numbers", () => {
     assert.strictEqual(agoText(1000, 1100, t), "0 s");
   });
 
-  // Catches the latency sort and the latency column reading different numbers.
-  it("shows the handshake as the latency and nothing for a failed node", () => {
-    assert.strictEqual(latencyOf(probe("a", 38)), 38);
+  // Catches the latency column showing the handshake to the node instead of the whole path.
+  it("shows the first byte as the latency and nothing for a failed node", () => {
+    assert.strictEqual(
+      latencyOf({ key: "a", ok: true, why: "", handshakeMs: 18, firstByteMs: 1400 }),
+      1400,
+    );
     assert.strictEqual(latencyOf(probe("a", null)), null);
     assert.strictEqual(latencyOf(undefined), null);
   });

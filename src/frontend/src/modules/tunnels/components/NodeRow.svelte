@@ -76,7 +76,18 @@
   </div>
   <div class="lat">
     {#if latency !== null}
-      {latency} {t("ms")}
+      <span class="fb">{latency} {t("ms")}</span>
+      {#if probe?.handshakeMs != null}
+        <Tooltip
+          value={t(
+            "The first number is the time to the first byte through the node: the whole path. “To the node” is DNS, TCP and the TLS/REALITY handshake to the node’s own address only; a much smaller number means that address is a nearby relay",
+          )}
+        >
+          <span class="hs">
+            {t("to the node {n} ms").replace("{n}", String(probe.handshakeMs))}
+          </span>
+        </Tooltip>
+      {/if}
     {:else if probe}
       <Tooltip value={probe.why || t("did not answer")}><span class="fail">—</span></Tooltip>
     {/if}
@@ -95,7 +106,7 @@
 <style>
   .node {
     display: grid;
-    grid-template-columns: 1.5rem minmax(0, 3fr) minmax(0, 1.4fr) minmax(0, 2fr) 4.5rem 4rem;
+    grid-template-columns: 1.5rem minmax(0, 3fr) minmax(0, 1.4fr) minmax(0, 2fr) 7.5rem 4rem;
     align-items: center;
     gap: 0.5rem;
     padding: 0.35rem 0.6rem;
@@ -132,7 +143,8 @@
   }
   .ex .name,
   .ex .state,
-  .ex .lat {
+  .ex .lat,
+  .ex .fb {
     color: var(--text-2);
   }
   .ex .name {
@@ -167,6 +179,17 @@
     font-size: 0.8rem;
     color: var(--text-2);
     text-align: right;
+    white-space: nowrap;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .fb {
+    color: var(--text);
+  }
+  .hs {
+    font-size: 0.7rem;
+    opacity: 0.75;
   }
   .fail {
     color: var(--red);

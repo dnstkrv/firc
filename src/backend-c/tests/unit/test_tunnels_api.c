@@ -722,6 +722,38 @@ TEST preview_of_a_disabled_tunnel_shows_its_held_nodes(void)
     PASS();
 }
 
+#define ROW_OF(k) \
+    "{\"key\":\"0000000b:" k "\",\"name\":\"" k "\",\"source\":\"P\",\"isNew\":false,\"excluded\":false," \
+    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}"
+
+/* catches: a saved reversed order previewed with nodes repeated or marked missing */
+TEST a_saved_reversed_order_previews_every_node_once_in_that_order(void)
+{
+    ASSERT(hx_start(SUB_TUN, 0) != NULL);
+    ASSERT(wait_for_cached(5000));
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
+                            "{\"tunnels\":[{\"id\":\"s\",\"device\":\"tunvless2\",\"sources\":["
+                            "{\"id\":\"0000000b\",\"kind\":\"subscription\",\"name\":\"P\",\"url\":\"" SUB_URL
+                            "\",\"interval\":3600}],"
+                            "\"order\":[\"0000000b:D\",\"0000000b:C\",\"0000000b:B\",\"0000000b:A\"]}]}",
+                            NULL));
+    cJSON *got = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &got));
+    cJSON *draft = cJSON_CreateObject();
+    cJSON_AddItemToObject(draft, "tunnel", cJSON_Duplicate(tunnel_named(got, "s"), true));
+    cJSON_Delete(got);
+    char *body = cJSON_PrintUnformatted(draft);
+    cJSON_Delete(draft);
+    cJSON *ans = NULL;
+    int code = call_api("POST", "/api/v1/tunnels/preview", body, &ans);
+    free(body);
+    ASSERT_EQ(200, code);
+    ASSERT(same_json(ans, "{\"nodes\":[" ROW_OF("D") "," ROW_OF("C") "," ROW_OF("B") "," ROW_OF("A") "],"
+                          "\"matched\":4,\"total\":4,\"subscriptions\":[{\"name\":\"P\",\"cached\":true}]}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
 #define STATE_TUNS                                                                                  \
     "tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n"                                    \
     "      - id: 0000000a\n        link: \"" LINK_A "\"\n"                                           \
@@ -1165,6 +1197,7 @@ SUITE(tunnels_api)
     RUN_TEST(preview_follows_the_draft_from_cached_bodies_without_links);
     RUN_TEST(preview_with_a_changed_uplink_shows_the_saved_nodes);
     RUN_TEST(preview_of_a_disabled_tunnel_shows_its_held_nodes);
+    RUN_TEST(a_saved_reversed_order_previews_every_node_once_in_that_order);
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);
     RUN_TEST(rates_are_the_counter_difference_over_the_time_between_polls);
