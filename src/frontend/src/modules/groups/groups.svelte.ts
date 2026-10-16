@@ -46,6 +46,7 @@ const LIVE_TIMEOUT_MS = 4000 as const;
 /* Three polls missed: the daemon's last word is no longer vouched for. */
 const LIVE_STALE_MS = 15000 as const;
 export const RULE_SEARCH_MATCH_PATTERN = 1 << 1;
+export const RULE_SEARCH_MATCH_COMMENT = 1 << 2;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -166,6 +167,7 @@ type DuplicateComputationResult = {
 type SearchIndexRule = {
   id: string;
   patternLower: string;
+  commentLower: string;
 };
 
 type SearchIndexGroup = {
@@ -871,6 +873,7 @@ export class GroupsStore {
         indexedRules[r] = {
           id: rule.id,
           patternLower: (rule.rule || "").toLowerCase(),
+          commentLower: (rule.comment || "").toLowerCase(),
         };
         if ((r & 31) === 0) {
           await maybeYield();
@@ -971,6 +974,9 @@ export class GroupsStore {
         let matchMask = 0;
         if (indexedRule.patternLower.includes(query)) {
           matchMask |= RULE_SEARCH_MATCH_PATTERN;
+        }
+        if (indexedRule.commentLower.includes(query)) {
+          matchMask |= RULE_SEARCH_MATCH_COMMENT;
         }
 
         if (forcedRules?.has(indexedRule.id) || matchMask !== 0) {

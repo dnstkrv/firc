@@ -59,19 +59,167 @@ define Package/firc/postinst
 # Strip fetched list rules from an old groups.yaml before start: a huge file OOM-kills fircd on load.
 GROUPS=/opt/etc/firc/groups.yaml
 
-# Smaller files load fine and are left to the daemon.
+# Smaller files keep their subscriptions' rules: the daemon loads them.
 MIGRATE_MIN_BYTES=$${MIGRATE_MIN_BYTES:-262144}
 
 migrate_groups() {
     f=$$1
     [ -f "$$f" ] || return 0
+    strip=1
     if [ "$${FIRC_MIGRATE_FORCE:-0}" != 1 ]; then
         size=$$(wc -c < "$$f" 2>/dev/null) || return 0
-        [ "$$size" -ge "$$MIGRATE_MIN_BYTES" ] || return 0
+        [ "$$size" -ge "$$MIGRATE_MIN_BYTES" ] || strip=0
     fi
     # A YAML sequence may sit at its key's own indent, so the skip also runs over `-` items at that indent.
-    awk -v countfile="$$f.off" '
-        /^[^ \t#-]/ { in_subs = ($$0 ~ /^subscriptions:[[:space:]]*$$/); skip = 0 }
+    LC_ALL=C awk -v countfile="$$f.off" -v strip="$$strip" '
+        BEGIN {
+            for (i = 1; i < 256; i++) { ORD[sprintf("%c", i)] = i }
+            HEX = "0123456789abcdef"
+            Q = "\047"
+        }
+        function hexval(h,   v, i) {
+            v = 0
+            for (i = 1; i <= length(h); i++) { v = v * 16 + index(HEX, tolower(substr(h, i, 1))) - 1 }
+            return v
+        }
+        function utf8(cp) {
+            if (cp < 32 || (cp >= 127 && cp < 160) || cp == 8232 || cp == 8233 || (cp >= 55296 && cp < 57344) || cp > 1114111) { return " " }
+            if (cp < 128) { return sprintf("%c", cp) }
+            if (cp < 2048) { return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64) }
+            if (cp < 65536) { return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64) }
+            return sprintf("%c%c%c%c", 240 + int(cp / 262144), 128 + int(cp / 4096) % 64, 128 + int(cp / 64) % 64, 128 + cp % 64)
+        }
+        function unquote(v,   out, i, c, e, n) {
+            c = substr(v, 1, 1)
+            if (c == Q) {
+                out = ""
+                for (i = 2; i <= length(v); i++) {
+                    c = substr(v, i, 1)
+                    if (c == Q) {
+                        if (substr(v, i + 1, 1) != Q) { break }
+                        i++
+                    }
+                    out = out c
+                }
+                return out
+            }
+            if (c == "\"") {
+                out = ""
+                for (i = 2; i <= length(v); i++) {
+                    c = substr(v, i, 1)
+                    if (c == "\"") { break }
+                    if (c != "\\") { out = out c; continue }
+                    e = substr(v, ++i, 1)
+                    n = (e == "x") ? 2 : (e == "u") ? 4 : (e == "U") ? 8 : 0
+                    if (n > 0) {
+                        out = out utf8(hexval(substr(v, i + 1, n)))
+                        i += n
+                    } else if (e == "\\" || e == "\"" || e == "/") {
+                        out = out e
+                    } else if (e == " ") {
+                        out = out " "
+                    } else if (e == "_") {
+                        out = out utf8(160)
+                    } else {
+                        out = out " "
+                    }
+                }
+                return out
+            }
+            sub(/[ \t]+#.*$$/, "", v)
+            return v
+        }
+        function clean(v,   out, i, b, k) {
+            out = ""
+            for (i = 1; i <= length(v); i++) {
+                b = ORD[substr(v, i, 1)]
+                if (b < 32 || b == 127) { out = out " "; continue }
+                if (b == 194 && ORD[substr(v, i + 1, 1)] >= 128 && ORD[substr(v, i + 1, 1)] < 160) { out = out " "; i++; continue }
+                if (b == 226 && ORD[substr(v, i + 1, 1)] == 128 && (ORD[substr(v, i + 2, 1)] == 168 || ORD[substr(v, i + 2, 1)] == 169)) { out = out " "; i += 2; continue }
+                out = out substr(v, i, 1)
+            }
+            sub(/^ +/, "", out)
+            sub(/ +$$/, "", out)
+            if (length(out) > 256) {
+                k = 256
+                while (k > 0 && ORD[substr(out, k + 1, 1)] >= 128 && ORD[substr(out, k + 1, 1)] < 192) { k-- }
+                out = substr(out, 1, k)
+                sub(/ +$$/, "", out)
+            }
+            return out
+        }
+        function key_of(line) {
+            if (substr(line, 1, kcol) !~ /^ *(- *)?$$/) { return "" }
+            line = substr(line, kcol + 1)
+            if (line !~ /^[A-Za-z_][A-Za-z0-9_]*:([ \t]|$$)/) { return "" }
+            return substr(line, 1, index(line, ":") - 1)
+        }
+        function value_of(i,   v, j, t, block) {
+            v = substr(L[i], kcol + 1)
+            v = substr(v, index(v, ":") + 1)
+            sub(/^[ \t]+/, "", v)
+            sub(/[ \t]+$$/, "", v)
+            block = substr(v, 1, 1)
+            if (block == "|" || block == ">") { v = "" }
+            for (j = i + 1; j <= n && key_of(L[j]) == ""; j++) {
+                t = L[j]
+                sub(/^[ \t]+/, "", t)
+                sub(/[ \t]+$$/, "", t)
+                v = v (v == "" ? "" : " ") t
+            }
+            last = j - 1
+            return (block == "|" || block == ">") ? v : unquote(v)
+        }
+        function flush_item(   i, name_i, rule_i, has_comment, k, nm, rv, end_i, out) {
+            if (n == 0) { return }
+            name_i = rule_i = has_comment = 0
+            for (i = 1; i <= n; i++) {
+                k = key_of(L[i])
+                if (k == "name") { name_i = i } else if (k == "rule") { rule_i = i } else if (k == "comment") { has_comment = 1 }
+            }
+            if (name_i > 0 && !has_comment) {
+                rv = rule_i > 0 ? value_of(rule_i) : ""
+                nm = clean(value_of(name_i))
+                end_i = last
+                out = ""
+                if (nm != "" && nm != rv) {
+                    gsub(Q, Q Q, nm)
+                    out = substr(L[name_i], 1, kcol) "comment: " Q nm Q
+                } else if (name_i == 1 && end_i < n) {
+                    L[end_i + 1] = substr(L[1], 1, kcol) substr(L[end_i + 1], kcol + 1)
+                }
+                for (i = 1; i <= n; i++) {
+                    if (i == name_i && out != "") { print out }
+                    if (i < name_i || i > end_i) { print L[i] }
+                }
+            } else {
+                for (i = 1; i <= n; i++) { print L[i] }
+            }
+            n = 0
+        }
+        {
+            if (in_rules) {
+                if ($$0 ~ /^[ \t]*(#.*)?$$/) {
+                    if (n > 0) { L[++n] = $$0 } else { print }
+                    next
+                }
+                match($$0, /^[ \t]*/)
+                c = substr($$0, RLENGTH + 1, 1)
+                if (RLENGTH > rules_indent || (RLENGTH == rules_indent && c == "-")) {
+                    if (c == "-" && (n == 0 || RLENGTH == item_indent)) {
+                        flush_item()
+                        item_indent = RLENGTH
+                        match($$0, /^[ \t]*-[ \t]*/)
+                        kcol = RLENGTH
+                    }
+                    L[++n] = $$0
+                    next
+                }
+                flush_item()
+                in_rules = 0
+            }
+        }
+        /^[^ \t#-]/ { in_subs = ($$0 ~ /^subscriptions:[[:space:]]*$$/); in_groups = ($$0 ~ /^groups:[[:space:]]*$$/); skip = 0 }
         {
             if (skip) {
                 if ($$0 ~ /^[[:space:]]*$$/) { next }
@@ -83,15 +231,20 @@ migrate_groups() {
                 if (RLENGTH == skip_indent && substr($$0, RLENGTH + 1, 1) == "-") { next }
                 skip = 0
             }
-            if (in_subs && $$0 ~ /^[ \t]*rules:/) {
+            if (strip && in_subs && $$0 ~ /^[ \t]*rules:/) {
                 match($$0, /^[ \t]*/)
                 skip_indent = RLENGTH
                 skip = 1
                 next
             }
+            if (in_groups && $$0 ~ /^[ \t]*(-[ \t]*)?rules:[ \t]*$$/) {
+                rules_indent = index($$0, "rules:") - 1
+                in_rules = 1
+                n = 0
+            }
             print
         }
-        END { print off + 0 > countfile }
+        END { flush_item(); print off + 0 > countfile }
     ' "$$f" > "$$f.new" || return 1
 
     if [ ! -s "$$f.new" ]; then
@@ -102,7 +255,7 @@ migrate_groups() {
         rm -f "$$f.new" "$$f.off"
         return 0
     fi
-    cp "$$f" "$$f.pre-0027.bak" || { rm -f "$$f.new"; return 1; }
+    [ -e "$$f.pre-0027.bak" ] || cp "$$f" "$$f.pre-0027.bak" || { rm -f "$$f.new"; return 1; }
     mv "$$f.new" "$$f" || return 1
 
     off=$$(cat "$$f.off" 2>/dev/null) || off=0

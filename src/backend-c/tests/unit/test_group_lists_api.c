@@ -1506,6 +1506,27 @@ TEST a_rule_edit_naming_proto_or_ports_is_refused(void) {
     PASS();
 }
 
+/* Catches: a PATCH carrying a `comment` answered 200 while the comment is silently dropped. */
+TEST a_rule_edit_naming_a_comment_is_refused(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    ASSERT(add_singbox_group(h));
+    char id[16];
+    ASSERT(nth_rule_id(SINGBOX_GROUP, 1, id, sizeof(id)));
+    char patch[160];
+    cJSON *out = NULL;
+    snprintf(patch, sizeof(patch), "{\"rules\":[{\"id\":\"%s\",\"enable\":false,\"comment\":\"x\"}]}", id);
+    ASSERT_EQ_FMT(400, do_request("PATCH", SINGBOX_RULES, patch, &out), "%d");
+    ASSERT_STR_EQ("a list rule has no comment", jstr(out, "error") != NULL ? jstr(out, "error") : "(none)");
+    cJSON_Delete(out);
+    out = NULL;
+    ASSERT_EQ(200, do_request("GET", SINGBOX_RULES, NULL, &out));
+    ASSERTm("the enable half never landed", cJSON_IsTrue(jobj(cJSON_GetArrayItem(jobj(out, "rules"), 1), "enable")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
 #define TWINS_GROUP "0e0e0e0e"
 #define TWINS_RULES "/api/v1/groups/" TWINS_GROUP "/list/rules"
 
@@ -2363,6 +2384,7 @@ int main(int argc, char **argv) {
     RUN_TEST(patching_a_singbox_rule_measures_against_the_lists_type);
     RUN_TEST(patching_a_singbox_rule_with_a_spec_to_an_unusable_type_is_400);
     RUN_TEST(a_rule_edit_naming_proto_or_ports_is_refused);
+    RUN_TEST(a_rule_edit_naming_a_comment_is_refused);
     RUN_TEST(a_line_list_override_carries_no_list_type);
     RUN_TEST(a_singbox_twins_override_carries_list_type_and_only_that_twin);
     RUN_TEST(a_rule_that_loses_its_twin_still_finds_its_typed_override);

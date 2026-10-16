@@ -61,23 +61,45 @@ export function isValidRegex(pattern: string): boolean {
   }
 }
 
-const PORTS_MAX_SLOTS = 15;
+export const PORTS_MAX_SLOTS = 15;
+
+export type PortProblem = "syntax" | "range" | "order";
+export type PortToken = { slots: number } | { problem: PortProblem };
+
+export function portToken(token: string): PortToken {
+  const bounds = /^([0-9]{1,5})(?:-([0-9]{1,5}))?$/.exec(token);
+  if (!bounds) return { problem: "syntax" };
+  const from = Number(bounds[1]);
+  const to = bounds[2] === undefined ? from : Number(bounds[2]);
+  if (from < 1 || to < 1 || from > 65535 || to > 65535) return { problem: "range" };
+  if (from > to) return { problem: "order" };
+  return { slots: from === to ? 1 : 2 };
+}
+
+export function splitPorts(text: string): string[] {
+  return text
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token !== "");
+}
+
+export function joinPorts(tokens: string[]): string {
+  return tokens.join(",");
+}
+
+export function portsSlots(tokens: string[]): number {
+  return tokens.reduce((sum, token) => {
+    const parsed = portToken(token);
+    return sum + ("slots" in parsed ? parsed.slots : 0);
+  }, 0);
+}
 
 export function isValidPorts(ports: string): boolean {
   if (ports === "") return true;
-  let slots = 0;
-  for (const entry of ports.split(",")) {
-    const bounds = entry.split("-");
-    if (bounds.length > 2) return false;
-    const [low, high = low] = bounds;
-    if (!/^[0-9]{1,5}$/.test(low) || !/^[0-9]{1,5}$/.test(high)) return false;
-    const from = Number(low);
-    const to = Number(high);
-    if (from < 1 || to > 65535 || from > to) return false;
-    slots += from === to ? 1 : 2;
-    if (slots > PORTS_MAX_SLOTS) return false;
-  }
-  return true;
+  const tokens = ports.split(",");
+  return (
+    tokens.every((token) => "slots" in portToken(token)) && portsSlots(tokens) <= PORTS_MAX_SLOTS
+  );
 }
 
 export const VALIDATOP_MAP: Record<string, (pattern: string) => boolean> = {

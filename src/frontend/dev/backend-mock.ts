@@ -381,7 +381,23 @@ function portsAreReadable(ports: string): boolean {
   return slots <= 15;
 }
 
+function commentRefusal(rule: any): string | null {
+  const raw = rule?.comment;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") return "comment is a string";
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(raw)) {
+    return "comment is one line without control characters";
+  }
+  const trimmed = raw.replace(/^ +| +$/g, "");
+  if (new TextEncoder().encode(trimmed).length > 256) return "comment is at most 256 bytes";
+  if (trimmed === "") delete rule.comment;
+  else rule.comment = trimmed;
+  return null;
+}
+
 function ruleRefusal(rule: any): string | null {
+  const comment = commentRefusal(rule);
+  if (comment) return comment;
   const rawProto = rule?.proto;
   const rawPorts = rule?.ports;
   const protoGiven = rawProto !== undefined && rawProto !== null;
@@ -538,6 +554,9 @@ app.patch(`${API_BASE}/groups/:id/list/rules`, async (c) => {
   for (const edit of body.rules ?? []) {
     if (edit.rule !== undefined) {
       return c.json({ error: "a list's pattern comes from the list itself" }, 400);
+    }
+    if (edit.comment !== undefined) {
+      return c.json({ error: "a list's rules carry no comment" }, 400);
     }
     const rule = (group.list.rules ?? []).find((r: any) => r.id === edit.id);
     if (!rule) return c.json({ error: "rule not found" }, 404);

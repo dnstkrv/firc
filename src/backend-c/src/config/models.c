@@ -7,6 +7,7 @@
 #include "firc/devices.h"
 #include "firc/ifacename.h"
 #include "firc/ipset_to_link.h"
+#include "firc/utf8.h"
 
 firc_err_t firc_strset(char **dst, const char *src)
 {
@@ -36,7 +37,67 @@ void firc_rule_free(firc_rule_t *r)
     free(r->rule);
     free(r->proto);
     free(r->ports);
+    free(r->comment);
     free(r);
+}
+
+#define COMMENT_MAX_STR_(n) #n
+#define COMMENT_MAX_STR(n) COMMENT_MAX_STR_(n)
+
+static const char *comment_trimmed(const char *s, size_t *n)
+{
+    if (s == NULL) {
+        s = "";
+    }
+    while (*s == ' ') {
+        s++;
+    }
+    *n = strlen(s);
+    while (*n > 0 && s[*n - 1] == ' ') {
+        (*n)--;
+    }
+    return s;
+}
+
+const char *firc_rule_comment_why(const char *s)
+{
+    size_t n;
+    s = comment_trimmed(s, &n);
+    if (!firc_utf8_valid(s)) {
+        return "comment is not valid UTF-8";
+    }
+    if (firc_text_has_control(s)) {
+        return "comment holds a control character";
+    }
+    if (strstr(s, "\xe2\x80\xa8") != NULL || strstr(s, "\xe2\x80\xa9") != NULL) {
+        return "comment holds a line or paragraph separator";
+    }
+    if (n > FIRC_RULE_COMMENT_MAX) {
+        return "comment is longer than " COMMENT_MAX_STR(FIRC_RULE_COMMENT_MAX) " bytes";
+    }
+    return NULL;
+}
+
+firc_err_t firc_rule_set_comment(firc_rule_t *r, const char *s, const char **why)
+{
+    *why = firc_rule_comment_why(s);
+    if (*why != NULL) {
+        return FIRC_ERR_INVAL;
+    }
+    size_t n;
+    s = comment_trimmed(s, &n);
+    char *copy = NULL;
+    if (n > 0) {
+        copy = malloc(n + 1);
+        if (copy == NULL) {
+            return FIRC_ERR_NOMEM;
+        }
+        memcpy(copy, s, n);
+        copy[n] = '\0';
+    }
+    free(r->comment);
+    r->comment = copy;
+    return FIRC_OK;
 }
 
 firc_group_t *firc_group_new(void)

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getContext } from "svelte";
+  import { getContext, tick } from "svelte";
 
   import Button from "../../../components/ui/Button.svelte";
   import Select from "../../../components/ui/Select.svelte";
@@ -8,9 +8,12 @@
   import { t } from "../../../data/locale.svelte";
   import {
     GROUPS_STORE_CONTEXT,
+    RULE_SEARCH_MATCH_COMMENT,
     RULE_SEARCH_MATCH_PATTERN,
     type GroupsStore,
   } from "../groups.svelte";
+  import RuleComment from "./RuleComment.svelte";
+  import RulePorts from "./RulePorts.svelte";
 
   import { Delete, Grip, TriangleAlert } from "../../../components/ui/icons";
   import { draggable, droppable, type Chip, type Edge } from "../../../lib/dnd";
@@ -77,27 +80,21 @@
   }
 
   const takesPorts = $derived(ruleTakesPorts(rule.type));
-  const protoOptions = $derived([
-    { value: "", label: t("Any") },
-    { value: "tcp", label: "TCP" },
-    { value: "udp", label: "UDP" },
-  ]);
-
   const showsPorts = $derived(takesPorts || Boolean(rule.proto) || Boolean(rule.ports));
-  const portsDisabled = $derived(!rule.proto && !rule.ports);
   const protoInvalid = $derived(Boolean(rule.proto) && !takesPorts);
   const portsInvalid = $derived(
     Boolean(rule.ports) && (!takesPorts || !rule.proto || !isValidPorts(rule.ports ?? "")),
   );
 
-  function setProto(value: string) {
-    rule.proto = value === "tcp" || value === "udp" ? value : undefined;
-    if (!rule.proto) rule.ports = undefined;
+  function setProtoPorts(proto: Rule["proto"], ports: string | undefined) {
+    rule.proto = proto;
+    rule.ports = ports;
     store.markDataRevision();
+    if (!showsPorts) void tick().then(() => input?.focus());
   }
 
-  function setPorts(value: string) {
-    rule.ports = value === "" ? undefined : value;
+  function setComment(value: string | undefined) {
+    rule.comment = value;
     store.markDataRevision();
   }
 
@@ -194,28 +191,21 @@
           {/if}
         </div>
         {#if showsPorts}
-          <span class="proto" class:invalid={protoInvalid}>
-            <Select
-              options={protoOptions}
-              selected={rule.proto ?? ""}
-              onValueChange={setProto}
-              ariaLabel={t("Protocol")}
-            />
-          </span>
-          <input
-            type="text"
-            placeholder={t("ports, e.g. 53,1000-2000")}
-            aria-label={t("Ports")}
-            class="table-input ports-input"
-            class:invalid={portsInvalid}
-            disabled={portsDisabled}
-            value={rule.ports ?? ""}
-            oninput={(event) => setPorts(event.currentTarget.value)}
+          <RulePorts
+            proto={rule.proto}
+            ports={rule.ports}
+            invalid={protoInvalid || portsInvalid}
+            onchange={setProtoPorts}
           />
         {/if}
       </div>
     </div>
     <div class="actions">
+      <RuleComment
+        comment={rule.comment}
+        matched={Boolean(ruleSearchMatchMask & RULE_SEARCH_MATCH_COMMENT)}
+        onchange={setComment}
+      />
       <div class="duplicate-indicator-slot" class:is-empty={!isDuplicate}>
         {#if isDuplicate}
           <Tooltip value={t("Duplicate rule")}>
@@ -285,17 +275,6 @@
 
   .pattern-fields.with-ports > .search-highlight-field {
     flex: 0 1 19rem;
-  }
-
-  .ports-input {
-    flex: 1 1 11rem;
-    width: auto;
-    min-width: 0;
-  }
-
-  .ports-input:disabled {
-    color: var(--text-2);
-    cursor: not-allowed;
   }
 
   .search-highlight-overlay {
@@ -454,19 +433,6 @@
     border-bottom: 1px solid var(--red);
   }
 
-  .ports-input.invalid,
-  .ports-input.invalid:focus-visible {
-    border-bottom: 1px solid var(--red);
-  }
-
-  .proto {
-    display: contents;
-  }
-
-  .proto.invalid :global([data-select-trigger]) {
-    border-bottom: 1px solid var(--red);
-  }
-
   .label {
     font-size: 0.9rem;
     color: var(--text-2);
@@ -518,9 +484,9 @@
     .pattern-fields.with-ports > .search-highlight-field {
       flex: 1 0 100%;
     }
-    .pattern .ports-input {
-      flex: 1 1 7rem;
-      width: auto;
+    .pattern-fields > :global(.rule-ports) {
+      flex-shrink: 0;
+      max-width: calc(100vw - 9rem);
     }
     .type :global([data-select-trigger]) {
       justify-content: flex-start;

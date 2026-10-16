@@ -18,6 +18,7 @@
   "Check connection or try again": "Проверьте соединение или попробуйте снова",
   "Clear view": "Очистить вид",
   "Collapse Group": "Свернуть группу",
+  "Comment": "Комментарий",
   "Config imported": "Конфиг импортирован",
   "Contains duplicate rules": "Содержит дублирующиеся правила",
   "Create a new group to get started": "Для начала создайте новую группу",
@@ -116,6 +117,7 @@
   "Type": "Тип",
   "Unnamed group": "Группа без имени",
   "Unnamed rule": "Правило без имени",
+  "Up to 256 bytes": "до 256 байт",
   "Who the group works for": "Для кого работает группа",
   "address hints removed": "адресные подсказки убраны",
   "any group": "любая группа",
@@ -143,7 +145,6 @@
   "passed": "пропущен",
   "passed, no address in the answer": "пропущен, в ответе нет адресов",
   "pool refused, answered": "пул отказал, отдан",
-  "ports, e.g. 53,1000-2000": "порты, например 53,1000-2000",
   "rule pattern...": "паттерн правила...",
   "saving changes...": "сохранение изменений...",
   "the last name firc recorded for this address": "последнее имя, которое firc запомнил за этим адресом",
@@ -586,5 +587,13 @@
   "Apply rule import": "Применить импорт правил",
   "Backup interface (in the picker)": "Резервный интерфейс (в выборе)",
   "Close a dialog or menu": "Закрыть окно или меню",
-  "On a Mac, ⌘ instead of Ctrl. Open this list:": "На Mac вместо Ctrl — ⌘. Открыть этот список:"
+  "On a Mac, ⌘ instead of Ctrl. Open this list:": "На Mac вместо Ctrl — ⌘. Открыть этот список:",
+  "any protocol": "любой протокол",
+  "all ports": "все порты",
+  "another port or 1000-2000": "ещё порт или 1000-2000",
+  "A port is 1 to 65535": "Порт — от 1 до 65535",
+  "A range goes from the lower port up": "Диапазон пишется от меньшего к большему",
+  "A port or a range like 1000-2000": "Порт или диапазон вида 1000-2000",
+  "No more than {max} ports": "Больше {max} портов нельзя",
+  "Empty means all ports. Up to {max} ports, a range counts as two. Enter or a comma adds one.": "Пусто — все порты. До {max} портов, диапазон считается за два. Enter или запятая — добавить."
 }

@@ -33,7 +33,11 @@ declare global {
 }
 
 export function parseConfig(json: string): Config {
-  return parse(ConfigSchema, JSON.parse(json));
+  return configFrom(JSON.parse(json));
+}
+
+export function configFrom(value: unknown): Config {
+  return parse(ConfigSchema, value);
 }
 
 export const RuleSchema = object({
@@ -44,6 +48,7 @@ export const RuleSchema = object({
   type: fallback(string(), "namespace"),
   proto: fallback(optional(picklist(["tcp", "udp"])), undefined),
   ports: fallback(optional(string()), undefined),
+  comment: fallback(optional(string()), undefined),
 });
 export type Rule = InferOutput<typeof RuleSchema>;
 

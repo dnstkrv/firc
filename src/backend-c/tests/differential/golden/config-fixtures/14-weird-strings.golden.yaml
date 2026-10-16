@@ -60,9 +60,15 @@ groups:
     type: wildcard
     rule: '*star'
     enable: true
+    comment: 'Meta: «CDN» #1 \ "x"'
   - id: "01020307"
     type: domain
     rule: -dash
+    enable: true
+    comment: '- ''null'': true'
+  - id: "01020308"
+    type: domain
+    rule: newline.example
     enable: true
 - id: 0a0b0c0e
   name: 'has: colon'

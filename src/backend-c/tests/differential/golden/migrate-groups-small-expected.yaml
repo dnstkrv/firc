@@ -1,0 +1,85 @@
+configVersion: 0.7.0
+groups:
+- id: d663876a
+  name: Example
+  interface: nwg0
+  enable: false
+  rules:
+  - id: 6f34ee91
+    comment: 'Wildcard Example'
+    type: wildcard
+    rule: '*wildcard.example.com'
+    enable: true
+  - id: 6f34ee92
+    type: domain
+    rule: example.org
+    enable: true
+  - comment: 'It''s #1: «CDN»'
+    id: 6f34ee93
+    type: domain
+    rule: cdn.example
+    enable: true
+  - id: 6f34ee94
+    comment: 'line1 line2 « end'
+    type: domain
+    rule: escapes.example
+    enable: true
+  - id: 6f34ee95
+    comment: 'plain words'
+    type: domain
+    rule: plain.example
+    enable: true
+  - id: 6f34ee96
+    type: domain
+    rule: empty.example
+    enable: true
+  - id: 6f34ee97
+    comment: 'aяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя'
+    type: domain
+    rule: long.example
+    enable: true
+  - id: 6f34ee98
+    type: domain
+    rule: blank.example
+    enable: true
+  - id: 6f34ee99
+    comment: 'a b c'
+    type: domain
+    rule: review.example
+    enable: true
+  - id: 6f34ee9a
+    comment: 'sep here end'
+    type: domain
+    rule: separators.example
+    enable: true
+  - id: 6f34ee9b
+    comment: 'lit sep'
+    type: domain
+    rule: literal.example
+    enable: true
+subscriptions:
+- id: aabbccdd
+  name: My Sub
+  interface: nwg1
+  enable: true
+  url: https://example.com/list.txt
+  interval: 86400
+  last_update: 1700000000
+  rules:
+  - id: deadbeef
+    rule: sub.example.com
+    name: kept as it is
+    type: namespace
+    enable: true
+  - id: deadbeff
+    rule: two.example.com
+    type: namespace
+    enable: false
+- id: bbccddee
+  name: Second
+  interface: nwg2
+  enable: false
+  url: https://example.com/other.txt
+  interval: 3600
+  last_update: 0
+  rules: []

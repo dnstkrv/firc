@@ -10,6 +10,11 @@ import {
   isValidSubnet,
   isValidSubnet6,
   isValidWildcard,
+  joinPorts,
+  PORTS_MAX_SLOTS,
+  portsSlots,
+  portToken,
+  splitPorts,
 } from "../../src/utils/rule-validators";
 
 describe("Rule validator", () => {
@@ -303,4 +308,41 @@ Deno.test("the ports ceiling is fifteen ports, and a range costs two", () => {
     isValidPorts(Array.from({ length: 15 }, (_, i) => `${i + 1}-${i + 1}`).join(",")),
     true,
   );
+});
+
+// Catches a tokeniser that keeps the spaces or the empty pieces a typed or pasted list carries.
+Deno.test("a typed ports list splits on commas into trimmed tokens", () => {
+  deepStrictEqual(splitPorts("443, 80 ,8000-9000"), ["443", "80", "8000-9000"]);
+  deepStrictEqual(splitPorts("1000-2000,"), ["1000-2000"]);
+  deepStrictEqual(splitPorts(" , ,"), []);
+  deepStrictEqual(splitPorts(""), []);
+});
+
+// Catches a joiner that puts spaces back or a separator the daemon does not read.
+Deno.test("tokens join back into the stored form", () => {
+  strictEqual(joinPorts(["443", "80", "8000-9000"]), "443,80,8000-9000");
+  strictEqual(joinPorts([]), "");
+});
+
+// Catches a slot count that counts entries, or charges a range one slot.
+Deno.test("a range costs two slots and a single port one", () => {
+  strictEqual(portsSlots(["443", "80", "8000-9000"]), 4);
+  strictEqual(portsSlots(["443-443"]), 1);
+  strictEqual(portsSlots([]), 0);
+  strictEqual(PORTS_MAX_SLOTS, 15);
+});
+
+// Catches a token check that accepts what the daemon refuses, or gives no reason for it.
+Deno.test("a bad token says why", () => {
+  deepStrictEqual(portToken("443"), { slots: 1 });
+  deepStrictEqual(portToken("8000-9000"), { slots: 2 });
+  deepStrictEqual(portToken("0"), { problem: "range" });
+  deepStrictEqual(portToken("70000"), { problem: "range" });
+  deepStrictEqual(portToken("1-65536"), { problem: "range" });
+  deepStrictEqual(portToken("20-10"), { problem: "order" });
+  deepStrictEqual(portToken("a"), { problem: "syntax" });
+  deepStrictEqual(portToken(" 53"), { problem: "syntax" });
+  deepStrictEqual(portToken("000053"), { problem: "syntax" });
+  deepStrictEqual(portToken("1-2-3"), { problem: "syntax" });
+  deepStrictEqual(portToken(""), { problem: "syntax" });
 });

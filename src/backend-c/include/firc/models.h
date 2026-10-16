@@ -24,6 +24,7 @@ typedef struct firc_rule {
     bool enable;
     char *proto; /* subnet/subnet6 only; NULL/"" = any protocol */
     char *ports; /* NULL/"" = all ports */
+    char *comment;
 } firc_rule_t;
 
 /* Which client devices a group applies to; empty = every device. */
@@ -232,6 +233,11 @@ typedef struct firc_config {
 
 firc_rule_t *firc_rule_new(void);
 void firc_rule_free(firc_rule_t *r);
+#define FIRC_RULE_COMMENT_MAX 256
+/* NULL when s (NULL is none) can be a rule's comment once trimmed of spaces; else why not. */
+const char *firc_rule_comment_why(const char *s);
+/* Sets r's comment from s trimmed of spaces (none when empty); FIRC_ERR_INVAL with *why as firc_rule_comment_why. */
+firc_err_t firc_rule_set_comment(firc_rule_t *r, const char *s, const char **why);
 
 firc_group_t *firc_group_new(void);
 void firc_group_free(firc_group_t *g);

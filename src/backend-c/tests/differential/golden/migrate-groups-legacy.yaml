@@ -10,6 +10,56 @@ groups:
     type: wildcard
     rule: '*wildcard.example.com'
     enable: true
+  - id: 6f34ee92
+    name: example.org
+    type: domain
+    rule: example.org
+    enable: true
+  - name: '  It''s #1: «CDN»  '
+    id: 6f34ee93
+    type: domain
+    rule: cdn.example
+    enable: true
+  - id: 6f34ee94
+    name: "line1\nline2\t\u00ab\x85end"
+    type: domain
+    rule: escapes.example
+    enable: true
+  - id: 6f34ee95
+    name: plain words # a YAML comment
+    type: domain
+    rule: plain.example
+    enable: true
+  - id: 6f34ee96
+    name: ''
+    type: domain
+    rule: empty.example
+    enable: true
+  - id: 6f34ee97
+    name: aяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя
+    type: domain
+    rule: long.example
+    enable: true
+  - name: "  "
+    id: 6f34ee98
+    type: domain
+    rule: blank.example
+    enable: true
+  - id: 6f34ee99
+    name: "a\nb\tc"
+    type: domain
+    rule: review.example
+    enable: true
+  - id: 6f34ee9a
+    name: "sep\Lhere\Pend"
+    type: domain
+    rule: separators.example
+    enable: true
+  - id: 6f34ee9b
+    name: 'lit sep'
+    type: domain
+    rule: literal.example
+    enable: true
 subscriptions:
 - id: aabbccdd
   name: My Sub
@@ -21,6 +71,7 @@ subscriptions:
   rules:
   - id: deadbeef
     rule: sub.example.com
+    name: kept as it is
     type: namespace
     enable: true
   - id: deadbeff

@@ -223,6 +223,8 @@ static const char *jstr(cJSON *obj, const char *key) {
     return cJSON_IsString(v) ? v->valuestring : NULL;
 }
 
+static const char *or_none(const char *s) { return s != NULL ? s : "(none)"; }
+
 static bool jbool(cJSON *obj, const char *key) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
     return cJSON_IsTrue(v);
@@ -270,6 +272,7 @@ TEST get_group_unknown_and_invalid_id(void) {
     PASS();
 }
 
+/* Catches: a PUT without rules dropping them, or a field of theirs, from the group. */
 TEST put_group_updates_fields_and_keeps_rules_when_absent(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
@@ -277,7 +280,7 @@ TEST put_group_updates_fields_and_keeps_rules_when_absent(void) {
     ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
                              "{\"name\":\"g1\",\"interface\":\"eth0\","
                              "\"rules\":[{\"type\":\"domain\",\"rule\":\"example.com\","
-                             "\"enable\":true}]}",
+                             "\"enable\":true,\"comment\":\"kept\"}]}",
                              &created));
     char id[9];
     snprintf(id, sizeof(id), "%s", jstr(created, "id"));
@@ -298,6 +301,7 @@ TEST put_group_updates_fields_and_keeps_rules_when_absent(void) {
     cJSON *rules1 = cJSON_GetObjectItemCaseSensitive(updated, "rules");
     ASSERT_EQ(1, cJSON_GetArraySize(rules1));
     ASSERT_STR_EQ(rule_id_buf, jstr(cJSON_GetArrayItem(rules1, 0), "id"));
+    ASSERT_STR_EQm("the comment is carried with the rule", "kept", or_none(jstr(cJSON_GetArrayItem(rules1, 0), "comment")));
     cJSON_Delete(updated);
     harness_stop(h);
     PASS();
@@ -706,6 +710,164 @@ TEST proto_and_ports_are_kept_or_refused(void) {
     cJSON_Delete(out);
     ASSERT_EQ_FMT(200, do_request("PUT", rule_path, "{\"type\":\"subnet\",\"rule\":\"10.0.0.0/8\",\"enable\":true}", &out), "%d");
     ASSERT(cJSON_GetObjectItem(out, "proto") == NULL);
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static void make_rules_path(const char *group_name, char *path, size_t cap) {
+    cJSON *out = NULL;
+    char body[128];
+    snprintf(body, sizeof(body), "{\"name\":\"%s\",\"interface\":\"lo\"}", group_name);
+    if (do_request("POST", "/api/v1/groups", body, &out) != 200) { abort(); }
+    snprintf(path, cap, "/api/v1/groups/%s/rules", jstr(out, "id"));
+    cJSON_Delete(out);
+}
+
+/* Catches: a comment lost, altered or left untrimmed through the API, or a key answered for a rule without one. */
+TEST a_rules_comment_round_trips_through_the_api(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,"
+                                  "\"comment\":\"Meta: \xc2\xab" "CDN\xc2\xbb #1 \\\\ \\\"x\\\"\"}",
+                                  &out), "%d");
+    ASSERT_STR_EQ("Meta: \xc2\xab" "CDN\xc2\xbb #1 \\ \"x\"", or_none(jstr(out, "comment")));
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, jstr(out, "id"));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", rule_path, NULL, &out));
+    ASSERT_STR_EQ("Meta: \xc2\xab" "CDN\xc2\xbb #1 \\ \"x\"", or_none(jstr(out, "comment")));
+    cJSON_Delete(out);
+
+    ASSERT_EQ_FMT(200, do_request("POST", path, "{\"type\":\"domain\",\"rule\":\"example.org\",\"enable\":true}", &out),
+                  "%d");
+    ASSERTm("a rule without one has no key", cJSON_GetObjectItem(out, "comment") == NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true,\"comment\":\"  pad  \"}",
+                                  &out), "%d");
+    ASSERT_STR_EQm("spaces around it are trimmed", "pad", or_none(jstr(out, "comment")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.info\",\"enable\":true,\"comment\":\"   \"}",
+                                  &out), "%d");
+    ASSERTm("nothing but spaces is no comment", cJSON_GetObjectItem(out, "comment") == NULL);
+    cJSON_Delete(out);
+
+    ASSERT_EQ_FMT(200, do_request("PUT", rule_path, "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true}", &out),
+                  "%d");
+    ASSERTm("a PUT replaces the rule whole, comment included", cJSON_GetObjectItem(out, "comment") == NULL);
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a comment of two lines (newline, U+2028, U+2029), past 256 bytes, with a C1 control, not UTF-8 or not a string stored, or refused unnamed. */
+TEST a_comment_with_a_newline_or_257_bytes_is_400(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"a\\nb\"}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment holds a control character", or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"a\\u0085b\"}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment holds a control character", or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"a\\u2028b\"}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment holds a line or paragraph separator",
+                  or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"a\xe2\x80\xa9\"}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment holds a line or paragraph separator",
+                  or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"a\xff\"}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment is not valid UTF-8", or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":7}", &out), "%d");
+    ASSERT_STR_EQ("rule \"example.com\" (type \"domain\"): comment is a string", or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+
+    char long_comment[300] = "";
+    for (int i = 0; i < 127; i++) { strcat(long_comment, "\xd1\x8f"); }
+    strcat(long_comment, "a\xd1\x8f");
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"groups\":[{\"name\":\"work\",\"interface\":\"lo\","
+             "\"rules\":[{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"%s\"}]}]}",
+             long_comment);
+    ASSERT_EQ_FMT(400, do_request("PUT", "/api/v1/groups", body, &out), "%d");
+    ASSERT_STR_EQ("group \"work\", rule \"example.com\" (type \"domain\"): comment is longer than 256 bytes",
+                  or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    snprintf(body, sizeof(body),
+             "{\"name\":\"work\",\"interface\":\"lo\","
+             "\"rules\":[{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"%s\"}]}",
+             long_comment);
+    ASSERT_EQ_FMT(400, do_request("POST", "/api/v1/groups", body, &out), "%d");
+    ASSERT_STR_EQ("group \"work\", rule \"example.com\" (type \"domain\"): comment is longer than 256 bytes",
+                  or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    snprintf(body, sizeof(body), "{\"rules\":[{\"type\":\"domain\",\"rule\":\"example.com\",\"comment\":\"%s\"}]}",
+             long_comment);
+    ASSERT_EQ_FMT(400, do_request("PUT", path, body, &out), "%d");
+    ASSERT_STR_EQ("group \"g\", rule \"example.com\" (type \"domain\"): comment is longer than 256 bytes",
+                  or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", path, NULL, &out));
+    ASSERT_EQm("a refused bulk PUT stored no rule", 0, cJSON_GetArraySize(cJSON_GetObjectItem(out, "rules")));
+    cJSON_Delete(out);
+
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,\"comment\":\"old\"}",
+                                  &out), "%d");
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, jstr(out, "id"));
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("PUT", rule_path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":false,\"comment\":\"a\\tb\"}",
+                                  &out), "%d");
+    ASSERT_STR_EQ("rule \"example.net\" (type \"domain\"): comment holds a control character", or_none(jstr(out, "error")));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", rule_path, NULL, &out));
+    ASSERT_STR_EQm("a refused PUT leaves the rule whole", "example.com", or_none(jstr(out, "rule")));
+    ASSERT_STR_EQ("old", or_none(jstr(out, "comment")));
+    ASSERT(jbool(out, "enable"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the 256-byte limit counted in characters, off by one, or a comment at it cut. */
+TEST a_comment_of_exactly_256_bytes_is_kept(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char comment[300] = "";
+    for (int i = 0; i < 128; i++) { strcat(comment, "\xd1\x8f"); }
+    char body[1024];
+    snprintf(body, sizeof(body), "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,\"comment\":\"%s\"}", comment);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("POST", path, body, &out), "%d");
+    ASSERT_STR_EQ(comment, or_none(jstr(out, "comment")));
+    cJSON_Delete(out);
+    snprintf(body, sizeof(body), "{\"type\":\"domain\",\"rule\":\"example.org\",\"enable\":true,\"comment\":\"  %s  \"}",
+             comment);
+    ASSERT_EQ_FMTm("the limit is measured after the trim", 200, do_request("POST", path, body, &out), "%d");
+    ASSERT_STR_EQ(comment, or_none(jstr(out, "comment")));
     cJSON_Delete(out);
     harness_stop(h);
     PASS();
@@ -2015,6 +2177,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_refused_put_leaves_the_group_in_the_kernel);
     RUN_TEST(a_rule_the_daemon_cannot_use_is_refused);
     RUN_TEST(proto_and_ports_are_kept_or_refused);
+    RUN_TEST(a_rules_comment_round_trips_through_the_api);
+    RUN_TEST(a_comment_with_a_newline_or_257_bytes_is_400);
+    RUN_TEST(a_comment_of_exactly_256_bytes_is_kept);
     RUN_TEST(an_unusable_rule_names_the_group_and_the_rule);
     RUN_TEST(an_unusable_rule_on_the_rule_endpoint_names_the_rule);
     RUN_TEST(an_empty_pattern_is_named_by_its_position);

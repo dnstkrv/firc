@@ -50,10 +50,18 @@ if [ -f "$WORK/new.yaml.pre-0027.bak" ]; then
     fail=1
 fi
 
-echo "== migrate: a small legacy file is left for the daemon, which can load it"
+echo "== migrate: a small legacy file keeps its subscriptions' rules, its rule names become comments"
 cp "$GOLDEN/migrate-groups-legacy.yaml" "$WORK/small.yaml"
 sh "$POSTINST" --migrate-only "$WORK/small.yaml"   # no FORCE: under the size threshold
-check "the small file" "$GOLDEN/migrate-groups-legacy.yaml" "$WORK/small.yaml"
+check "the small file" "$GOLDEN/migrate-groups-small-expected.yaml" "$WORK/small.yaml"
+
+echo "== migrate: an older backup is kept, not overwritten"
+cp "$GOLDEN/migrate-groups-legacy.yaml" "$WORK/again.yaml"
+echo "the original from an earlier strip" > "$WORK/again.yaml.pre-0027.bak"
+cp "$WORK/again.yaml.pre-0027.bak" "$WORK/older.bak"
+FIRC_MIGRATE_FORCE=1 sh "$POSTINST" --migrate-only "$WORK/again.yaml" 2> /dev/null
+check "the migrated file" "$GOLDEN/migrate-groups-expected.yaml" "$WORK/again.yaml"
+check "the older backup" "$WORK/older.bak" "$WORK/again.yaml.pre-0027.bak"
 
 echo "== migrate: a missing file is not an error"
 sh "$POSTINST" --migrate-only "$WORK/nonexistent.yaml"

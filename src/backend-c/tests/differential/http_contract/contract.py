@@ -331,7 +331,8 @@ def run_api_sequence(conn, out):
     )
     t.step("PUT", "/api/v1/groups/aabbccdd", put_group_body)
 
-    new_rule_body = json.dumps({"type": "wildcard", "rule": "*.example.org", "enable": True})
+    new_rule_body = json.dumps({"type": "wildcard", "rule": "*.example.org", "enable": True,
+                                "comment": "  Meta: \u00abCDN\u00bb #1 \\ \"x\"  "})
     rule_r2_holder = []
 
     def learn_rule_r2(resp):
@@ -343,6 +344,9 @@ def run_api_sequence(conn, out):
 
     t.step("GET", "/api/v1/groups/aabbccdd/rules")
     t.step("GET", "/api/v1/groups/aabbccdd/rules/" + rule_r2)
+    t.step("POST", "/api/v1/groups/aabbccdd/rules",
+           json.dumps({"type": "domain", "rule": "example.net", "enable": True, "comment": "line1\nline2"}),
+           normalize=lambda r: {"refused": r["error"]})
 
     put_rule_body = json.dumps(
         {"type": "wildcard", "rule": "*.example.net", "enable": False}

@@ -1,12 +1,23 @@
-import { DEFAULT_RESOLVE, parseConfig, syncIdle, type Group, type Rule } from "../../types";
+import { configFrom, DEFAULT_RESOLVE, syncIdle, type Group, type Rule } from "../../types";
 import { randomId } from "../../utils/random-id";
+import { cleanComment } from "../../utils/rule-comment";
 import { sortRules, type SortDirection } from "../../utils/rule-sorter";
 
 export type YieldToMain = () => Promise<void>;
 
 export function groupsFromFile(fileName: string, text: string): Group[] {
-  const groups = parseConfig(text).groups ?? [];
-  return fileName.toLowerCase().endsWith(".mtrickle") ? groups.reverse() : groups;
+  const foreign = fileName.toLowerCase().endsWith(".mtrickle");
+  const raw = JSON.parse(text);
+  for (const group of Array.isArray(raw?.groups) ? raw.groups : []) {
+    for (const rule of Array.isArray(group?.rules) ? group.rules : []) {
+      if (!rule || typeof rule !== "object") continue;
+      const comment = cleanComment(foreign ? rule.name : rule.comment);
+      if (comment === undefined || (foreign && comment === rule.rule)) delete rule.comment;
+      else rule.comment = comment;
+    }
+  }
+  const groups = configFrom(raw).groups ?? [];
+  return foreign ? groups.reverse() : groups;
 }
 
 export function cloneGroupWithNewIds(group: Group): Group {

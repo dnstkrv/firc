@@ -59,6 +59,7 @@ CORE_SRCS := \
     src/util/spawn.c \
     src/util/listen.c \
     src/util/ifacename.c \
+    src/util/utf8.c \
     src/core/lifecycle.c \
     src/logging/log.c \
     src/logging/events.c \

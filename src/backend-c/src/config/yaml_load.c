@@ -482,6 +482,7 @@ static firc_err_t load_rule(yaml_document_t *doc, node_t *n, firc_rule_t *r)
     GET_OR_FAIL(get_bool(map_get(doc, n, "enable"), &r->enable, &err));
     GET_OR_FAIL(get_string(map_get(doc, n, "proto"), &r->proto, &err));
     GET_OR_FAIL(get_string(map_get(doc, n, "ports"), &r->ports, &err));
+    GET_OR_FAIL(get_string(map_get(doc, n, "comment"), &r->comment, &err));
     if (r->type == NULL && (err = firc_strset(&r->type, "")) != FIRC_OK) {
         return err;
     }
@@ -733,6 +734,17 @@ static firc_err_t load_group(yaml_document_t *doc, node_t *n, firc_group_t *g)
                               g->name ? g->name : "", why ? why : "unusable",
                               rule->type ? rule->type : "", rule->rule ? rule->rule : "");
                 }
+                char *raw = rule->comment;
+                rule->comment = NULL;
+                err = firc_rule_set_comment(rule, raw, &why);
+                free(raw);
+                if (err == FIRC_ERR_INVAL) {
+                    FIRC_WARN("config: group \"%s\", rule \"%s\" (type \"%s\"): %s; the comment is dropped",
+                              g->name ? g->name : "", rule->rule, rule->type, why);
+                    err = FIRC_OK;
+                }
+            }
+            if (err == FIRC_OK) {
                 err = firc_group_add_rule(g, rule);
             }
             if (err != FIRC_OK) {

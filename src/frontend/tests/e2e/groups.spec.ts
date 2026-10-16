@@ -171,20 +171,26 @@ test.describe("Groups Management", () => {
     await groupsPage.setRulePattern(0, 0, "10.0.0.0/8");
     await groupsPage.setRuleType(0, 0, "IPv4 subnet");
 
-    const rule = await groupsPage.getRule(0, 0);
-    const ports = rule.locator(".ports-input");
+    const pill = (await groupsPage.getRule(0, 0)).locator(".rule-ports");
+    const editor = page.locator(".rule-ports-editor");
 
-    await expect(ports).toBeDisabled();
+    await expect(pill).toHaveText("any protocol");
+    await groupsPage.openRulePorts(0, 0);
+    await expect(editor.getByRole("textbox", { name: "Ports" })).toHaveCount(0);
 
     await groupsPage.setRuleProto(0, 0, "UDP");
-    await expect(ports).toBeEnabled();
+    await expect(pill).toHaveText("UDP · all ports");
 
-    await groupsPage.setRulePorts(0, 0, "53,");
-    await expect(ports).toHaveClass(/invalid/);
-    await expect(groupsPage.saveButton).toHaveClass(/fail/);
+    await groupsPage.addRulePorts(0, 0, "0");
+    await expect(editor.getByRole("status")).toHaveText("A port is 1 to 65535");
+    await expect(editor.locator(".port-token")).toHaveCount(0);
+    await expect(pill).toHaveText("UDP · all ports");
 
-    await groupsPage.setRulePorts(0, 0, "53,1000-2000");
-    await expect(ports).not.toHaveClass(/invalid/);
+    await groupsPage.addRulePorts(0, 0, "53,1000-2000");
+    await expect(editor.locator(".port-token")).toHaveText(["53", "1000–2000"]);
+    await expect(pill).toHaveText("UDP · 53, 1000–2000");
+    await groupsPage.closeRulePorts();
+    await expect(pill).not.toHaveClass(/invalid/);
     await expect(groupsPage.saveButton).not.toHaveClass(/inactive|fail/);
 
     await groupsPage.save();
@@ -196,8 +202,7 @@ test.describe("Groups Management", () => {
 
     await groupsPage.goto();
     const reloaded = await groupsPage.getRule(0, 0);
-    await expect(reloaded.locator(".pattern [data-select-trigger]")).toHaveText(/UDP/);
-    await expect(reloaded.locator(".ports-input")).toHaveValue("53,1000-2000");
+    await expect(reloaded.locator(".rule-ports")).toHaveText("UDP · 53, 1000–2000");
   });
 
   // Catches protocol and ports staying on a non-subnet rule, which the daemon answers with a 400.
@@ -214,11 +219,13 @@ test.describe("Groups Management", () => {
     await groupsPage.setRulePattern(0, 0, "10.0.0.0/8");
     await groupsPage.setRuleType(0, 0, "IPv4 subnet");
     await groupsPage.setRuleProto(0, 0, "TCP");
-    await groupsPage.setRulePorts(0, 0, "443");
+    await groupsPage.addRulePorts(0, 0, "443");
+    await expect((await groupsPage.getRule(0, 0)).locator(".rule-ports")).toHaveText("TCP · 443");
+    await groupsPage.closeRulePorts();
 
     await groupsPage.setRuleType(0, 0, "Namespace");
     await groupsPage.setRulePattern(0, 0, "example.com");
-    await expect((await groupsPage.getRule(0, 0)).locator(".ports-input")).toHaveCount(0);
+    await expect((await groupsPage.getRule(0, 0)).locator(".rule-ports")).toHaveCount(0);
 
     await expect(groupsPage.saveButton).not.toHaveClass(/inactive|fail/);
     await groupsPage.save();
@@ -258,17 +265,17 @@ test.describe("Groups Management", () => {
     await groupsPage.goto();
     await groupsPage.expandGroup(0);
 
-    const ports = (await groupsPage.getRule(0, 0)).locator(".ports-input");
-    await expect(ports).toBeVisible();
-    await expect(ports).toHaveValue("53");
-    await expect(ports).toBeEnabled();
-    await expect(ports).toHaveClass(/invalid/);
+    const pill = (await groupsPage.getRule(0, 0)).locator(".rule-ports");
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveText("any protocol · 53");
+    await expect(pill).toHaveClass(/invalid/);
 
     await groupsPage.setGroupName(0, "hand edited twice");
     await expect(groupsPage.saveButton).toHaveClass(/fail/);
 
     await groupsPage.setRuleProto(0, 0, "UDP");
-    await expect(ports).not.toHaveClass(/invalid/);
+    await expect(pill).toHaveText("UDP · 53");
+    await expect(pill).not.toHaveClass(/invalid/);
     await expect(groupsPage.saveButton).not.toHaveClass(/inactive|fail/);
   });
 
@@ -304,7 +311,7 @@ test.describe("Groups Management", () => {
     await groupsPage.expandGroup(0);
 
     await expect(page.locator(".rule")).toHaveCount(50);
-    await expect(page.locator(".rule input.invalid")).toHaveCount(0);
+    await expect(page.locator(".rule .invalid")).toHaveCount(0);
 
     await groupsPage.setGroupName(0, "big and edited");
     await expect(groupsPage.saveButton).toHaveClass(/fail/);

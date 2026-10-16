@@ -82,15 +82,30 @@ export class GroupsPage {
     await header.locator("[data-collapsible-trigger]").click();
   }
 
-  async setRuleProto(groupIndex: number, ruleIndex: number, protoLabel: string) {
-    const rule = await this.getRule(groupIndex, ruleIndex);
-    await rule.locator(".pattern [data-select-trigger]").click();
-    await this.page.getByRole("option", { name: protoLabel, exact: true }).click();
+  async openRulePorts(groupIndex: number, ruleIndex: number) {
+    const editor = this.page.locator(".rule-ports-editor");
+    if (!(await editor.isVisible())) {
+      await (await this.getRule(groupIndex, ruleIndex)).locator(".rule-ports").click();
+      await expect(editor).toBeVisible();
+    }
+    return editor;
   }
 
-  async setRulePorts(groupIndex: number, ruleIndex: number, ports: string) {
-    const rule = await this.getRule(groupIndex, ruleIndex);
-    await rule.locator(".ports-input").fill(ports);
+  async closeRulePorts() {
+    await this.page.mouse.click(1, 300);
+    await expect(this.page.locator(".rule-ports-editor")).toBeHidden();
+  }
+
+  async setRuleProto(groupIndex: number, ruleIndex: number, protoLabel: string) {
+    const editor = await this.openRulePorts(groupIndex, ruleIndex);
+    await editor.getByRole("radio", { name: protoLabel, exact: true }).click();
+  }
+
+  async addRulePorts(groupIndex: number, ruleIndex: number, ports: string) {
+    const editor = await this.openRulePorts(groupIndex, ruleIndex);
+    const input = editor.getByRole("textbox", { name: "Ports" });
+    await input.fill(ports);
+    await input.press("Enter");
   }
 
   async setRuleType(groupIndex: number, ruleIndex: number, typeLabel: string) {

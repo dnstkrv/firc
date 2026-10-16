@@ -394,6 +394,10 @@ static void handle_patch_rules(firc_http_req_t *req, firc_http_res_t *res, void 
             bad = "a list rule's protocol and ports come from its list and cannot be edited";
             break;
         }
+        if (cJSON_GetObjectItemCaseSensitive(e, "comment") != NULL) {
+            bad = "a list rule has no comment";
+            break;
+        }
         get_optional_bool(e, "enable", &edits[i].enable, &edits[i].has_enable);
         cJSON *type_j = cJSON_GetObjectItemCaseSensitive(e, "type");
         edits[i].type = cJSON_IsString(type_j) ? type_j->valuestring : NULL; /* borrowed from json */

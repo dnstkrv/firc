@@ -940,6 +940,10 @@ definitions:
   types.RuleReq:
     description: 'A rule the daemon can actually route with. `type` is one of domain, namespace, wildcard, regex, subnet, subnet6; `rule` must be usable for that type -- a prefix for subnet/subnet6, a regex that compiles, never empty. Anything else is 400: a rule that matches nothing would otherwise be stored, listed and shown enabled while doing nothing.'
     properties:
+      comment:
+        description: 'One line about the rule, for people only. Spaces around it are trimmed; empty or only spaces means none. At most 256 bytes of UTF-8 after trimming, no control characters (C0, DEL, C1) and no U+2028 or U+2029. Anything else is 400, naming the rule (and the group, where the request carries one).'
+        example: 'Meta: CDN'
+        type: string
       enable:
         example: true
         type: boolean
@@ -963,6 +967,10 @@ definitions:
     type: object
   types.RuleRes:
     properties:
+      comment:
+        description: Present only when set.
+        example: 'Meta: CDN'
+        type: string
       enable:
         example: true
         type: boolean
@@ -2055,7 +2063,7 @@ paths:
     patch:
       consumes:
       - application/json
-      description: 'Changes `type` and/or `enable` of the named rules of the group''s list, and only theirs: in place, without copying the list and without touching other groups. Any rejection (an unknown rule ID, a pattern in the request) changes nothing; if memory runs out midway, edits already applied may stay, and the answer is 500. A `rule` field in the request is 400: the pattern comes from the list. An edit is remembered in the file under the rule text; a type equal to what the list parser guesses removes the type edit. The file is written only with `save=true`. The answer is `{"status":"ok"}`.'
+      description: 'Changes `type` and/or `enable` of the named rules of the group''s list, and only theirs: in place, without copying the list and without touching other groups. Any rejection (an unknown rule ID, a pattern in the request) changes nothing; if memory runs out midway, edits already applied may stay, and the answer is 500. A `rule`, `proto` or `ports` field in the request is 400: the pattern and its protocol and ports come from the list. A `comment` is 400 too: a list rule has none. An edit is remembered in the file under the rule text; a type equal to what the list parser guesses removes the type edit. The file is written only with `save=true`. The answer is `{"status":"ok"}`.'
       parameters:
       - description: 'Group ID'
         in: path

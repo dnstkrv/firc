@@ -1142,6 +1142,128 @@ TEST a_hand_rule_unusable_for_its_ports_is_said_at_load(void)
     PASS();
 }
 
+static const char *or_none(const char *s) { return s != NULL ? s : "(none)"; }
+
+#define WEIRD_COMMENT "Meta: \xc2\xab" "CDN\xc2\xbb #1 \\ \"x\""
+
+/* Catches: a comment cut, altered by quoting, lost on save, or written as an empty key for a rule without one. */
+TEST a_rules_comment_round_trips_through_yaml(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    const char *doc =
+        "groups:\n"
+        "  - id: d663876a\n"
+        "    name: g\n"
+        "    interface: nwg0\n"
+        "    enable: true\n"
+        "    rules:\n"
+        "      - id: 6f34ee91\n"
+        "        type: domain\n"
+        "        rule: example.com\n"
+        "        enable: true\n"
+        "        comment: 'Meta: \xc2\xab" "CDN\xc2\xbb #1 \\ \"x\"'\n"
+        "      - id: 6f34ee92\n"
+        "        type: domain\n"
+        "        rule: example.org\n"
+        "        enable: true\n";
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
+    ASSERT_STR_EQ(WEIRD_COMMENT, or_none(cfg.groups[0]->rules[0]->comment));
+    ASSERT(cfg.groups[0]->rules[1]->comment == NULL);
+
+    char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.99.0", FIRC_CFG_GROUPS, &out, &out_len));
+    ASSERT(strstr(out, "comment:") != NULL);
+    ASSERTm("written once, for the rule that has one", strstr(strstr(out, "comment:") + 1, "comment:") == NULL);
+
+    firc_config_t back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    ASSERT_STR_EQ(WEIRD_COMMENT, or_none(back.groups[0]->rules[0]->comment));
+    ASSERT(back.groups[0]->rules[1]->comment == NULL);
+    char *again = NULL;
+    size_t again_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&back, "0.99.0", FIRC_CFG_GROUPS, &again, &again_len));
+    ASSERT_EQ_FMT(out_len, again_len, "%zu");
+    ASSERT_MEM_EQ(out, again, out_len);
+    free(again);
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: a bad comment in the file failing the load or taking its rule along, kept unsaid, or padding kept. */
+TEST a_bad_comment_in_the_file_is_dropped_with_a_warning(void)
+{
+    char long_comment[300] = "";
+    for (int i = 0; i < 127; i++) { strcat(long_comment, "\xd1\x8f"); }
+    strcat(long_comment, "a\xd1\x8f");
+    char doc[2048];
+    snprintf(doc, sizeof(doc),
+             "groups:\n"
+             "  - id: d663876a\n"
+             "    name: g\n"
+             "    interface: nwg0\n"
+             "    enable: true\n"
+             "    rules:\n"
+             "      - id: 6f34ee91\n"
+             "        type: domain\n"
+             "        rule: long.example\n"
+             "        enable: true\n"
+             "        comment: %s\n"
+             "      - id: 6f34ee92\n"
+             "        type: domain\n"
+             "        rule: tab.example\n"
+             "        enable: true\n"
+             "        comment: \"a\\tb\"\n"
+             "      - id: 6f34ee93\n"
+             "        type: domain\n"
+             "        rule: c1.example\n"
+             "        enable: true\n"
+             "        comment: \"a\\u0085b\"\n"
+             "      - id: 6f34ee94\n"
+             "        type: domain\n"
+             "        rule: padded.example\n"
+             "        enable: true\n"
+             "        comment: '  kept  '\n"
+             "      - id: 6f34ee95\n"
+             "        type: domain\n"
+             "        rule: blank.example\n"
+             "        enable: true\n"
+             "        comment: '   '\n",
+             long_comment);
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    firc_event_reset_for_test();
+    firc_log_set_output_floor(FIRC_LOG_ERROR);
+    firc_err_t err = load_str(&cfg, doc);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    ASSERT_EQ(FIRC_OK, err);
+    ASSERT_EQ_FMT((size_t)5, cfg.groups[0]->n_rules, "%zu");
+    ASSERT(cfg.groups[0]->rules[0]->comment == NULL);
+    ASSERT(cfg.groups[0]->rules[1]->comment == NULL);
+    ASSERT(cfg.groups[0]->rules[2]->comment == NULL);
+    ASSERT_STR_EQ("kept", or_none(cfg.groups[0]->rules[3]->comment));
+    ASSERT(cfg.groups[0]->rules[4]->comment == NULL);
+    firc_event_t ev[8];
+    uint64_t next = 0, dropped = 0;
+    size_t n = firc_event_read(0, ev, 8, &next, &dropped);
+    ASSERT_EQ_FMT((size_t)3, n, "%zu");
+    ASSERT_EQ(FIRC_LOG_WARN, ev[0].u.log.level);
+    ASSERT_STR_EQ("config: group \"g\", rule \"long.example\" (type \"domain\"): comment is longer than 256 bytes; "
+                  "the comment is dropped",
+                  ev[0].u.log.text);
+    ASSERT_STR_EQ("config: group \"g\", rule \"tab.example\" (type \"domain\"): comment holds a control character; "
+                  "the comment is dropped",
+                  ev[1].u.log.text);
+    ASSERTm(ev[2].u.log.text, strstr(ev[2].u.log.text, "rule \"c1.example\"") != NULL);
+    ASSERTm(ev[2].u.log.text, strstr(ev[2].u.log.text, "control character") != NULL);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 TEST an_override_that_was_only_a_bad_type_is_dropped(void)
 {
     firc_config_t cfg;
@@ -1861,6 +1983,8 @@ int main(int argc, char **argv)
     RUN_TEST(an_unusable_override_type_does_not_take_the_enable_with_it);
     RUN_TEST(an_override_type_unusable_with_its_own_proto_is_dropped);
     RUN_TEST(a_hand_rule_unusable_for_its_ports_is_said_at_load);
+    RUN_TEST(a_rules_comment_round_trips_through_yaml);
+    RUN_TEST(a_bad_comment_in_the_file_is_dropped_with_a_warning);
     RUN_TEST(an_override_that_was_only_a_bad_type_is_dropped);
     RUN_TEST(an_override_with_no_type_writes_no_type_key);
     RUN_TEST(an_override_with_no_spec_writes_no_spec_keys);

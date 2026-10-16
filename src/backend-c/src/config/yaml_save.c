@@ -174,6 +174,10 @@ static void emit_rule(emitter_ctx_t *ctx, const firc_rule_t *r)
         emit_plain(ctx, "ports");
         emit_string(ctx, r->ports);
     }
+    if (r->comment != NULL && *r->comment != '\0') {
+        emit_plain(ctx, "comment");
+        emit_string(ctx, r->comment);
+    }
     map_end(ctx);
 }
 

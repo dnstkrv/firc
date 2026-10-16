@@ -26,6 +26,18 @@ static const char *get_opt_string(const cJSON *obj, const char *key, bool *bad) 
 
 static const char why_not_strings[] = "proto and ports are strings";
 
+static const char *comment_from_req(const cJSON *req, const char **why) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(req, "comment");
+    *why = NULL;
+    if (item == NULL || cJSON_IsNull(item)) { return NULL; }
+    if (!cJSON_IsString(item)) {
+        *why = "comment is a string";
+        return NULL;
+    }
+    *why = firc_rule_comment_why(item->valuestring);
+    return item->valuestring;
+}
+
 /* list is config only here; the app's carry_list gate moves a live list's arena/sync state in when the url matches */
 
 /* absent list keeps the group's own, as an absent devices/rules does; NULL on OOM */
@@ -131,6 +143,15 @@ static firc_err_t fill_rule_fields(firc_rule_t *rule, const cJSON *req, const ch
     if (firc_strset(&rule->proto, proto) != FIRC_OK) { return FIRC_ERR_NOMEM; }
     if (firc_strset(&rule->ports, ports) != FIRC_OK) { return FIRC_ERR_NOMEM; }
     if (!firc_rule_spec_is_usable(rule->type, rule->rule, rule->proto, rule->ports, why)) {
+        return FIRC_ERR_INVAL;
+    }
+    const char *comment_why = NULL;
+    const char *comment = comment_from_req(req, &comment_why);
+    if (comment_why == NULL && firc_rule_set_comment(rule, comment, &comment_why) == FIRC_ERR_NOMEM) {
+        return FIRC_ERR_NOMEM;
+    }
+    if (comment_why != NULL) {
+        if (why != NULL) { *why = comment_why; }
         return FIRC_ERR_INVAL;
     }
     cJSON *enable_j = cJSON_GetObjectItemCaseSensitive(req, "enable"); /* absent/wrong-type/null all read as false */
@@ -441,6 +462,7 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
             if (e == FIRC_OK) { e = firc_strset(&r->rule, existing->rules[i]->rule); }
             if (e == FIRC_OK) { e = firc_strset(&r->proto, existing->rules[i]->proto); }
             if (e == FIRC_OK) { e = firc_strset(&r->ports, existing->rules[i]->ports); }
+            if (e == FIRC_OK) { e = firc_strset(&r->comment, existing->rules[i]->comment); }
             if (e == FIRC_OK) { r->enable = existing->rules[i]->enable; }
             if (e != FIRC_OK || firc_group_add_rule(group, r) != FIRC_OK) {
                 firc_rule_free(r);
@@ -464,6 +486,7 @@ static cJSON *rule_to_json(const firc_rule_t *r) {
     /* only when set, so an unset rule has neither key */
     if (r->proto != NULL && *r->proto != '\0') { cJSON_AddStringToObject(obj, "proto", r->proto); }
     if (r->ports != NULL && *r->ports != '\0') { cJSON_AddStringToObject(obj, "ports", r->ports); }
+    if (r->comment != NULL && *r->comment != '\0') { cJSON_AddStringToObject(obj, "comment", r->comment); }
     return obj;
 }
 
@@ -1026,7 +1049,12 @@ static void handle_put_rule(firc_http_req_t *req, firc_http_res_t *res, void *ud
     const char *proto = get_opt_string(json, "proto", &bad);
     const char *ports = get_opt_string(json, "ports", &bad);
     if (bad) { why = why_not_strings; }
-    if (bad || !firc_rule_spec_is_usable(get_string(json, "type"), get_string(json, "rule"), proto, ports, &why)) {
+    bool refused = bad || !firc_rule_spec_is_usable(get_string(json, "type"), get_string(json, "rule"), proto, ports, &why);
+    if (!refused) {
+        (void)comment_from_req(json, &why);
+        refused = why != NULL;
+    }
+    if (refused) {
         char msgbuf[FIRC_RULE_WHERE_MAX];
         const char *msg =
             locate_rule(msgbuf, sizeof(msgbuf), NULL, get_string(json, "type"),

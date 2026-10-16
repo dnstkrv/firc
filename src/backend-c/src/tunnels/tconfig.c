@@ -15,6 +15,7 @@
 #include "firc/ifacename.h"
 #include "firc/log.h"
 #include "firc/hash.h"
+#include "firc/utf8.h"
 
 #define FILE_CAP (4u * 1024u * 1024u)
 
@@ -234,16 +235,6 @@ static bool sub_name_ok(const char *s)
         bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ' ||
                   ch == '.' || ch == '_' || ch == '-';
         if (!ok) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool description_ok(const char *s)
-{
-    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
-        if (*p < 0x20 || *p == 0x7f || (p[0] == 0xc2 && p[1] >= 0x80 && p[1] <= 0x9f)) {
             return false;
         }
     }
@@ -585,7 +576,7 @@ static firc_err_t parse_tunnel(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
                 return fail(c, "must start with tunvless", "tunnels[%zu].device", ti);
             }
         } else if (strcmp(key, "description") == 0) {
-            if (!copy_str(v, t->description, sizeof t->description) || !description_ok(t->description)) {
+            if (!copy_str(v, t->description, sizeof t->description) || firc_text_has_control(t->description)) {
                 return fail(c, "up to 63 bytes, no control characters", "tunnels[%zu].description", ti);
             }
         } else if (strcmp(key, "enable") == 0) {

@@ -240,3 +240,28 @@ describe("GroupsStore bulk actions", () => {
     assert.deepStrictEqual(store.selectedIds, ["b"]);
   });
 });
+
+describe("a rule's comment in the store", () => {
+  // Catches a comment edit not counted as unsaved, an empty string counted as none, or clearing to none leaving the group dirty.
+  it("a comment makes the group unsaved and clearing it makes it clean again", () => {
+    const store = seeded([makeGroup("a"), makeGroup("b")]);
+    store.data[0].rules[0].comment = "Meta";
+    assert.strictEqual(store.groupDirty(store.data[0]), true);
+    assert.strictEqual(store.groupDirty(store.data[1]), false);
+    store.data[0].rules[0].comment = "";
+    assert.strictEqual(store.groupDirty(store.data[0]), true);
+    store.data[0].rules[0].comment = undefined;
+    assert.strictEqual(store.groupDirty(store.data[0]), false);
+  });
+
+  // Catches the comment made part of what makes two rules the same one.
+  it("two rules differing only in their comment are duplicates", () => {
+    const store = seeded([makeGroup("a"), makeGroup("b")]);
+    store.data[1].rules[0].rule = "a.example.com";
+    store.data[0].rules[0].comment = "one";
+    store.data[1].rules[0].comment = "two";
+    store.refreshDuplicateRuleIds();
+    assert.strictEqual(store.isRuleDuplicate("ra"), true);
+    assert.strictEqual(store.isRuleDuplicate("rb"), true);
+  });
+});
