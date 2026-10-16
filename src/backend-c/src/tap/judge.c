@@ -22,12 +22,11 @@ static bool fold_name(const char *name, char *out, size_t cap) {
     return n > 0;
 }
 
-/* Today's owner in the snapshot the pipeline routes by now, not the group the recall recorded when answered. */
 static bool judge_name(const firc_tap_ctx_t *c, const firc_ip_t *client, uint8_t how,
                        firc_tap_find_t *out) {
-    const firc_group_snapshot_t *g = firc_ruleset_snapshot_first_match(c->snap, out->name);
+    const firc_group_snapshot_t *g =
+        firc_ruleset_snapshot_owner(c->snap, out->name, client, c->policy, c->device, c->ud, NULL);
     if (g == NULL) { return false; }
-    if (!firc_devsel_allows(g->devices, client, c->policy, c->device, c->ud)) { return false; }
     out->group = g;
     out->how = how;
     return true;

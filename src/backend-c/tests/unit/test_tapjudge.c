@@ -146,7 +146,7 @@ TEST a_client_nobody_covers_is_not_reported(void) {
     PASS();
 }
 
-/* Catches: a recalled name judged by the group it had, not the one that owns it today. */
+/* Catches: a recalled name judged by the group it had, or a device the first group turns away not passed to the next that admits it. */
 TEST a_recalled_name_now_owned_by_another_group_is_judged_by_that_group(void) {
     static const gspec_t g[] = {
         {2, "video", "video.example.com", "192.168.1.43"},
@@ -161,8 +161,9 @@ TEST a_recalled_name_now_owned_by_another_group_is_judged_by_that_group(void) {
     firc_tap_find_t f;
     ASSERT(firc_tap_judge_addr(&r.ctx, &by_new, &real, &f));
     ASSERT_STR_EQm("named by today's owner", "video", f.group->name);
-    ASSERT_FALSEm("and a client only the old owner covers is not its bypass",
-                  firc_tap_judge_addr(&r.ctx, &by_old_only, &real, &f));
+    ASSERT(firc_tap_judge_addr(&r.ctx, &by_old_only, &real, &f));
+    ASSERT_STR_EQm("a device the first group turns away is judged by the next group that admits it", "media",
+                   f.group->name);
     rig_down(&r);
     PASS();
 }

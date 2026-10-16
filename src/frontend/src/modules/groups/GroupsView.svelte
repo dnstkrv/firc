@@ -106,6 +106,7 @@
 
   function closeDevicesModal() {
     devicesModal = { open: false, groupIndex: null };
+    store.markDataRevision();
   }
 
   function openGroupDialog() {
@@ -299,7 +300,7 @@
   </PageControls>
 
   <p class="order-hint">
-    {t("Order is priority: a name goes to the first group from the top that matches it")}
+    {t("Rule order sets the priority: top to bottom")}
   </p>
 
   {#if store.fetchError}

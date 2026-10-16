@@ -49,8 +49,9 @@ firc_recall_t *firc_dns_pipeline_recall(firc_dns_pipeline_t *p);
 /* Whether some group's selector admits `client`; NULL is not covered. */
 bool firc_dns_pipeline_covers(const firc_dns_pipeline_t *p, const firc_ip_t *client);
 
-/* First group matching the queried name, or NULL; valid until the next set_snapshot. */
+/* The group owning the queried name for client (first matching and admitting), or NULL;
+ * valid until the next set_snapshot. */
 const firc_group_snapshot_t *firc_dns_pipeline_owner(firc_dns_pipeline_t *p, const firc_dns_msg_t *query,
-                                                     const firc_ip_t *client, bool *covered);
+                                                     const firc_ip_t *client);
 
 #endif /* FIRC_DNSPIPELINE_H */

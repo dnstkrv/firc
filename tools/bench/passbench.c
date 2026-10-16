@@ -74,7 +74,7 @@ static firc_err_t add_name(firc_fakeip_t *pool, size_t i, int64_t now) {
     real.b[1] = (uint8_t)(64u + ((i >> 16) & 0x3fu));
     real.b[2] = (uint8_t)(i >> 8);
     real.b[3] = (uint8_t)i;
-    return firc_fakeip_set_real(pool, qname, &real);
+    return firc_fakeip_set_real(pool, qname, gid, &real);
 }
 
 int main(int argc, char **argv) {

@@ -85,7 +85,7 @@ TEST a_restored_name_keeps_its_addresses_group_and_reals(void) {
     firc_ip_t a4, a6;
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "shop.example.com", "g1", 1000, &a4, &a6));
     const firc_ip_t real4 = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "shop.example.com", &real4, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "shop.example.com", "g1", &real4, 1));
     firc_fakeip_mark_committed(f, firc_fakeip_gen(f));
 
     size_t restored = 0;
@@ -109,9 +109,9 @@ TEST a_restored_name_keeps_its_addresses_group_and_reals(void) {
         }
     }
     ASSERTm("a restored pair needs a commit: the kernel has no rule for it",
-            firc_fakeip_needs_commit(g, "shop.example.com", FIRC_FAM_V4));
+            firc_fakeip_needs_commit(g, &a4));
     ASSERT_FALSEm("a family with no real address has no pair to commit",
-                  firc_fakeip_needs_commit(g, "shop.example.com", FIRC_FAM_V6));
+                  firc_fakeip_needs_commit(g, &a6));
 
     firc_ip_t b4, b6;
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(g, "shop.example.com", "g1", 2001, &b4, &b6));
@@ -456,6 +456,49 @@ TEST each_name_comes_back_under_its_own_group(void) {
     PASS();
 }
 
+/* Catches: the loader refusing a name already held when the line is for another group. */
+TEST one_name_in_two_groups_is_restored_twice(void) {
+    size_t restored = 0;
+    firc_fakeip_t *g = loaded_from_text(
+        "map a.example.com g1 198.18.0.1 - fd37:9a00::1 - 5\n"
+        "map a.example.com g2 198.18.1.1 - fd37:9a00:0:1::1 - 5\n"
+        "map A.EXAMPLE.COM g2 198.18.1.2 - fd37:9a00:0:1::2 - 5\n", 64, &restored);
+    ASSERT_EQ_FMTm("both groups' lines, not the repeat within g2", (size_t)2, restored, "%zu");
+    const firc_ip_t g1v4 = {{198, 18, 0, 1}, 4}, g2v4 = {{198, 18, 1, 1}, 4}, repeat = {{198, 18, 1, 2}, 4};
+    const char *n1 = firc_fakeip_name_of(g, &g1v4), *n2 = firc_fakeip_name_of(g, &g2v4);
+    ASSERT(n1 != NULL && strcmp(n1, "a.example.com") == 0);
+    ASSERT(n2 != NULL && strcmp(n2, "a.example.com") == 0);
+    ASSERT_EQ(NULL, firc_fakeip_name_of(g, &repeat));
+    firc_fakeip_free(g);
+    PASS();
+}
+
+/* Catches: a save or load dropping one of a name's two mappings or crossing their reals. */
+TEST a_names_two_mappings_survive_a_restart_with_their_reals(void) {
+    firc_fakeip_t *f = fresh(64);
+    firc_ip_t a4 = {{0}, 0}, b4 = {{0}, 0}, got = {{0}, 0};
+    const firc_ip_t x = {{93, 184, 216, 34}, 4}, y = {{1, 2, 3, 4}, 4};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", 1000, &a4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", 1000, &b4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &x, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g2", &y, 1));
+    size_t restored = 0;
+    firc_err_t err = FIRC_OK;
+    firc_fakeip_t *g = reloaded(f, 1000, &restored, &err);
+    ASSERT_EQ(FIRC_OK, err);
+    ASSERT_EQ_FMT((size_t)2, restored, "%zu");
+    const char *gid = NULL;
+    ASSERT(firc_fakeip_pair_of(g, &a4, &gid, &got));
+    ASSERT_STR_EQ("g1", gid);
+    ASSERT(same_ip(&got, &x));
+    ASSERT(firc_fakeip_pair_of(g, &b4, &gid, &got));
+    ASSERT_STR_EQ("g2", gid);
+    ASSERT(same_ip(&got, &y));
+    firc_fakeip_free(g);
+    firc_fakeip_free(f);
+    PASS();
+}
+
 /* Catches: a save writing over the file in place instead of renaming a new one over it. */
 TEST the_file_is_replaced_not_overwritten(void) {
     if (geteuid() == 0) { SKIPm("root can write a read-only file"); }
@@ -663,12 +706,11 @@ TEST parked_pairs_survive_a_clean_stop(void) {
     firc_ip_t old4;
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", 1000, &old4, NULL));
     const firc_ip_t real = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &real, 1));
-    firc_ip_t new4;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", 1000, &new4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &real, 1));
+    firc_fakeip_reclaim(f, 1000 + 86400);
     size_t restored = 0;
     firc_err_t err = FIRC_ERR_IO;
-    firc_fakeip_t *g = reloaded(f, 2000, &restored, &err);
+    firc_fakeip_t *g = reloaded(f, 1000 + 86400 + 1000, &restored, &err);
     ASSERT_EQ(FIRC_OK, err);
 
     firc_fakeip_snapshot_t *s = firc_fakeip_snapshot_take(g);
@@ -682,10 +724,10 @@ TEST parked_pairs_survive_a_clean_stop(void) {
     ASSERTm("the parked pair is in the snapshot with its real address: its DNAT rule comes back", parked_rule);
 
     firc_ip_t b4;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(g, "b.example.com", "g1", 2001, &b4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(g, "b.example.com", "g1", 1000 + 86400 + 1001, &b4, NULL));
     ASSERT_FALSEm("inside its window the parked address goes to nobody else", same_ip(&b4, &old4));
     firc_ip_t c4;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(g, "c.example.com", "g1", 1000 + 3601, &c4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(g, "c.example.com", "g1", 1000 + 86400 + 3601, &c4, NULL));
     ASSERTm("past the window it had -- counted from when it was parked, not from the load -- it is issued", same_ip(&c4, &old4));
     firc_fakeip_free(f);
     firc_fakeip_free(g);
@@ -1315,6 +1357,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_broken_line_in_the_middle_costs_only_itself);
     RUN_TEST(refused_lines_and_the_cap);
     RUN_TEST(each_name_comes_back_under_its_own_group);
+    RUN_TEST(one_name_in_two_groups_is_restored_twice);
+    RUN_TEST(a_names_two_mappings_survive_a_restart_with_their_reals);
     RUN_TEST(the_file_is_replaced_not_overwritten);
     RUN_TEST(a_fresh_chunk_after_a_restart_is_saved_at_once);
     RUN_TEST(a_chunk_returned_before_the_stop_is_parked_after_it);

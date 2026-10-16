@@ -50,7 +50,7 @@ typedef struct firc_fakeip_cfg {
 firc_err_t firc_fakeip_new(const firc_fakeip_cfg_t *cfg, firc_fakeip_t **out);
 void firc_fakeip_free(firc_fakeip_t *f);
 
-/* Allocates/returns qname's address pair for group_id; LIMIT/NOMEM still write the blackhole address, INVAL none. */
+/* Allocates/returns qname's address pair in group_id (one mapping per name and group); LIMIT/NOMEM still write the blackhole address, INVAL none. */
 firc_err_t firc_fakeip_get(firc_fakeip_t *f, const char *qname, const char *group_id, int64_t now,
                            firc_ip_t *v4_out, firc_ip_t *v6_out);
 
@@ -61,15 +61,15 @@ bool firc_fakeip_overlaps(const firc_fakeip_t *f, const firc_ip_t *addr, uint8_t
 bool firc_fakeip_pool_prefix(const firc_fakeip_t *f, unsigned family, firc_ip_t *base_out,
                              uint8_t *prefix_out);
 
-/* Records qname's real address for that family (DNAT side); FIRC_ERR_NOENT if qname has no fake addresses. */
-firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const firc_ip_t *real);
+/* Records the real address behind qname's mapping in group_id (DNAT side); FIRC_ERR_NOENT if there is none. */
+firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const char *group_id, const firc_ip_t *real);
 
 /* Same, from a whole answer; per family keeps the stored address while still offered, else the first offered. */
-firc_err_t firc_fakeip_set_reals(firc_fakeip_t *f, const char *qname, const firc_ip_t *reals,
-                                 size_t n);
+firc_err_t firc_fakeip_set_reals(firc_fakeip_t *f, const char *qname, const char *group_id,
+                                 const firc_ip_t *reals, size_t n);
 
-/* True when this family's pair has an uncommitted real address; call only after firc_fakeip_set_reals. */
-bool firc_fakeip_needs_commit(const firc_fakeip_t *f, const char *qname, unsigned family);
+/* True when the mapping holding fake has an uncommitted real address in fake's family. */
+bool firc_fakeip_needs_commit(const firc_fakeip_t *f, const firc_ip_t *fake);
 
 /* Pool generation, advanced on every kernel-relevant change; compare before/after a call. */
 uint64_t firc_fakeip_gen(const firc_fakeip_t *f);

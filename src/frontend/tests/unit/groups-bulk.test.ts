@@ -261,7 +261,29 @@ describe("a rule's comment in the store", () => {
     store.data[0].rules[0].comment = "one";
     store.data[1].rules[0].comment = "two";
     store.refreshDuplicateRuleIds();
-    assert.strictEqual(store.isRuleDuplicate("ra"), true);
-    assert.strictEqual(store.isRuleDuplicate("rb"), true);
+    assert.strictEqual(store.ruleOverlap("ra"), undefined);
+    const overlap = store.ruleOverlap("rb");
+    assert.strictEqual(overlap?.kind, "shadowed");
+    assert.ok(store.overlapText(overlap!).includes("group-a"));
+  });
+});
+
+describe("the group's conflict menu", () => {
+  // Catches a named earlier copy overwriting the kind of a rule the group already marks for itself.
+  it("a marked rule keeps its own kind when a later rule names it", () => {
+    const store = seeded([makeGroup("a"), makeGroup("b"), makeGroup("c")]);
+    store.data[0].devices = { allow: ["192.168.1.5"], deny: [] };
+    store.data[0].rules[0].rule = "x.example.com";
+    store.data[2].rules = [
+      { id: "c1", enable: true, rule: "x.example.com", type: "domain" },
+      { id: "c2", enable: true, rule: "x.example.com", type: "domain" },
+    ];
+    store.refreshDuplicateRuleIds();
+    assert.strictEqual(store.ruleOverlap("c1")?.kind, "split");
+    assert.strictEqual(store.ruleOverlap("c2")?.kind, "shadowed");
+    const byRule = new Map(store.getDuplicateConflictsForGroup("c").map((c) => [c.ruleId, c.kind]));
+    assert.strictEqual(byRule.get("c1"), "split");
+    assert.strictEqual(byRule.get("c2"), "shadowed");
+    assert.strictEqual(byRule.get("ra"), "split");
   });
 });

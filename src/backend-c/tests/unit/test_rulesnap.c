@@ -1,6 +1,8 @@
 #include "greatest.h"
 
 #include "firc/rulesnap.h"
+#include <arpa/inet.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "firc/log.h"
@@ -30,6 +32,146 @@ static firc_rule_t *make_rule(firc_id_t id, const char *type, const char *rule,
     firc_strset(&r->rule, rule);
     r->enable = enable;
     return r;
+}
+
+static void add_entry(char ***list, size_t *n, const char *entry)
+{
+    char **grown = realloc(*list, (*n + 1) * sizeof(char *));
+    if (grown == NULL) { abort(); }
+    *list = grown;
+    grown[(*n)++] = strdup(entry);
+}
+
+static firc_group_t *shared_group(firc_config_t *cfg, uint8_t id, const char *name, bool rule_on)
+{
+    firc_group_t *g = make_group((firc_id_t){{id, 0, 0, 0}}, name, true);
+    firc_group_add_rule(g, make_rule((firc_id_t){{id, 1, 0, 0}}, "namespace", "shared.test", rule_on));
+    firc_config_add_group(cfg, g);
+    return g;
+}
+
+static firc_ip_t client_at(const char *text)
+{
+    firc_ip_t c = {{0}, 4};
+    if (inet_pton(AF_INET, text, c.b) != 1) { abort(); }
+    return c;
+}
+
+static const char *owner_for(const firc_ruleset_snapshot_t *snap, const char *client)
+{
+    firc_ip_t c = client_at(client);
+    const firc_group_snapshot_t *g =
+        firc_ruleset_snapshot_owner(snap, "x.shared.test", &c, NULL, NULL, NULL, NULL);
+    return g != NULL ? g->name : "-";
+}
+
+static bool in_kids(const char *policy, const firc_ip_t *client, void *ud)
+{
+    (void)ud;
+    return strcmp(policy, "Kids") == 0 && client->b[3] == 5;
+}
+
+/* Catches: the owner chosen by the device first, so a scoped group below takes an unscoped upper group's devices. */
+TEST an_unscoped_upper_group_owns_every_device(void)
+{
+    firc_config_t cfg = make_cfg();
+    shared_group(&cfg, 1, "upper", true);
+    firc_group_t *lower = shared_group(&cfg, 2, "lower", true);
+    add_entry(&lower->devices.allow, &lower->devices.n_allow, "192.168.1.5");
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    ASSERT_STR_EQ("upper", owner_for(snap, "192.168.1.5"));
+    ASSERT_STR_EQ("upper", owner_for(snap, "192.168.1.9"));
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: the first matching group kept for a device its selector turns away, or the search stopping there. */
+TEST disjoint_selectors_split_one_name(void)
+{
+    firc_config_t cfg = make_cfg();
+    firc_group_t *upper = shared_group(&cfg, 1, "upper", true);
+    add_entry(&upper->devices.allow, &upper->devices.n_allow, "192.168.1.5");
+    firc_group_t *lower = shared_group(&cfg, 2, "lower", true);
+    add_entry(&lower->devices.allow, &lower->devices.n_allow, "192.168.1.9");
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    ASSERT_STR_EQ("upper", owner_for(snap, "192.168.1.5"));
+    ASSERT_STR_EQ("lower", owner_for(snap, "192.168.1.9"));
+    ASSERT_STR_EQm("a device neither admits has no owner", "-", owner_for(snap, "192.168.1.7"));
+    firc_ip_t stranger = client_at("192.168.1.7");
+    const firc_group_snapshot_t *first = NULL;
+    ASSERT_EQ(NULL, firc_ruleset_snapshot_owner(snap, "x.shared.test", &stranger, NULL, NULL, NULL, &first));
+    ASSERTm("the first matching group is still named", first != NULL && strcmp(first->name, "upper") == 0);
+    ASSERT_EQ(NULL, firc_ruleset_snapshot_owner(snap, "x.other.test", &stranger, NULL, NULL, NULL, &first));
+    ASSERT_EQm("no match names no group", NULL, first);
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: a query without a client address given no owner instead of the first matching group. */
+TEST a_query_without_a_client_goes_to_the_first_matching_group(void)
+{
+    firc_config_t cfg = make_cfg();
+    firc_group_t *upper = shared_group(&cfg, 1, "upper", true);
+    add_entry(&upper->devices.allow, &upper->devices.n_allow, "192.168.1.5");
+    shared_group(&cfg, 2, "lower", true);
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    const firc_group_snapshot_t *g =
+        firc_ruleset_snapshot_owner(snap, "x.shared.test", NULL, NULL, NULL, NULL, NULL);
+    ASSERT(g != NULL);
+    ASSERT_STR_EQ("upper", g->name);
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: a deny entry in the upper group read as the end of the search. */
+TEST a_deny_in_the_upper_group_passes_that_device_down(void)
+{
+    firc_config_t cfg = make_cfg();
+    firc_group_t *upper = shared_group(&cfg, 1, "upper", true);
+    add_entry(&upper->devices.deny, &upper->devices.n_deny, "192.168.1.5");
+    shared_group(&cfg, 2, "lower", true);
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    ASSERT_STR_EQ("lower", owner_for(snap, "192.168.1.5"));
+    ASSERT_STR_EQ("upper", owner_for(snap, "192.168.1.9"));
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: a disabled rule or a disabled group still taking the name. */
+TEST a_disabled_rule_or_group_is_skipped(void)
+{
+    firc_config_t cfg = make_cfg();
+    shared_group(&cfg, 1, "rule-off", false);
+    firc_group_t *off = shared_group(&cfg, 2, "group-off", true);
+    off->enable = false;
+    shared_group(&cfg, 3, "lower", true);
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    ASSERT_STR_EQ("lower", owner_for(snap, "192.168.1.5"));
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: the selector asked without the caller's policy resolver. */
+TEST a_policy_entry_is_resolved_by_the_callers_resolver(void)
+{
+    firc_config_t cfg = make_cfg();
+    firc_group_t *upper = shared_group(&cfg, 1, "upper", true);
+    add_entry(&upper->devices.allow, &upper->devices.n_allow, "policy:Kids");
+    shared_group(&cfg, 2, "lower", true);
+    firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
+    firc_ip_t kid = client_at("192.168.1.5"), other = client_at("192.168.1.9");
+    const firc_group_snapshot_t *g = firc_ruleset_snapshot_owner(snap, "x.shared.test", &kid, in_kids, NULL, NULL, NULL);
+    ASSERT(g != NULL && strcmp(g->name, "upper") == 0);
+    g = firc_ruleset_snapshot_owner(snap, "x.shared.test", &other, in_kids, NULL, NULL, NULL);
+    ASSERT(g != NULL && strcmp(g->name, "lower") == 0);
+    firc_ruleset_snapshot_free(snap);
+    firc_config_clear(&cfg);
+    PASS();
 }
 
 TEST disabled_group_excluded(void)
@@ -126,7 +268,7 @@ TEST a_snapshot_with_two_holders_outlives_the_first_free(void)
     firc_ruleset_snapshot_t *other = firc_ruleset_snapshot_ref(snap);
     ASSERT(other == snap);
     firc_ruleset_snapshot_free(snap);
-    ASSERT(firc_ruleset_snapshot_first_match(other, "sub.example.com") != NULL);
+    ASSERT(firc_ruleset_snapshot_owner(other, "sub.example.com", NULL, NULL, NULL, NULL, NULL) != NULL);
     firc_ruleset_snapshot_free(other);
 
     firc_config_clear(&cfg);
@@ -146,7 +288,8 @@ TEST a_list_group_above_a_manual_group_owns_a_shared_name(void)
     firc_config_add_group(&cfg, mg);
 
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
-    const firc_group_snapshot_t *owner = firc_ruleset_snapshot_first_match(snap, "shared.example");
+    const firc_group_snapshot_t *owner =
+        firc_ruleset_snapshot_owner(snap, "shared.example", NULL, NULL, NULL, NULL, NULL);
     ASSERT(owner != NULL);
     ASSERT(firc_id_equal(lg->id, owner->id));
 
@@ -167,7 +310,8 @@ TEST a_manual_group_above_a_list_group_owns_a_shared_name(void)
     firc_config_add_group(&cfg, lg);
 
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
-    const firc_group_snapshot_t *owner = firc_ruleset_snapshot_first_match(snap, "shared.example");
+    const firc_group_snapshot_t *owner =
+        firc_ruleset_snapshot_owner(snap, "shared.example", NULL, NULL, NULL, NULL, NULL);
     ASSERT(owner != NULL);
     ASSERT(firc_id_equal(mg->id, owner->id));
 
@@ -187,8 +331,10 @@ TEST a_hand_rule_and_a_list_rule_of_one_group_give_one_owner(void)
 
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
     ASSERT_EQ_FMTm("one entry for the group, not two", (size_t)1, snap->n_groups, "%zu");
-    const firc_group_snapshot_t *owner_a = firc_ruleset_snapshot_first_match(snap, "a.example");
-    const firc_group_snapshot_t *owner_b = firc_ruleset_snapshot_first_match(snap, "b.example");
+    const firc_group_snapshot_t *owner_a =
+        firc_ruleset_snapshot_owner(snap, "a.example", NULL, NULL, NULL, NULL, NULL);
+    const firc_group_snapshot_t *owner_b =
+        firc_ruleset_snapshot_owner(snap, "b.example", NULL, NULL, NULL, NULL, NULL);
     ASSERT(owner_a != NULL);
     ASSERT(owner_b != NULL);
     ASSERT(firc_id_equal(g->id, owner_a->id));
@@ -275,15 +421,16 @@ TEST the_first_group_in_config_order_owns_the_name(void)
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build(&cfg);
     ASSERT(snap != NULL);
 
-    const firc_group_snapshot_t *w = firc_ruleset_snapshot_first_match(snap, "www.example.com");
+    const firc_group_snapshot_t *w =
+        firc_ruleset_snapshot_owner(snap, "www.example.com", NULL, NULL, NULL, NULL, NULL);
     ASSERT(w != NULL);
     ASSERT_STR_EQm("the earlier group wins, not the later one", "first", w->name);
 
-    w = firc_ruleset_snapshot_first_match(snap, "other.test");
+    w = firc_ruleset_snapshot_owner(snap, "other.test", NULL, NULL, NULL, NULL, NULL);
     ASSERT(w != NULL);
     ASSERT_STR_EQ("third", w->name);
 
-    ASSERT_EQ(NULL, firc_ruleset_snapshot_first_match(snap, "unmatched.invalid"));
+    ASSERT_EQ(NULL, firc_ruleset_snapshot_owner(snap, "unmatched.invalid", NULL, NULL, NULL, NULL, NULL));
 
     firc_ruleset_snapshot_free(snap);
     firc_config_clear(&cfg);
@@ -321,7 +468,7 @@ TEST a_rule_that_cannot_compile_is_skipped_quietly_at_rebuild(void)
         }
         ASSERT_EQ_FMTm(out, (size_t)0, lines, "%zu");
 
-        ASSERT(firc_ruleset_snapshot_first_match(snap, "ok.example.com") != NULL);
+        ASSERT(firc_ruleset_snapshot_owner(snap, "ok.example.com", NULL, NULL, NULL, NULL, NULL) != NULL);
         firc_ruleset_snapshot_free(snap);
     }
     firc_config_clear(&cfg);
@@ -373,8 +520,8 @@ TEST a_kept_out_group_is_out_of_the_view_and_of_provisional(void)
     firc_ruleset_snapshot_t *snap = firc_ruleset_snapshot_build_where(&cfg, all_but_2, NULL);
     ASSERT(snap != NULL);
     ASSERT_EQ(1u, (unsigned)snap->n_groups);
-    ASSERT(firc_ruleset_snapshot_first_match(snap, "a.example.com") != NULL);
-    ASSERT_EQ(NULL, firc_ruleset_snapshot_first_match(snap, "b.example.com"));
+    ASSERT(firc_ruleset_snapshot_owner(snap, "a.example.com", NULL, NULL, NULL, NULL, NULL) != NULL);
+    ASSERT_EQ(NULL, firc_ruleset_snapshot_owner(snap, "b.example.com", NULL, NULL, NULL, NULL, NULL));
     ASSERT_FALSEm("a group out of the view makes nothing provisional", snap->provisional);
     firc_ruleset_snapshot_free(snap);
 
@@ -406,5 +553,11 @@ int main(int argc, char **argv)
     RUN_TEST(a_list_group_without_a_body_makes_the_snapshot_provisional);
     RUN_TEST(a_list_group_without_an_interface_still_takes_its_names);
     RUN_TEST(a_kept_out_group_is_out_of_the_view_and_of_provisional);
+    RUN_TEST(an_unscoped_upper_group_owns_every_device);
+    RUN_TEST(disjoint_selectors_split_one_name);
+    RUN_TEST(a_query_without_a_client_goes_to_the_first_matching_group);
+    RUN_TEST(a_deny_in_the_upper_group_passes_that_device_down);
+    RUN_TEST(a_disabled_rule_or_group_is_skipped);
+    RUN_TEST(a_policy_entry_is_resolved_by_the_callers_resolver);
     GREATEST_MAIN_END();
 }

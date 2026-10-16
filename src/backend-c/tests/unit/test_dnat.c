@@ -78,7 +78,7 @@ TEST a_resolved_mapping_becomes_one_host_rule(void) {
     ASSERT_EQ_FMT(1, (int)fake4.b[3], "%d");
 
     firc_ip_t real = v4(93, 184, 216, 34);
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", "g1", &real));
 
     firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
@@ -147,8 +147,8 @@ TEST each_family_gets_only_its_own_rules(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "dual.example.com", "g1", 1000, &fake4, &fake6));
     firc_ip_t real4 = v4(1, 2, 3, 4);
     firc_ip_t real6 = {{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 16};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "dual.example.com", &real4));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "dual.example.com", &real6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "dual.example.com", "g1", &real4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "dual.example.com", "g1", &real6));
 
     firc_fake_ipt_t *f4 = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     firc_ipt_t *i4 = firc_ipt_new(firc_fake_ipt_as_xt(f4), "FIRC_");
@@ -217,7 +217,7 @@ TEST every_resolved_mapping_gets_its_own_rule(void) {
         snprintf(name, sizeof(name), "h%d.example.com", i);
         ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, name, "g1", 1000, &a, &b));
         firc_ip_t real = v4(10, 0, 0, (uint8_t)(i + 1));
-        ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, name, &real));
+        ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, name, "g1", &real));
     }
 
     firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
@@ -245,18 +245,21 @@ TEST every_resolved_mapping_gets_its_own_rule(void) {
     PASS();
 }
 
-/* Catches: a moved name's old pair losing its rule before its quarantine ends. */
-TEST a_moved_names_old_address_keeps_its_rule(void) {
+/* Catches: a reclaimed pair losing its rule before its quarantine ends while the name's other group still maps it. */
+TEST a_reclaimed_pair_keeps_its_rule_beside_the_other_groups_pair(void) {
     firc_fakeip_cfg_t c = cfg();
     firc_fakeip_t *pool = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &pool));
     firc_ip_t fake4 = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g1", 1000, &fake4, NULL));
     firc_ip_t real = v4(93, 184, 216, 34);
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", &real));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g2", 1000, &fake4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", "g1", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g2", 1000 + 86400 - 1, &fake4, NULL));
     firc_ip_t real2 = v4(93, 184, 216, 35);
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", &real2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", "g2", &real2));
+    firc_fakeip_reclaim(pool, 1000 + 86400);
+    firc_ip_t parked = v4(198, 18, 0, 1);
+    ASSERT_EQm("g1's mapping is parked, not live", NULL, firc_fakeip_name_of(pool, &parked));
 
     firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
@@ -310,8 +313,8 @@ TEST only_a_routed_groups_mappings_are_rewritten(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g1", 1000, &f1, NULL));
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "b.example.com", "g2", 1000, &f2, NULL));
     firc_ip_t r1 = v4(93, 184, 216, 34), r2 = v4(104, 18, 32, 7);
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", &r1));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "b.example.com", &r2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", "g1", &r1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "b.example.com", "g2", &r2));
     char d1[24], d2[24];
     snprintf(d1, sizeof(d1), "%u.%u.%u.%u/32", f1.b[0], f1.b[1], f1.b[2], f1.b[3]);
     snprintf(d2, sizeof(d2), "%u.%u.%u.%u/32", f2.b[0], f2.b[1], f2.b[2], f2.b[3]);
@@ -409,7 +412,7 @@ TEST a_wiped_mangle_leaves_only_conditional_dnat(void) {
     firc_ip_t fake4 = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g1", 1000, &fake4, NULL));
     firc_ip_t real = v4(93, 184, 216, 34);
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(pool, "a.example.com", "g1", &real));
 
     firc_fake_ipt_t *f = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
     firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(f), "FIRC_");
@@ -468,7 +471,7 @@ int main(int argc, char **argv)
     RUN_TEST(an_unresolved_mapping_contributes_no_rule);
     RUN_TEST(each_family_gets_only_its_own_rules);
     RUN_TEST(every_resolved_mapping_gets_its_own_rule);
-    RUN_TEST(a_moved_names_old_address_keeps_its_rule);
+    RUN_TEST(a_reclaimed_pair_keeps_its_rule_beside_the_other_groups_pair);
     RUN_TEST(without_a_pool_only_the_chain_is_staged);
     RUN_TEST(only_a_routed_groups_mappings_are_rewritten);
     RUN_TEST(the_dnat_jump_joins_what_others_staged_in_prerouting);

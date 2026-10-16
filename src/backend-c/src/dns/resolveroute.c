@@ -253,9 +253,8 @@ bool firc_resolve_router_decide(void *ud, const firc_dns_msg_t *query, const fir
 {
     firc_resolve_router_t *r = ud;
     if (r == NULL || r->pipeline == NULL) { return false; }
-    bool covered = false;
-    const firc_group_snapshot_t *owner = firc_dns_pipeline_owner(r->pipeline, query, client, &covered);
-    if (owner == NULL || !covered) { return false; }
+    const firc_group_snapshot_t *owner = firc_dns_pipeline_owner(r->pipeline, query, client);
+    if (owner == NULL) { return false; }
     const firc_resolve_route_t *rt = firc_resolve_table_find(&r->table, owner->id);
     if (!firc_resolve_route_usable(rt)) { return false; }
     memset(out, 0, sizeof(*out));

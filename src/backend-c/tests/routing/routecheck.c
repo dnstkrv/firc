@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "firc/dnspipeline.h"
 #include "firc/dnsproxy.h"
 #include "firc/fakeip.h"
 #include "firc/ipset_to_link.h"
@@ -19,6 +20,7 @@
 #include "firc/netfilter_cleaner.h"
 #include "firc/pool_reject.h"
 #include "firc/ruleset.h"
+#include "firc/rulesnap.h"
 #include "firc/xtables.h"
 #include "../../src/xtables/xt_internal.h"
 #include "xt_golden.h"
@@ -188,6 +190,25 @@ static int push_entry(char ***list, size_t *n, const char *text)
     return 0;
 }
 
+static firc_fakeip_cfg_t routing_pool_cfg(void)
+{
+    firc_fakeip_cfg_t c = {0};
+    c.v4.base.len = 4;
+    c.v4.base.b[0] = 198;
+    c.v4.base.b[1] = 18;
+    c.v4.pool_cidr = 15;
+    c.v4.chunk_cidr = 24;
+    c.v6.base.len = 16;
+    c.v6.base.b[0] = 0xfd;
+    c.v6.base.b[1] = 0x37;
+    c.v6.pool_cidr = 48;
+    c.v6.chunk_cidr = 64;
+    c.max_names = 64;
+    c.idle_secs = 86400;
+    c.clamp_secs = 300;
+    return c;
+}
+
 static int do_devchain(int argc, char **argv)
 {
     char *end = NULL;
@@ -244,20 +265,7 @@ static int do_devchain(int argc, char **argv)
     firc_nf_devices_t dev;
     if (firc_ruleset_render_devices(g, &lk, &dev) != FIRC_OK) { return 3; }
 
-    firc_fakeip_cfg_t c = {0};
-    c.v4.base.len = 4;
-    c.v4.base.b[0] = 198;
-    c.v4.base.b[1] = 18;
-    c.v4.pool_cidr = 15;
-    c.v4.chunk_cidr = 24;
-    c.v6.base.len = 16;
-    c.v6.base.b[0] = 0xfd;
-    c.v6.base.b[1] = 0x37;
-    c.v6.pool_cidr = 48;
-    c.v6.chunk_cidr = 64;
-    c.max_names = 64;
-    c.idle_secs = 86400;
-    c.clamp_secs = 300;
+    firc_fakeip_cfg_t c = routing_pool_cfg();
     firc_fakeip_t *pool = NULL;
     firc_ip_t v4, v6;
     if (firc_fakeip_new(&c, &pool) != FIRC_OK ||
@@ -290,6 +298,126 @@ static int do_devchain(int argc, char **argv)
     firc_group_free(g);
     if (err != FIRC_OK) {
         fprintf(stderr, "devchain: %s\n", firc_err_str(err));
+        return 3;
+    }
+    return 0;
+}
+
+static size_t shared_answer(uint8_t *b)
+{
+    static const uint8_t head[] = {0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0};
+    static const uint8_t name[] = {6, 's', 'h', 'a', 'r', 'e', 'd', 4, 't', 'e', 's', 't', 0};
+    static const uint8_t question[] = {0, 1, 0, 1};
+    static const uint8_t record[] = {0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 9, 9, 9, 9};
+    size_t p = 0;
+    memcpy(b + p, head, sizeof(head));
+    p += sizeof(head);
+    memcpy(b + p, name, sizeof(name));
+    p += sizeof(name);
+    memcpy(b + p, question, sizeof(question));
+    p += sizeof(question);
+    memcpy(b + p, name, sizeof(name));
+    p += sizeof(name);
+    memcpy(b + p, record, sizeof(record));
+    return p + sizeof(record);
+}
+
+static firc_group_t *shared_group(uint8_t id, const char *name, const char *allow)
+{
+    firc_group_t *g = firc_group_new();
+    firc_rule_t *r = firc_rule_new();
+    if (g == NULL || r == NULL) { return NULL; }
+    g->id = (firc_id_t){{id, 0, 0, 0}};
+    g->enable = true;
+    r->id = (firc_id_t){{id, 1, 0, 0}};
+    r->enable = true;
+    if (firc_strset(&g->name, name) != FIRC_OK || firc_strset(&r->type, "namespace") != FIRC_OK ||
+        firc_strset(&r->rule, "shared.test") != FIRC_OK) {
+        return NULL;
+    }
+    firc_group_add_rule(g, r);
+    if (allow != NULL && push_entry(&g->devices.allow, &g->devices.n_allow, allow) != 0) { return NULL; }
+    return g;
+}
+
+static int fake_for(firc_dns_pipeline_t *p, const char *client_text, firc_ip_t *out)
+{
+    firc_ip_t client = {{0}, 4};
+    if (inet_pton(AF_INET, client_text, client.b) != 1) { return 64; }
+    uint8_t buf[128];
+    size_t len = shared_answer(buf);
+    firc_dns_msg_t *msg = NULL;
+    if (firc_dns_msg_parse(buf, len, &msg) != FIRC_OK) { return 3; }
+    firc_dns_verdict_t v = firc_dns_pipeline_handle_message(p, msg, 1000, &client, NULL);
+    int rc = 3;
+    for (size_t i = 0; i < msg->n_answers; i++) {
+        const firc_dns_rr_t *rr = &msg->answers[i];
+        if ((v == FIRC_DNS_HOLD || v == FIRC_DNS_REWRITTEN) && rr->rtype == FIRC_DNS_TYPE_A && rr->rdata_len == 4) {
+            memcpy(out->b, rr->rdata, 4);
+            out->len = 4;
+            rc = 0;
+        }
+    }
+    firc_dns_msg_free(msg);
+    return rc;
+}
+
+static int do_shared(const char *client_a, const char *client_b)
+{
+    firc_config_t cfg;
+    if (firc_config_init_defaults(&cfg) != FIRC_OK) { return 3; }
+    firc_group_t *a = shared_group(1, "a", client_a);
+    firc_group_t *b = shared_group(2, "b", NULL);
+    if (a == NULL || b == NULL) { return 3; }
+    firc_config_add_group(&cfg, a);
+    firc_config_add_group(&cfg, b);
+    firc_fakeip_cfg_t c = routing_pool_cfg();
+    firc_fakeip_t *pool = NULL;
+    firc_dns_pipeline_t *p = firc_dns_pipeline_create();
+    firc_ruleset_snapshot_t *rules = firc_ruleset_snapshot_build(&cfg);
+    if (p == NULL || rules == NULL || firc_fakeip_new(&c, &pool) != FIRC_OK) { return 3; }
+    firc_dns_pipeline_set_snapshot(p, rules);
+    firc_dns_pipeline_set_pool(p, pool, 300);
+    firc_ip_t fa = {{0}, 0}, fb = {{0}, 0};
+    int rc = fake_for(p, client_a, &fa);
+    if (rc == 0) { rc = fake_for(p, client_b, &fb); }
+    if (rc != 0) {
+        fprintf(stderr, "shared: the pipeline issued no fake address\n");
+        return rc;
+    }
+    firc_ruleset_lookup_t lk = {arg_mark, NULL, NULL, arg_nets, NULL, NULL};
+    firc_nf_devices_t dev_a, dev_b;
+    uint32_t mark_a = 0, mark_b = 0;
+    if (firc_ruleset_render_devices(a, &lk, &dev_a) != FIRC_OK || firc_ruleset_render_devices(b, &lk, &dev_b) != FIRC_OK ||
+        !firc_mark_for_field(5, &mark_a) || !firc_mark_for_field(6, &mark_b)) {
+        return 3;
+    }
+    firc_fakeip_snapshot_t *snap = firc_fakeip_snapshot_take(pool);
+    firc_xt_t *xt = firc_xt_real_new(FIRC_IPT_PROTO_IPV4);
+    if (snap == NULL || xt == NULL) {
+        perror("x_tables raw socket");
+        return 3;
+    }
+    firc_ipt_t *ipt = firc_ipt_new(xt, "FIRC");
+    if (ipt == NULL) { return 3; }
+    char ta[INET_ADDRSTRLEN], tb[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, fa.b, ta, sizeof(ta));
+    inet_ntop(AF_INET, fb.b, tb, sizeof(tb));
+    printf("# fake-a %s\n# fake-b %s\n", ta, tb);
+    firc_err_t err = firc_netfilter_register_base_chains(ipt, NULL);
+    if (err == FIRC_OK) { err = firc_ipset_to_link_build_rules_dev(ipt, "FIRCA", "tun0", mark_a, 5, snap, "01000000", &dev_a); }
+    if (err == FIRC_OK) { err = firc_ipset_to_link_build_rules_dev(ipt, "FIRCB", "tun1", mark_b, 6, snap, "02000000", &dev_b); }
+    if (err == FIRC_OK) { err = firc_ipt_commit(ipt); }
+    fflush(stdout);
+    firc_ipt_free(ipt);
+    firc_fakeip_snapshot_free(snap);
+    firc_dns_pipeline_destroy(p);
+    firc_fakeip_free(pool);
+    firc_nf_devices_clear(&dev_a);
+    firc_nf_devices_clear(&dev_b);
+    firc_config_clear(&cfg);
+    if (err != FIRC_OK) {
+        fprintf(stderr, "shared: %s\n", firc_err_str(err));
         return 3;
     }
     return 0;
@@ -561,6 +689,7 @@ int main(int argc, char **argv)
     }
     if (argc == 4 && strcmp(argv[1], "ask") == 0) { return do_ask(argv[2], argv[3]); }
     if (argc >= 3 && strcmp(argv[1], "devchain") == 0) { return do_devchain(argc, argv); }
+    if (argc == 4 && strcmp(argv[1], "shared") == 0) { return do_shared(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtparse") == 0) { return do_xtparse(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtnat") == 0) { return do_xtnat(argv[2], argv[3]); }
     if (argc == 4 && strcmp(argv[1], "xtdump") == 0) { return do_xtdump(argv[2], argv[3]); }

@@ -451,7 +451,11 @@
           />
 
           <Tooltip value={t(group.enable ? "Disable Group" : "Enable Group")}>
-            <Switch class="enable-group" bind:checked={group.enable} />
+            <Switch
+              class="enable-group"
+              bind:checked={group.enable}
+              onCheckedChange={store.markDataRevision}
+            />
           </Tooltip>
 
           {#if hasList}
@@ -606,7 +610,6 @@
                   {group_index}
                   rule_id={rule.id}
                   group_id={group.id}
-                  isDuplicate={store.isRuleDuplicate(rule.id)}
                   isHighlighted={store.isRuleHighlighted(rule.id)}
                   style={i % 2 ? "" : "background-color: var(--bg-light)"}
                 />

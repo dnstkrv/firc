@@ -1259,13 +1259,13 @@ describe("a list rule repeating a group's own rule", () => {
       };
       seed(store, [makeGroup("a1b2c3d4", 120), own]);
       store.refreshDuplicateRuleIds();
-      assert.strictEqual(store.isRuleDuplicate("own00001"), false);
+      assert.strictEqual(store.ruleOverlap("own00001")?.kind, undefined);
 
       await store.lists.loadRules("a1b2c3d4", 0);
 
-      assert.strictEqual(store.isRuleDuplicate("own00001"), true);
-      assert.strictEqual(store.isRuleDuplicate("rule0007"), true);
-      assert.strictEqual(store.isRuleDuplicate("rule0008"), false);
+      assert.strictEqual(store.ruleOverlap("own00001")?.kind, "shadowed");
+      assert.strictEqual(store.ruleOverlap("rule0007"), undefined);
+      assert.strictEqual(store.ruleOverlap("rule0008"), undefined);
       assert.deepStrictEqual(
         store.getDuplicateConflictsForGroup("e5e5e5e5").map((c) => [c.groupId, c.ruleId]),
         [

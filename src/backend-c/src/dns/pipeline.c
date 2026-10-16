@@ -257,7 +257,7 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
         ev->u.dns.n_reals = (uint8_t)k;
     }
     if (issue == FIRC_OK && n_reals > 0) {
-        firc_err_t e = firc_fakeip_set_reals(p->pool, qname, reals, n_reals);
+        firc_err_t e = firc_fakeip_set_reals(p->pool, qname, group_id, reals, n_reals);
         if (e != FIRC_OK) {
             firc_lograte_say(&p->said_reals, 60000, FIRC_LOG_WARN, NULL, "recording real addresses for %s: %s", qname,
                              firc_err_str(e));
@@ -290,8 +290,8 @@ static firc_dns_verdict_t rewrite(firc_dns_pipeline_t *p, firc_dns_msg_t *msg, i
     journal_put(p, ev, issue == FIRC_OK ? FIRC_DNS_ISSUED : FIRC_DNS_POOL_REFUSED);
 
     bool waits = issue == FIRC_OK &&
-                 ((had4 && firc_fakeip_needs_commit(p->pool, qname, FIRC_FAM_V4)) ||
-                  (had6 && firc_fakeip_needs_commit(p->pool, qname, FIRC_FAM_V6)));
+                 ((had4 && firc_fakeip_needs_commit(p->pool, &fake4)) ||
+                  (had6 && firc_fakeip_needs_commit(p->pool, &fake6)));
     return waits ? FIRC_DNS_HOLD : FIRC_DNS_REWRITTEN;
 }
 
@@ -349,28 +349,27 @@ firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p,
             if (!firc_dns_msg_queried_name(msg, nx, sizeof(nx))) { nx[0] = '\0'; }
             journal_begin(ev, now, client, nx, msg, rcode, resolver);
             const firc_group_snapshot_t *g =
-                nx[0] != '\0' ? firc_ruleset_snapshot_first_match(p->snapshot, nx) : NULL;
-            if (g != NULL &&
-                firc_devsel_allows(g->devices, client, p->policy_fn, p->device_fn, p->policy_ud)) {
-                journal_group(ev, g);
-            }
+                nx[0] != '\0' ? firc_ruleset_snapshot_owner(p->snapshot, nx, client, p->policy_fn, p->device_fn,
+                                                            p->policy_ud, NULL)
+                              : NULL;
+            journal_group(ev, g);
             journal_put(p, ev, FIRC_DNS_PASSED);
         }
         return FIRC_DNS_PASS;
     }
 
-    /* First matching group only: firing per group alternates a name between groups. */
     char qname[FIRC_DNS_MAX_NAME * 4 + 2];
-    const firc_group_snapshot_t *owner = NULL;
+    const firc_group_snapshot_t *owner = NULL, *matched = NULL;
     if (firc_dns_msg_queried_name(msg, qname, sizeof(qname))) {
-        owner = firc_ruleset_snapshot_first_match(p->snapshot, qname);
+        owner = firc_ruleset_snapshot_owner(p->snapshot, qname, client, p->policy_fn, p->device_fn, p->policy_ud,
+                                            &matched);
     } else {
         qname[0] = '\0';
     }
 
     if (ev != NULL) {
         journal_begin(ev, now, client, qname, msg, rcode, resolver);
-        journal_group(ev, owner);
+        journal_group(ev, owner != NULL ? owner : matched);
     }
 
     chain_t chain;
@@ -379,7 +378,7 @@ firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p,
     bool addr_question = msg->n_questions > 0 &&
         (msg->questions[0].qtype == FIRC_DNS_TYPE_A || msg->questions[0].qtype == FIRC_DNS_TYPE_AAAA);
 
-    if (owner == NULL) {
+    if (matched == NULL) {
         if (p->snapshot != NULL && p->snapshot->provisional && p->pool != NULL && addr_question) {
             /* RETIMED, not REWRITTEN: the address is real, so AAAA stripping must still apply. */
             uint32_t clamp = p->clamp_secs;
@@ -400,7 +399,7 @@ firc_dns_verdict_t firc_dns_pipeline_handle_message_from(firc_dns_pipeline_t *p,
         journal_put(p, ev, FIRC_DNS_PASSED);
         return FIRC_DNS_PASS;
     }
-    if (!firc_devsel_allows(owner->devices, client, p->policy_fn, p->device_fn, p->policy_ud)) {
+    if (owner == NULL) {
         journal_put(p, ev, FIRC_DNS_NOT_COVERED);
         if (p->unmatched_ttl_secs > 0 && addr_question) {
             if (firc_dns_msg_clamp_ttl(msg, p->unmatched_ttl_secs)) { return FIRC_DNS_RETIMED; }
@@ -441,15 +440,10 @@ bool firc_dns_pipeline_covers(const firc_dns_pipeline_t *p, const firc_ip_t *cli
 }
 
 const firc_group_snapshot_t *firc_dns_pipeline_owner(firc_dns_pipeline_t *p, const firc_dns_msg_t *query,
-                                                     const firc_ip_t *client, bool *covered)
+                                                     const firc_ip_t *client)
 {
-    *covered = false;
     if (p == NULL || p->snapshot == NULL || query == NULL) { return NULL; }
     char qname[FIRC_DNS_MAX_NAME * 4 + 2];
     if (!firc_dns_msg_queried_name(query, qname, sizeof(qname))) { return NULL; }
-    const firc_group_snapshot_t *owner = firc_ruleset_snapshot_first_match(p->snapshot, qname);
-    if (owner != NULL) {
-        *covered = firc_devsel_allows(owner->devices, client, p->policy_fn, p->device_fn, p->policy_ud);
-    }
-    return owner;
+    return firc_ruleset_snapshot_owner(p->snapshot, qname, client, p->policy_fn, p->device_fn, p->policy_ud, NULL);
 }

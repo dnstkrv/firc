@@ -283,8 +283,8 @@ static firc_group_t *published_list_group(firc_app_t *app, firc_dns_pipeline_t *
     firc_id_t id = g->id;
     if (firc_app_add_group(app, g) != FIRC_OK) { return NULL; }
     if (firc_app_republish_dns_snapshot(app) != FIRC_OK) { return NULL; }
-    if (firc_ruleset_snapshot_first_match(firc_dns_pipeline_snapshot(p), "a.ads.example.com") ==
-        NULL) {
+    if (firc_ruleset_snapshot_owner(firc_dns_pipeline_snapshot(p), "a.ads.example.com", NULL, NULL, NULL, NULL,
+                                    NULL) == NULL) {
         return NULL;
     }
     firc_ruleset_t *rs = firc_app_find_group_by_id(app, id);
@@ -295,7 +295,8 @@ static firc_group_t *published_list_group(firc_app_t *app, firc_dns_pipeline_t *
 static bool a_dropped_list_still_owns_the_name(firc_app_t *app, firc_dns_pipeline_t *p) {
     const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(p);
     const firc_group_snapshot_t *owner =
-        snap != NULL ? firc_ruleset_snapshot_first_match(snap, "a.ads.example.com") : NULL;
+        snap != NULL ? firc_ruleset_snapshot_owner(snap, "a.ads.example.com", NULL, NULL, NULL, NULL, NULL)
+                     : NULL;
     firc_ruleset_t *rs = firc_app_find_group_by_id(app, (firc_id_t){{0x0a, 0x0b, 0x0c, 0x0d}});
     bool list_there = rs != NULL && firc_ruleset_group(rs)->list != NULL;
     return owner != NULL && !list_there;

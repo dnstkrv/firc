@@ -32,6 +32,13 @@ import {
   toConfigPayload as toConfigPayloadData,
 } from "./groups-data";
 import { liveOfRecord, type GroupLive, type NetfilterState } from "./live-state";
+import {
+  computeOverlaps,
+  ruleKey,
+  type OverlapGroup,
+  type OverlapKind,
+  type RuleOverlap,
+} from "./overlap";
 import { selectableIds, selectedInOrder, toggleId } from "./selection";
 
 export const GROUPS_STORE_CONTEXT = Symbol("groups-store");
@@ -149,6 +156,7 @@ export type GroupDuplicateConflict = {
   inCurrentGroup: boolean;
   duplicateKey: string;
   totalRulesWithSameKey: number;
+  kind: OverlapKind;
 };
 
 export type DuplicateRuleFocusRequest = {
@@ -162,6 +170,7 @@ type DuplicateComputationResult = {
   duplicateGroups: Set<string>;
   duplicateRuleKeys: Map<string, string>;
   duplicateConflictsByGroup: Map<string, GroupDuplicateConflict[]>;
+  ruleOverlaps: Map<string, RuleOverlap>;
 };
 
 type SearchIndexRule = {
@@ -513,6 +522,7 @@ export class GroupsStore {
   duplicateGroupIds = $state<Set<string>>(new Set());
   duplicateRuleKeys = $state<Map<string, string>>(new Map());
   duplicateConflictsByGroup = $state<Map<string, GroupDuplicateConflict[]>>(new Map());
+  ruleOverlaps = $state<Map<string, RuleOverlap>>(new Map());
   activeDuplicateKey = $state<string | null>(null);
   duplicateHighlightPinned = $state(false);
   highlightedRuleId = $state<string | null>(null);
@@ -1159,83 +1169,73 @@ export class GroupsStore {
   }
 
   #computeDuplicates(): DuplicateComputationResult {
+    const groups: OverlapGroup[] = this.data.map((group) => ({
+      id: group.id,
+      name: group.name,
+      enable: group.enable,
+      devices: group.devices,
+      rules: [
+        ...group.rules,
+        ...((group.list ? (this.lists.pageState[group.id]?.rules ?? []) : []) as Rule[]),
+      ],
+    }));
+    const ruleOverlaps = computeOverlaps(groups);
+    const ruleById = new Map<string, Rule>();
+    const copies = new Map<string, number>();
+    for (const group of groups) {
+      for (const rule of group.rules) {
+        ruleById.set(rule.id, rule);
+        if (rule.rule.trim()) copies.set(ruleKey(rule), (copies.get(ruleKey(rule)) ?? 0) + 1);
+      }
+    }
+
     const duplicateRules = new Set<string>();
     const duplicateGroups = new Set<string>();
     const duplicateRuleKeys = new Map<string, string>();
-    const rulesByKey = new Map<string, { rule: Rule; groupId: string; groupName: string }[]>();
-
-    for (const group of this.data) {
-      const listed = (group.list ? (this.lists.pageState[group.id]?.rules ?? []) : []) as Rule[];
-      for (const rule of [...group.rules, ...listed]) {
-        const normalizedPattern = rule.rule.trim();
-        if (!normalizedPattern) continue;
-
-        const key = `${rule.type}:${rule.rule}:${rule.proto ?? ""}:${rule.ports ?? ""}`;
-        duplicateRuleKeys.set(rule.id, key);
-        let rules = rulesByKey.get(key);
-        if (!rules) {
-          rules = [];
-          rulesByKey.set(key, rules);
-        }
-        rules.push({
-          rule,
-          groupId: group.id,
-          groupName: group.name,
-        });
-      }
-    }
-
-    const conflictsByKey = new Map<string, GroupDuplicateConflict[]>();
-    const duplicateKeysByGroup = new Map<string, Set<string>>();
-
-    for (const [key, rules] of rulesByKey) {
-      if (rules.length < 2) continue;
-
-      for (const entry of rules) {
-        duplicateRules.add(entry.rule.id);
-        duplicateGroups.add(entry.groupId);
-        let keys = duplicateKeysByGroup.get(entry.groupId);
-        if (!keys) {
-          keys = new Set<string>();
-          duplicateKeysByGroup.set(entry.groupId, keys);
-        }
-        keys.add(key);
-      }
-
-      conflictsByKey.set(
-        key,
-        rules.map((entry) => ({
-          ruleId: entry.rule.id,
-          rulePattern: entry.rule.rule,
-          ruleType: entry.rule.type,
-          groupId: entry.groupId,
-          groupName: entry.groupName,
-          inCurrentGroup: false,
-          duplicateKey: key,
-          totalRulesWithSameKey: rules.length,
-        })),
-      );
-    }
-
     const duplicateConflictsByGroup = new Map<string, GroupDuplicateConflict[]>();
 
-    for (const [groupId, keys] of duplicateKeysByGroup) {
-      const conflicts: GroupDuplicateConflict[] = [];
-      for (const key of keys) {
-        const sameKeyConflicts = conflictsByKey.get(key);
-        if (!sameKeyConflicts) continue;
-        for (const conflict of sameKeyConflicts) {
-          conflicts.push({
-            ...conflict,
-            inCurrentGroup: conflict.groupId === groupId,
-          });
-        }
+    for (const group of groups) {
+      const conflicts = new Map<string, GroupDuplicateConflict>();
+      const add = (rule: Rule, groupId: string, groupName: string, kind: OverlapKind) => {
+        const key = ruleKey(rule);
+        duplicateRules.add(rule.id);
+        duplicateRuleKeys.set(rule.id, key);
+        if (conflicts.has(rule.id)) return;
+        conflicts.set(rule.id, {
+          ruleId: rule.id,
+          rulePattern: rule.rule,
+          ruleType: rule.type,
+          groupId,
+          groupName,
+          inCurrentGroup: groupId === group.id,
+          duplicateKey: key,
+          totalRulesWithSameKey: copies.get(key) ?? 0,
+          kind,
+        });
+      };
+      const marked = group.rules.filter((rule) => ruleOverlaps.has(rule.id));
+      for (const rule of marked) {
+        add(rule, group.id, group.name, ruleOverlaps.get(rule.id)!.kind);
       }
-      this.#sortDuplicateConflicts(conflicts);
-      duplicateConflictsByGroup.set(groupId, conflicts);
+      for (const rule of marked) {
+        const overlap = ruleOverlaps.get(rule.id)!;
+        const named = ruleById.get(overlap.ruleId);
+        if (named) add(named, overlap.groupId, overlap.groupName, overlap.kind);
+      }
+      if (conflicts.size === 0) continue;
+      const list = [...conflicts.values()];
+      this.#sortDuplicateConflicts(list);
+      duplicateGroups.add(group.id);
+      duplicateConflictsByGroup.set(group.id, list);
     }
 
-    return { duplicateRules, duplicateGroups, duplicateRuleKeys, duplicateConflictsByGroup };
+    return {
+      duplicateRules,
+      duplicateGroups,
+      duplicateRuleKeys,
+      duplicateConflictsByGroup,
+      ruleOverlaps,
+    };
   }
 
   #applyDuplicateComputation(result: DuplicateComputationResult) {
@@ -1243,6 +1243,7 @@ export class GroupsStore {
     this.duplicateGroupIds = result.duplicateGroups;
     this.duplicateRuleKeys = result.duplicateRuleKeys;
     this.duplicateConflictsByGroup = result.duplicateConflictsByGroup;
+    this.ruleOverlaps = result.ruleOverlaps;
     this.#syncActiveDuplicateKey();
   }
 
@@ -1295,7 +1296,14 @@ export class GroupsStore {
     }, delayMs);
   };
 
-  isRuleDuplicate = (ruleId: string) => this.duplicateRuleIds.has(ruleId);
+  ruleOverlap = (ruleId: string): RuleOverlap | undefined => this.ruleOverlaps.get(ruleId);
+  overlapText = (overlap: RuleOverlap) => {
+    const text =
+      overlap.kind === "shadowed"
+        ? t("Shadowed by group {group}")
+        : t("Same rule in group {group} for other devices");
+    return text.replace("{group}", overlap.groupName.trim() || t("Unnamed group"));
+  };
   getRuleSearchMatchMask = (ruleId: string) => this.searchRuleMatchMaskById.get(ruleId) ?? 0;
   getSearchHighlightParts = (value: string, query: string): SearchHighlightSegment[] | undefined =>
     this.#splitSearchHighlightSegments(value, query);

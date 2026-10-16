@@ -38,8 +38,8 @@ typedef struct firc_tap_find {
     uint8_t how;                        /* firc_bypass_how_t */
 } firc_tap_find_t;
 
-/* A new connection client->dst: a bypass when the client is covered, the
- * recall knows dst's name, and that name's current owner admits the client. */
+/* A new connection client->dst: a bypass when the client is covered, the recall knows dst's name,
+ * and some group matching that name now admits the client (the first such group is reported). */
 bool firc_tap_judge_addr(const firc_tap_ctx_t *c, const firc_ip_t *client, const firc_ip_t *dst,
                          firc_tap_find_t *out);
 /* The same, from a ClientHello's SNI; used only when the address path misses. */

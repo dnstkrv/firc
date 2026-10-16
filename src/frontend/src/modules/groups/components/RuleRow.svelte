@@ -26,7 +26,6 @@
     group_index: number;
     rule_id: string;
     group_id: string;
-    isDuplicate?: boolean;
     isHighlighted?: boolean;
     [key: string]: any;
   };
@@ -37,7 +36,6 @@
     group_index,
     rule_id,
     group_id,
-    isDuplicate = false,
     isHighlighted = false,
     ...rest
   }: Props = $props();
@@ -46,6 +44,8 @@
   if (!store) {
     throw new Error("GroupsStore context is missing");
   }
+
+  let overlap = $derived(store.ruleOverlap(rule.id));
 
   let input: HTMLInputElement;
 
@@ -206,17 +206,17 @@
         matched={Boolean(ruleSearchMatchMask & RULE_SEARCH_MATCH_COMMENT)}
         onchange={setComment}
       />
-      <div class="duplicate-indicator-slot" class:is-empty={!isDuplicate}>
-        {#if isDuplicate}
-          <Tooltip value={t("Duplicate rule")}>
-            <div class="duplicate-indicator">
+      <div class="duplicate-indicator-slot" class:is-empty={!overlap}>
+        {#if overlap}
+          <Tooltip value={store.overlapText(overlap)}>
+            <div class="duplicate-indicator" data-overlap={overlap.kind}>
               <TriangleAlert size={18} />
             </div>
           </Tooltip>
         {/if}
       </div>
       <Tooltip value={t(rule.enable ? "Disable Rule" : "Enable Rule")}>
-        <Switch bind:checked={rule.enable} />
+        <Switch bind:checked={rule.enable} onCheckedChange={store.markDataRevision} />
       </Tooltip>
       <Tooltip value={t("Delete Rule")}>
         <Button
@@ -413,6 +413,10 @@
   }
   .grip:hover {
     color: var(--text);
+  }
+
+  .duplicate-indicator[data-overlap="split"] {
+    color: var(--grey-dark);
   }
 
   .duplicate-indicator {

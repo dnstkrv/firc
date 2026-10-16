@@ -925,4 +925,23 @@ test.describe("Groups with a list", () => {
 
     expect(state.savedBody?.groups.map((g: any) => g.id)).toEqual(["bbbbbbb2", "aaaaaaa1"]);
   });
+
+  // Catches a list rule's enable switch not recomputing the duplicate marks.
+  test("disabling an upper list rule clears the mark on the lower copy", async ({ page }) => {
+    const shared = (id: string) => [
+      { enable: true, id, rule: "shared.example.com", type: "domain" },
+    ];
+    await setupGroupLists(page, [
+      makeListGroup("a1b2c3d4", "https://one.example/list.txt", "One", shared("a1b2aaaa")),
+      makeListGroup("b1c2d3e4", "https://two.example/list.txt", "Two", shared("b1c2aaaa")),
+    ]);
+
+    const lower = page.locator('.list-rule[data-uuid="b1c2aaaa"] .duplicate-indicator');
+    await expect(lower).toBeVisible();
+    await page.locator('.list-rule[data-uuid="a1b2aaaa"] [data-switch-root]').click();
+    await expect(lower).toHaveCount(0);
+    await expect(
+      page.locator(".group-header").nth(1).locator(".group-duplicate-indicator"),
+    ).toHaveCount(0);
+  });
 });

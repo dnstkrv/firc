@@ -364,6 +364,7 @@ $(ROUTECHECK): tests/routing/routecheck.c $(LIB_OBJS) $(BUILDDIR)/tests/support/
 routing: $(ROUTECHECK)
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_mark_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_selector_routing.sh
+	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_shared_name_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_barrier_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_egress_routing.sh
 	FIRC_ROUTECHECK=$(abspath $(ROUTECHECK)) sh tests/routing/run_xt_nat.sh v4

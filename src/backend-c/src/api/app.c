@@ -3520,17 +3520,13 @@ static bool answer_ready(const firc_dns_msg_t *msg, void *ud) {
 }
 
 bool firc_app_answer_ready(firc_app_t *app, const firc_dns_msg_t *msg) {
-    char qname[FIRC_DNS_MAX_NAME * 4 + 2];
-    if (!firc_dns_msg_queried_name(msg, qname, sizeof(qname))) { return true; }
-    /* only the families the held answer actually carries: an A answer is not kept waiting on a later AAAA's v6 pair */
     for (size_t i = 0; i < msg->n_answers; i++) {
-        uint16_t t = msg->answers[i].rtype;
-        if (t == FIRC_DNS_TYPE_A && firc_fakeip_needs_commit(app->pool, qname, FIRC_FAM_V4)) {
-            return false;
-        }
-        if (t == FIRC_DNS_TYPE_AAAA && firc_fakeip_needs_commit(app->pool, qname, FIRC_FAM_V6)) {
-            return false;
-        }
+        const firc_dns_rr_t *rr = &msg->answers[i];
+        size_t len = rr->rtype == FIRC_DNS_TYPE_A ? 4 : rr->rtype == FIRC_DNS_TYPE_AAAA ? 16 : 0;
+        if (len == 0 || rr->rdata_len != len) { continue; }
+        firc_ip_t fake = {{0}, (uint8_t)len};
+        memcpy(fake.b, rr->rdata, len);
+        if (firc_fakeip_needs_commit(app->pool, &fake)) { return false; }
     }
     return true;
 }

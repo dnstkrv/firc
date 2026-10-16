@@ -15,6 +15,8 @@
 
   let { conflicts, isRuleHighlighted, onConflictClick }: Props = $props();
 
+  let kind = $derived(conflicts.some((c) => c.kind === "shadowed") ? "shadowed" : "split");
+
   function duplicateConflictGroupTitle(conflict: GroupDuplicateConflict) {
     const normalizedName = conflict.groupName.trim();
     if (normalizedName) return normalizedName;
@@ -29,6 +31,7 @@
         <span
           aria-label={t("Show duplicate conflicts")}
           class="group-duplicate-indicator group-duplicate-menu-trigger"
+          data-overlap={kind}
         >
           <TriangleAlert size={18} />
         </span>
@@ -75,6 +78,10 @@
     justify-content: center;
     padding: 0;
     flex: 0 0 auto;
+  }
+
+  :global(.group-duplicate-indicator[data-overlap="split"]) {
+    color: var(--grey-dark);
   }
 
   :global(.group-duplicate-menu-trigger) {

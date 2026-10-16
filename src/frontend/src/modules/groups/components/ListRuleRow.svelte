@@ -30,7 +30,7 @@
     );
   }
 
-  let isDuplicate = $derived(store.isRuleDuplicate(rule.id));
+  let overlap = $derived(store.ruleOverlap(rule.id));
   let isHighlighted = $derived(store.isRuleHighlighted(rule.id));
 
   let baseline = $derived(store.lists.baselineOf(group_id, rule.id));
@@ -73,9 +73,11 @@
       {#if rule.proto || rule.ports}
         <span class="list-rule-spec">{[rule.proto, rule.ports].filter(Boolean).join(" ")}</span>
       {/if}
-      {#if isDuplicate}
-        <Tooltip value={t("Duplicate rule")}>
-          <span class="duplicate-indicator"><TriangleAlert size={18} /></span>
+      {#if overlap}
+        <Tooltip value={store.overlapText(overlap)}>
+          <span class="duplicate-indicator" data-overlap={overlap.kind}
+            ><TriangleAlert size={18} /></span
+          >
         </Tooltip>
       {/if}
       {#if isChanged}
@@ -84,7 +86,7 @@
     </div>
     <div class="list-rule-actions">
       <Tooltip value={t(rule.enable ? "Disable Rule" : "Enable Rule")}>
-        <Switch bind:checked={rule.enable} />
+        <Switch bind:checked={rule.enable} onCheckedChange={store.markDataRevision} />
       </Tooltip>
     </div>
   </div>
@@ -141,6 +143,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1 1 auto;
+  }
+
+  .duplicate-indicator[data-overlap="split"] {
+    color: var(--grey-dark);
   }
 
   .duplicate-indicator {

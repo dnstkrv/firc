@@ -83,12 +83,18 @@ static firc_err_t append_group(firc_ruleset_snapshot_t *snap, const firc_group_t
     return err;
 }
 
-const firc_group_snapshot_t *firc_ruleset_snapshot_first_match(const firc_ruleset_snapshot_t *snap,
-                                                               const char *name) {
+const firc_group_snapshot_t *firc_ruleset_snapshot_owner(const firc_ruleset_snapshot_t *snap, const char *name,
+                                                         const firc_ip_t *client, firc_devsel_policy_fn policy,
+                                                         firc_devsel_device_fn device, void *ud,
+                                                         const firc_group_snapshot_t **first)
+{
+    if (first != NULL) { *first = NULL; }
     if (snap == NULL || name == NULL) { return NULL; }
     for (size_t i = 0; i < snap->n_groups; i++) {
-        firc_group_snapshot_t *g = snap->groups[i];
-        if (g != NULL && firc_matcher_match(g->matcher, name)) { return g; }
+        const firc_group_snapshot_t *g = snap->groups[i];
+        if (g == NULL || !firc_matcher_match(g->matcher, name)) { continue; }
+        if (first != NULL && *first == NULL) { *first = g; }
+        if (firc_devsel_allows(g->devices, client, policy, device, ud)) { return g; }
     }
     return NULL;
 }

@@ -475,6 +475,42 @@ TEST what_is_not_routed_goes_to_the_common_upstream(void)
     PASS();
 }
 
+/* Catches: the router's owner fixed by the first match, or a device falling through when its group cannot resolve. */
+TEST a_lower_groups_device_is_resolved_by_its_group_and_never_through_another(void)
+{
+    decide_fx_t fx;
+    memset(&fx, 0, sizeof(fx));
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&fx.cfg));
+    firc_group_t *a = group("a", "nwg0", 1);
+    add_namespace_rule(a, "shared.test");
+    a->devices.allow = calloc(1, sizeof(char *));
+    a->devices.allow[0] = strdup("192.168.1.5");
+    a->devices.n_allow = 1;
+    firc_config_add_group(&fx.cfg, a);
+    firc_group_t *b = group("b", "nwg1", 2);
+    add_namespace_rule(b, "shared.test");
+    firc_config_add_group(&fx.cfg, b);
+    fx.pl = firc_dns_pipeline_create();
+    fx.router = firc_resolve_router_new(fx.pl);
+    ASSERT(fx.pl != NULL && fx.router != NULL);
+    firc_dns_pipeline_set_snapshot(fx.pl, firc_ruleset_snapshot_build(&fx.cfg));
+    static firc_resolver_addr_t fw[1];
+    fw[0] = addr("9.9.9.9");
+    firc_resolve_input_t in[2] = {
+        {.group = a, .mark = 0, .firmware = fw, .n_firmware = 1},
+        {.group = b, .mark = MARK1, .firmware = fw, .n_firmware = 1},
+    };
+    firc_resolve_table_t t;
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(in, 2, NULL, &t));
+    firc_resolve_router_publish(fx.router, &t);
+    firc_dnsproxy_route_t r;
+    ASSERT_FALSEm("A's device stays with A, which cannot resolve", decide(&fx, "x.shared.test", 1, "192.168.1.5", &r));
+    ASSERTm("B's device goes to B's resolver", decide(&fx, "x.shared.test", 1, "192.168.1.9", &r));
+    ASSERT(firc_id_equal(b->id, r.group_id));
+    decide_fx_down(&fx);
+    PASS();
+}
+
 /* Catches: an unchanged group reported stale, a changed one missed, or rewired taken for removed. */
 TEST the_stale_groups_are_the_removed_and_the_rewired(void)
 {
@@ -635,6 +671,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_query_with_no_client_address_is_routed_like_the_pipeline_covers_it);
     RUN_TEST(every_query_type_is_routed);
     RUN_TEST(what_is_not_routed_goes_to_the_common_upstream);
+    RUN_TEST(a_lower_groups_device_is_resolved_by_its_group_and_never_through_another);
     RUN_TEST(the_stale_groups_are_the_removed_and_the_rewired);
     RUN_TEST(a_published_v6_flag_reaches_the_answer_and_flips_with_the_next_publish);
     RUN_TEST(a_route_names_the_active_entry_not_the_first);

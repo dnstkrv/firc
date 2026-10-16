@@ -23,9 +23,12 @@ typedef struct firc_ruleset_snapshot {
     bool provisional;  /* an enabled group with a list has no body fetched yet */
 } firc_ruleset_snapshot_t;
 
-/* The first group (in snapshot = configuration order) whose rules match name, or NULL. */
-const firc_group_snapshot_t *firc_ruleset_snapshot_first_match(const firc_ruleset_snapshot_t *snap,
-                                                               const char *name);
+/* The first group, in snapshot order, whose rules match name and whose selector admits client (NULL: any);
+ * *first (nullable) gets the first group whose rules match, admitting or not. */
+const firc_group_snapshot_t *firc_ruleset_snapshot_owner(const firc_ruleset_snapshot_t *snap, const char *name,
+                                                         const firc_ip_t *client, firc_devsel_policy_fn policy,
+                                                         firc_devsel_device_fn device, void *ud,
+                                                         const firc_group_snapshot_t **first);
 
 /* Builds a fresh snapshot: one entry per enabled group, in config order; NULL only on OOM. */
 firc_ruleset_snapshot_t *firc_ruleset_snapshot_build(const firc_config_t *cfg);

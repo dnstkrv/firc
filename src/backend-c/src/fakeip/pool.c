@@ -531,32 +531,15 @@ firc_err_t firc_fakeip_get(firc_fakeip_t *f, const char *qname, const char *grou
 
     uint64_t h = fnv1a(qname) % MAP_BUCKETS;
     for (mapping_t *m = f->buckets[h]; m != NULL; m = m->next) {
-        if (!name_eq(m->qname, qname)) { continue; }
-        /* Fast path for the common case; without it this falls into the move branch at 2-3x cost. */
-        if (strcmp(m->owner->id, group_id) == 0) {
-            m->last_seen = now;
-            f->dirty = true;
-            if (v4_out != NULL) { *v4_out = m->addr[FAM_V4]; }
-            if (v6_out != NULL) { *v6_out = m->addr[FAM_V6]; }
-            return FIRC_OK;
-        }
-        /* Moved group: addresses carry the routing decision, so they can't follow the name. */
-        for (unsigned i = 0; i < N_FAM; i++) {
-            chunk_count(f, &m->owner->fam[i], &m->addr[i], -1, 0);
-            quarantine_put(f, &m->owner->fam[i], &m->addr[i], m->has_real[i] ? &m->real[i] : NULL,
-                           now, m->qname);
-        }
-        mapping_t **pp = &f->buckets[h];
-        while (*pp != m) { pp = &(*pp)->next; }
-        *pp = m->next;
-        rindex_del(f, m);
-        free(m->qname);
-        free(m);
-        f->n_names--;
-        break;
+        if (!name_eq(m->qname, qname) || strcmp(m->owner->id, group_id) != 0) { continue; }
+        m->last_seen = now;
+        f->dirty = true;
+        if (v4_out != NULL) { *v4_out = m->addr[FAM_V4]; }
+        if (v6_out != NULL) { *v6_out = m->addr[FAM_V6]; }
+        return FIRC_OK;
     }
 
-    /* At capacity, refuse like an exhausted pool; already-mapped names were served above. */
+    /* At capacity, refuse like an exhausted pool; mappings already held were served above. */
     if (f->n_names >= f->max_names) {
         write_blackholes(f, v4_out, v6_out);
         return FIRC_ERR_LIMIT;
@@ -626,10 +609,10 @@ firc_err_t firc_fakeip_get(firc_fakeip_t *f, const char *qname, const char *grou
     return FIRC_OK;
 }
 
-static mapping_t *mapping_find(firc_fakeip_t *f, const char *qname) {
+static mapping_t *mapping_find(firc_fakeip_t *f, const char *qname, const char *group_id) {
     uint64_t h = fnv1a(qname) % MAP_BUCKETS;
     for (mapping_t *m = f->buckets[h]; m != NULL; m = m->next) {
-        if (name_eq(m->qname, qname)) { return m; }
+        if (name_eq(m->qname, qname) && strcmp(m->owner->id, group_id) == 0) { return m; }
     }
     return NULL;
 }
@@ -686,8 +669,8 @@ bool firc_fakeip_pool_prefix(const firc_fakeip_t *f, unsigned family, firc_ip_t 
     return true;
 }
 
-firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const firc_ip_t *real) {
-    if (f == NULL || qname == NULL || real == NULL) { return FIRC_ERR_INVAL; }
+firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const char *group_id, const firc_ip_t *real) {
+    if (f == NULL || qname == NULL || group_id == NULL || real == NULL) { return FIRC_ERR_INVAL; }
     unsigned fi;
     if (real->len == 4) {
         fi = FAM_V4;
@@ -697,7 +680,7 @@ firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const firc_
         return FIRC_ERR_INVAL;
     }
 
-    mapping_t *m = mapping_find(f, qname);
+    mapping_t *m = mapping_find(f, qname, group_id);
     if (m == NULL) { return FIRC_ERR_NOENT; }
     if (!m->has_real[fi] || !ip_equal(&m->real[fi], real)) {
         m->real[fi] = *real;
@@ -707,10 +690,10 @@ firc_err_t firc_fakeip_set_real(firc_fakeip_t *f, const char *qname, const firc_
     return FIRC_OK;
 }
 
-firc_err_t firc_fakeip_set_reals(firc_fakeip_t *f, const char *qname, const firc_ip_t *reals,
-                                 size_t n) {
-    if (f == NULL || qname == NULL || (reals == NULL && n > 0)) { return FIRC_ERR_INVAL; }
-    mapping_t *m = mapping_find(f, qname);
+firc_err_t firc_fakeip_set_reals(firc_fakeip_t *f, const char *qname, const char *group_id,
+                                 const firc_ip_t *reals, size_t n) {
+    if (f == NULL || qname == NULL || group_id == NULL || (reals == NULL && n > 0)) { return FIRC_ERR_INVAL; }
+    mapping_t *m = mapping_find(f, qname, group_id);
     if (m == NULL) { return FIRC_ERR_NOENT; }
 
     /* Per family: keep the stored address while still offered, else the first offered. */
@@ -738,11 +721,14 @@ firc_err_t firc_fakeip_set_reals(firc_fakeip_t *f, const char *qname, const firc
     return FIRC_OK;
 }
 
-bool firc_fakeip_needs_commit(const firc_fakeip_t *f, const char *qname, unsigned family) {
-    if (f == NULL || qname == NULL || family >= N_FAM) { return false; }
-    const mapping_t *m = mapping_find((firc_fakeip_t *)f, qname);
-    if (m == NULL) { return false; }
-    return m->pair_gen[family] > f->committed_gen; /* pair_gen 0 (no real address) is never above it */
+bool firc_fakeip_needs_commit(const firc_fakeip_t *f, const firc_ip_t *fake) {
+    if (f == NULL || fake == NULL) { return false; }
+    unsigned fi = fake->len == 4 ? FAM_V4 : fake->len == 16 ? FAM_V6 : N_FAM;
+    if (fi == N_FAM) { return false; }
+    for (const mapping_t *m = f->by_addr[fi][addr_bucket(fake)]; m != NULL; m = m->rnext[fi]) {
+        if (ip_equal(&m->addr[fi], fake)) { return m->pair_gen[fi] > f->committed_gen; }
+    }
+    return false;
 }
 
 void firc_fakeip_mark_committed(firc_fakeip_t *f, uint64_t gen) {
@@ -1261,7 +1247,7 @@ static bool chunk_held_by_other(const firc_fakeip_t *f, unsigned fi, const group
     return false;
 }
 
-/* Refuses an address outside the pool or in the blackhole chunk, or a name already held. */
+/* Refuses an address outside the pool or in the blackhole chunk, or a mapping already held (name and group). */
 static bool restore_line(firc_fakeip_t *f, char *line, int64_t now) {
     char *save = NULL;
     char *qname = strtok_r(line, " ", &save);
@@ -1293,7 +1279,7 @@ static bool restore_line(firc_fakeip_t *f, char *line, int64_t now) {
     char *end = NULL;
     long long seen = strtoll(seen_s, &end, 10);
     if (end == seen_s || *end != '\0') { return false; }
-    if (f->n_names >= f->max_names || mapping_find(f, qname) != NULL) { return false; }
+    if (f->n_names >= f->max_names || mapping_find(f, qname, gid) != NULL) { return false; }
 
     group_t *g = group_find_or_add(f, gid);
     if (g == NULL) { return false; }

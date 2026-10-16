@@ -20,6 +20,11 @@ static const char *s6(const firc_ip_t *a, char buf[40]) {
     return buf;
 }
 
+static bool names(const firc_fakeip_t *f, const firc_ip_t *addr, const char *want) {
+    const char *n = firc_fakeip_name_of(f, addr);
+    return n != NULL && strcmp(n, want) == 0;
+}
+
 #define T0 INT64_C(1700000000)
 #define DAY INT64_C(86400)
 #define CLAMP INT64_C(300)
@@ -285,51 +290,106 @@ TEST names_that_share_a_hash_bucket_get_their_own_addresses(void) {
     PASS();
 }
 
-/* Catches: a moved name keeping its old group's addresses, moving one family only, or not parking. */
-TEST a_name_moved_to_another_group_is_issued_addresses_from_that_group(void) {
+/* Catches: the move branch kept, so one group's ask takes the name's only mapping away from the other. */
+TEST one_name_holds_one_mapping_per_group(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-
-    firc_ip_t v4 = {{0}, 0}, v6 = {{0}, 0};
-    char b4[16], b6[40];
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.0.1", s4(&v4, b4));
-    ASSERT_STR_EQ("fd37:9a5c:be10:0000:0000:0000:0000:0001", s6(&v6, b6));
-
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.1.1", s4(&v4, b4));
-    ASSERT_STR_EQm("the v6 address moved too", "fd37:9a5c:be10:0001:0000:0000:0000:0001",
-                   s6(&v6, b6));
-
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.0.2", s4(&v4, b4));
-
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + QUAR, &v4, &v6));
-    ASSERT_STR_EQm("past the window the vacated v4 address is back", "198.18.0.1",
-                   s4(&v4, b4));
-    ASSERT_STR_EQm("and the v6 one", "fd37:9a5c:be10:0000:0000:0000:0000:0001", s6(&v6, b6));
-
+    firc_ip_t a4 = {{0}, 0}, a6 = {{0}, 0}, b4 = {{0}, 0}, b6 = {{0}, 0};
+    char s[16], t[40];
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, &a6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &b4, &b6));
+    ASSERT_STR_EQ("198.18.0.1", s4(&a4, s));
+    ASSERT_STR_EQ("fd37:9a5c:be10:0000:0000:0000:0000:0001", s6(&a6, t));
+    ASSERT_STR_EQm("the second group's chunk", "198.18.1.1", s4(&b4, s));
+    ASSERT_STR_EQ("fd37:9a5c:be10:0001:0000:0000:0000:0001", s6(&b6, t));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, NULL));
+    ASSERT_STR_EQm("asked again by the first group, its own address", "198.18.0.1", s4(&a4, s));
+    ASSERTm("the first group's mapping is live", names(f, &a4, "a.example.com"));
+    ASSERTm("and so is the second's", names(f, &b4, "a.example.com"));
     firc_fakeip_free(f);
     PASS();
 }
 
-/* Catches: a name returning to a group given a fresh pair instead of the one it parked there. */
-TEST a_name_returning_to_a_group_gets_its_parked_addresses_back(void) {
+/* Catches: a known name's mapping in a second group served without counting against max_names. */
+TEST a_name_in_a_second_group_costs_a_second_mapping(void) {
+    firc_fakeip_cfg_t c = base_cfg();
+    c.max_names = 1;
+    firc_fakeip_t *f = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
+    firc_ip_t v4 = {{0}, 0};
+    char s[16];
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
+    ASSERT_EQ(FIRC_ERR_LIMIT, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
+    ASSERT_STR_EQm("the blackhole, never the first group's address", "198.19.255.1", s4(&v4, s));
+    firc_fakeip_free(f);
+    PASS();
+}
+
+/* Catches: one group's ask keeping the name's other mapping alive, or the sweep taking both. */
+TEST an_idle_mapping_is_reclaimed_while_the_other_groups_stays(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
+    firc_ip_t a4 = {{0}, 0}, b4 = {{0}, 0}, again = {{0}, 0};
+    char s[16];
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &b4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0 + DAY - 10, &b4, NULL));
+    firc_fakeip_reclaim(f, T0 + DAY);
+    ASSERT_EQm("g1's mapping, idle a day, is released", NULL, firc_fakeip_name_of(f, &a4));
+    ASSERTm("g2's, asked since, stays", names(f, &b4, "a.example.com"));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0 + DAY + 1, &again, NULL));
+    ASSERT_STR_EQm("asked again in g1, it gets its parked address back", "198.18.0.1", s4(&again, s));
+    firc_fakeip_free(f);
+    PASS();
+}
 
-    firc_ip_t v4 = {{0}, 0}, v6 = {{0}, 0};
-    char b4[16], b6[40];
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, &v6));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.0.1", s4(&v4, b4));
-    ASSERT_STR_EQ("fd37:9a5c:be10:0000:0000:0000:0000:0001", s6(&v6, b6));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.1.1", s4(&v4, b4));
+/* Catches: a parked address of one group handed to the same name's mapping in another group. */
+TEST a_name_parked_in_one_group_gets_nothing_of_it_in_another(void) {
+    firc_fakeip_cfg_t c = base_cfg();
+    firc_fakeip_t *f = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
+    firc_ip_t a4 = {{0}, 0}, b4 = {{0}, 0};
+    char s[16];
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, NULL));
+    firc_fakeip_reclaim(f, T0 + DAY);
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0 + DAY + 1, &b4, NULL));
+    ASSERT_STR_EQm("g2's own chunk, not g1's parked address", "198.18.1.1", s4(&b4, s));
+    firc_fakeip_free(f);
+    PASS();
+}
 
+/* Catches: set_reals or needs_commit finding the name's mapping in the wrong group. */
+TEST each_groups_mapping_of_one_name_keeps_its_own_real_and_commit(void) {
+    firc_fakeip_cfg_t c = base_cfg();
+    firc_fakeip_t *f = NULL;
+    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
+    firc_ip_t a4 = {{0}, 0}, b4 = {{0}, 0}, got = {{0}, 0};
+    const firc_ip_t x = {{93, 184, 216, 34}, 4};
+    const firc_ip_t y = {{1, 2, 3, 4}, 4};
+    const firc_ip_t never = {{198, 18, 20, 186}, 4};
+    const char *gid = NULL;
+    char s[16];
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &b4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &x, 1));
+    ASSERTm("g1's pair waits", firc_fakeip_needs_commit(f, &a4));
+    ASSERT_FALSEm("g2's pair has no real yet", firc_fakeip_needs_commit(f, &b4));
+    firc_fakeip_snapshot_t *snap = firc_fakeip_snapshot_take(f);
+    firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(snap));
+    firc_fakeip_snapshot_free(snap);
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g2", &y, 1));
+    ASSERTm("g2's new pair waits", firc_fakeip_needs_commit(f, &b4));
+    ASSERT_FALSEm("g1's committed pair does not", firc_fakeip_needs_commit(f, &a4));
+    ASSERT(firc_fakeip_pair_of(f, &a4, &gid, &got));
+    ASSERT_STR_EQ("g1", gid);
+    ASSERT_STR_EQ("93.184.216.34", s4(&got, s));
+    ASSERT(firc_fakeip_pair_of(f, &b4, &gid, &got));
+    ASSERT_STR_EQ("g2", gid);
+    ASSERT_STR_EQ("1.2.3.4", s4(&got, s));
+    ASSERT_EQ(FIRC_ERR_NOENT, firc_fakeip_set_reals(f, "a.example.com", "g3", &x, 1));
+    ASSERT_FALSEm("an address the pool never issued waits for nothing", firc_fakeip_needs_commit(f, &never));
     firc_fakeip_free(f);
     PASS();
 }
@@ -564,23 +624,6 @@ TEST at_capacity_new_names_are_refused_but_known_ones_still_work(void) {
     PASS();
 }
 
-/* Catches: a move that does not return its old mapping's capacity. */
-TEST a_move_returns_the_capacity_the_old_mapping_held(void) {
-    firc_fakeip_cfg_t c = base_cfg();
-    c.max_names = 1;
-    firc_fakeip_t *f = NULL;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-
-    firc_ip_t v4 = {{0}, 0};
-    char b4[16];
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
-    ASSERT_STR_EQ("198.18.1.1", s4(&v4, b4));
-
-    firc_fakeip_free(f);
-    PASS();
-}
-
 /* Catches: a mapping recording the head of the group list instead of the group that issued it. */
 TEST a_mapping_records_the_group_that_issued_it(void) {
     firc_fakeip_cfg_t c = base_cfg();
@@ -617,10 +660,10 @@ TEST a_vacated_address_returns_to_the_group_whose_chunk_it_came_from(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "seed.example.com", "g2", T0, &v4, &v6));
     ASSERT_STR_EQ("198.18.1.1", s4(&v4, b4));
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, &v6));
-    ASSERT_STR_EQ("198.18.1.2", s4(&v4, b4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "seed.example.com", "g2", T0 + DAY - 1, &v4, &v6));
+    firc_fakeip_reclaim(f, T0 + DAY);
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + QUAR, &v4, &v6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + DAY + QUAR, &v4, &v6));
     ASSERT_STR_EQm("the vacated v4 address came back to g1", "198.18.0.1", s4(&v4, b4));
     ASSERT_STR_EQm("and the v6 one", "fd37:9a5c:be10:0000:0000:0000:0000:0001", s6(&v6, b6));
 
@@ -799,7 +842,7 @@ TEST the_real_address_a_fake_one_stands_for_is_recorded_per_family(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
 
     firc_ip_t real = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &real));
 
     walk_log_t w = {0};
     firc_fakeip_walk(f, log_entry, &w);
@@ -820,7 +863,7 @@ TEST the_real_address_a_fake_one_stands_for_is_recorded_per_family(void) {
     firc_ip_t real6 = {{0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0, 1, 0x02, 0x48, 0x18, 0x93, 0x25,
                         0xc8, 0x19, 0x46},
                        16};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &real6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &real6));
 
     walk_log_t w2 = {0};
     firc_fakeip_walk(f, log_entry, &w2);
@@ -848,8 +891,8 @@ TEST setting_the_real_address_again_replaces_it(void) {
 
     firc_ip_t first = {{93, 184, 216, 34}, 4};
     firc_ip_t second = {{1, 2, 3, 4}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &first));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &second));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &first));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &second));
 
     walk_log_t w = {0};
     firc_fakeip_walk(f, log_entry, &w);
@@ -877,10 +920,10 @@ TEST a_real_address_still_in_the_answer_is_kept_and_a_vanished_one_replaced(void
     const firc_ip_t y6 = {{0x26, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, 16};
 
     firc_ip_t first[] = {a, x6};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", first, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", first, 2));
 
     firc_ip_t rotated[] = {b, a};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", rotated, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", rotated, 2));
     walk_log_t w = {0};
     firc_fakeip_walk(f, log_entry, &w);
     int i4 = find_fake(&w, "198.18.0.1");
@@ -888,7 +931,7 @@ TEST a_real_address_still_in_the_answer_is_kept_and_a_vanished_one_replaced(void
     ASSERT_STR_EQm("still present, so kept", "93.184.216.34", w.real[i4]);
 
     firc_ip_t gone[] = {cc, b};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", gone, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", gone, 2));
     walk_log_t w2 = {0};
     firc_fakeip_walk(f, log_entry, &w2);
     i4 = find_fake(&w2, "198.18.0.1");
@@ -900,7 +943,7 @@ TEST a_real_address_still_in_the_answer_is_kept_and_a_vanished_one_replaced(void
                    "2606:0000:0000:0000:0000:0000:0000:0001", w2.real[i6]);
 
     firc_ip_t only6[] = {y6};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", only6, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", only6, 1));
     walk_log_t w3 = {0};
     firc_fakeip_walk(f, log_entry, &w3);
     i6 = find_fake(&w3, "fd37:9a5c:be10:0000:0000:0000:0000:0001");
@@ -917,37 +960,38 @@ TEST a_pair_needs_a_commit_until_a_snapshot_taken_after_it_completes(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-    firc_ip_t v4 = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
+    firc_ip_t v4 = {{0}, 0}, v6 = {{0}, 0};
+    const firc_ip_t nobody = {{198, 18, 0, 99}, 4};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
     ASSERT_FALSEm("no real address yet: nothing to write, nothing to wait for",
-                  firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+                  firc_fakeip_needs_commit(f, &v4));
 
     const firc_ip_t a = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &a, 1));
-    ASSERT(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &a, 1));
+    ASSERT(firc_fakeip_needs_commit(f, &v4));
     ASSERT_FALSEm("the v6 half has no real address (a v4-only name)",
-                  firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V6));
+                  firc_fakeip_needs_commit(f, &v6));
 
     firc_fakeip_snapshot_t *s1 = firc_fakeip_snapshot_take(f);
     ASSERT(s1 != NULL);
-    ASSERTm("taken, not yet written", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERTm("taken, not yet written", firc_fakeip_needs_commit(f, &v4));
 
     const firc_ip_t b = {{1, 2, 3, 4}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &b, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &b, 1));
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1));
     ASSERTm("the pass that completed carried the OLD pair", 
-            firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+            firc_fakeip_needs_commit(f, &v4));
 
     firc_fakeip_snapshot_t *s2 = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s2));
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &v4));
 
     firc_ip_t rotated[] = {a, b};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", rotated, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", rotated, 2));
     ASSERT_FALSEm("the stored address is still in the answer; no new pair",
-                  firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+                  firc_fakeip_needs_commit(f, &v4));
 
-    ASSERT_FALSEm("an unknown name has no pair", firc_fakeip_needs_commit(f, "nobody.example", FIRC_FAM_V4));
+    ASSERT_FALSEm("an address no name holds has no pair", firc_fakeip_needs_commit(f, &nobody));
 
     firc_fakeip_snapshot_free(s1);
     firc_fakeip_snapshot_free(s2);
@@ -982,48 +1026,49 @@ static void snap_record(void *ud, const char *group_id, unsigned family, const f
     v->n++;
 }
 
-/* Catches: a global dirty flag instead of per pair, a commit mark that moves back, or a bad bump. */
+/* Catches: a global dirty flag instead of per pair, a commit mark that moves back, a bad bump, or one group's pair of a name read as another's. */
 TEST the_generation_is_per_pair_and_the_mark_is_monotonic(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-    firc_ip_t v4 = {{0}, 0};
+    firc_ip_t a4 = {{0}, 0}, b4 = {{0}, 0}, other = {{0}, 0};
     const firc_ip_t x = {{93, 184, 216, 34}, 4};
     const firc_ip_t y = {{1, 2, 3, 4}, 4};
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &x));
-    ASSERTm("set_real bumps on a first address", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &x));
+    ASSERTm("set_real bumps on a first address", firc_fakeip_needs_commit(f, &a4));
     firc_fakeip_snapshot_t *s1 = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1));
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &a4));
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &x));
-    ASSERT_FALSEm("the same address again is not a change", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &y));
-    ASSERTm("a different one is", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &x));
+    ASSERT_FALSEm("the same address again is not a change", firc_fakeip_needs_commit(f, &a4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &y));
+    ASSERTm("a different one is", firc_fakeip_needs_commit(f, &a4));
     firc_fakeip_snapshot_t *s1b = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1b));
     firc_fakeip_snapshot_free(s1b);
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "b.example.com", &y, 1));
-    ASSERT(firc_fakeip_needs_commit(f, "b.example.com", FIRC_FAM_V4));
-    ASSERT_FALSEm("an unrelated name's change is not this name's", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &b4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "b.example.com", "g1", &y, 1));
+    ASSERT(firc_fakeip_needs_commit(f, &b4));
+    ASSERT_FALSEm("an unrelated name's change is not this name's", firc_fakeip_needs_commit(f, &a4));
 
     firc_fakeip_snapshot_t *s2 = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s2));
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1));
-    ASSERT_FALSEm("the mark never moves backwards", firc_fakeip_needs_commit(f, "b.example.com", FIRC_FAM_V4));
+    ASSERT_FALSEm("the mark never moves backwards", firc_fakeip_needs_commit(f, &b4));
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &x, 1));
-    ASSERTm("a moved name's pair is new even with the same real address",
-            firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &other, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g2", &x, 1));
+    ASSERTm("the name's pair in another group is its own pair, even with the same real address",
+            firc_fakeip_needs_commit(f, &other));
+    ASSERT_FALSEm("and the first group's pair stays committed", firc_fakeip_needs_commit(f, &a4));
 
     firc_ip_t bad = {{1, 2, 3, 4, 5}, 5};
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_reals(f, "a.example.com", &bad, 1));
-    ASSERT_EQ(FIRC_ERR_NOENT, firc_fakeip_set_reals(f, "nobody.example.com", &x, 1));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_reals(f, "a.example.com", "g2", &bad, 1));
+    ASSERT_EQ(FIRC_ERR_NOENT, firc_fakeip_set_reals(f, "nobody.example.com", "g1", &x, 1));
 
     firc_fakeip_snapshot_free(s1);
     firc_fakeip_snapshot_free(s2);
@@ -1031,8 +1076,8 @@ TEST the_generation_is_per_pair_and_the_mark_is_monotonic(void) {
     PASS();
 }
 
-/* Catches: a moved name's old pair dropped from the snapshot, losing its real address or group. */
-TEST a_moved_names_old_pair_stays_in_the_snapshot(void) {
+/* Catches: a reclaimed pair dropped from the snapshot while the name's other group still holds a mapping. */
+TEST a_reclaimed_pair_stays_in_the_snapshot_beside_the_other_groups_mapping(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
@@ -1041,8 +1086,9 @@ TEST a_moved_names_old_pair_stays_in_the_snapshot(void) {
     const firc_ip_t x6 = {{0x26, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 16};
     firc_ip_t both[] = {x, x6};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", both, 2));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", both, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0 + DAY - 1, &v4, NULL));
+    firc_fakeip_reclaim(f, T0 + DAY);
 
     firc_fakeip_snapshot_t *s = firc_fakeip_snapshot_take(f);
     ASSERT(s != NULL);
@@ -1069,7 +1115,7 @@ TEST a_moved_names_old_pair_stays_in_the_snapshot(void) {
     }
     firc_fakeip_snapshot_free(s);
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + QUAR, &v4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + DAY + QUAR, &v4, NULL));
     firc_fakeip_snapshot_t *s2 = firc_fakeip_snapshot_take(f);
     snapseen_t seen2 = {{{0}}, {{0}}, {false}, {false}, {0}, 0};
     firc_fakeip_snapshot_walk(s2, snap_record, &seen2);
@@ -1093,11 +1139,11 @@ TEST an_expired_parked_address_leaves_at_the_sweep(void) {
     firc_ip_t v4 = {{0}, 0};
     const firc_ip_t x = {{93, 184, 216, 34}, 4};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &x, 1));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &x, 1));
+    firc_fakeip_reclaim(f, T0 + DAY);
 
     uint64_t gen = firc_fakeip_gen(f);
-    firc_fakeip_reclaim(f, T0 + 1);
+    firc_fakeip_reclaim(f, T0 + DAY + 1);
     ASSERT_EQ_FMTm("inside the window nothing leaves", (unsigned long long)gen,
                    (unsigned long long)firc_fakeip_gen(f), "%llu");
     firc_fakeip_snapshot_t *s = firc_fakeip_snapshot_take(f);
@@ -1108,7 +1154,7 @@ TEST an_expired_parked_address_leaves_at_the_sweep(void) {
     for (size_t i = 0; i < seen.n; i++) { parked_present |= strcmp(seen.fakes[i], "198.18.0.1") == 0; }
     ASSERT(parked_present);
 
-    firc_fakeip_reclaim(f, T0 + QUAR);
+    firc_fakeip_reclaim(f, T0 + DAY + QUAR);
     ASSERTm("a rule went: the generation moved", firc_fakeip_gen(f) > gen);
     firc_fakeip_snapshot_t *s2 = firc_fakeip_snapshot_take(f);
     snapseen_t seen2 = {{{0}}, {{0}}, {false}, {false}, {0}, 0};
@@ -1127,12 +1173,12 @@ TEST an_address_whose_window_ran_out_under_the_sweep_is_issued_again(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-    firc_ip_t first = {{0}, 0}, later = {{0}, 0};
+    firc_ip_t first = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &first, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &later, NULL));
-    firc_fakeip_reclaim(f, T0 + QUAR);
+    firc_fakeip_reclaim(f, T0 + DAY);
+    firc_fakeip_reclaim(f, T0 + DAY + QUAR);
     firc_ip_t fresh = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0 + QUAR + 1, &fresh, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0 + DAY + QUAR + 1, &fresh, NULL));
     ASSERT_MEM_EQm("the freed address is the next one g1 issues", first.b, fresh.b, 4);
     firc_fakeip_free(f);
     PASS();
@@ -1143,15 +1189,14 @@ TEST two_freed_addresses_of_one_chunk_are_both_issued_again(void) {
     firc_fakeip_cfg_t c = base_cfg();
     firc_fakeip_t *f = NULL;
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
-    firc_ip_t a = {{0}, 0}, b = {{0}, 0}, x = {{0}, 0};
+    firc_ip_t a = {{0}, 0}, b = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &a, NULL));
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &b, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &x, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0, &x, NULL));
-    firc_fakeip_reclaim(f, T0 + QUAR);
+    firc_fakeip_reclaim(f, T0 + DAY);
+    firc_fakeip_reclaim(f, T0 + DAY + QUAR);
     firc_ip_t p = {{0}, 0}, q = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "p.example.com", "g1", T0 + QUAR + 1, &p, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "q.example.com", "g1", T0 + QUAR + 1, &q, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "p.example.com", "g1", T0 + DAY + QUAR + 1, &p, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "q.example.com", "g1", T0 + DAY + QUAR + 1, &q, NULL));
     ASSERTm("two different addresses", memcmp(p.b, q.b, 4) != 0);
     ASSERTm("both from the freed pair", (memcmp(p.b, a.b, 4) == 0 || memcmp(p.b, b.b, 4) == 0) &&
                                         (memcmp(q.b, a.b, 4) == 0 || memcmp(q.b, b.b, 4) == 0));
@@ -1183,23 +1228,23 @@ TEST a_chunk_with_names_or_parked_addresses_is_not_given_back(void) {
     chunks = 0;
     firc_fakeip_walk_chunks(f, "g1", count_v4_chunks, &chunks);
     ASSERT_EQ_FMTm("chunks with names stay", (size_t)2, chunks, "%zu");
-    for (int i = 0; i < 254; i++) {
+    for (int i = 254; i < 300; i++) {
         snprintf(name, sizeof(name), "n%d.example.com", i);
-        ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, name, "g2", T0 + 20, &a, NULL));
+        ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, name, "g1", T0 + DAY - 10, &a, NULL));
     }
-    firc_fakeip_reclaim(f, T0 + 30);
+    firc_fakeip_reclaim(f, T0 + DAY);
     chunks = 0;
     firc_fakeip_walk_chunks(f, "g1", count_v4_chunks, &chunks);
     ASSERT_EQ_FMTm("a chunk of parked addresses inside the window stays", (size_t)2, chunks, "%zu");
     firc_ip_t other = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "x.example.com", "g3", T0 + 40, &other, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "x.example.com", "g3", T0 + DAY + 10, &other, NULL));
     ASSERTm("and nobody else lands in it", other.b[2] != 0 && other.b[2] != 1);
-    firc_fakeip_reclaim(f, T0 + 20 + QUAR);
+    firc_fakeip_reclaim(f, T0 + DAY + QUAR);
     chunks = 0;
     firc_fakeip_walk_chunks(f, "g1", count_v4_chunks, &chunks);
     ASSERT_EQ_FMTm("the emptied first chunk went back", (size_t)1, chunks, "%zu");
     firc_ip_t still = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "n299.example.com", "g1", T0 + 21 + QUAR, &still, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "n299.example.com", "g1", T0 + DAY + QUAR + 1, &still, NULL));
     ASSERTm("the kept chunk is the one with the names", still.b[2] == 1);
     firc_fakeip_free(f);
     PASS();
@@ -1232,11 +1277,11 @@ TEST the_real_address_of_an_unknown_name_is_refused_and_case_is_folded(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_new(&c, &f));
 
     firc_ip_t real = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_ERR_NOENT, firc_fakeip_set_real(f, "nobody.example.com", &real));
+    ASSERT_EQ(FIRC_ERR_NOENT, firc_fakeip_set_real(f, "nobody.example.com", "g1", &real));
 
     firc_ip_t v4 = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "A.ExAmPlE.CoM", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "A.ExAmPlE.CoM", "g1", &real));
 
     walk_log_t w = {0};
     firc_fakeip_walk(f, log_entry, &w);
@@ -1244,9 +1289,10 @@ TEST the_real_address_of_an_unknown_name_is_refused_and_case_is_folded(void) {
     ASSERT(i4 >= 0);
     ASSERTm("the differently-cased name is the same name", w.has_real[i4]);
 
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(f, NULL, &real));
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(f, "a.example.com", NULL));
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(NULL, "a.example.com", &real));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(f, NULL, "g1", &real));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(f, "a.example.com", "g1", NULL));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(NULL, "a.example.com", "g1", &real));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_fakeip_set_real(f, "a.example.com", NULL, &real));
 
     firc_fakeip_free(f);
     PASS();
@@ -1418,10 +1464,11 @@ TEST parked_addresses_come_back_oldest_first(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &v4, NULL));
     ASSERT_STR_EQ("198.18.0.2", s4(&v4, b4));
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &v4, NULL));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0 + 100, &v4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0 + 100, &v4, NULL));
+    firc_fakeip_reclaim(f, T0 + DAY);
+    firc_fakeip_reclaim(f, T0 + DAY + 100);
 
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + QUAR, &v4, NULL));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0 + DAY + QUAR, &v4, NULL));
     ASSERT_STR_EQm("the address whose window ran out first", "198.18.0.1", s4(&v4, b4));
 
     firc_fakeip_free(f);
@@ -1436,19 +1483,20 @@ TEST deleting_a_group_unlinks_the_addresses_it_parked_by_name(void) {
 
     firc_ip_t a4, a6, b4, b6;
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h209.example.com", "g1", T0, &a4, &a6));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h209.example.com", "g2", T0, &b4, &b6));
+    firc_fakeip_reclaim(f, T0 + DAY);
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h209.example.com", "g2", T0 + DAY, &b4, &b6));
     ASSERT(memcmp(&a4, &b4, sizeof a4) != 0);
     ASSERT(memcmp(&a6, &b6, sizeof a6) != 0);
 
-    firc_fakeip_drop_group(f, "g1", T0);
+    firc_fakeip_drop_group(f, "g1", T0 + DAY);
 
     firc_ip_t c4, c6;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h209.example.com", "g2", T0, &c4, &c6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h209.example.com", "g2", T0 + DAY, &c4, &c6));
     ASSERT_MEM_EQ(&b4, &c4, sizeof b4);
     ASSERT_MEM_EQ(&b6, &c6, sizeof b6);
 
     firc_ip_t d4, d6;
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h300.example.com", "g2", T0, &d4, &d6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "h300.example.com", "g2", T0 + DAY, &d4, &d6));
     ASSERT(memcmp(&d4, &c4, sizeof d4) != 0);
     ASSERT(memcmp(&d6, &c6, sizeof d6) != 0);
 
@@ -1582,7 +1630,7 @@ TEST a_snapshot_outlives_the_mappings_it_describes(void) {
     firc_ip_t v4 = {{0}, 0}, v6 = {{0}, 0};
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
     firc_ip_t real = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", &real));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_real(f, "a.example.com", "g1", &real));
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0, &v4, &v6));
 
     firc_fakeip_snapshot_t *s = firc_fakeip_snapshot_take(f);
@@ -1691,29 +1739,29 @@ TEST uncommitting_a_group_makes_its_resolved_pairs_wait_again(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0, &b4, NULL));
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "c.example.com", "g1", T0, &c4, NULL));
     const firc_ip_t ra = {{93, 184, 216, 34}, 4}, rb = {{1, 2, 3, 4}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &ra, 1));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "b.example.com", &rb, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", &ra, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "b.example.com", "g2", &rb, 1));
     firc_fakeip_snapshot_t *s1 = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1));
     firc_fakeip_snapshot_free(s1);
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "b.example.com", FIRC_FAM_V4));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &a4));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &b4));
 
     uint64_t g0 = firc_fakeip_gen(f);
     ASSERT_EQ_FMT((size_t)1, firc_fakeip_uncommit_group(f, "g1"), "%zu");
     ASSERT_EQ_FMTm("the generation advances once", (unsigned long long)g0 + 1,
                    (unsigned long long)firc_fakeip_gen(f), "%llu");
-    ASSERTm("g1's resolved pair waits again", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERTm("g1's resolved pair waits again", firc_fakeip_needs_commit(f, &a4));
     ASSERT_FALSEm("its unresolved v6 has nothing to wait for",
-                  firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V6));
-    ASSERT_FALSEm("nor has a name with no real address", firc_fakeip_needs_commit(f, "c.example.com", FIRC_FAM_V4));
-    ASSERT_FALSEm("another group's pair is untouched", firc_fakeip_needs_commit(f, "b.example.com", FIRC_FAM_V4));
+                  firc_fakeip_needs_commit(f, &a6));
+    ASSERT_FALSEm("nor has a name with no real address", firc_fakeip_needs_commit(f, &c4));
+    ASSERT_FALSEm("another group's pair is untouched", firc_fakeip_needs_commit(f, &b4));
 
     firc_fakeip_snapshot_t *s2 = firc_fakeip_snapshot_take(f);
     ASSERT_EQ_FMT((unsigned long long)g0 + 1, (unsigned long long)firc_fakeip_snapshot_gen(s2), "%llu");
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s2));
     firc_fakeip_snapshot_free(s2);
-    ASSERT_FALSEm("the pass after it releases it", firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
+    ASSERT_FALSEm("the pass after it releases it", firc_fakeip_needs_commit(f, &a4));
 
     ASSERT_EQ_FMT((size_t)0, firc_fakeip_uncommit_group(f, "nobody"), "%zu");
     ASSERT_EQ_FMTm("nothing marked, nothing advanced", (unsigned long long)g0 + 1,
@@ -1733,11 +1781,11 @@ TEST uncommitting_a_group_with_nothing_resolved_marks_nothing(void) {
     ASSERT_EQ_FMT((size_t)0, firc_fakeip_uncommit_group(f, "g3"), "%zu");
     ASSERT_EQ_FMTm("the generation stays", (unsigned long long)g0, (unsigned long long)firc_fakeip_gen(f),
                    "%llu");
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V4));
-    ASSERT_FALSE(firc_fakeip_needs_commit(f, "a.example.com", FIRC_FAM_V6));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &a4));
+    ASSERT_FALSE(firc_fakeip_needs_commit(f, &a6));
 
     const firc_ip_t ra = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", &ra, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g3", &ra, 1));
     firc_fakeip_snapshot_t *s1 = firc_fakeip_snapshot_take(f);
     firc_fakeip_mark_committed(f, firc_fakeip_snapshot_gen(s1));
     firc_fakeip_snapshot_free(s1);
@@ -1815,12 +1863,14 @@ TEST a_released_address_names_nothing_until_issued_again(void) {
     ASSERT_STR_EQ("idle.example.com", or_none(firc_fakeip_name_of(f, &n4)));
 
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "idle.example.com", "g2", T0 + DAY, &m4, &m6));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "idle.example.com", "g2", T0 + 2 * DAY - 1, &m4, &m6));
+    firc_fakeip_reclaim(f, T0 + 2 * DAY);
     ASSERT_EQ(NULL, firc_fakeip_name_of(f, &a4));
     ASSERT_EQ(NULL, firc_fakeip_name_of(f, &a6));
     ASSERT_STR_EQ("idle.example.com", or_none(firc_fakeip_name_of(f, &m4)));
     ASSERT_STR_EQ("idle.example.com", or_none(firc_fakeip_name_of(f, &m6)));
 
-    firc_fakeip_drop_group(f, "g2", T0 + DAY);
+    firc_fakeip_drop_group(f, "g2", T0 + 2 * DAY);
     ASSERT_EQ(NULL, firc_fakeip_name_of(f, &m4));
     ASSERT_EQ(NULL, firc_fakeip_name_of(f, &m6));
     firc_fakeip_free(f);
@@ -1911,7 +1961,7 @@ TEST pair_of_finds_parked_mappings(void) {
 
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g1", T0, &v4, &v6));
     ASSERT_FALSEm("no real address yet", firc_fakeip_pair_of(f, &v4, &gid, &got));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", both, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(f, "a.example.com", "g1", both, 2));
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g1", T0, &b4, NULL));
 
     ASSERT(firc_fakeip_pair_of(f, &v4, &gid, &got));
@@ -1920,16 +1970,16 @@ TEST pair_of_finds_parked_mappings(void) {
     ASSERT_FALSEm("a v6 fake is not asked about", firc_fakeip_pair_of(f, &v6, &gid, &got));
     ASSERT_FALSEm("b.example.com has no real address", firc_fakeip_pair_of(f, &b4, &gid, &got));
 
-    firc_ip_t moved = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &moved, NULL));
-    ASSERT_STR_EQ("198.18.1.1", s4(&moved, b));
+    firc_ip_t other = {{0}, 0};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "a.example.com", "g2", T0, &other, NULL));
+    ASSERT_STR_EQ("198.18.1.1", s4(&other, b));
+    ASSERT_FALSEm("the second group's mapping has no real yet", firc_fakeip_pair_of(f, &other, &gid, &got));
+    firc_fakeip_reclaim(f, T0 + DAY);
     gid = NULL;
     memset(&got, 0, sizeof(got));
     ASSERTm("the parked pair is found", firc_fakeip_pair_of(f, &v4, &gid, &got));
     ASSERT_STR_EQ("g1", gid);
     ASSERT_STR_EQ("93.184.216.34", s4(&got, b));
-    ASSERT_FALSEm("the new address has no real yet", firc_fakeip_pair_of(f, &moved, &gid, &got));
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(f, "b.example.com", "g2", T0, NULL, NULL));
     ASSERT_FALSEm("a parked address that never had a real", firc_fakeip_pair_of(f, &b4, &gid, &got));
 
     const firc_ip_t elsewhere = {{198, 18, 0, 200}, 4};
@@ -1960,8 +2010,11 @@ int main(int argc, char **argv) {
     RUN_TEST(a_snapshot_outlives_the_mappings_it_describes);
     RUN_TEST(a_snapshot_carries_chunks_and_prefixes);
     RUN_TEST(an_empty_pool_still_snapshots);
-    RUN_TEST(a_name_moved_to_another_group_is_issued_addresses_from_that_group);
-    RUN_TEST(a_name_returning_to_a_group_gets_its_parked_addresses_back);
+    RUN_TEST(one_name_holds_one_mapping_per_group);
+    RUN_TEST(a_name_in_a_second_group_costs_a_second_mapping);
+    RUN_TEST(an_idle_mapping_is_reclaimed_while_the_other_groups_stays);
+    RUN_TEST(a_name_parked_in_one_group_gets_nothing_of_it_in_another);
+    RUN_TEST(each_groups_mapping_of_one_name_keeps_its_own_real_and_commit);
     RUN_TEST(a_parked_address_is_not_offered_to_a_different_name);
     RUN_TEST(the_quarantine_window_is_derived_from_the_clamp);
     RUN_TEST(the_quarantine_window_takes_the_larger_of_the_multiple_and_the_floor);
@@ -1971,7 +2024,6 @@ int main(int argc, char **argv) {
     RUN_TEST(a_group_with_no_chunk_left_gets_the_blackhole_addresses);
     RUN_TEST(every_refusal_writes_both_blackhole_addresses);
     RUN_TEST(at_capacity_new_names_are_refused_but_known_ones_still_work);
-    RUN_TEST(a_move_returns_the_capacity_the_old_mapping_held);
     RUN_TEST(a_mapping_records_the_group_that_issued_it);
     RUN_TEST(a_vacated_address_returns_to_the_group_whose_chunk_it_came_from);
     RUN_TEST(a_deleted_groups_chunk_comes_back_only_after_its_quarantine);
@@ -1984,7 +2036,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_real_address_still_in_the_answer_is_kept_and_a_vanished_one_replaced);
     RUN_TEST(a_pair_needs_a_commit_until_a_snapshot_taken_after_it_completes);
     RUN_TEST(the_generation_is_per_pair_and_the_mark_is_monotonic);
-    RUN_TEST(a_moved_names_old_pair_stays_in_the_snapshot);
+    RUN_TEST(a_reclaimed_pair_stays_in_the_snapshot_beside_the_other_groups_mapping);
     RUN_TEST(an_expired_parked_address_leaves_at_the_sweep);
     RUN_TEST(an_address_whose_window_ran_out_under_the_sweep_is_issued_again);
     RUN_TEST(the_pool_knows_when_a_prefix_overlaps_it);

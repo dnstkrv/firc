@@ -1545,7 +1545,8 @@ TEST a_group_that_fails_to_activate_leaves_the_snapshot_serving(void) {
     ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(1, "keep.example", NULL, NULL)));
     const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(l.pipeline);
     ASSERTm("fixture: the first group's name is served",
-            snap != NULL && firc_ruleset_snapshot_first_match(snap, "keep.example") != NULL);
+            snap != NULL &&
+            firc_ruleset_snapshot_owner(snap, "keep.example", NULL, NULL, NULL, NULL, NULL) != NULL);
 
     fake_rtnl_fail_next_of(l.kernel, RTM_NEWRULE, EPERM);
     ASSERT(firc_app_add_group(l.app, activation_group(2, "other.example", NULL, NULL)) != FIRC_OK);
@@ -1554,8 +1555,35 @@ TEST a_group_that_fails_to_activate_leaves_the_snapshot_serving(void) {
 
     snap = firc_dns_pipeline_snapshot(l.pipeline);
     ASSERTm("the pipeline still has a snapshot", snap != NULL);
-    const firc_group_snapshot_t *owner = firc_ruleset_snapshot_first_match(snap, "keep.example");
+    const firc_group_snapshot_t *owner =
+        firc_ruleset_snapshot_owner(snap, "keep.example", NULL, NULL, NULL, NULL, NULL);
     ASSERTm("and the first group still owns its name", owner != NULL);
+    locked_app_down(&l);
+    PASS();
+}
+
+/* Catches: the DNS view narrowed to routed groups, so a device of a group without an interface falls through to the next. */
+TEST a_group_without_an_interface_keeps_its_devices_in_the_view(void) {
+    locked_app_t l;
+    ASSERT(locked_app_up(&l));
+    fake_rtnl_set_link_flags(l.kernel, 0x1 | 0x10);
+    firc_app_set_running(l.app, true);
+    firc_group_t *a = activation_group(1, "a.example", NULL, NULL);
+    free(a->iface);
+    a->iface = strdup("");
+    a->devices.allow = calloc(1, sizeof(char *));
+    a->devices.allow[0] = strdup("192.168.1.5");
+    a->devices.n_allow = 1;
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, a));
+    ASSERT_EQ(FIRC_OK, firc_app_add_group(l.app, activation_group(2, "a.example", NULL, NULL)));
+    const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(l.pipeline);
+    const firc_ip_t headset = {{192, 168, 1, 5}, 4}, phone = {{192, 168, 1, 9}, 4};
+    const firc_group_snapshot_t *g =
+        firc_ruleset_snapshot_owner(snap, "a.example", &headset, NULL, NULL, NULL, NULL);
+    ASSERTm("the headset stays with its group, which routes nothing",
+            g != NULL && firc_id_equal(g->id, (firc_id_t){{1, 1, 1, 1}}));
+    g = firc_ruleset_snapshot_owner(snap, "a.example", &phone, NULL, NULL, NULL, NULL);
+    ASSERT(g != NULL && firc_id_equal(g->id, (firc_id_t){{2, 2, 2, 2}}));
     locked_app_down(&l);
     PASS();
 }
@@ -1578,7 +1606,8 @@ TEST a_replace_whose_activation_fails_frees_lists_after_the_release(void) {
     firc_ruleset_group_mut(rs)->list->sync_state = FIRC_SUB_SYNC_FETCHING;
     const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(l.pipeline);
     ASSERTm("fixture: the list's name is served",
-            snap != NULL && firc_ruleset_snapshot_first_match(snap, "a.ads.example.com") != NULL);
+            snap != NULL &&
+            firc_ruleset_snapshot_owner(snap, "a.ads.example.com", NULL, NULL, NULL, NULL, NULL) != NULL);
 
     firc_group_t *arrival = activation_group(1, NULL, "http://127.0.0.1:1/l", "x.invalid");
     firc_sub_rules_free(&arrival->list->rules);
@@ -1596,8 +1625,8 @@ TEST a_replace_whose_activation_fails_frees_lists_after_the_release(void) {
     ASSERT_EQm("its stream was not ended: the list is still there", 0, g_ended_calls);
     snap = firc_dns_pipeline_snapshot(l.pipeline);
     ASSERTm("the pipeline has a snapshot", snap != NULL);
-    ASSERT_EQ(NULL, firc_ruleset_snapshot_first_match(snap, "a.ads.example.com"));
-    ASSERT(firc_ruleset_snapshot_first_match(snap, "keep.example") != NULL);
+    ASSERT_EQ(NULL, firc_ruleset_snapshot_owner(snap, "a.ads.example.com", NULL, NULL, NULL, NULL, NULL));
+    ASSERT(firc_ruleset_snapshot_owner(snap, "keep.example", NULL, NULL, NULL, NULL, NULL) != NULL);
     firc_app_set_sync_listener(l.app, NULL, NULL);
     locked_app_down(&l);
     PASS();
@@ -2370,14 +2399,15 @@ TEST a_held_answer_waits_only_for_the_families_it_carries(void) {
     firc_app_t *app = firc_app_create(&deps);
 
     firc_ip_t v4 = {{0}, 0};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g1", 1000, &v4, NULL));
+    firc_ip_t v6 = {{0}, 0};
+    ASSERT_EQ(FIRC_OK, firc_fakeip_get(pool, "a.example.com", "g1", 1000, &v4, &v6));
     const firc_ip_t real4 = {{93, 184, 216, 34}, 4};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(pool, "a.example.com", &real4, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(pool, "a.example.com", "g1", &real4, 1));
     firc_fakeip_snapshot_t *s = firc_fakeip_snapshot_take(pool);
     firc_app_pass_committed(app, firc_fakeip_snapshot_gen(s));
     firc_fakeip_snapshot_free(s);
     const firc_ip_t real6 = {{0x26, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 16};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(pool, "a.example.com", &real6, 1));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(pool, "a.example.com", "g1", &real6, 1));
 
     static const uint8_t name[] = {1, 'a', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0};
     firc_dns_msg_t m = {0};
@@ -2393,8 +2423,12 @@ TEST a_held_answer_waits_only_for_the_families_it_carries(void) {
     rr.rtype = FIRC_DNS_TYPE_A;
     m.answers = &rr;
     m.n_answers = 1;
+    rr.rdata = v4.b;
+    rr.rdata_len = 4;
     ASSERTm("the v4 pair is in; the v6 one is not its business", firc_app_answer_ready(app, &m));
     rr.rtype = FIRC_DNS_TYPE_AAAA;
+    rr.rdata = v6.b;
+    rr.rdata_len = 16;
     ASSERT_FALSEm("an AAAA answer does wait for the v6 pair", firc_app_answer_ready(app, &m));
 
     firc_app_destroy(app);
@@ -3163,7 +3197,7 @@ TEST a_groups_guard_comes_and_goes_with_its_chains(void) {
 
 static const firc_group_snapshot_t *view_owner(locked_app_t *l, const char *name) {
     const firc_ruleset_snapshot_t *snap = firc_dns_pipeline_snapshot(l->pipeline);
-    return snap != NULL ? firc_ruleset_snapshot_first_match(snap, name) : NULL;
+    return snap != NULL ? firc_ruleset_snapshot_owner(snap, name, NULL, NULL, NULL, NULL, NULL) : NULL;
 }
 
 static size_t log_len(locked_app_t *l) {
@@ -4460,7 +4494,7 @@ static bool issue(locked_app_t *l, const char *name, uint8_t tag, firc_ip_t *fak
     const firc_ip_t real = {{93, 184, 216, 34}, 4};
     firc_app_nf_enter(l->app);
     bool ok = firc_fakeip_get(l->pool, name, gid, (int64_t)time(NULL), fake, NULL) == FIRC_OK &&
-              firc_fakeip_set_reals(l->pool, name, &real, 1) == FIRC_OK;
+              firc_fakeip_set_reals(l->pool, name, gid, &real, 1) == FIRC_OK;
     if (ok) { firc_app_pool_changed(l->app); }
     firc_app_nf_leave(l->app);
     return ok;
@@ -4486,7 +4520,7 @@ static bool dnat_has(locked_app_t *l, const firc_ip_t *fake) {
 }
 
 /* firc_app_answer_ready for an A answer to a.example, as the proxy asks before releasing it. */
-static bool answer_ready_for_a(locked_app_t *l) {
+static bool answer_ready_for_a(locked_app_t *l, firc_ip_t *fake) {
     static const uint8_t name[] = {1, 'a', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0};
     firc_dns_msg_t m = {0};
     firc_dns_question_t q = {0};
@@ -4499,6 +4533,8 @@ static bool answer_ready_for_a(locked_app_t *l) {
     memcpy(rr.name, name, sizeof(name));
     rr.name_len = sizeof(name);
     rr.rtype = FIRC_DNS_TYPE_A;
+    rr.rdata = fake->b;
+    rr.rdata_len = fake->len;
     m.answers = &rr;
     m.n_answers = 1;
     firc_app_nf_enter(l->app);
@@ -4524,7 +4560,7 @@ static bool issue_unwritten(locked_app_t *l, const char *name, uint8_t tag, firc
     const firc_ip_t real = {{93, 184, 216, 34}, 4};
     firc_app_nf_enter(l->app);
     bool ok = firc_fakeip_get(l->pool, name, gid, (int64_t)time(NULL), fake, NULL) == FIRC_OK &&
-              firc_fakeip_set_reals(l->pool, name, &real, 1) == FIRC_OK &&
+              firc_fakeip_set_reals(l->pool, name, gid, &real, 1) == FIRC_OK &&
               firc_app_refresh_pool_snapshot(l->app) == FIRC_OK;
     firc_app_nf_leave(l->app);
     return ok;
@@ -5063,14 +5099,14 @@ TEST a_group_turned_back_on_holds_its_cached_names_until_the_pass(void) {
     uint64_t started = firc_app_nf_passes_for_test(l.app);
     ASSERT(issue(&l, "a.example", 1, &f1));
     ASSERT(wait_written_after(&l, started));
-    ASSERTm("fixture: committed", answer_ready_for_a(&l));
+    ASSERTm("fixture: committed", answer_ready_for_a(&l, &f1));
 
     firc_app_nf_enter(l.app);
     firc_group_t *renamed = activation_group(1, "a.example", NULL, NULL);
     free(renamed->name);
     renamed->name = strdup("renamed");
     ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, gid, renamed));
-    bool rename_held = !answer_ready_for_a(&l);
+    bool rename_held = !answer_ready_for_a(&l, &f1);
     firc_app_nf_leave(l.app);
     ASSERT_FALSEm("a group that stays routed is not held", rename_held);
 
@@ -5084,12 +5120,12 @@ TEST a_group_turned_back_on_holds_its_cached_names_until_the_pass(void) {
     firc_app_nf_enter(l.app);
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, gid, activation_group(1, "a.example", NULL, NULL)));
-    bool held = !answer_ready_for_a(&l);
-    bool waits = firc_fakeip_needs_commit(l.pool, "a.example", FIRC_FAM_V4);
+    bool held = !answer_ready_for_a(&l, &f1);
+    bool waits = firc_fakeip_needs_commit(l.pool, &f1);
     firc_app_nf_leave(l.app);
     ASSERTm("turned back on: the answer is held", held && waits);
     ASSERT(wait_written_after(&l, started));
-    ASSERTm("released by the pass that wrote the rule", answer_ready_for_a(&l));
+    ASSERTm("released by the pass that wrote the rule", answer_ready_for_a(&l, &f1));
     ASSERT(dnat_has(&l, &f1));
     locked_app_down(&l);
     PASS();
@@ -5110,17 +5146,17 @@ TEST a_group_given_a_usable_interface_holds_its_cached_names_until_the_pass(void
     uint64_t started = firc_app_nf_passes_for_test(l.app);
     ASSERT(issue(&l, "a.example", 1, &f1));
     ASSERT(wait_written_after(&l, started));
-    ASSERTm("fixture: the pool believes it committed", answer_ready_for_a(&l));
+    ASSERTm("fixture: the pool believes it committed", answer_ready_for_a(&l, &f1));
     ASSERT_FALSEm("fixture: no DNAT rule while not routed", dnat_has(&l, &f1));
 
     firc_app_nf_enter(l.app);
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, gid, activation_group(1, "a.example", NULL, NULL)));
-    bool held = !answer_ready_for_a(&l);
+    bool held = !answer_ready_for_a(&l, &f1);
     firc_app_nf_leave(l.app);
     ASSERTm("routed now: held", held);
     ASSERT(wait_written_after(&l, started));
-    ASSERT(answer_ready_for_a(&l));
+    ASSERT(answer_ready_for_a(&l, &f1));
     ASSERT(dnat_has(&l, &f1));
     locked_app_down(&l);
     PASS();
@@ -5143,7 +5179,7 @@ TEST a_save_holds_only_the_groups_it_makes_routed(void) {
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_update_group(l.app, (firc_id_t){{2, 2, 2, 2}}, off));
     ASSERT(wait_written_after(&l, started));
-    ASSERTm("fixture: a.example committed", answer_ready_for_a(&l));
+    ASSERTm("fixture: a.example committed", answer_ready_for_a(&l, &f1));
     ASSERT_FALSEm("fixture: group 2 is off and unrewritten", dnat_has(&l, &f2));
 
     firc_group_t **save = calloc(2, sizeof(*save));
@@ -5153,14 +5189,14 @@ TEST a_save_holds_only_the_groups_it_makes_routed(void) {
     firc_app_nf_enter(l.app);
     started = firc_app_nf_passes_for_test(l.app);
     ASSERT_EQ(FIRC_OK, firc_app_replace_groups(l.app, save, 2));
-    bool a_waits = firc_fakeip_needs_commit(l.pool, "a.example", FIRC_FAM_V4);
-    bool b_waits = firc_fakeip_needs_commit(l.pool, "b.example", FIRC_FAM_V4);
+    bool a_waits = firc_fakeip_needs_commit(l.pool, &f1);
+    bool b_waits = firc_fakeip_needs_commit(l.pool, &f2);
     firc_app_nf_leave(l.app);
     ASSERT_FALSEm("the group routed throughout is not held", a_waits);
     ASSERTm("the group the Save turned on is held", b_waits);
     ASSERT(wait_written_after(&l, started));
     firc_app_nf_enter(l.app);
-    b_waits = firc_fakeip_needs_commit(l.pool, "b.example", FIRC_FAM_V4);
+    b_waits = firc_fakeip_needs_commit(l.pool, &f2);
     firc_app_nf_leave(l.app);
     ASSERT_FALSEm("released by the pass that wrote its rule", b_waits);
     ASSERT(dnat_has(&l, &f2));
@@ -6852,7 +6888,7 @@ static firc_id_t routed_group_with_a_mapping(locked_app_t *l, firc_ip_t *fake) {
     firc_ip_t v6;
     if (firc_fakeip_get(l->pool, "a.dnsleaktest.com", id, 1000, fake, &v6) != FIRC_OK) { abort(); }
     const firc_ip_t real = {{93, 184, 216, 34}, 4};
-    if (firc_fakeip_set_reals(l->pool, "a.dnsleaktest.com", &real, 1) != FIRC_OK) { abort(); }
+    if (firc_fakeip_set_reals(l->pool, "a.dnsleaktest.com", id, &real, 1) != FIRC_OK) { abort(); }
     if (firc_app_refresh_pool_snapshot(l->app) != FIRC_OK) { abort(); }
     if (firc_app_rebuild_netfilter_kind(l->app, NULL, false) != FIRC_OK) { abort(); }
     return gid;
@@ -6992,9 +7028,8 @@ static void rec_pushed(const firc_ktcp_image_t *prev, const firc_ktcp_image_t *n
     for (size_t i = 0; i < next->n; i++) {
         firc_ip_t a = {{0}, 4};
         memcpy(a.b, next->v[i].fake, 4);
-        const char *name = firc_fakeip_name_of(r->pool, &a);
         r->pairs++;
-        if (name != NULL && firc_fakeip_needs_commit(r->pool, name, FIRC_FAM_V4)) { r->pending_at_push++; }
+        if (firc_fakeip_needs_commit(r->pool, &a)) { r->pending_at_push++; }
     }
 }
 
@@ -7017,7 +7052,7 @@ static bool ktcp_up(locked_app_t *l, firc_loop_t *loop, ktcp_rec_t *rec, firc_ip
     ports[3] = 3603;
     firc_app_set_ktcp_ports(l->app, ports);
     return firc_app_add_group(l->app, tunnel_group(1, "a.example", "tunvless3")) == FIRC_OK &&
-           issue_unwritten(l, "a.example", 1, fake) && firc_fakeip_needs_commit(l->pool, "a.example", FIRC_FAM_V4);
+           issue_unwritten(l, "a.example", 1, fake) && firc_fakeip_needs_commit(l->pool, fake);
 }
 
 static bool pair_is(const firc_ktcp_pair_t *p, uint8_t dev, const firc_ip_t *fake, const uint8_t real[4]) {
@@ -7045,7 +7080,7 @@ TEST the_map_is_pushed_before_held_answers_are_released(void) {
         ASSERT_EQ_FMT((size_t)0, rec.prev_n[0], "%zu");
         ASSERT_EQ_FMT((size_t)1, rec.pairs, "%zu");
         ASSERT_EQ_FMT((size_t)1, rec.pending_at_push, "%zu");
-        ASSERT_FALSE(firc_fakeip_needs_commit(l.pool, "a.example", FIRC_FAM_V4));
+        ASSERT_FALSE(firc_fakeip_needs_commit(l.pool, &f1));
         locked_app_down(&l);
         firc_loop_destroy(loop);
     }
@@ -7069,7 +7104,7 @@ TEST the_image_holds_only_redirect_groups_pairs(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(l.pool, "a.example", gid, (int64_t)time(NULL), &v4, &a6));
     const firc_ip_t both[] = {{{93, 184, 216, 34}, 4},
                               {{0x26, 0x06, 0x28, 0, 2, 0x20, 0, 1, 2, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46}, 16}};
-    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(l.pool, "a.example", both, 2));
+    ASSERT_EQ(FIRC_OK, firc_fakeip_set_reals(l.pool, "a.example", gid, both, 2));
     ASSERT_EQ(FIRC_OK, firc_app_refresh_pool_snapshot(l.app));
     ASSERT_EQ(16, a6.len);
     ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(l.app, NULL, false));
@@ -8745,6 +8780,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_list_rule_moved_to_subnet_asks_for_one_pass);
     RUN_TEST(a_list_rule_moved_off_subnet_asks_for_one_pass);
     RUN_TEST(a_group_that_fails_to_activate_leaves_the_snapshot_serving);
+    RUN_TEST(a_group_without_an_interface_keeps_its_devices_in_the_view);
     RUN_TEST(a_replace_whose_activation_fails_frees_lists_after_the_release);
     RUN_TEST(a_group_whose_interface_is_not_a_name_routes_nothing);
     RUN_TEST(an_update_that_lost_one_race_comes_back);

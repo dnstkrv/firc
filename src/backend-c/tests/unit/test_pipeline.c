@@ -14,6 +14,7 @@
 #include "firc/models.h"
 #include "firc/recall.h"
 #include "firc/rulesnap.h"
+#include "firc/tap.h"
 
 static firc_config_t make_cfg(void) {
     firc_config_t c;
@@ -231,6 +232,76 @@ TEST only_the_first_matching_group_owns_the_name(void) {
     PASS();
 }
 
+/* Catches: the owner fixed by the first match, so the lower group's device gets the real answer or the upper group's chunk. */
+TEST two_clients_of_two_groups_get_one_name_from_two_chunks(void) {
+    firc_config_t cfg = make_cfg();
+    add_group(&cfg, 1, "headset", FIRC_RULE_NAMESPACE, "example.com");
+    add_group(&cfg, 2, "everyone", FIRC_RULE_NAMESPACE, "example.com");
+    firc_group_t *g = cfg.groups[0];
+    g->devices.allow = calloc(1, sizeof(char *));
+    g->devices.allow[0] = strdup("192.168.1.5");
+    g->devices.n_allow = 1;
+    rw_fixture_t f;
+    rw_up_cfg(&f, cfg, 64);
+    const firc_ip_t headset = {{192, 168, 1, 5}, 4}, phone = {{192, 168, 1, 9}, 4};
+    static const uint8_t first_chunk[4] = {198, 18, 0, 1}, second_chunk[4] = {198, 18, 1, 1};
+
+    firc_dns_msg_t *msg = chain_answer();
+    ASSERT_EQ((int)FIRC_DNS_HOLD, (int)firc_dns_pipeline_handle_message(f.p, msg, 1000, &headset, NULL));
+    ASSERT_MEM_EQm("the headset's group's chunk", first_chunk, msg->answers[0].rdata, 4);
+    firc_dns_msg_free(msg);
+
+    msg = chain_answer();
+    ASSERT_EQ((int)FIRC_DNS_HOLD, (int)firc_dns_pipeline_handle_message(f.p, msg, 1000, &phone, NULL));
+    ASSERT_MEM_EQm("the phone's group's chunk, not the real answer", second_chunk, msg->answers[0].rdata, 4);
+    firc_dns_msg_free(msg);
+
+    msg = chain_answer();
+    (void)firc_dns_pipeline_handle_message(f.p, msg, 1001, &headset, NULL);
+    ASSERT_MEM_EQm("the headset again: its own address, the name does not bounce", first_chunk,
+                   msg->answers[0].rdata, 4);
+    firc_dns_msg_free(msg);
+
+    firc_tap_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.snap = firc_dns_pipeline_snapshot(f.p);
+    ctx.pipeline = f.p;
+    ctx.recall = firc_dns_pipeline_recall(f.p);
+    const firc_ip_t real = {{93, 184, 216, 34}, 4};
+    firc_tap_find_t found;
+    ASSERT(firc_tap_judge_addr(&ctx, &headset, &real, &found));
+    ASSERT_STR_EQm("the judge names the headset's group, as the pipeline did", "headset", found.group->name);
+    ASSERT(firc_tap_judge_addr(&ctx, &phone, &real, &found));
+    ASSERT_STR_EQ("everyone", found.group->name);
+    rw_down(&f);
+    PASS();
+}
+
+/* Catches: a device every matching group turns away given a fake address. */
+TEST a_device_no_matching_group_admits_gets_the_real_answer(void) {
+    firc_config_t cfg = make_cfg();
+    add_group(&cfg, 1, "a", FIRC_RULE_NAMESPACE, "example.com");
+    add_group(&cfg, 2, "b", FIRC_RULE_NAMESPACE, "example.com");
+    for (size_t i = 0; i < 2; i++) {
+        cfg.groups[i]->devices.allow = calloc(1, sizeof(char *));
+        cfg.groups[i]->devices.allow[0] = strdup(i == 0 ? "192.168.1.5" : "192.168.1.6");
+        cfg.groups[i]->devices.n_allow = 1;
+    }
+    rw_fixture_t f;
+    rw_up_cfg(&f, cfg, 64);
+    const firc_ip_t stranger = {{192, 168, 1, 7}, 4};
+    static const uint8_t real[4] = {93, 184, 216, 34};
+    firc_dns_msg_t *msg = chain_answer();
+    ASSERT_EQ((int)FIRC_DNS_PASS, (int)firc_dns_pipeline_handle_message(f.p, msg, 1000, &stranger, NULL));
+    ASSERT_MEM_EQ(real, msg->answers[1].rdata, 4);
+    seen_t seen;
+    seen_from(f.pool, &seen);
+    ASSERT_EQ_FMTm("no mapping for a device nobody admits", (size_t)0, seen.n, "%zu");
+    firc_dns_msg_free(msg);
+    rw_down(&f);
+    PASS();
+}
+
 TEST a_rule_on_the_chains_target_does_not_capture_the_query(void) {
     firc_config_t cfg = make_cfg();
     add_group(&cfg, 1, "cdnrule", FIRC_RULE_NAMESPACE, "cdn.example.net");
@@ -275,7 +346,7 @@ TEST a_matched_name_gets_an_address_of_its_own_and_waits_for_its_rule(void) {
     ASSERT_EQ(FIRC_OK, firc_fakeip_get(f.pool, "shop.example.com", gid, 1000, &fake4, NULL));
     ASSERT_MEM_EQm("the same address the client got: issued to THIS name in THIS group",
                    first_issued, fake4.b, 4);
-    ASSERT(firc_fakeip_needs_commit(f.pool, "shop.example.com", FIRC_FAM_V4));
+    ASSERT(firc_fakeip_needs_commit(f.pool, &fake4));
 
     firc_dns_msg_free(msg);
     rw_down(&f);
@@ -1558,6 +1629,37 @@ TEST a_failed_answer_names_a_group_only_for_a_client_it_covers(void) {
     PASS();
 }
 
+/* Catches: a failed answer naming the first matching group, or none, for a client only a later group admits. */
+TEST a_failed_answer_names_the_first_group_that_admits_the_client(void) {
+    firc_event_reset_for_test();
+    firc_config_t cfg = make_cfg();
+    add_group(&cfg, 1, "headset", FIRC_RULE_NAMESPACE, "example.com");
+    add_group(&cfg, 2, "everyone", FIRC_RULE_NAMESPACE, "example.com");
+    cfg.groups[0]->devices.allow = calloc(1, sizeof(char *));
+    cfg.groups[0]->devices.allow[0] = strdup("192.168.1.5");
+    cfg.groups[0]->devices.n_allow = 1;
+    rw_fixture_t f;
+    rw_up_cfg(&f, cfg, 64);
+
+    firc_ip_t headset = {{192, 168, 1, 5}, 4}, phone = {{192, 168, 1, 9}, 4};
+    static const char *q[] = {"nx", "example", "com"};
+    firc_dns_msg_t *msg = plain_answer(q, 3, 3);
+    (void)firc_dns_pipeline_handle_message(f.p, msg, 1000, &headset, NULL);
+    firc_dns_msg_free(msg);
+    msg = plain_answer(q, 3, 3);
+    (void)firc_dns_pipeline_handle_message(f.p, msg, 1000, &phone, NULL);
+    firc_dns_msg_free(msg);
+
+    firc_event_t all[8], ev[8];
+    ASSERT_EQ_FMT((size_t)2, dns_events(all, journal(all, 8), ev), "%zu");
+    ASSERT_MEM_EQ(headset.b, ev[0].u.dns.client.b, 4);
+    ASSERT_STR_EQ("headset", ev[0].u.dns.group_name);
+    ASSERT_MEM_EQ(phone.b, ev[1].u.dns.client.b, 4);
+    ASSERT_STR_EQm("the phone is admitted by the second group only", "everyone", ev[1].u.dns.group_name);
+    rw_down(&f);
+    PASS();
+}
+
 /* Catches: an uncovered client journalled, NOT_COVERED never produced, or coverage from the owner only. */
 TEST coverage_decides_who_is_journalled(void) {
     firc_event_reset_for_test();
@@ -2002,6 +2104,8 @@ int main(int argc, char **argv)
 {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(only_the_first_matching_group_owns_the_name);
+    RUN_TEST(two_clients_of_two_groups_get_one_name_from_two_chunks);
+    RUN_TEST(a_device_no_matching_group_admits_gets_the_real_answer);
     RUN_TEST(a_rule_on_the_chains_target_does_not_capture_the_query);
     RUN_TEST(a_matched_name_gets_an_address_of_its_own_and_waits_for_its_rule);
     RUN_TEST(a_repeat_answer_for_a_committed_pair_is_not_held);
@@ -2047,6 +2151,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_failed_answer_is_journalled_with_its_rcode);
     RUN_TEST(an_answer_is_journalled_as_its_event_only);
     RUN_TEST(a_failed_answer_names_a_group_only_for_a_client_it_covers);
+    RUN_TEST(a_failed_answer_names_the_first_group_that_admits_the_client);
     RUN_TEST(coverage_decides_who_is_journalled);
     RUN_TEST(a_refused_issue_is_journalled_as_refused);
     RUN_TEST(no_snapshot_and_no_client_journal_nothing);
