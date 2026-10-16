@@ -7,7 +7,7 @@
   import Select from "../../../components/ui/Select.svelte";
   import Switch from "../../../components/ui/Switch.svelte";
   import { hosts } from "../../../data/hosts.svelte";
-  import { groupInterfaces } from "../../../data/interfaces.svelte";
+  import { interfaces } from "../../../data/interfaces.svelte";
   import { locale, t } from "../../../data/locale.svelte";
   import { policies } from "../../../data/policies.svelte";
   import { fetchResolvers, resolvers } from "../../../data/resolvers.svelte";
@@ -91,7 +91,7 @@
 
     name = group?.name ?? "";
     draft = {
-      interface: group ? ifaceValue(ifaceList(group)) : (groupInterfaces()[0]?.id ?? ""),
+      interface: group ? ifaceValue(ifaceList(group)) : (interfaces.list[0]?.id ?? ""),
     };
     devicesTarget = {
       id: group?.id ?? "draft",

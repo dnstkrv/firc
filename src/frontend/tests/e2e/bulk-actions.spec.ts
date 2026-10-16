@@ -40,9 +40,9 @@ async function setup(page: Page) {
     route.fulfill({
       json: {
         interfaces: [
-          { id: "nwg0", name: "vdsina" },
-          { id: "nwg1", name: "Wireguard1" },
-          { id: "wg0", name: "WireGuard Interface" },
+          { id: "nwg0", name: "vdsina", role: "tunnel" },
+          { id: "nwg1", ndmsName: "Wireguard1", role: "tunnel" },
+          { id: "wg0", name: "WireGuard Interface", role: "tunnel" },
         ],
       },
     }),
@@ -161,15 +161,15 @@ test.describe("Group bulk actions", () => {
     await bar(page).getByRole("button", { name: "Interface" }).click();
     const menu = page.getByRole("menu");
     await expect(menu.getByRole("menuitem")).toHaveText([
-      "nwg0 vdsina",
-      "nwg1 Wireguard1",
-      "wg0 WireGuard Interface",
+      /vdsina\s*nwg0/,
+      /Wireguard1\s*nwg1/,
+      /WireGuard Interface\s*wg0/,
     ]);
-    await menu.getByRole("menuitem", { name: /^nwg1/ }).click();
+    await menu.getByRole("menuitem", { name: /nwg1/ }).click();
     await expect(menu).toHaveCount(0);
 
     const shown = await page
-      .locator(".iface-select .selected-value")
+      .locator(".iface-select .selected-description")
       .evaluateAll((els) => els.map((e) => e.textContent?.trim()));
     expect(shown).toEqual(["nwg1", "wg0", "nwg1", "wg0", "wg0"]);
     expect(daemon.puts).toHaveLength(0);

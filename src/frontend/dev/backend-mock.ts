@@ -11,12 +11,20 @@ const API_BASE = "/api/v1";
 
 const INTERFACES: Interfaces = {
   interfaces: [
-    { id: "nwg0" },
-    { id: "longinterf" },
-    { id: "eth1" },
-    { id: "wg0", name: "WireGuard Interface" },
-    { id: "tunvless0" },
-    { id: "ppp0", name: "Broadband connection", uplinkOnly: true },
+    { id: "blackhole" },
+    { id: "nwg0", name: "WARP", ndmsName: "Wireguard0", role: "tunnel" },
+    { id: "nwg1", name: "AmneziaWG NL", ndmsName: "Wireguard1", role: "tunnel" },
+    { id: "nwg2", ndmsName: "Wireguard2", role: "tunnel" },
+    { id: "wg0", name: "WireGuard Interface", role: "tunnel" },
+    { id: "opkgtun10", name: "sing-box", role: "tunnel" },
+    { id: "tunvless0", role: "tunnel" },
+    { id: "ppp0", name: "Broadband connection", ndmsName: "PPPoE0", role: "wan" },
+    { id: "eth3", ndmsName: "GigabitEthernet1", role: "wan" },
+    { id: "br0", name: "Home network", ndmsName: "Bridge0", role: "lan" },
+    { id: "br1", name: "Guest", ndmsName: "Bridge1", role: "lan" },
+    { id: "eth1", role: "other" },
+    { id: "eth2.1", role: "other" },
+    { id: "longinterf", role: "other" },
   ],
 };
 
@@ -986,7 +994,6 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.link": ["br0"],
   "app.netfilter.iptables.chainPrefix": "FIRC_",
   "app.netfilter.startMarkTableIndex": "0x66697263",
-  "app.showAllInterfaces": false,
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
   "app.update.check": false,
@@ -999,7 +1006,6 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.port",
   "app.dnsProxy.disableDropAAAA",
   "app.dnsProxy.unmatchedTtl",
-  "app.showAllInterfaces",
   "app.update.check",
   "app.check.url",
   "app.check.interval",

@@ -13,6 +13,13 @@
     disabled?: boolean;
     hint?: string;
     ariaDescription?: string;
+    mono?: boolean;
+    tag?: string;
+    danger?: boolean;
+    separator?: boolean;
+    hidden?: boolean;
+    toggle?: () => void;
+    expanded?: boolean;
   };
   type Props = {
     options?: Option[];
@@ -26,6 +33,7 @@
     lead?: Snippet<[Option]>;
     closed?: Snippet;
     footer?: Snippet;
+    onOpenChange?: (open: boolean) => void;
     [key: string]: any;
   };
 
@@ -41,8 +49,25 @@
     lead,
     closed,
     footer,
+    onOpenChange,
     ...rest
   }: Props = $props();
+
+  function onKeyCapture(e: KeyboardEvent) {
+    if ((e.key === "Enter" || e.key === " ") && !e.shiftKey) {
+      const trigger = (e.currentTarget as HTMLElement).querySelector("[data-select-trigger]");
+      const id = trigger?.getAttribute("aria-activedescendant");
+      const value = id ? document.getElementById(id)?.dataset.value : undefined;
+      const option = options.find((o) => o.value === value && o.toggle);
+      if (option?.toggle) {
+        e.preventDefault();
+        e.stopPropagation();
+        option.toggle();
+        return;
+      }
+    }
+    rest.onkeydowncapture?.(e);
+  }
 
   const shown_value = $derived(shown ?? selected);
   const selected_option = $derived(options.find((o) => o.value === shown_value));
@@ -59,19 +84,35 @@
   <div class="option">
     {#if lead}{@render lead(option)}{/if}
     <div class="option-text">
-      <span class="option-label">{option.label}</span>
+      <span class="option-label" class:danger={option.danger}>{option.label}</span>
       {#if option.description}
-        <span class="option-description">{option.description}</span>
+        <span class="option-description" class:mono={option.mono}>{option.description}</span>
+      {/if}
+      {#if option.tag}
+        <span class="option-tag">{option.tag}</span>
       {/if}
     </div>
-    <div class="option-check">
-      {#if selected}<Check size={16} />{/if}
+    <div class="option-check" class:open={option.expanded}>
+      {#if option.toggle}<SelectOpen size={16} />{:else if selected}<Check size={16} />{/if}
     </div>
   </div>
 {/snippet}
 
-<div class="select-wrap" class:missing={missing_selection} class:disabled {...rest}>
-  <Select.Root type="single" {onValueChange} items={options} bind:value={selected} {disabled}>
+<div
+  class="select-wrap"
+  class:missing={missing_selection}
+  class:disabled
+  {...rest}
+  onkeydowncapture={onKeyCapture}
+>
+  <Select.Root
+    type="single"
+    {onValueChange}
+    {onOpenChange}
+    items={options}
+    bind:value={selected}
+    {disabled}
+  >
     <Select.Trigger aria-label={ariaLabel}>
       <div class="selected" class:has-description={selected_description}>
         <div class="selected-text">
@@ -79,7 +120,11 @@
             {#if closed}{@render closed()}{:else}{selected_label}{/if}
           </div>
           {#if selected_description}
-            <div class="selected-description" title={selected_description}>
+            <div
+              class="selected-description"
+              class:mono={selected_option?.mono}
+              title={selected_description}
+            >
               {selected_description}
             </div>
           {/if}
@@ -93,23 +138,34 @@
     <Select.Portal>
       <Select.Content align="start" sideOffset={4} collisionPadding={8}>
         {#each options as option}
-          <Select.Item
-            value={option.value}
-            label={option.label}
-            disabled={option.disabled}
-            onpointerup={() => onItemPointerUp?.(option.value)}
-            {...option.ariaDescription ? { "aria-description": option.ariaDescription } : {}}
-          >
-            {#snippet children({ selected })}
-              {#if option.hint}
-                <Tooltip value={option.hint}>
+          {#if !option.hidden}
+            <Select.Item
+              value={option.value}
+              label={option.label}
+              disabled={option.disabled}
+              class={option.separator ? "select-separated" : undefined}
+              onpointerup={(e: PointerEvent) => {
+                if (option.toggle) {
+                  e.preventDefault();
+                  option.toggle();
+                  return;
+                }
+                onItemPointerUp?.(option.value);
+              }}
+              {...option.ariaDescription ? { "aria-description": option.ariaDescription } : {}}
+              {...option.toggle ? { "aria-expanded": Boolean(option.expanded) } : {}}
+            >
+              {#snippet children({ selected })}
+                {#if option.hint}
+                  <Tooltip value={option.hint}>
+                    {@render body(option, selected)}
+                  </Tooltip>
+                {:else}
                   {@render body(option, selected)}
-                </Tooltip>
-              {:else}
-                {@render body(option, selected)}
-              {/if}
-            {/snippet}
-          </Select.Item>
+                {/if}
+              {/snippet}
+            </Select.Item>
+          {/if}
         {/each}
         {#if footer}{@render footer()}{/if}
       </Select.Content>
@@ -277,6 +333,27 @@
   .option-description {
     color: var(--text-2);
     font-size: 0.9em;
+  }
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 0.8em;
+  }
+  .option-label.danger {
+    color: var(--danger);
+  }
+  .option-tag {
+    color: var(--text-2);
+    font-size: 0.75em;
+    opacity: 0.8;
+  }
+  :global([data-select-item].select-separated) {
+    margin-top: 0.2rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--bg-light-extra);
+    border-radius: 0;
+  }
+  .option-check.open {
+    transform: rotate(180deg);
   }
   .option-check {
     color: var(--text-2);

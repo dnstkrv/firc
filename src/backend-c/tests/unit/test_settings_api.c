@@ -243,8 +243,9 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(28, cJSON_GetArraySize(s));
+    ASSERT_EQ(27, cJSON_GetArraySize(s));
     ASSERT_EQ(NULL, item(s, "app.logLevel"));
+    ASSERT_EQ(NULL, item(s, "app.showAllInterfaces"));
     ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
     ASSERT_STR_EQ("live", item(c, "app.update.check")->valuestring);
     ASSERT_EQ(NULL, item(s, "app.httpWeb.enabled"));
@@ -267,7 +268,7 @@ TEST get_answers_every_setting_typed(void) {
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(9, live);
+    ASSERT_EQ(8, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);
@@ -1157,6 +1158,43 @@ TEST every_web_port_busy_leaves_no_web_ui_and_writes_nothing(void) {
     PASS();
 }
 
+/* Catches: a WebUI that cannot listen logged without the address, port, protocol and reason, or naming a port before the last one tried. */
+TEST a_web_port_that_cannot_open_is_named_in_the_log(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    uint16_t busy = 0, last = 0;
+    int held = hold(SOCK_STREAM, &busy);
+    ASSERT(held >= 0);
+    int held2 = hold(SOCK_STREAM, &last);
+    ASSERT(held2 >= 0);
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_httpd_t *other = NULL;
+    ASSERT_EQ(FIRC_OK, firc_httpd_create(loop, &other));
+    FILE *log = tmpfile();
+    ASSERT(log != NULL);
+    firc_log_set_fd(fileno(log));
+    firc_system_ctx_t ctx = h->ctx;
+    const uint16_t ports[] = {busy, last};
+    firc_err_t err = firc_system_listen_web(&ctx, other, ports, 2);
+    firc_log_set_fd(STDERR_FILENO);
+    ASSERT(err != FIRC_OK);
+    char text[2048] = "";
+    rewind(log);
+    size_t got = fread(text, 1, sizeof(text) - 1, log);
+    text[got] = '\0';
+    fclose(log);
+    char want[128];
+    snprintf(want, sizeof(want), ":%u/tcp: address already in use (is another program using this port?)", last);
+    ASSERTm(text, strstr(text, want) != NULL);
+    firc_httpd_destroy(other);
+    firc_loop_destroy(loop);
+    close(held);
+    close(held2);
+    harness_stop(h);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1168,6 +1206,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_web_ui_on_any_address_reports_the_lan_interface);
     RUN_TEST(a_move_that_could_not_be_saved_still_counts_as_saved);
     RUN_TEST(every_web_port_busy_leaves_no_web_ui_and_writes_nothing);
+    RUN_TEST(a_web_port_that_cannot_open_is_named_in_the_log);
     RUN_TEST(get_carries_the_boot_of_this_run);
     RUN_TEST(a_put_with_one_bad_key_writes_nothing);
     RUN_TEST(an_unknown_key_is_refused);

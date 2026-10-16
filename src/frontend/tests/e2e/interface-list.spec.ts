@@ -47,11 +47,11 @@ async function setup(page: Page, groups: Record<string, unknown>[], locale = "en
       json: {
         interfaces: [
           { id: "blackhole" },
-          { id: "wg0", name: "WireGuard Interface" },
-          { id: "nwg0" },
-          { id: "eth1" },
-          { id: "nwg1" },
-          { id: "nwg2" },
+          { id: "wg0", name: "WireGuard Interface", role: "tunnel" },
+          { id: "nwg0", role: "tunnel" },
+          { id: "nwg3", role: "tunnel" },
+          { id: "nwg1", role: "tunnel" },
+          { id: "nwg2", role: "tunnel" },
         ],
       },
     }),
@@ -106,11 +106,11 @@ test.describe("The interface picker in the card", () => {
     page,
   }) => {
     const daemon = await setup(page, [plain()]);
-    await expect(closedValue(page)).toHaveText("wg0");
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
     await expect(amber(page)).toHaveCount(0);
     await openPicker(page);
     await expect(circle(page, "blackhole")).toHaveCount(0);
-    for (const id of ["wg0", "nwg0", "eth1", "nwg1", "nwg2"])
+    for (const id of ["wg0", "nwg0", "nwg3", "nwg1", "nwg2"])
       await expect(row(page, id).locator(`[data-circle="${id}"]`)).toHaveCount(1);
     await expect(circle(page, "wg0")).toHaveText("1");
     await expect(circle(page, "nwg0")).toHaveText("");
@@ -130,7 +130,7 @@ test.describe("The interface picker in the card", () => {
     await circle(page, "nwg0").click();
     await expect(circle(page, "nwg0")).toHaveText("2");
     await expect(content(page)).toBeVisible();
-    await expect(closedValue(page)).toHaveText("wg0");
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
     await expect(page.locator(".group .live-status")).toHaveAttribute("data-kind", "unsaved");
     await expect(page.locator("#save-changes")).not.toHaveClass(/inactive/);
     await circle(page, "nwg0").click();
@@ -138,12 +138,12 @@ test.describe("The interface picker in the card", () => {
     await expect(content(page)).toBeVisible();
     await expect(page.locator(".group .live-status")).toHaveAttribute("data-kind", "live");
     await expect(page.locator("#save-changes")).toHaveClass(/inactive/);
-    await circle(page, "eth1").click();
+    await circle(page, "nwg3").click();
     await circle(page, "nwg0").click();
-    await expect(circle(page, "eth1")).toHaveText("2");
+    await expect(circle(page, "nwg3")).toHaveText("2");
     await expect(circle(page, "nwg0")).toHaveText("3");
     await page.keyboard.press("Escape");
-    expect(await save(page, daemon, 1)).toEqual(["wg0", "eth1", "nwg0"]);
+    expect(await save(page, daemon, 1)).toEqual(["wg0", "nwg3", "nwg0"]);
     expect(daemon.moveUps).toEqual([]);
   });
 
@@ -206,7 +206,7 @@ test.describe("The interface picker in the card", () => {
   test("Shift+Enter acts on its own picker, not on another one's highlighted row", async ({
     page,
   }) => {
-    await setup(page, [plain(), plain({ id: "0a000013", name: "Other", interface: "eth1" })]);
+    await setup(page, [plain(), plain({ id: "0a000013", name: "Other", interface: "nwg3" })]);
     await page.evaluate(() => {
       const stray = document.createElement("div");
       stray.setAttribute("data-select-content", "");
@@ -223,8 +223,8 @@ test.describe("The interface picker in the card", () => {
 
   test("a list group on its first entry shows no amber dot", async ({ page }) => {
     await setup(page, [listed({ active: "wg0" })]);
-    await expect(closedValue(page)).toHaveText("wg0");
-    await expect(picker(page).locator(".selected-description")).toHaveText("WireGuard Interface");
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
+    await expect(picker(page).locator(".selected-description")).toHaveText("wg0");
     await expect(amber(page)).toHaveCount(0);
   });
 
@@ -234,7 +234,7 @@ test.describe("The interface picker in the card", () => {
     await circle(page, "wg0").click();
     await expect(circle(page, "nwg0")).toHaveText("1");
     await expect(closedValue(page)).toHaveText("nwg0");
-    await circle(page, "eth1").click();
+    await circle(page, "nwg3").click();
     await page.keyboard.press("Escape");
     await expect(closedValue(page)).toHaveText("nwg0");
     await expect(amber(page)).toHaveCount(0);
@@ -244,8 +244,8 @@ test.describe("The interface picker in the card", () => {
     await setup(page, [listed()]);
     await expect(amber(page)).toHaveCount(1);
     await openPicker(page);
-    await circle(page, "eth1").click();
-    await expect(closedValue(page)).toHaveText("wg0");
+    await circle(page, "nwg3").click();
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
     await expect(amber(page)).toHaveCount(0);
   });
 
@@ -259,8 +259,8 @@ test.describe("The interface picker in the card", () => {
   test("the rows keep their states while the list is unsaved", async ({ page }) => {
     await setup(page, [listed()]);
     await openPicker(page);
-    await circle(page, "eth1").click();
-    await expect(circle(page, "eth1")).toHaveText("3");
+    await circle(page, "nwg3").click();
+    await expect(circle(page, "nwg3")).toHaveText("3");
     await expect(row(page, "wg0").locator(".iface-dot")).toHaveAttribute("data-state", "dead");
     await expect(row(page, "nwg0").locator(".iface-dot")).toHaveAttribute("data-state", "alive");
   });
@@ -283,7 +283,7 @@ test.describe("The interface picker in the card", () => {
     await openPicker(page);
     await expect(row(page, "wg0").locator(".iface-dot")).toHaveAttribute("data-state", "dead");
     await expect(row(page, "nwg0").locator(".iface-dot")).toHaveAttribute("data-state", "alive");
-    await expect(row(page, "eth1").locator(".iface-dot")).toHaveAttribute("data-state", "unknown");
+    await expect(row(page, "nwg3").locator(".iface-dot")).toHaveAttribute("data-state", "unknown");
   });
 
   test("a row click on a list's first entry collapses the list to it", async ({ page }) => {
@@ -298,7 +298,7 @@ test.describe("The interface picker in the card", () => {
   });
 
   test("a full list offers no circle on a free row", async ({ page }) => {
-    await setup(page, [listed({ interface: ["wg0", "nwg0", "eth1", "nwg1"], active: "wg0" })]);
+    await setup(page, [listed({ interface: ["wg0", "nwg0", "nwg3", "nwg1"], active: "wg0" })]);
     await openPicker(page);
     await expect(circle(page, "nwg1")).toHaveText("4");
     await expect(circle(page, "nwg2")).toHaveCount(0);
@@ -347,7 +347,7 @@ test.describe("The interface picker by touch", () => {
     await circle(page, "nwg0").tap();
     await expect(circle(page, "nwg0")).toHaveText("2");
     await expect(content(page)).toBeVisible();
-    await expect(closedValue(page)).toHaveText("wg0");
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
   });
 
   test("a tapped circle of a list's first entry removes it and keeps the list open", async ({
@@ -373,7 +373,7 @@ test.describe("The interface picker by touch", () => {
 });
 
 test.describe("The interface picker in the group dialog", () => {
-  const chain = () => listed({ interface: ["wg0", "nwg0", "eth1"] });
+  const chain = () => listed({ interface: ["wg0", "nwg0", "nwg3"] });
   const field = (page: Page) => page.getByRole("dialog").locator(".interface-select");
 
   test("keeps Name and Interface side by side and shows the saved chain", async ({ page }) => {
@@ -383,10 +383,10 @@ test.describe("The interface picker in the group dialog", () => {
     const iface = await field(page).boundingBox();
     expect(Math.abs(name!.y - iface!.y)).toBeLessThan(4);
     expect(iface!.x).toBeGreaterThan(name!.x + name!.width);
-    await expect(field(page).locator(".selected-value")).toHaveText("wg0 → nwg0 → eth1");
+    await expect(field(page).locator(".selected-value")).toHaveText("wg0 → nwg0 → nwg3");
     await expect(field(page).locator(".selected-value [title]")).toHaveAttribute(
       "title",
-      "wg0 → nwg0 → eth1",
+      "wg0 → nwg0 → nwg3",
     );
   });
 
@@ -405,7 +405,7 @@ test.describe("The interface picker in the group dialog", () => {
     const dialog = page.getByRole("dialog");
     await page.getByRole("button", { name: "Group Settings" }).click();
     await field(page).locator("[data-select-trigger]").click();
-    await circle(page, "eth1").click();
+    await circle(page, "nwg3").click();
     await expect(content(page)).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(content(page)).toBeHidden();
@@ -418,8 +418,8 @@ test.describe("The interface picker in the group dialog", () => {
     await field(page).locator("[data-select-trigger]").click();
     await circle(page, "nwg0").click();
     await page.keyboard.press("Escape");
-    await expect(field(page).locator(".selected-value")).toHaveText("wg0");
-    await expect(field(page).locator(".selected-description")).toHaveText("WireGuard Interface");
+    await expect(field(page).locator(".selected-value")).toHaveText("WireGuard Interface");
+    await expect(field(page).locator(".selected-description")).toHaveText("wg0");
     await dialog.getByRole("button", { name: "Save" }).click();
     await expect(dialog).toBeHidden();
     expect(await save(page, daemon, 2)).toBe("wg0");

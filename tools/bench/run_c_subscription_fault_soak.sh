@@ -57,7 +57,6 @@ app:
     disableIPv6: false
     startMarkTableIndex: 1298229100
   link: []
-  showAllInterfaces: true
 groups:
   - id: aaaaaaaa
     name: soak-group

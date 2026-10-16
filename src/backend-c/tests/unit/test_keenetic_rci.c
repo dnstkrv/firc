@@ -113,7 +113,8 @@ TEST parse_system_names_tolerates_length_mismatch(void)
     PASS();
 }
 
-TEST aliases_prefer_description_then_interface_name(void)
+/* Catches: the interface-name given as the description, or the description as the NDMS name. */
+TEST aliases_keep_description_and_interface_name_apart(void)
 {
     firc_kn_iface_meta_t *metas = NULL;
     size_t n = 0;
@@ -132,14 +133,18 @@ TEST aliases_prefer_description_then_interface_name(void)
     ASSERT_EQ(FIRC_OK, firc_kn_build_aliases(metas, n, &aliases));
     ASSERT_EQ(2, aliases.n);
     ASSERT_STR_EQ("Home VPN", firc_kn_aliases_lookup(&aliases, "nwg0"));
-    ASSERT_STR_EQ("Backup VPN", firc_kn_aliases_lookup(&aliases, "nwg1"));
+    ASSERT(firc_kn_aliases_ndms_name(&aliases, "nwg0") == NULL);
+    ASSERT(firc_kn_aliases_lookup(&aliases, "nwg1") == NULL);
+    ASSERT_STR_EQ("Backup VPN", firc_kn_aliases_ndms_name(&aliases, "nwg1"));
     ASSERT(firc_kn_aliases_lookup(&aliases, "br0") == NULL);
+    ASSERT(firc_kn_aliases_ndms_name(&aliases, "br0") == NULL);
 
     firc_kn_aliases_free(&aliases);
     free(metas);
     PASS();
 }
 
+/* Catches: an interface NDMS lists without a usable name forgotten, so the list drops it as unknown, or one with no kernel name kept. */
 TEST aliases_skip_empty_and_redundant(void)
 {
     firc_kn_iface_meta_t metas[4] = {0};
@@ -156,8 +161,14 @@ TEST aliases_skip_empty_and_redundant(void)
 
     firc_kn_aliases_t aliases = {0};
     ASSERT_EQ(FIRC_OK, firc_kn_build_aliases(metas, 4, &aliases));
-    ASSERT_EQ(0, aliases.n);
+    ASSERT_EQ(3, aliases.n);
     ASSERT(firc_kn_aliases_lookup(&aliases, "eth0") == NULL);
+    ASSERT(firc_kn_aliases_lookup(&aliases, "eth1") == NULL);
+    ASSERT(firc_kn_aliases_lookup(&aliases, "eth2") == NULL);
+    ASSERT(firc_kn_aliases_known(&aliases, "eth0"));
+    ASSERT(firc_kn_aliases_known(&aliases, "eth1"));
+    ASSERT_FALSE(firc_kn_aliases_known(&aliases, "eth9"));
+    ASSERT_FALSE(firc_kn_aliases_known(NULL, "eth0"));
 
     firc_kn_aliases_free(&aliases);
     PASS();
@@ -329,6 +340,28 @@ TEST a_label_after_an_unlabelled_external_entry_is_found(void)
     PASS();
 }
 
+/* Catches: one of the two names lost when both are set, or a name equal to the kernel name kept. */
+TEST an_entry_carries_both_names_and_drops_one_equal_to_the_kernel_name(void)
+{
+    firc_kn_iface_meta_t metas[2] = {0};
+    snprintf(metas[0].description, sizeof(metas[0].description), "%s", "WARP");
+    snprintf(metas[0].interface_name, sizeof(metas[0].interface_name), "%s", "Wireguard0");
+    snprintf(metas[0].system_name, sizeof(metas[0].system_name), "%s", "nwg0");
+    snprintf(metas[1].description, sizeof(metas[1].description), "%s", "Guest");
+    snprintf(metas[1].interface_name, sizeof(metas[1].interface_name), "%s", "br1");
+    snprintf(metas[1].system_name, sizeof(metas[1].system_name), "%s", "br1");
+
+    firc_kn_aliases_t aliases = {0};
+    ASSERT_EQ(FIRC_OK, firc_kn_build_aliases(metas, 2, &aliases));
+    ASSERT_STR_EQ("WARP", firc_kn_aliases_lookup(&aliases, "nwg0"));
+    ASSERT_STR_EQ("Wireguard0", firc_kn_aliases_ndms_name(&aliases, "nwg0"));
+    ASSERT_STR_EQ("Guest", firc_kn_aliases_lookup(&aliases, "br1"));
+    ASSERT(firc_kn_aliases_ndms_name(&aliases, "br1") == NULL);
+    ASSERT(firc_kn_aliases_ndms_name(NULL, "nwg0") == NULL);
+    firc_kn_aliases_free(&aliases);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -340,7 +373,8 @@ int main(int argc, char **argv)
     RUN_TEST(build_system_name_request_is_one_batch);
     RUN_TEST(parse_system_names_matches_positionally);
     RUN_TEST(parse_system_names_tolerates_length_mismatch);
-    RUN_TEST(aliases_prefer_description_then_interface_name);
+    RUN_TEST(aliases_keep_description_and_interface_name_apart);
+    RUN_TEST(an_entry_carries_both_names_and_drops_one_equal_to_the_kernel_name);
     RUN_TEST(aliases_skip_empty_and_redundant);
     RUN_TEST(labels_and_system_names_are_trimmed);
     RUN_TEST(empty_list_yields_no_aliases);

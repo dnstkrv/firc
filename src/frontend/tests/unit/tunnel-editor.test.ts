@@ -194,33 +194,36 @@ describe("the uplink choice", () => {
     assert.strictEqual(wouldCycle(set, "t0", "t1"), false);
   });
 
-  // Catches blackhole or a tunnel's own device offered as an interface, or a cyclic tunnel left choosable.
-  it("offers auto, real interfaces and other tunnels, the cyclic one disabled", () => {
+  // Catches blackhole, a tunnel's own device, a LAN or other interface offered as an uplink, a description lost, or a cyclic tunnel left choosable.
+  it("offers auto, wan and tunnel interfaces and other tunnels, the cyclic one disabled", () => {
     const set = [
       tn("t0", "tunvless0"),
       tn("t1", "tunvless1", { uplink: { kind: "tunnel", ref: "t0" } }),
       tn("t2", "tunvless2"),
     ];
     const ifaces = [
-      { id: "PPPoE0", name: "Internet" },
+      { id: "ppp0", name: "Internet", role: "wan" as const },
       { id: "blackhole" },
-      { id: "tunvless1" },
-      { id: "tunvless7" },
-      { id: "Wireguard1" },
+      { id: "tunvless1", role: "tunnel" as const },
+      { id: "tunvless7", role: "tunnel" as const },
+      { id: "br0", name: "Home", role: "lan" as const },
+      { id: "eth2.1", role: "other" as const },
+      { id: "nwg1", ndmsName: "Wireguard1", role: "tunnel" as const },
     ];
     const options = uplinkOptions(set[0], set, ifaces, t);
     assert.deepStrictEqual(
       options.map((o) => [o.value, Boolean(o.disabled)]),
       [
         ["auto", false],
-        ["iface:PPPoE0", false],
-        ["iface:Wireguard1", false],
+        ["iface:ppp0", false],
+        ["iface:nwg1", false],
         ["tunnel:t1", true],
         ["tunnel:t2", false],
       ],
     );
     assert.ok(options.find((o) => o.value === "tunnel:t1")?.hint);
-    assert.strictEqual(options[1].description, "Internet");
+    assert.deepStrictEqual([options[1].label, options[1].description], ["Internet", "ppp0"]);
+    assert.deepStrictEqual([options[2].label, options[2].description], ["Wireguard1", "nwg1"]);
   });
 
   // Catches the saved interface vanishing from the list when it is down, so the select reads empty.

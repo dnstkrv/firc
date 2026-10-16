@@ -2,7 +2,7 @@
   import { DropdownMenu } from "bits-ui";
   import { getContext } from "svelte";
 
-  import { groupInterfaces } from "../../../data/interfaces.svelte";
+  import { interfaces } from "../../../data/interfaces.svelte";
   import { locale, t } from "../../../data/locale.svelte";
   import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
 
@@ -15,6 +15,7 @@
     ToggleRight,
     X,
   } from "../../../components/ui/icons";
+  import { groupChoices, ifaceTitle, moreText, type IfaceItem } from "../../../data/iface-choices";
   import { selectionCountText } from "../selection";
 
   type Props = {
@@ -25,6 +26,8 @@
   let { height = $bindable(0) }: Props = $props();
 
   let bar = $state<HTMLDivElement>();
+  let restOpen = $state(false);
+  const choices = $derived(groupChoices(interfaces.list, []));
 
   const store = getContext<GroupsStore>(GROUPS_STORE_CONTEXT);
   if (!store) {
@@ -79,7 +82,11 @@
   <span class="bulk-separator" aria-hidden="true"></span>
 
   <div class="bulk-row bulk-actions">
-    <DropdownMenu.Root>
+    <DropdownMenu.Root
+      onOpenChange={(open) => {
+        if (open) restOpen = false;
+      }}
+    >
       <DropdownMenu.Trigger class="bulk-button">
         <Network size={18} /><span class="bulk-label">{t("Interface")}</span><SelectOpen
           size={16}
@@ -93,17 +100,38 @@
           sideOffset={8}
           collisionPadding={8}
         >
-          {#each groupInterfaces() as item (item.id)}
+          {#each choices.head as item (item.id)}
+            {@render ifaceItem(item)}
+          {/each}
+          {#if choices.blackhole}
+            <DropdownMenu.Separator class="bulk-menu-separator" />
             <DropdownMenu.Item
               class="bulk-menu-item"
-              onSelect={() => store.setSelectedInterface(item.id)}
+              onSelect={() => store.setSelectedInterface("blackhole")}
             >
-              <span class="bulk-menu-label">{item.id}</span>
-              {#if item.name}
-                <span class="bulk-menu-description">{item.name}</span>
-              {/if}
+              <span class="bulk-menu-label bulk-menu-danger">{t("Block")}</span>
             </DropdownMenu.Item>
-          {/each}
+          {/if}
+          {#if choices.rest.length > 0}
+            <DropdownMenu.Separator class="bulk-menu-separator" />
+            <DropdownMenu.Item
+              class="bulk-menu-item"
+              aria-expanded={restOpen}
+              onSelect={(e) => {
+                e.preventDefault();
+                restOpen = !restOpen;
+              }}
+            >
+              <span class="bulk-menu-label">{moreText(choices.rest.length, locale.current, t)}</span
+              >
+              <span class="bulk-menu-chevron" class:open={restOpen}><SelectOpen size={16} /></span>
+            </DropdownMenu.Item>
+            {#if restOpen}
+              {#each choices.rest as item (item.id)}
+                {@render ifaceItem(item)}
+              {/each}
+            {/if}
+          {/if}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -140,6 +168,15 @@
     </button>
   </div>
 </div>
+
+{#snippet ifaceItem(item: IfaceItem)}
+  {@const label = ifaceTitle(item)}
+  <DropdownMenu.Item class="bulk-menu-item" onSelect={() => store.setSelectedInterface(item.id)}>
+    <span class="bulk-menu-label">{label.title}</span>
+    {#if label.sub}<span class="bulk-menu-sub">{label.sub}</span>{/if}
+    {#if item.role === "wan"}<span class="bulk-menu-tag">{t("provider")}</span>{/if}
+  </DropdownMenu.Item>
+{/snippet}
 
 <style>
   .bulk-bar {
@@ -260,12 +297,37 @@
     white-space: nowrap;
   }
 
-  :global(.bulk-menu-description) {
-    margin-left: auto;
-    padding-left: 1.5rem;
-    font-size: 0.8rem;
+  :global(.bulk-menu-sub) {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
     color: var(--text-2);
     white-space: nowrap;
+  }
+
+  :global(.bulk-menu-tag) {
+    font-size: 0.7rem;
+    color: var(--text-2);
+    opacity: 0.8;
+  }
+
+  :global(.bulk-menu-danger) {
+    color: var(--danger);
+  }
+
+  :global(.bulk-menu-separator) {
+    height: 1px;
+    margin: 0.25rem 0.2rem;
+    background: var(--bg-light-extra);
+  }
+
+  .bulk-menu-chevron {
+    display: flex;
+    margin-left: auto;
+    transition: transform 0.16s ease;
+  }
+
+  .bulk-menu-chevron.open {
+    transform: rotate(180deg);
   }
 
   @media (max-width: 960px) {

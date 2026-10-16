@@ -445,8 +445,6 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
 
     GET_OR_FAIL(get_string_list(doc, map_get(doc, app, "link"), &c->link,
                                 &c->n_link, &err));
-    GET_OR_FAIL(get_bool(map_get(doc, app, "showAllInterfaces"),
-                         &c->show_all_interfaces, &err));
     node_t *upd = map_get(doc, app, "update");
     if (upd != NULL && !node_is_null(upd)) {
         if (upd->type != YAML_MAPPING_NODE) {

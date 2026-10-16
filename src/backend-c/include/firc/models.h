@@ -212,7 +212,6 @@ typedef struct firc_app_config {
 
     char **link;
     size_t n_link;
-    bool show_all_interfaces;
     struct {
         bool check;
     } update;

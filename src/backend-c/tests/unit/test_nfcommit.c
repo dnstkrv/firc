@@ -12,6 +12,23 @@
 #include "firc/logrep.h"
 #include "firc/nfcommit.h"
 
+static firc_nfcommit_t *g_live[8];
+
+static firc_nfcommit_t *tracked_new(firc_nfcommit_rebuild_fn fn, void *ud) {
+    firc_nfcommit_t *c = firc_nfcommit_new(fn, ud);
+    for (size_t i = 0; c != NULL && i < sizeof(g_live) / sizeof(g_live[0]); i++) {
+        if (g_live[i] == NULL) { g_live[i] = c; break; }
+    }
+    return c;
+}
+
+static void tracked_free(firc_nfcommit_t *c) {
+    for (size_t i = 0; c != NULL && i < sizeof(g_live) / sizeof(g_live[0]); i++) {
+        if (g_live[i] == c) { g_live[i] = NULL; }
+    }
+    firc_nfcommit_free(c);
+}
+
 typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -120,7 +137,7 @@ static void sleep_ms(unsigned ms) {
 }
 
 static firc_nfcommit_t *start_committer(probe_t *p) {
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, p);
     firc_nfcommit_set_delays_for_test(c, 1, 4);
     firc_nfcommit_start(c);
     return c;
@@ -141,7 +158,7 @@ static struct timespec start_of(probe_t *p, int ordinal) {
 }
 
 static firc_nfcommit_t *start_settling(probe_t *p, unsigned long_ms, unsigned addr_ms) {
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, p);
     firc_nfcommit_set_delays_for_test(c, long_ms, long_ms * 4u);
     firc_nfcommit_set_addr_delay_for_test(c, addr_ms);
     firc_nfcommit_set_addr_idle_for_test(c, 0);
@@ -150,7 +167,7 @@ static firc_nfcommit_t *start_settling(probe_t *p, unsigned long_ms, unsigned ad
 }
 
 static firc_nfcommit_t *start_idling(probe_t *p, unsigned long_ms, unsigned addr_ms, unsigned idle_ms) {
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, p);
     firc_nfcommit_set_delays_for_test(c, long_ms, long_ms * 4u);
     firc_nfcommit_set_addr_delay_for_test(c, addr_ms);
     firc_nfcommit_set_addr_idle_for_test(c, idle_ms);
@@ -160,7 +177,7 @@ static firc_nfcommit_t *start_idling(probe_t *p, unsigned long_ms, unsigned addr
 
 /* Catches: a pass for new fake addresses waiting the settle meant for firmware bursts. */
 TEST an_address_request_settles_short(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 300, 1);
     firc_nfcommit_request_addresses(c);
@@ -174,14 +191,14 @@ TEST an_address_request_settles_short(void) {
     int partial = p.partial_passes;
     pthread_mutex_unlock(&p.mu);
     ASSERT_EQ_FMT(1, partial, "%d");
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: the idle check ignored or inverted, so a request long after the last pass settles long. */
 TEST an_address_request_after_an_idle_stretch_settles_short(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_idling(&p, 300, 1, 400);
     firc_nfcommit_request_addresses(c);
@@ -192,14 +209,14 @@ TEST an_address_request_after_an_idle_stretch_settles_short(void) {
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 2);
     ASSERT_LT(started_after_ms(&p, 2, &t0), 250);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: the idle check ignored, so back-to-back address passes split batches with the short settle. */
 TEST an_address_request_right_after_a_pass_settles_long(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_idling(&p, 300, 1, 400);
     firc_nfcommit_request_addresses(c);
@@ -209,14 +226,14 @@ TEST an_address_request_right_after_a_pass_settles_long(void) {
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 2);
     ASSERT_GTE(started_after_ms(&p, 2, &t0), 290);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a chain change asked with request_more settling short like an address request. */
 TEST a_more_request_settles_long(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 300, 1);
     firc_nfcommit_request_addresses(c);
@@ -226,14 +243,14 @@ TEST a_more_request_settles_long(void) {
     firc_nfcommit_request_more(c);
     AWAIT(&p, p.started >= 2);
     ASSERT_GTE(started_after_ms(&p, 2, &t0), 290);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: the settle length fixed when the wait begins, so a full request inside a short one is served early or twice. */
 TEST a_full_request_during_a_short_settle_waits_the_long_one(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 600, 300);
     firc_nfcommit_request_addresses(c);
@@ -251,14 +268,14 @@ TEST a_full_request_during_a_short_settle_waits_the_long_one(void) {
     pthread_mutex_unlock(&p.mu);
     ASSERT_EQ_FMT(2, started, "%d");
     ASSERT_EQ_FMT(2, full, "%d");
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: the startup pass, which wipes, settling short. */
 TEST the_first_pass_settles_long(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -266,14 +283,14 @@ TEST the_first_pass_settles_long(void) {
     firc_nfcommit_request_addresses(c);
     AWAIT(&p, p.started >= 1);
     ASSERT_GTE(started_after_ms(&p, 1, &t0), 290);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a raced address pass retried after the short settle, so the firmware's rewrite is hit again at once. */
 TEST a_raced_address_pass_retries_after_the_long_settle(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 300, 1);
     firc_nfcommit_request_addresses(c);
@@ -286,14 +303,14 @@ TEST a_raced_address_pass_retries_after_the_long_settle(void) {
     AWAIT(&p, p.started >= 3);
     struct timespec t0 = start_of(&p, 2);
     ASSERT_GTE(started_after_ms(&p, 3, &t0), 290);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: the long settle owed by a chain change lost when its pass is canceled and retried. */
 TEST a_canceled_more_pass_retries_after_the_long_settle(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 300, 1);
     firc_nfcommit_request_addresses(c);
@@ -306,14 +323,14 @@ TEST a_canceled_more_pass_retries_after_the_long_settle(void) {
     AWAIT(&p, p.started >= 3);
     struct timespec t0 = start_of(&p, 2);
     ASSERT_GTE(started_after_ms(&p, 3, &t0), 290);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a hard failure's backoff replaced by the short settle on the retry of an address pass. */
 TEST a_failed_address_pass_still_backs_off(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_settling(&p, 100, 1);
     firc_nfcommit_request_addresses(c);
@@ -327,27 +344,27 @@ TEST a_failed_address_pass_still_backs_off(void) {
     struct timespec t0 = start_of(&p, 2);
     ASSERT_GTE(started_after_ms(&p, 3, &t0), 190);
     ASSERT_LT(started_after_ms(&p, 3, &t0), 350);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 TEST request_triggers_a_rebuild(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_committer(&p);
 
     firc_nfcommit_request(c);
     AWAIT(&p, p.finished >= 1);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a first pass that does not wipe, a "more" request that wipes, or a failed wipe not owed. */
 TEST the_first_pass_wipes_and_only_a_table_change_wipes_again(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_committer(&p);
 
@@ -368,14 +385,14 @@ TEST the_first_pass_wipes_and_only_a_table_change_wipes_again(void) {
     ASSERT_EQ_FMTm("a table change wipes, and its failed attempt is retried as a wipe", 3,
                    p.full_passes, "%d");
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: firc_nfcommit_request blocking until the write is done. */
 TEST request_does_not_wait_for_the_write(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.block = true;
     firc_nfcommit_t *c = start_committer(&p);
@@ -391,14 +408,14 @@ TEST request_does_not_wait_for_the_write(void) {
     p.release = true;
     pthread_mutex_unlock(&p.mu);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a request mid-write not aborting it, or no fresh pass after it. */
 TEST request_interrupts_and_restarts(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.block = true;
     firc_nfcommit_t *c = start_committer(&p);
@@ -417,16 +434,16 @@ TEST request_interrupts_and_restarts(void) {
     AWAIT(&p, p.finished >= 1);
     ASSERT(p.started >= 2);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a burst of requests costing one pass each instead of one or two. */
 TEST requests_coalesce(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, &p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, &p);
     firc_nfcommit_set_delays_for_test(c, 30, 60);
     firc_nfcommit_start(c);
 
@@ -438,14 +455,14 @@ TEST requests_coalesce(void) {
     uint64_t passes = firc_nfcommit_passes(c);
     ASSERT_FALSE(passes > 4);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a pass that lost a race to the firmware not retried until one gets through. */
 TEST retries_until_the_table_holds_still(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 5;
     p.fail_with = FIRC_ERR_AGAIN;
@@ -455,14 +472,14 @@ TEST retries_until_the_table_holds_still(void) {
     AWAIT(&p, p.finished >= 1);
     ASSERT(p.started >= 6);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a failure that is not a race being dropped instead of retried. */
 TEST retries_unclassified_failures(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 3;
     p.fail_with = FIRC_ERR_IO;
@@ -471,13 +488,13 @@ TEST retries_unclassified_failures(void) {
     firc_nfcommit_request(c);
     AWAIT(&p, p.finished >= 1);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 static firc_nfcommit_t *start_committer_failing_after(probe_t *p, unsigned ms) {
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, p);
     firc_nfcommit_set_delays_for_test(c, 1, 4);
     firc_nfcommit_set_failing_after_for_test(c, ms);
     firc_nfcommit_start(c);
@@ -531,6 +548,7 @@ static const char *log_capture_end(void) {
     const char *s = log_drain();
     close(g_log_pipe[0]);
     close(g_log_pipe[1]);
+    g_log_pipe[0] = g_log_pipe[1] = -1;
     return s;
 }
 
@@ -560,7 +578,7 @@ static uint64_t rep_clock(void) { return atomic_load(&g_rep_ms); }
 
 /* Catches: one hard failure read as failing at once, said at WARN or ERR, or followed by a recovery line. */
 TEST one_refusal_then_a_completed_pass_is_not_failing_and_no_error(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1;
     p.fail_with = FIRC_ERR_IO;
@@ -579,7 +597,7 @@ TEST one_refusal_then_a_completed_pass_is_not_failing_and_no_error(void) {
     ASSERT_EQ_FMTm("the retry completed", 2ULL, (unsigned long long)firc_nfcommit_last_completed_pass(c), "%llu");
     ASSERT_FALSE(health_of(c).failing);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     const char *log = log_capture_end();
     ASSERT_EQ_FMTm("nothing at WARN", 0, occurrences(log, " WRN "), "%d");
     ASSERT_EQ_FMTm("and nothing at ERR", 0, occurrences(log, " ERR "), "%d");
@@ -590,7 +608,7 @@ TEST one_refusal_then_a_completed_pass_is_not_failing_and_no_error(void) {
 
 /* Catches: three quick failures said at ERROR, a run past a minute never raised to ERROR, raised more than once, failing before the bound, or no recovery. */
 TEST a_refusal_that_persists_warns_then_errs_after_a_minute(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_IO;
@@ -644,7 +662,7 @@ TEST a_refusal_that_persists_warns_then_errs_after_a_minute(void) {
     }
     ASSERTm("a completed pass clears it", cleared);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     firc_logrep_set_clock_for_test(NULL);
     log = log_capture_end();
     ASSERTm("fixture: the capture did not fill", g_log_len + 1 < sizeof(g_log));
@@ -661,7 +679,7 @@ TEST races_neither_count_toward_the_escalation_nor_break_it(void) {
     const firc_err_t *seqs[] = {two, three};
     const int want_err[] = {0, 1};
     for (int k = 0; k < 2; k++) {
-        probe_t p;
+        static probe_t p;
         probe_init(&p);
         memcpy(p.seq, seqs[k], sizeof(two));
         p.seq_n = 5;
@@ -672,7 +690,7 @@ TEST races_neither_count_toward_the_escalation_nor_break_it(void) {
         for (int i = 0; i < 2000 && firc_nfcommit_last_completed_pass(c) == 0; i++) { sleep_ms(1); }
         ASSERT_EQ_FMTm("five failures, then the pass that completed", 6ULL,
                        (unsigned long long)firc_nfcommit_last_completed_pass(c), "%llu");
-        firc_nfcommit_free(c);
+        tracked_free(c);
         const char *log = log_capture_end();
         ASSERT_EQ_FMT(want_err[k], occurrences(log, "WRN " ESCALATION), "%d");
         ASSERT_EQ_FMT(0, occurrences(log, " ERR "), "%d");
@@ -684,7 +702,7 @@ TEST races_neither_count_toward_the_escalation_nor_break_it(void) {
 
 /* Catches: lost races logged above debug, or escalating. */
 TEST a_race_streak_says_nothing_above_debug(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 20;
     p.fail_with = FIRC_ERR_AGAIN;
@@ -693,7 +711,7 @@ TEST a_race_streak_says_nothing_above_debug(void) {
     firc_nfcommit_request(c);
     AWAIT(&p, p.finished >= 1);
     ASSERT_EQ_FMT(21, p.started, "%d");
-    firc_nfcommit_free(c);
+    tracked_free(c);
     const char *log = log_capture_end();
     ASSERT_EQ_FMT(0, occurrences(log, " WRN "), "%d");
     ASSERT_EQ_FMT(0, occurrences(log, " ERR "), "%d");
@@ -707,7 +725,7 @@ TEST a_race_streak_says_nothing_above_debug(void) {
 
 /* Catches: lost races past the bound never said above debug, said per pass, or never said over. */
 TEST a_race_run_past_the_bound_warns_once(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_AGAIN;
@@ -725,7 +743,7 @@ TEST a_race_run_past_the_bound_warns_once(void) {
     pthread_mutex_unlock(&p.mu);
     AWAIT(&p, p.finished >= 1);
     ASSERT(health_becomes(c, false));
-    firc_nfcommit_free(c);
+    tracked_free(c);
     const char *log = log_capture_end();
     ASSERT_EQ_FMTm("once per run", 1, occurrences(log, " WRN "), "%d");
     ASSERT_EQ_FMTm("never an error", 0, occurrences(log, " ERR "), "%d");
@@ -736,7 +754,7 @@ TEST a_race_run_past_the_bound_warns_once(void) {
 
 /* Catches: a race run never raised to ERROR, or its minute counted from the WARN instead of the run's first race. */
 TEST a_race_run_errs_a_minute_after_its_first_race(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_AGAIN;
@@ -745,7 +763,7 @@ TEST a_race_run_errs_a_minute_after_its_first_race(void) {
     log_capture_begin();
     firc_nfcommit_t *c = start_committer_failing_after(&p, 200u);
     firc_nfcommit_request(c);
-    AWAIT(&p, p.started >= 1);
+    AWAIT(&p, p.started >= 2);
     atomic_fetch_add(&g_rep_ms, 30000);
     ASSERT(health_becomes(c, true));
     pthread_mutex_lock(&p.mu);
@@ -766,7 +784,7 @@ TEST a_race_run_errs_a_minute_after_its_first_race(void) {
     p.fail_times = 0;
     pthread_mutex_unlock(&p.mu);
     ASSERT(health_becomes(c, false));
-    firc_nfcommit_free(c);
+    tracked_free(c);
     firc_logrep_set_clock_for_test(NULL);
     (void)log_capture_end();
     probe_destroy(&p);
@@ -775,7 +793,7 @@ TEST a_race_run_errs_a_minute_after_its_first_race(void) {
 
 /* Catches: a hard failure never failing, the wrong error or `since`, or a completed pass not clearing it. */
 TEST a_hard_failure_is_failing_until_a_pass_completes(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_IO;
@@ -804,14 +822,14 @@ TEST a_hard_failure_is_failing_until_a_pass_completes(void) {
     AWAIT(&p, p.finished >= 1);
     ASSERTm("a completed pass clears it", health_becomes(c, false));
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: races or a hard error failing within the bound, or a later race replacing the error. */
 TEST races_within_the_bound_are_not_failing(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1000000;
     p.fail_with = FIRC_ERR_AGAIN;
@@ -837,7 +855,7 @@ TEST races_within_the_bound_are_not_failing(void) {
     ASSERT(health_becomes(c, true));
     ASSERT_EQ(FIRC_ERR_IO, health_of(c).err);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
@@ -846,7 +864,7 @@ TEST races_within_the_bound_are_not_failing(void) {
 TEST races_past_the_bound_are_failing(void) {
     firc_err_t kinds[] = {FIRC_ERR_AGAIN, FIRC_ERR_CANCELED};
     for (size_t k = 0; k < 2; k++) {
-        probe_t p;
+        static probe_t p;
         probe_init(&p);
         p.fail_times = 1000000;
         p.fail_with = kinds[k];
@@ -856,7 +874,7 @@ TEST races_past_the_bound_are_failing(void) {
         ASSERT(health_becomes(c, true));
         ASSERT_EQ(kinds[k], health_of(c).err);
 
-        firc_nfcommit_free(c);
+        tracked_free(c);
         probe_destroy(&p);
     }
     PASS();
@@ -864,7 +882,7 @@ TEST races_past_the_bound_are_failing(void) {
 
 /* Catches: a completed pass leaving the old run's start, so new races read as already old. */
 TEST a_completed_pass_starts_the_bound_over(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 1;
     p.fail_with = FIRC_ERR_IO;
@@ -884,19 +902,19 @@ TEST a_completed_pass_starts_the_bound_over(void) {
     AWAIT(&p, p.started >= seen + 2);
     ASSERT_FALSEm("a new run, inside its bound", health_of(c).failing);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: first_pending false at start, cleared by a failed pass, or left set after a completed one. */
 TEST the_first_write_is_pending_until_a_pass_completes(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.fail_times = 2;
     p.fail_with = FIRC_ERR_IO;
     p.gate_at = 3;
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, &p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, &p);
     firc_nfcommit_set_delays_for_test(c, 1, 4);
     ASSERTm("before start", health_of(c).first_pending);
     firc_nfcommit_start(c);
@@ -911,16 +929,16 @@ TEST the_first_write_is_pending_until_a_pass_completes(void) {
         if (!cleared) { sleep_ms(1); }
     }
     ASSERTm("the completed pass ends it", cleared);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a request made before the thread starts being lost. */
 TEST request_before_start_is_served(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
-    firc_nfcommit_t *c = firc_nfcommit_new(probe_rebuild, &p);
+    firc_nfcommit_t *c = tracked_new(probe_rebuild, &p);
     firc_nfcommit_set_delays_for_test(c, 1, 4);
 
     firc_nfcommit_request(c);
@@ -929,14 +947,14 @@ TEST request_before_start_is_served(void) {
     ASSERT_EQ(FIRC_OK, firc_nfcommit_start(c));
     AWAIT(&p, p.finished >= 1);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: a stop waiting for the write in flight to finish. */
 TEST stop_aborts_a_running_rebuild(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.block = true;
     firc_nfcommit_t *c = start_committer(&p);
@@ -947,14 +965,14 @@ TEST stop_aborts_a_running_rebuild(void) {
     firc_nfcommit_stop(c);
     ASSERT(p.interrupted >= 1);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: an interrupt scheduling a rebuild of its own, or losing the interrupted pass. */
 TEST interrupt_yields_without_asking_for_more_work(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_committer(&p);
 
@@ -978,20 +996,20 @@ TEST interrupt_yields_without_asking_for_more_work(void) {
     pthread_mutex_unlock(&p.mu);
     AWAIT(&p, p.finished >= 1);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 TEST idle_committer_does_nothing(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_committer(&p);
 
     sleep_ms(50);
     ASSERT_EQ(0u, firc_nfcommit_passes(c));
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
@@ -999,23 +1017,23 @@ TEST idle_committer_does_nothing(void) {
 TEST null_and_double_stop_are_safe(void) {
     firc_nfcommit_request(NULL);
     firc_nfcommit_stop(NULL);
-    firc_nfcommit_free(NULL);
+    tracked_free(NULL);
     ASSERT_EQ(0u, firc_nfcommit_passes(NULL));
-    ASSERT(firc_nfcommit_new(NULL, NULL) == NULL);
+    ASSERT(tracked_new(NULL, NULL) == NULL);
 
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     firc_nfcommit_t *c = start_committer(&p);
     firc_nfcommit_stop(c);
     firc_nfcommit_stop(c);
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
 
 /* Catches: request_more aborting the pass in flight like request, or not scheduling a pass. */
 TEST request_more_does_not_interrupt_but_still_schedules(void) {
-    probe_t p;
+    static probe_t p;
     probe_init(&p);
     p.block = true;
     firc_nfcommit_t *c = start_committer(&p);
@@ -1039,7 +1057,7 @@ TEST request_more_does_not_interrupt_but_still_schedules(void) {
 
     AWAIT(&p, p.started >= 2);
 
-    firc_nfcommit_free(c);
+    tracked_free(c);
     probe_destroy(&p);
     PASS();
 }
@@ -1049,7 +1067,7 @@ TEST an_interrupt_at_the_instant_a_pass_begins_is_not_lost(void) {
     int lost = 0;
     int skipped = 0;
     for (int round = 0; round < 60; round++) {
-        probe_t p;
+        static probe_t p;
         probe_init(&p);
         p.block = true;
         firc_nfcommit_t *c = start_committer(&p);
@@ -1065,7 +1083,7 @@ TEST an_interrupt_at_the_instant_a_pass_begins_is_not_lost(void) {
             p.release = true;
             p.block = false;
             pthread_mutex_unlock(&p.mu);
-            firc_nfcommit_free(c);
+            tracked_free(c);
             probe_destroy(&p);
             skipped++;
             continue;
@@ -1100,7 +1118,7 @@ TEST an_interrupt_at_the_instant_a_pass_begins_is_not_lost(void) {
         pthread_mutex_unlock(&p.mu);
         if (started && !aborted) { lost++; }
 
-        firc_nfcommit_free(c);
+        tracked_free(c);
         probe_destroy(&p);
     }
     ASSERT_EQ_FMTm("an interrupt raised while a pass is running must abort it", 0, lost, "%d");
@@ -1108,10 +1126,18 @@ TEST an_interrupt_at_the_instant_a_pass_begins_is_not_lost(void) {
     PASS();
 }
 
+static void teardown(void *arg) {
+    (void)arg;
+    for (size_t i = 0; i < sizeof(g_live) / sizeof(g_live[0]); i++) { tracked_free(g_live[i]); }
+    firc_logrep_set_clock_for_test(NULL);
+    if (g_log_pipe[0] >= 0) { (void)log_capture_end(); }
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
+    GREATEST_SET_TEARDOWN_CB(teardown, NULL);
     RUN_TEST(request_triggers_a_rebuild);
     RUN_TEST(the_first_pass_wipes_and_only_a_table_change_wipes_again);
     RUN_TEST(request_does_not_wait_for_the_write);

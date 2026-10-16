@@ -14,7 +14,8 @@
 
 typedef struct firc_kn_alias {
     char system_name[16]; /* IFNAMSIZ */
-    char alias[64];
+    char description[64];
+    char ndms_name[64];
     bool inet;
 } firc_kn_alias_t;
 
@@ -32,8 +33,14 @@ firc_err_t firc_kn_get_iface_aliases_from(const char *base_url, firc_kn_aliases_
 /* One RCI GET of path under base_url; *out_body is NUL-terminated, caller frees. */
 firc_err_t firc_kn_rci_get(const char *base_url, const char *path, char **out_body);
 
-/* Alias for system_name, or NULL; a NULL or empty set is fine. */
+/* NDMS description for system_name, or NULL; a NULL or empty set is fine. */
 const char *firc_kn_aliases_lookup(const firc_kn_aliases_t *aliases, const char *system_name);
+
+/* True when NDMS lists an interface with this kernel name. */
+bool firc_kn_aliases_known(const firc_kn_aliases_t *aliases, const char *system_name);
+
+/* NDMS interface-name for system_name, or NULL; a NULL or empty set is fine. */
+const char *firc_kn_aliases_ndms_name(const firc_kn_aliases_t *aliases, const char *system_name);
 
 /* True when an entry for system_name carries the router's inet role. */
 bool firc_kn_aliases_inet(const firc_kn_aliases_t *aliases, const char *system_name);
@@ -58,7 +65,7 @@ char *firc_kn_build_system_name_request(const firc_kn_iface_meta_t *metas, size_
 /* Fills metas[i].system_name by position (RCI echoes no id); extra or missing elements are tolerated. */
 firc_err_t firc_kn_parse_system_names(const char *json, firc_kn_iface_meta_t *metas, size_t n);
 
-/* Applies the alias selection rules, keeping inet entries without a label; free *out with firc_kn_aliases_free(). */
+/* One entry per interface with a kernel name; description and interface-name kept apart, each emptied when equal to the kernel name. Free *out with firc_kn_aliases_free(). */
 firc_err_t firc_kn_build_aliases(const firc_kn_iface_meta_t *metas, size_t n, firc_kn_aliases_t *out);
 
 /* RCI interface id to kernel name ("Wireguard0" to "nwg0"). */

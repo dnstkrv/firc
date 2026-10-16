@@ -171,7 +171,7 @@ $(STAMPS_DIR)/build-properties-frontend: FORCE
 	@echo "$(FRONTEND_BUILD_PROPERTIES)" | cmp -s - $@ || echo "$(FRONTEND_BUILD_PROPERTIES)" > $@
 
 $(STAMPS_DIR)/build-frontend: $(STAMPS_DIR)/download-frontend $(FRONTEND_SOURCES) $(STAMPS_DIR)/build-properties-frontend
-	cd ./src/frontend && VITE_PKG_VERSION="$(PKG_VERSION_DISPLAY)" VITE_PKG_VERSION_IS_DEV=$(if $(PKG_VERSION_PRERELEASE),true,false) npm run build
+	cd ./src/frontend && VITE_PKG_VERSION="$(PKG_VERSION_DISPLAY)" npm run build
 
 	@mkdir -p $(STAMPS_DIR)
 	@touch "$(STAMPS_DIR)/build-frontend"

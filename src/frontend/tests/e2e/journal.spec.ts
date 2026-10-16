@@ -108,7 +108,12 @@ test("the source and level buttons filter the rows, each on its own", async ({ p
   const levels = page.getByRole("group", { name: "Levels" });
   await expect(rows).toHaveCount(5);
   await expect(page.getByText("a detail")).toHaveCount(0);
-  await expect(sources.getByRole("button")).toHaveText(["fircd2", "Tunnels2", "DNS1", "Bypass1"]);
+  await expect(sources.getByRole("button")).toHaveText([
+    "firc core2",
+    "Tunnels2",
+    "DNS1",
+    "Leaks1",
+  ]);
   await expect(levels.getByRole("button", { name: "debug" })).toHaveAttribute(
     "aria-pressed",
     "false",
@@ -119,7 +124,7 @@ test("the source and level buttons filter the rows, each on its own", async ({ p
   for (const name of ["debug", "info", "warn"]) await levels.getByRole("button", { name }).click();
   await expect(rows).toHaveCount(3);
   await expect(page.locator(".pane .row.l-error")).toHaveText(/no usable VLESS node/);
-  await expect(sources.getByRole("button", { name: /fircd/ })).toHaveText("fircd2");
+  await expect(sources.getByRole("button", { name: /firc core/ })).toHaveText("firc core2");
 
   await levels.getByRole("button", { name: "error" }).click();
   await expect(rows).toHaveCount(2);
@@ -135,7 +140,7 @@ test("clicking a tunnel's badge shows that tunnel's lines", async ({ page }) => 
   await page.getByRole("tab", { name: "Journal" }).click();
   const rows = page.locator(".pane .row");
   await expect(rows).toHaveCount(5);
-  await expect(rows.nth(0).locator(".chip")).toHaveText("fircd");
+  await expect(rows.nth(0).locator(".chip")).toHaveText("firc core");
   await rows.nth(1).getByRole("button", { name: "tunvless0" }).click();
   await expect(page.getByPlaceholder("client, name or tunnel")).toHaveValue("tunvless0");
   await expect(rows).toHaveCount(1);
@@ -652,15 +657,15 @@ test.describe("pausing the journal", () => {
     await page.goto("/");
     await page.getByRole("tab", { name: "Journal" }).click();
     const fircd = page.getByRole("group", { name: "Sources" }).getByRole("button").first();
-    await expect(fircd).toHaveText("fircd2");
+    await expect(fircd).toHaveText("firc core2");
     await page.getByRole("button", { name: "Pause", exact: true }).click();
     all.push(line(3), line(4), line(5));
     await expect(page.getByRole("button", { name: "+3 new events" })).toBeVisible({
       timeout: 6000,
     });
-    await expect(fircd).toHaveText("fircd2");
+    await expect(fircd).toHaveText("firc core2");
     await page.getByRole("button", { name: "+3 new events" }).click();
-    await expect(fircd).toHaveText("fircd5");
+    await expect(fircd).toHaveText("firc core5");
   });
 
   // Catches a poll appending rows while paused, a wrong new-row count, or Resume not catching up.
@@ -695,4 +700,63 @@ test.describe("pausing the journal", () => {
       .evaluate((el) => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) <= 1);
     expect(atBottom).toBe(true);
   });
+});
+
+// Catches the bypass or fircd source shown under its old name, or a Russian form other than «Утечки» and «Ядро firc».
+for (const [locale, label, core] of [
+  ["en", "Leaks", "firc core"],
+  ["ru", "Утечки", "Ядро firc"],
+]) {
+  test(`the bypass source is named ${label}`, async ({ page }) => {
+    await page.addInitScript((l) => {
+      localStorage.setItem("locale", JSON.stringify({ value: l }));
+    }, locale);
+    await shell(page, MIXED);
+    await page.goto("/");
+    await page.getByRole("tab", { name: locale === "ru" ? "Журнал" : "Journal" }).click();
+    const sources = page.getByRole("group", { name: locale === "ru" ? "Источники" : "Sources" });
+    await expect(sources.getByRole("button").nth(3)).toHaveText(`${label}1`);
+    await expect(page.locator(".pane .row.bypass .chip")).toHaveText(label);
+    await expect(sources.getByRole("button").nth(0)).toHaveText(`${core}2`);
+    await expect(page.locator(".pane .row .chip").first()).toHaveText(core);
+    const fits = await page
+      .locator(".pane .row")
+      .first()
+      .evaluate((row) => {
+        const chip = row.querySelector(".chip")!.getBoundingClientRect();
+        const msg = row.querySelector(".msg")!.getBoundingClientRect();
+        return chip.right <= msg.left && chip.height < 24;
+      });
+    expect(fits).toBe(true);
+  });
+}
+
+// Catches a source label that wraps or spills out of its equal-width button at phone width, or the fircd tab not shortened there.
+test("the source labels fit their buttons at 360 px", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("locale", JSON.stringify({ value: "ru" }));
+  });
+  const many = Array.from({ length: 4000 }, (_, i) => ({ ...MIXED.at(-1), seq: 100 + i }));
+  const core = Array.from({ length: 1500 }, (_, i) => ({
+    ...MIXED[0],
+    seq: 9000 + i,
+    level: ["debug", "info", "warn"][i % 3],
+  }));
+  await shell(page, [...MIXED, ...many, ...core]);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Журнал" }).click();
+  await page.setViewportSize({ width: 360, height: 740 });
+  const buttons = page.getByRole("group", { name: "Источники" }).getByRole("button");
+  await expect(buttons.nth(3)).toHaveText("Утечки4001");
+  await expect(buttons.nth(0)).toHaveText(/^Ядро\d{4}$/);
+  const boxes = await buttons.evaluateAll((els) =>
+    els.map((el) => ({
+      fits: el.scrollWidth <= el.clientWidth,
+      width: Math.round(el.getBoundingClientRect().width),
+      height: Math.round(el.getBoundingClientRect().height),
+    })),
+  );
+  for (const b of boxes) expect(b.fits).toBe(true);
+  expect(new Set(boxes.map((b) => b.width)).size).toBe(1);
+  expect(new Set(boxes.map((b) => b.height)).size).toBe(1);
 });

@@ -2,9 +2,10 @@
   import Kbd from "../../../components/ui/Kbd.svelte";
   import Select from "../../../components/ui/Select.svelte";
   import Tooltip from "../../../components/ui/Tooltip.svelte";
-  import { groupInterfaces } from "../../../data/interfaces.svelte";
-  import { t } from "../../../data/locale.svelte";
+  import { interfaces } from "../../../data/interfaces.svelte";
+  import { locale, t } from "../../../data/locale.svelte";
 
+  import { groupChoices, ifaceTitle, moreText, type IfaceItem } from "../../../data/iface-choices";
   import {
     backupNote,
     backupText,
@@ -28,17 +29,54 @@
   let { value = $bindable(), live, unsaved = false, closed, class: className }: Props = $props();
 
   let list = $derived(ifaceList({ interface: value }));
-  let options = $derived(
-    groupInterfaces().map((item) => ({
+  let choices = $derived(groupChoices(interfaces.list, list));
+  const MORE = "__more__";
+  let opened = $state<boolean | null>(null);
+  let expanded = $derived(opened ?? choices.expanded);
+  function option(item: IfaceItem, extra: Record<string, unknown> = {}) {
+    const { title, sub } = ifaceTitle(item);
+    return {
       value: item.id,
-      label: item.id,
-      description: item.name,
+      label: title,
+      description: sub,
+      mono: true,
       ariaDescription: canBackup(list, item.id)
         ? t("Shift+Enter — add as a backup or remove")
         : undefined,
-    })),
-  );
-  let anyCircle = $derived(options.some((o) => canBackup(list, o.value)));
+      ...extra,
+    };
+  }
+  let options = $derived([
+    ...choices.head.map((item) => option(item)),
+    ...(choices.blackhole
+      ? [
+          option(choices.blackhole, {
+            label: t("Block"),
+            description: undefined,
+            danger: true,
+            separator: true,
+          }),
+        ]
+      : []),
+    ...(choices.rest.length > 0
+      ? [
+          {
+            value: MORE,
+            label: moreText(choices.rest.length, locale.current, t),
+            separator: true,
+            expanded,
+            toggle: () => (opened = !expanded),
+          },
+        ]
+      : []),
+    ...choices.rest.map((item) =>
+      option(item, {
+        hidden: !expanded,
+        tag: item.role === "wan" ? t("provider") : undefined,
+      }),
+    ),
+  ]);
+  let anyCircle = $derived(options.some((o) => o.value !== MORE && canBackup(list, o.value)));
   let chain = $derived(closed === "chain" && list.length > 1);
   let note = $derived(closed === "active" && !unsaved ? backupNote(list, live) : null);
   let shown = $derived(closed === "active" && !unsaved ? (live?.active ?? list[0]) : list[0]);
@@ -60,7 +98,7 @@
     const trigger = (e.currentTarget as HTMLElement).querySelector("[data-select-trigger]");
     const highlighted = trigger?.getAttribute("aria-activedescendant");
     const id = highlighted ? document.getElementById(highlighted)?.dataset.value : undefined;
-    if (!id) return;
+    if (!id || id === MORE) return;
     e.preventDefault();
     e.stopPropagation();
     toggle(id);
@@ -69,7 +107,7 @@
 
 {#snippet lead(option: { value: string })}
   {@const n = entryNumber(list, option.value)}
-  {#if canBackup(list, option.value)}
+  {#if option.value === MORE}{:else if canBackup(list, option.value)}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <span
       class="iface-circle"
@@ -90,7 +128,11 @@
   {:else if anyCircle}
     <span class="iface-gap"></span>
   {/if}
-  <span class="iface-dot" data-state={stateOf(option.value)}></span>
+  {#if option.value === MORE}{:else if option.value === "blackhole"}
+    <span class="iface-ring"></span>
+  {:else}
+    <span class="iface-dot" data-state={stateOf(option.value)}></span>
+  {/if}
 {/snippet}
 
 {#snippet closedValue()}
@@ -127,7 +169,7 @@
   bind:selected={
     () => list[0],
     (v: string) => {
-      if (v) value = v;
+      if (v && v !== MORE) value = v;
     }
   }
   {shown}
@@ -136,6 +178,9 @@
   {lead}
   closed={chain || note ? closedValue : undefined}
   footer={anyCircle ? footer : undefined}
+  onOpenChange={(open: boolean) => {
+    if (open) opened = null;
+  }}
   class={className}
   onkeydowncapture={onKey}
 />
@@ -191,6 +236,16 @@
   }
   .iface-dot[data-state="dead"] {
     background: var(--red);
+  }
+
+  .iface-ring {
+    width: 7px;
+    height: 7px;
+    margin-right: 0.3rem;
+    box-sizing: border-box;
+    border-radius: 50%;
+    flex: none;
+    border: 1.5px solid var(--danger);
   }
 
   .iface-foot {

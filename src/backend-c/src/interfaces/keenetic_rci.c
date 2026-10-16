@@ -187,14 +187,16 @@ firc_err_t firc_kn_build_aliases(const firc_kn_iface_meta_t *metas, size_t n, fi
         copy_trimmed(system_name, sizeof(system_name), metas[i].system_name);
         if (system_name[0] == '\0') { continue; }
 
-        char alias[sizeof(arr[count].alias)];
-        copy_trimmed(alias, sizeof(alias), metas[i].description);
-        if (alias[0] == '\0') { copy_trimmed(alias, sizeof(alias), metas[i].interface_name); }
-        if (strcmp(alias, system_name) == 0) { alias[0] = '\0'; }
-        if (alias[0] == '\0' && !metas[i].inet) { continue; }
+        char description[sizeof(arr[count].description)];
+        copy_trimmed(description, sizeof(description), metas[i].description);
+        if (strcmp(description, system_name) == 0) { description[0] = '\0'; }
+        char ndms_name[sizeof(arr[count].ndms_name)];
+        copy_trimmed(ndms_name, sizeof(ndms_name), metas[i].interface_name);
+        if (strcmp(ndms_name, system_name) == 0) { ndms_name[0] = '\0'; }
 
         snprintf(arr[count].system_name, sizeof(arr[count].system_name), "%.15s", system_name);
-        snprintf(arr[count].alias, sizeof(arr[count].alias), "%.63s", alias);
+        snprintf(arr[count].description, sizeof(arr[count].description), "%.63s", description);
+        snprintf(arr[count].ndms_name, sizeof(arr[count].ndms_name), "%.63s", ndms_name);
         arr[count].inet = metas[i].inet;
         count++;
     }
@@ -211,9 +213,28 @@ firc_err_t firc_kn_build_aliases(const firc_kn_iface_meta_t *metas, size_t n, fi
 const char *firc_kn_aliases_lookup(const firc_kn_aliases_t *aliases, const char *system_name) {
     if (!aliases || !aliases->items || !system_name) { return NULL; }
     for (size_t i = 0; i < aliases->n; i++) {
-        if (aliases->items[i].alias[0] != '\0' &&
+        if (aliases->items[i].description[0] != '\0' &&
             strcmp(aliases->items[i].system_name, system_name) == 0) {
-            return aliases->items[i].alias;
+            return aliases->items[i].description;
+        }
+    }
+    return NULL;
+}
+
+bool firc_kn_aliases_known(const firc_kn_aliases_t *aliases, const char *system_name) {
+    if (!aliases || !aliases->items || !system_name) { return false; }
+    for (size_t i = 0; i < aliases->n; i++) {
+        if (strcmp(aliases->items[i].system_name, system_name) == 0) { return true; }
+    }
+    return false;
+}
+
+const char *firc_kn_aliases_ndms_name(const firc_kn_aliases_t *aliases, const char *system_name) {
+    if (!aliases || !aliases->items || !system_name) { return NULL; }
+    for (size_t i = 0; i < aliases->n; i++) {
+        if (aliases->items[i].ndms_name[0] != '\0' &&
+            strcmp(aliases->items[i].system_name, system_name) == 0) {
+            return aliases->items[i].ndms_name;
         }
     }
     return NULL;

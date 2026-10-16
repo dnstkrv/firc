@@ -136,11 +136,14 @@ export const RULE_TYPES = [
   { value: "subnet6", label: "IPv6 subnet" },
 ];
 
+export type IfaceRole = "tunnel" | "wan" | "lan" | "other";
+
 export type Interfaces = {
   interfaces: {
     id: string;
     name?: string;
-    uplinkOnly?: boolean;
+    ndmsName?: string;
+    role?: IfaceRole;
   }[];
 };
 

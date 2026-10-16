@@ -1,3 +1,4 @@
+import { ifaceTitle, TUNVLESS_DEVICE, type IfaceItem } from "../../data/iface-choices";
 import type { Tunnel, TunnelProbeRow, TunnelUplink } from "../../types";
 import { intervalLabel } from "../groups/intervals";
 
@@ -9,11 +10,10 @@ export type UplinkOption = {
   description?: string;
   disabled?: boolean;
   hint?: string;
+  mono?: boolean;
 };
 
 export type NodeDnD = { scope: string; key: string; edge?: "before" | "after" };
-
-export const DEVICE_PATTERN = /^tunvless([0-9]|[1-9][0-9])$/;
 
 export function orderAfterDrop(
   visible: string[],
@@ -89,16 +89,20 @@ export function parseUplink(value: string): TunnelUplink {
 export function uplinkOptions(
   self: Tunnel,
   tunnels: Tunnel[],
-  ifaces: { id: string; name?: string }[],
+  ifaces: IfaceItem[],
   t: T,
 ): UplinkOption[] {
   const devices = new Set(tunnels.map((tn) => tn.device));
   const usable = ifaces.filter(
-    (i) => i.id !== "blackhole" && !DEVICE_PATTERN.test(i.id) && !devices.has(i.id),
+    (i) =>
+      (i.role === "wan" || i.role === "tunnel") &&
+      !TUNVLESS_DEVICE.test(i.id) &&
+      !devices.has(i.id),
   );
   const options: UplinkOption[] = [{ value: "auto", label: t("Auto") }];
   for (const i of usable) {
-    options.push({ value: `iface:${i.id}`, label: i.id, description: i.name });
+    const { title, sub } = ifaceTitle(i);
+    options.push({ value: `iface:${i.id}`, label: title, description: sub, mono: true });
   }
   if (self.uplink.kind === "iface" && !usable.some((i) => i.id === self.uplink.ref)) {
     options.push({ value: `iface:${self.uplink.ref}`, label: self.uplink.ref });
@@ -148,7 +152,7 @@ export function deviceProblem(
   selfId: string,
   t: T = (key) => key,
 ): string | null {
-  if (!DEVICE_PATTERN.test(device)) return t("Device must be tunvless0 to tunvless99");
+  if (!TUNVLESS_DEVICE.test(device)) return t("Device must be tunvless0 to tunvless99");
   if (tunnels.some((tn) => tn.id !== selfId && tn.device === device)) {
     return t("Another tunnel uses this device");
   }

@@ -364,56 +364,26 @@ test.describe("Tunnels page", () => {
     await expect(tunnels.save).toHaveClass(/inactive/);
   });
 
-  // Catches an external interface missing from the uplink select, or offered to a group by its picker, bulk menu or dialog.
-  test("an uplink-only interface is offered to the tunnel and to no group", async ({ page }) => {
+  // Catches a LAN or other interface offered as an uplink, a wan or tunnel one left out, or its description lost.
+  test("the uplink offers wan and tunnel interfaces with their descriptions", async ({ page }) => {
     await stubDaemon(page, {
-      interfaces: ["ppp0", "wg0"],
-      uplinkOnly: ["ppp0"],
+      interfaces: ["ppp0", "nwg1", "br0", "eth2.1"],
+      names: { ppp0: "Broadband", br0: "Home" },
+      ndms: { nwg1: "Wireguard1" },
+      roles: { ppp0: "wan", nwg1: "tunnel", br0: "lan", "eth2.1": "other" },
       tunnels: [tunnel("a", "tunvless0")],
       states: [],
-      groups: [
-        {
-          id: "aaaaaaaa",
-          name: "g",
-          interface: "wg0",
-          enable: true,
-          rules: [],
-          devices: { allow: [], deny: [] },
-          resolve: { tunnel: true, server: "" },
-        },
-      ],
     });
     const tunnels = new TunnelsPage(page);
     await tunnels.open();
     await tunnels.expand("a");
     await tunnels.card("a").getByRole("button", { name: "Way out to the internet" }).click();
     const item = (value: string) => page.locator(`[data-select-item][data-value="${value}"]`);
-    await expect(item("iface:ppp0")).toBeVisible();
-    await expect(item("iface:wg0")).toBeVisible();
-    await page.keyboard.press("Escape");
-
-    await tunnels.tab("Groups").click();
-    await page.locator(".iface-select [data-select-trigger]").first().click();
-    await expect(item("wg0")).toBeVisible();
-    await expect(item("ppp0")).toHaveCount(0);
-    await page.keyboard.press("Escape");
-
-    await page.getByRole("button", { name: "Select group g", exact: true }).click();
-    const bar = page.getByRole("region", { name: "Selected groups" });
-    await bar.getByRole("button", { name: "Interface" }).click();
-    const menu = page.getByRole("menuitem");
-    await expect(menu.filter({ hasText: "wg0" })).toHaveCount(1);
-    await expect(menu.filter({ hasText: "ppp0" })).toHaveCount(0);
-    await page.keyboard.press("Escape");
-
-    await page.locator('[data-value="Add Group"] button').click();
-    const dialog = page.getByRole("dialog");
-    const picker = dialog.locator(".interface-select [data-select-trigger]");
-    await expect(picker).toContainText("wg0");
-    await expect(picker).not.toContainText("ppp0");
-    await picker.click();
-    await expect(item("wg0")).toBeVisible();
-    await expect(item("ppp0")).toHaveCount(0);
+    await expect(item("iface:ppp0")).toContainText("Broadband");
+    await expect(item("iface:ppp0")).toContainText("ppp0");
+    await expect(item("iface:nwg1")).toContainText("Wireguard1");
+    await expect(item("iface:br0")).toHaveCount(0);
+    await expect(item("iface:eth2.1")).toHaveCount(0);
   });
 
   // Catches an icon-only tunnel control, or a node switch, that a screen reader announces as nothing.

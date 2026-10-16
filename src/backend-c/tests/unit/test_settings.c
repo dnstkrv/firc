@@ -34,7 +34,6 @@ static const char EVERY_FIELD[] =
     "    ttlClamp: 2m\n"
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
-    "  showAllInterfaces: true\n"
     "  update: {check: true}\n"
     "  check: {url: 'https://check.example/204', interval: 45s, timeout: 3s}\n";
 
@@ -307,7 +306,6 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.upstream.port", FIRC_APPLY_UPSTREAM},
         {"app.dnsProxy.disableDropAAAA", FIRC_APPLY_PROXY_FLAGS},
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
-        {"app.showAllInterfaces", FIRC_APPLY_NONE},
         {"app.update.check", FIRC_APPLY_NONE},
         {"app.check.url", FIRC_APPLY_CHECK},
         {"app.check.interval", FIRC_APPLY_CHECK},
@@ -369,7 +367,6 @@ static const field_t NUMERIC[] = {
     FIELD("app.netfilter.disableIPv4", netfilter.disable_ipv4),
     FIELD("app.netfilter.disableIPv6", netfilter.disable_ipv6),
     FIELD("app.netfilter.startMarkTableIndex", netfilter.start_mark_table_index),
-    FIELD("app.showAllInterfaces", show_all_interfaces),
     FIELD("app.update.check", update.check),
     FIELD("app.check.interval", check.interval),
     FIELD("app.check.timeout", check.timeout),

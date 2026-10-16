@@ -30,7 +30,6 @@ app:
   link:
     - br0
     - br1
-  showAllInterfaces: true
   update:
     check: true
 groups:

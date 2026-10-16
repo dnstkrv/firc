@@ -74,13 +74,12 @@ TEST overlay_and_defaults(void)
         "  dnsProxy:\n"
         "    host:\n"
         "      port: 5353\n"
-        "  showAllInterfaces: true\n";
+        "  link: [br0]\n";
     ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
     ASSERT_EQ(5353, cfg.app.dns_proxy.host.port);
     ASSERT_STR_EQ("[::]", cfg.app.dns_proxy.host.address);
     ASSERT_STR_EQ("127.0.0.1", cfg.app.dns_proxy.upstream.address);
     ASSERT_EQ(53, cfg.app.dns_proxy.upstream.port);
-    ASSERT(cfg.app.show_all_interfaces);
     ASSERT_EQ(5000 * FIRC_DURATION_MS, cfg.app.dns_proxy.timeout);
     firc_config_clear(&cfg);
     PASS();
@@ -448,7 +447,6 @@ TEST save_shape_matches_committed_fixture(void)
         "    maxNames: 65536\n"
         "  link:\n"
         "  - br0\n"
-        "  showAllInterfaces: false\n"
         "  update:\n"
         "    check: false\n"
         "  check:\n"
@@ -519,7 +517,7 @@ TEST fakeip_block_is_read_back(void)
     firc_config_clear(&cfg);
 
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
-    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.1.0\napp:\n  showAllInterfaces: false\n"));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.1.0\napp:\n  link: []\n"));
     ASSERT_STR_EQ("198.18.0.0/15", cfg.app.fakeip.v4.pool);
     ASSERT_EQ_FMT(64u, (unsigned)cfg.app.fakeip.v6.chunk, "%u");
     ASSERT_EQ_FMT((uint64_t)(300 * FIRC_DURATION_SEC), (uint64_t)cfg.app.fakeip.ttl_clamp, "%" PRIu64);
@@ -734,7 +732,24 @@ TEST a_later_load_cannot_launder_a_refused_geometry(void)
 
     ASSERT_EQ_FMTm("the geometry is still the refused one, so this must refuse too",
                    (int)FIRC_ERR_INVAL,
-                   (int)load_str(&cfg, "configVersion: 0.1.0\napp:\n  showAllInterfaces: false\n"), "%d");
+                   (int)load_str(&cfg, "configVersion: 0.1.0\napp:\n  link: []\n"), "%d");
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: a file that still has showAllInterfaces refused, its value type-checked, or the key written back. */
+TEST a_file_with_show_all_interfaces_still_loads(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  showAllInterfaces: true\n  link: [br1]\n"));
+    ASSERT_STR_EQ("br1", cfg.app.link[0]);
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  showAllInterfaces: [1]\n"));
+    char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.7.0", FIRC_CFG_SETTINGS, &out, &out_len));
+    ASSERT_EQ(NULL, strstr(out, "showAllInterfaces"));
+    free(out);
     firc_config_clear(&cfg);
     PASS();
 }
@@ -757,7 +772,7 @@ TEST the_update_check_survives_load_and_save(void)
     ASSERT(back.app.update.check);
     free(out);
     firc_config_clear(&back);
-    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  showAllInterfaces: false\n"));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.7.0\napp:\n  link: []\n"));
     ASSERTm("an absent key keeps the earlier value", cfg.app.update.check);
     ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update:\n    check: [1]\n"));
     ASSERT_EQ(FIRC_ERR_INVAL, load_str(&cfg, "configVersion: 0.7.0\napp:\n  update: 3\n"));
@@ -2029,6 +2044,7 @@ int main(int argc, char **argv)
     RUN_TEST(an_old_idle_window_is_dropped_by_the_next_save);
     RUN_TEST(a_later_load_cannot_launder_a_refused_geometry);
     RUN_TEST(a_log_level_in_the_file_loads_as_an_unknown_key);
+    RUN_TEST(a_file_with_show_all_interfaces_still_loads);
     RUN_TEST(the_update_check_survives_load_and_save);
     RUN_TEST(an_upstream_that_is_not_an_address_is_refused);
     RUN_TEST(a_conf_that_still_names_a_skin_loads_and_drops_it);

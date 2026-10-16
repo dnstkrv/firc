@@ -142,6 +142,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 1rem;
     width: 100%;
     max-width: 1000px;
     position: relative;
@@ -151,6 +152,12 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
+    flex: none;
+  }
+
+  .header-settings {
+    display: flex;
+    flex: 1 1 0;
     min-width: 0;
   }
 
@@ -206,6 +213,16 @@
   :global([data-tabs-content]) {
     padding-top: 1rem;
     outline: none;
+  }
+
+  @media (min-width: 701px) and (max-width: 960px) {
+    :global([data-tabs-list]) {
+      gap: 0.5rem;
+    }
+
+    :global([data-tabs-trigger]) {
+      font-size: 1.15rem;
+    }
   }
 
   @media (max-width: 700px) {

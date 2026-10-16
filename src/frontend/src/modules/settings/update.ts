@@ -142,3 +142,79 @@ export function updatePhase(
   if (sameRelease(res.installed, target)) return "back";
   return res.state === "idle" || res.state === "failed" ? "failed" : "old-daemon";
 }
+
+export type UpdateStatus =
+  | { kind: "running"; state: UpdateState; version: string; percent: number | null }
+  | { kind: "checking" }
+  | { kind: "install-failed"; error: string }
+  | { kind: "not-installed"; version: string; code: number }
+  | { kind: "check-failed"; error: string }
+  | { kind: "newer"; version: string; offered: boolean }
+  | { kind: "up-to-date"; minutes: number }
+  | { kind: "unchecked" };
+
+export function offered(res: UpdateRes | null): boolean {
+  const check = res?.check;
+  return !!res?.canInstall && !!check?.newer && !!check.installable && !!check.latest;
+}
+
+export function progressPercent(res: UpdateRes | null): number | null {
+  return res?.progress && res.progress.total > 0
+    ? Math.min(100, Math.floor((res.progress.bytes * 100) / res.progress.total))
+    : null;
+}
+
+export function updateStatus(
+  res: UpdateRes,
+  ui: { checking: boolean; checkError: string },
+): UpdateStatus {
+  const check = res.check;
+  if (running(res)) {
+    return {
+      kind: "running",
+      state: res.state,
+      version: check?.latest?.version ?? "",
+      percent: progressPercent(res),
+    };
+  }
+  if (ui.checking) return { kind: "checking" };
+  if (res.state === "failed" && res.error) return { kind: "install-failed", error: res.error };
+  if (res.result !== null && resultCurrent(res) && !landed(res)) {
+    return { kind: "not-installed", version: res.result.version, code: res.result.opkgExit };
+  }
+  if (ui.checkError) return { kind: "check-failed", error: ui.checkError };
+  if (check?.error) return { kind: "check-failed", error: check.error };
+  if (check?.newer && check.latest) {
+    return { kind: "newer", version: check.latest.version, offered: offered(res) };
+  }
+  if (check) return { kind: "up-to-date", minutes: Math.floor(check.ageS / 60) };
+  return { kind: "unchecked" };
+}
+
+const RELEASES = "https://github.com/hoaxisr/firc/releases/";
+
+const linkedRelease = (res: UpdateRes) => (res.check?.newer ? res.check.latest : null);
+
+export function releaseLinkText(res: UpdateRes, t: (key: string) => string): string {
+  const latest = linkedRelease(res);
+  if (latest) return `${latest.version} · ${t("What's new")}`;
+  if (!RELEASE.test(res.installed.version)) return t("All releases");
+  return `${res.installed.version} · ${t("What's new")}`;
+}
+
+export function releaseUrl(res: UpdateRes): string {
+  const latest = linkedRelease(res);
+  if (latest) return RELEASES + "tag/" + latest.tag;
+  const { version, revision } = res.installed;
+  if (!RELEASE.test(version)) return RELEASES.slice(0, -1);
+  return RELEASES + "tag/" + (revision > 1 ? `${version}-rev${revision}` : version);
+}
+
+export function runningText(
+  state: UpdateState,
+  version: string,
+  t: (key: string) => string,
+): string {
+  if (state === "downloading") return t("Downloading {version}…").replace("{version}", version);
+  return state === "verifying" ? t("Checking the package…") : t("Installing…");
+}

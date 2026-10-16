@@ -265,17 +265,29 @@ firc_err_t firc_app_reload_settings(firc_app_t *app, const firc_app_config_t *fr
 /* pending[i] true for each restart row whose saved value differs from running; returns the count */
 size_t firc_app_pending_restart(const firc_app_t *app, bool pending[FIRC_SETTINGS_COUNT]);
 
+typedef enum firc_iface_role {
+    FIRC_IFACE_OTHER,
+    FIRC_IFACE_LAN,
+    FIRC_IFACE_WAN,
+    FIRC_IFACE_TUNNEL,
+} firc_iface_role_t;
+
 typedef struct firc_iface_info {
-    char id[16];   /* IFNAMSIZ */
-    char name[64]; /* friendly alias; empty unless built with FIRC_ENTWARE_KN */
-    bool uplink_only;
+    char id[16];        /* IFNAMSIZ */
+    char name[64];      /* NDMS description; empty unless built with FIRC_ENTWARE_KN */
+    char ndms_name[64]; /* NDMS interface-name; empty unless built with FIRC_ENTWARE_KN */
+    firc_iface_role_t role;
 } firc_iface_info_t;
 
-/* enumerates system interfaces (getifaddrs, deduped); without showAllInterfaces keeps IFF_POINTOPOINT and tunvless ones, and external ones as uplink_only */
-firc_err_t firc_app_list_interfaces(const firc_app_t *app, firc_iface_info_t **out, size_t *out_n);
+/* enumerates system interfaces (getifaddrs, deduped) but lo, ezcfg0 and the radios ra<N>/rai<N>[.<M>] */
+firc_err_t firc_app_list_interfaces(firc_iface_info_t **out, size_t *out_n);
 
-bool firc_iface_is_ignored_for_test(const char *name); /* test seam, always false without FIRC_ENTWARE_KN */
-bool firc_iface_listed_for_test(const char *name, unsigned flags, bool show_all); /* test seam: the list's filter */
+/* "tunnel", "wan", "lan" or "other" */
+const char *firc_iface_role_name(firc_iface_role_t role);
+
+firc_iface_role_t firc_iface_role_for_test(const char *name, unsigned flags, bool inet); /* test seam */
+
+bool firc_iface_listed_for_test(const char *name); /* test seam: the list's filter */
 
 /* two files sharing one path; _save_groups writes only groups.yaml; _save_config writes both, from the saved copy */
 firc_err_t firc_app_save_groups(firc_app_t *app, const char *conf_path,

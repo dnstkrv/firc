@@ -1335,7 +1335,8 @@ int main(int argc, char **argv)
 #endif
     err = firc_dnsproxy_start(d.proxy);
     if (err != FIRC_OK) {
-        FIRC_ERROR("failed to start DNS proxy: %s", firc_err_str(err));
+        const char *why = firc_dnsproxy_listen_error(d.proxy);
+        FIRC_ERROR("failed to start DNS proxy: %s", why[0] != '\0' ? why : firc_err_str(err));
         daemon_teardown(&d);
         firc_config_clear(&cfg);
         return 1;

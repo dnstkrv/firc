@@ -15,6 +15,7 @@
 #include "firc/ifacename.h"
 #include "firc/log.h"
 #include "firc/hash.h"
+#include "firc/tunvless_name.h"
 #include "firc/utf8.h"
 
 #define FILE_CAP (4u * 1024u * 1024u)
@@ -630,17 +631,7 @@ static firc_err_t parse_tunnel(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
 static bool device_ok(const char *d, bool *prefix)
 {
     *prefix = strncmp(d, "tunvless", 8) == 0;
-    if (!*prefix) {
-        return false;
-    }
-    const char *s = d + 8;
-    if (s[0] < '0' || s[0] > '9') {
-        return false;
-    }
-    if (s[0] == '0') {
-        return s[1] == '\0';
-    }
-    return (s[1] == '\0') || (s[1] >= '0' && s[1] <= '9' && s[2] == '\0');
+    return firc_tunvless_index(d) >= 0;
 }
 
 static const firc_tunnel_t *find_id(const firc_tunnels_t *ts, const char *id)

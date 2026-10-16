@@ -33,15 +33,3 @@ firc_err_t firc_redir_build_rules(firc_ipt_t *ipt4, const char *chain_prefix, co
     return firc_ipt_insert(ipt4, "nat", "PREROUTING", 1, jump, 13);
 }
 
-int firc_redir_device(const char *iface) {
-    static const char stem[] = "tunvless";
-    if (iface == NULL) { return -1; }
-    for (size_t i = 0; i < sizeof(stem) - 1; i++) {
-        if (iface[i] != stem[i]) { return -1; }
-    }
-    const char *d = iface + sizeof(stem) - 1;
-    if (d[0] < '0' || d[0] > '9') { return -1; }
-    if (d[1] == '\0') { return d[0] - '0'; }
-    if (d[0] == '0' || d[1] < '0' || d[1] > '9' || d[2] != '\0') { return -1; }
-    return (d[0] - '0') * 10 + (d[1] - '0');
-}

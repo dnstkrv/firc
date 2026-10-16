@@ -10,6 +10,7 @@
 #include "firc/log.h"
 #include "firc/logrep.h"
 #include "firc/mark.h"
+#include "firc/tunvless_name.h"
 
 typedef struct watched_if {
     char name[16];
@@ -55,15 +56,6 @@ struct firc_ifwatch {
 
 static const firc_if_track_t k_unknown = {FIRC_IF_UNKNOWN, 0, -1, false, ""};
 static const char k_all_dead[] = "every interface of its list is dead; its traffic goes nowhere until one is alive";
-
-static bool tunvless_name(const char *n) {
-    static const char stem[] = "tunvless";
-    if (strncmp(n, stem, sizeof(stem) - 1) != 0) { return false; }
-    const char *d = n + sizeof(stem) - 1;
-    if (d[0] < '0' || d[0] > '9') { return false; }
-    if (d[1] == '\0') { return true; }
-    return d[0] != '0' && d[1] >= '0' && d[1] <= '9' && d[2] == '\0';
-}
 
 static int64_t now_ms(const firc_ifwatch_t *w) {
     if (w->d.now_ms != NULL) { return w->d.now_ms(); }
@@ -140,7 +132,7 @@ static watched_if_t *add_if(firc_ifwatch_t *w, const char *name, int64_t now) {
     firc_if_track_init(&wi->track, now);
     wi->since_unix = (int64_t)time(NULL);
     wi->due_ms = now;
-    wi->tunnel = tunvless_name(name);
+    wi->tunnel = firc_tunvless_index(name) >= 0;
     wi->gen = ++w->next_gen;
     if (wi->tunnel) {
         tunnel_step(w, wi, now);

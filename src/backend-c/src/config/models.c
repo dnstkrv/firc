@@ -637,7 +637,6 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
     c->netfilter.disable_ipv4 = false;
     c->netfilter.disable_ipv6 = false;
     c->netfilter.start_mark_table_index = UINT32_C(0x66697263); /* "firc" */
-    c->show_all_interfaces = false;
     c->update.check = false;
     c->check.interval = 30 * FIRC_DURATION_SEC;
     c->check.timeout = 5 * FIRC_DURATION_SEC;

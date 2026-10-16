@@ -28,6 +28,27 @@ test.describe("Header Settings", () => {
     await expect(button).toHaveAttribute("aria-expanded", "false");
   });
 
+  // Catches a long version drawn over the Russian nav tabs, or the dev badge back next to it.
+  for (const width of [1290, 1024]) {
+    test(`a long version stays clear of the nav tabs at ${width} px`, async ({ page }) => {
+      await page.evaluate(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));
+      await page.setViewportSize({ width, height: 600 });
+      await page.reload();
+      await expect(page.getByRole("tab").last()).toHaveText("Настройки");
+      await expect(page.getByText("dev", { exact: true })).toHaveCount(0);
+      const version = page.locator(".version .version-text");
+      await version.evaluate(
+        (el) => (el.textContent = "0.3.1~git20261016154241.805abcd (805abcd)"),
+      );
+      const v = await version.boundingBox();
+      const tab = await page.getByRole("tab").last().boundingBox();
+      expect(v && tab).toBeTruthy();
+      const apart = v!.x >= tab!.x + tab!.width || v!.x + v!.width <= tab!.x;
+      expect(apart).toBe(true);
+      expect(v!.width).toBeGreaterThan(0);
+    });
+  }
+
   test("should display version", async ({ page }) => {
     const version = page.locator(".version .version-text");
     await expect(version).toBeVisible();

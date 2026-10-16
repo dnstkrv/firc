@@ -117,6 +117,9 @@ void firc_dnsproxy_destroy(firc_dnsproxy_t *p);
 
 firc_err_t firc_dnsproxy_start(firc_dnsproxy_t *p);
 
+/* Why the last start could not open its sockets, as firc_listen_describe words it; "" otherwise. */
+const char *firc_dnsproxy_listen_error(const firc_dnsproxy_t *p);
+
 uint64_t firc_dnsproxy_dropped(const firc_dnsproxy_t *p);
 uint64_t firc_dnsproxy_inflight(const firc_dnsproxy_t *p);
 

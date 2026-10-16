@@ -50,6 +50,7 @@ typedef struct group_health {
 } group_health_t;
 
 struct firc_dnsproxy {
+    char listen_error[192];
     firc_dnsproxy_config_t cfg;
     firc_loop_t *loop;
     firc_dnsproxy_msg_cb cb;
@@ -1794,6 +1795,11 @@ firc_err_t firc_dnsproxy_create(const firc_dnsproxy_config_t *cfg, firc_loop_t *
     return FIRC_OK;
 }
 
+const char *firc_dnsproxy_listen_error(const firc_dnsproxy_t *p)
+{
+    return p->listen_error;
+}
+
 firc_err_t firc_dnsproxy_start(firc_dnsproxy_t *p)
 {
     struct sockaddr_storage listen_sa;
@@ -1804,13 +1810,16 @@ firc_err_t firc_dnsproxy_start(firc_dnsproxy_t *p)
         return FIRC_ERR_INVAL;
     }
 
-    int ufd = firc_listen_open(SOCK_DGRAM, &listen_sa, listen_len, FIRC_DNS_UDP_LISTEN);
+    p->listen_error[0] = '\0';
+    int ufd = firc_listen_open("DNS proxy", SOCK_DGRAM, &listen_sa, listen_len, FIRC_DNS_UDP_LISTEN,
+                               p->listen_error, sizeof(p->listen_error));
     if (ufd < 0) {
         return firc_err_from_errno(-ufd);
     }
     p->udp_fd = ufd;
 
-    int tfd = firc_listen_open(SOCK_STREAM, &listen_sa, listen_len, FIRC_DNS_TCP_LISTEN);
+    int tfd = firc_listen_open("DNS proxy", SOCK_STREAM, &listen_sa, listen_len, FIRC_DNS_TCP_LISTEN,
+                               p->listen_error, sizeof(p->listen_error));
     if (tfd < 0) {
         close(ufd);
         p->udp_fd = -1;
@@ -1826,9 +1835,11 @@ firc_err_t firc_dnsproxy_start(firc_dnsproxy_t *p)
     if (err != FIRC_OK) {
         return err;
     }
-    FIRC_INFO("DNS proxy listening on %s:%u (udp+tcp), upstream %s:%u",
-            p->cfg.listen_addr, p->cfg.listen_port, p->cfg.upstream_addr,
-            p->cfg.upstream_port);
+    char uname[96], tname[96];
+    firc_listen_name(ufd, SOCK_DGRAM, uname, sizeof(uname));
+    firc_listen_name(tfd, SOCK_STREAM, tname, sizeof(tname));
+    FIRC_INFO("DNS proxy listening on %s and %s, upstream %s:%u", uname, tname, p->cfg.upstream_addr,
+              p->cfg.upstream_port);
     return FIRC_OK;
 }
 

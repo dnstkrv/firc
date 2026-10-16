@@ -2492,17 +2492,22 @@ static void resolver_stub_stop(resolver_stub_t *s) {
     close(s->fd);
 }
 
-static uint16_t free_udp_port(void) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { return 0; }
-    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    socklen_t sl = sizeof(sa);
-    uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0 && getsockname(fd, (struct sockaddr *)&sa, &sl) == 0) {
-        port = ntohs(sa.sin_port);
+static uint16_t free_port(void) {
+    for (int attempt = 0; attempt < 16; attempt++) {
+        int tcp = socket(AF_INET, SOCK_STREAM, 0);
+        int udp = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+        socklen_t sl = sizeof(sa);
+        uint16_t port = 0;
+        if (tcp >= 0 && udp >= 0 && bind(tcp, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+            getsockname(tcp, (struct sockaddr *)&sa, &sl) == 0) {
+            if (bind(udp, (struct sockaddr *)&sa, sizeof(sa)) == 0) { port = ntohs(sa.sin_port); }
+        }
+        if (tcp >= 0) { close(tcp); }
+        if (udp >= 0) { close(udp); }
+        if (port != 0) { return port; }
     }
-    close(fd);
-    return port;
+    return 0;
 }
 
 typedef struct {
@@ -2606,9 +2611,9 @@ TEST a_cached_answer_for_a_committed_address_is_not_held(void) {
     firc_dnsproxy_config_t pcfg;
     memset(&pcfg, 0, sizeof(pcfg));
     pcfg.listen_addr = "127.0.0.1";
-    pcfg.listen_port = free_udp_port();
+    pcfg.listen_port = free_port();
     pcfg.upstream_addr = "127.0.0.1";
-    pcfg.upstream_port = free_udp_port();
+    pcfg.upstream_port = free_port();
     pcfg.timeout_ms = 3000;
     pcfg.max_concurrent = 16;
     pcfg.max_idle_conns = 2;
@@ -2728,31 +2733,18 @@ TEST remove_by_id_and_by_index(void) {
     PASS();
 }
 
-TEST list_interfaces_show_all_finds_loopback(void) {
-    firc_config_t cfg;
-    firc_config_init_defaults(&cfg);
-    cfg.app.show_all_interfaces = true;
-    firc_app_deps_t deps = {.cfg = &cfg};
-    firc_app_t *app = firc_app_create(&deps);
-
+/* Catches: the loopback listed, or a name listed once per address it holds. */
+TEST the_list_never_holds_the_loopback(void) {
     firc_iface_info_t *ifaces = NULL;
     size_t n = 0;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(app, &ifaces, &n));
-    ASSERT(n > 0);
-    bool found_lo = false;
+    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifaces, &n));
     for (size_t i = 0; i < n; i++) {
-        if (strcmp(ifaces[i].id, "lo") == 0) { found_lo = true; }
-    }
-    ASSERT(found_lo);
-    for (size_t i = 0; i < n; i++) {
+        ASSERT(strcmp(ifaces[i].id, "lo") != 0);
         for (size_t j = i + 1; j < n; j++) {
             ASSERT(strcmp(ifaces[i].id, ifaces[j].id) != 0);
         }
     }
-
     free(ifaces);
-    firc_app_destroy(app);
-    firc_config_clear(&cfg);
     PASS();
 }
 
@@ -8763,7 +8755,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_held_answer_waits_only_for_the_families_it_carries);
     RUN_TEST(a_cached_answer_for_a_committed_address_is_not_held);
     RUN_TEST(remove_by_id_and_by_index);
-    RUN_TEST(list_interfaces_show_all_finds_loopback);
+    RUN_TEST(the_list_never_holds_the_loopback);
     RUN_TEST(save_config_round_trips);
     RUN_TEST(force_commit_without_a_committer_is_refused);
     RUN_TEST(the_app_publishes_a_route_per_group);

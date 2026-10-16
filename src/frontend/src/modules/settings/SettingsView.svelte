@@ -231,13 +231,13 @@
     background: var(--bg-medium);
     border: 1px solid var(--bg-light-extra);
     border-radius: 8px;
-    overflow: hidden;
   }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 8px 12px;
+    border-radius: 7px 7px 0 0;
     background: var(--bg-light);
   }
   .title {

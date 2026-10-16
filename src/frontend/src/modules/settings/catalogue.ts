@@ -282,17 +282,6 @@ export const SECTIONS: Section[] = [
     title: () => t("WebUI"),
     rows: [
       row(
-        () => t("Show all interfaces"),
-        () => t("In a group's interface list, service ones included"),
-        [
-          {
-            key: "app.showAllInterfaces",
-            label: () => t("Show all interfaces"),
-            control: { kind: "switch" },
-          },
-        ],
-      ),
-      row(
         () => t("WebUI address"),
         () => t("Where this page is served"),
         [

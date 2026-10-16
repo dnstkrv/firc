@@ -25,7 +25,6 @@ export const DEFAULTS: Record<string, unknown> = {
   "app.link": ["br0"],
   "app.netfilter.iptables.chainPrefix": "FIRC_",
   "app.netfilter.startMarkTableIndex": "0x66697263",
-  "app.showAllInterfaces": false,
   "app.httpWeb.host.address": "[::]",
   "app.httpWeb.host.port": 666,
   "app.update.check": false,
@@ -42,7 +41,6 @@ const LIVE = new Set([
   "app.dnsProxy.upstream.port",
   "app.dnsProxy.disableDropAAAA",
   "app.dnsProxy.unmatchedTtl",
-  "app.showAllInterfaces",
   "app.update.check",
 ]);
 
@@ -114,9 +112,11 @@ export async function openSettings(
       json: {
         interfaces: [
           { id: "blackhole" },
-          { id: "br0" },
-          { id: "br1" },
-          { id: "ppp0", uplinkOnly: true },
+          { id: "br0", name: "Home network", role: "lan" },
+          { id: "br1", name: "Guest", role: "lan" },
+          { id: "ppp0", name: "Broadband", role: "wan" },
+          { id: "eth2.1", role: "other" },
+          { id: "tunvless0", name: "VLESS", role: "tunnel" },
         ],
       },
     }),

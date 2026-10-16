@@ -155,7 +155,7 @@ test.describe("A group's DNS", () => {
     await page.locator('[data-value="Add Group"] button').click();
     const dialog = page.getByRole("dialog");
     await dialog.locator(".interface-select [data-select-trigger]").click();
-    const bh = page.getByRole("option", { name: "blackhole" });
+    const bh = page.getByRole("option", { name: "Block" });
     await bh.waitFor({ state: "attached" });
     await bh.click();
     await expect(dialog.locator(".dns-blackhole-hint")).toBeVisible();
@@ -198,7 +198,7 @@ test.describe("A group's DNS", () => {
     await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
 
     await dialog.locator(".interface-select [data-select-trigger]").click();
-    const bh = page.getByRole("option", { name: "blackhole" });
+    const bh = page.getByRole("option", { name: "Block" });
     await bh.waitFor({ state: "attached" });
     await bh.click();
     await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();

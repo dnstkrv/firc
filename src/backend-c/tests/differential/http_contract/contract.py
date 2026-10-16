@@ -175,6 +175,18 @@ def run_tunnel_sequence(t, conn):
     t.step("GET", "/api/v1/tunnels/state")
 
 
+_ROLES = {"tunnel", "wan", "lan", "other"}
+
+
+def _host_interface_ok(item):
+    """A host interface: an id, a known role, and nothing but optional string names."""
+    if not isinstance(item, dict) or not set(item) <= {"id", "name", "ndmsName", "role"}:
+        return False
+    if not isinstance(item.get("id"), str) or item.get("role") not in _ROLES:
+        return False
+    return all(isinstance(item[k], str) and item[k] for k in ("name", "ndmsName") if k in item)
+
+
 def _normalize_host_interfaces(obj):
     """Preserve the response contract without freezing runner device names."""
     if not isinstance(obj, dict) or set(obj.keys()) != {"interfaces"}:
@@ -182,9 +194,9 @@ def _normalize_host_interfaces(obj):
     interfaces = obj["interfaces"]
     if (
         not isinstance(interfaces, list)
-        or len(interfaces) < 2
+        or len(interfaces) < 1
         or interfaces[0] != {"id": "blackhole"}
-        or not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in interfaces)
+        or not all(_host_interface_ok(item) for item in interfaces[1:])
     ):
         return obj
     return {"interfaces": [{"id": "blackhole"}, {"id": "<HOST-INTERFACES>"}]}

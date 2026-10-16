@@ -198,12 +198,60 @@ test("Russian counts agree with the number", async ({ page }) => {
   await expect(page.getByTestId("settings-counter")).toHaveText("Изменены 2 настройки");
 });
 
-// Catches an interface listed only as a tunnel uplink suggested as a LAN interface.
-test("the LAN interface suggestions leave out uplink-only interfaces", async ({ page }) => {
+// Catches a chip without its description, the segments not offered first, a search blind to other interfaces, or a tunnel or the blackhole offered.
+test("the LAN picker offers the segments and finds any other interface", async ({ page }) => {
   await openSettings(page, (r) => r.fulfill({ json: answer() }));
-  const offered = page.locator('[data-row="app.link"] datalist option');
-  await expect(offered).toHaveCount(1);
-  await expect(offered).toHaveAttribute("value", "br1");
+  const row = page.locator('[data-row="app.link"]');
+  await expect(row.locator(".tag")).toHaveText(["Home network"]);
+  await expect(row.locator(".tag")).toHaveAttribute("title", "br0");
+  await row.getByRole("button", { name: "Add" }).click();
+  const search = row.getByRole("combobox", { name: "Search interface" });
+  await expect(search).toBeFocused();
+  await expect(row.locator(".section")).toHaveText("Segments");
+  const offered = row.getByRole("listbox", { name: "LAN interfaces" }).getByRole("option");
+  await expect(offered).toHaveText([/^\s*Home network\s*br0\s*$/, /^\s*Guest\s*br1\s*$/]);
+  await expect(offered.first()).toHaveAttribute("aria-selected", "true");
+  await offered.filter({ hasText: "br1" }).click();
+  await expect(row.locator(".tag")).toHaveText(["Home network", "Guest"]);
+  await search.fill("eth2");
+  await expect(row.locator(".section")).toHaveCount(0);
+  await expect(offered).toHaveText([/^\s*eth2\.1\s*$/]);
+  await search.press("ArrowDown");
+  await search.press("Enter");
+  await expect(row.locator(".tag")).toHaveText(["Home network", "Guest", "eth2.1"]);
+  await search.fill("vless");
+  await expect(offered).toHaveCount(0);
+  await search.fill("eth9");
+  await expect(row.locator(".panel .empty")).toHaveText("Enter adds it as typed");
+  await search.press("Enter");
+  await expect(row.locator(".tag")).toHaveText(["Home network", "Guest", "eth2.1", "eth9"]);
+  await search.press("Escape");
+  await expect(search).toHaveCount(0);
+  await expect(row.getByRole("button", { name: "Add" })).toBeFocused();
+});
+
+// Catches Enter ignoring a typed match until an arrow key, or Tab leaving the panel open behind.
+test("Enter takes the first match and Tab closes the LAN panel", async ({ page }) => {
+  await openSettings(page, (r) => r.fulfill({ json: answer() }));
+  const row = page.locator('[data-row="app.link"]');
+  await row.getByRole("button", { name: "Add" }).click();
+  const search = row.getByRole("combobox", { name: "Search interface" });
+  await search.fill("ppp");
+  await search.press("Enter");
+  await expect(row.locator(".tag")).toHaveText(["Home network", "Broadband"]);
+  await search.press("Tab");
+  await expect(search).toHaveCount(0);
+});
+
+// Catches the LAN panel spilling past a phone's screen once the row wraps.
+test("the LAN panel fits a 360 px phone", async ({ page }) => {
+  await openSettings(page, (r) => r.fulfill({ json: answer() }));
+  await page.setViewportSize({ width: 360, height: 800 });
+  const row = page.locator('[data-row="app.link"]');
+  await row.getByRole("button", { name: "Add" }).click();
+  const box = await row.locator(".panel").boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(360);
 });
 
 test("the interface check shows its three fields and saves the interval as a live change", async ({

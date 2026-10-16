@@ -47,7 +47,7 @@ func main() {
 	fmt.Fprintf(&b, "  dnsProxy:\n    host:\n      address: \"%s\"\n      port: %d\n    upstream:\n      address: %s\n      port: %d\n", *hostAddr, *hostPort, *upstream, *upstreamPt)
 	b.WriteString("    disableRemap53: true\n    disableDropAAAA: false\n    maxIdleConns: 10\n    maxConcurrent: 100\n    timeout: 5s\n")
 	b.WriteString("  netfilter:\n    iptables:\n      chainPrefix: FIRC_\n    ipset:\n      tablePrefix: firc_\n      additionalTTL: 1h0m0s\n    disableIPv4: false\n    disableIPv6: false\n    startMarkTableIndex: 1718186595\n")
-	b.WriteString("  link: []\n  showAllInterfaces: false\n")
+	b.WriteString("  link: []\n")
 	b.WriteString("groups:\n")
 	fmt.Fprintf(&b, "  - id: aa000001\n    name: Bench\n    color: '#ffffff'\n    interface: %s\n    enable: %v\n    rules:\n", "blackhole", *groupEnable)
 	for i := 0; i < *nRules; i++ {

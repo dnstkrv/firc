@@ -47,7 +47,6 @@ const firc_setting_t firc_settings[] = {
     {"app.link", FIRC_SK_LIST, RESTART, AT(link), AT(n_link), FIRC_APPLY_NONE},
     {"app.netfilter.iptables.chainPrefix", FIRC_SK_STRING, RESTART, AT(netfilter.iptables.chain_prefix), 0, FIRC_APPLY_NONE},
     {"app.netfilter.startMarkTableIndex", FIRC_SK_HEX32, RESTART, AT(netfilter.start_mark_table_index), 0, FIRC_APPLY_NONE},
-    {"app.showAllInterfaces", FIRC_SK_BOOL, LIVE, AT(show_all_interfaces), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.address", FIRC_SK_ADDR, RESTART, AT(http_web.host.address), 0, FIRC_APPLY_NONE},
     {"app.httpWeb.host.port", FIRC_SK_PORT, RESTART, AT(http_web.host.port), 0, FIRC_APPLY_NONE},
     {"app.update.check", FIRC_SK_BOOL, LIVE, AT(update.check), 0, FIRC_APPLY_NONE},

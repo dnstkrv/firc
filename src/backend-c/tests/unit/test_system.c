@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ifaddrs.h>
 #include <sys/socket.h>
 #include <linux/if.h>
 #include <sys/time.h>
@@ -22,6 +23,69 @@
 #include "firc/tunnels.h"
 
 static void *g_policies;
+
+typedef struct stub_kn {
+    const char *iface;
+    const char *description;
+    const char *ndms;
+    bool inet;
+} stub_kn_t;
+
+static const stub_kn_t *g_kn;
+
+firc_err_t __real_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
+firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
+firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out) {
+    if (g_kn == NULL) { return __real_firc_kn_get_iface_aliases(out); }
+    size_t n = 0;
+    while (g_kn[n].iface != NULL) { n++; }
+    out->items = calloc(n + 1, sizeof(*out->items));
+    if (out->items == NULL) { return FIRC_ERR_NOMEM; }
+    out->n = n;
+    for (size_t i = 0; i < n; i++) {
+        snprintf(out->items[i].system_name, sizeof(out->items[i].system_name), "%s", g_kn[i].iface);
+        snprintf(out->items[i].description, sizeof(out->items[i].description), "%s", g_kn[i].description);
+        snprintf(out->items[i].ndms_name, sizeof(out->items[i].ndms_name), "%s", g_kn[i].ndms);
+        out->items[i].inet = g_kn[i].inet;
+    }
+    return FIRC_OK;
+}
+
+typedef struct stub_if {
+    const char *name;
+    unsigned flags;
+} stub_if_t;
+
+static const stub_if_t *g_ifs;
+static struct ifaddrs g_ifa[32];
+
+int __real_getifaddrs(struct ifaddrs **ifap);
+int __wrap_getifaddrs(struct ifaddrs **ifap);
+int __wrap_getifaddrs(struct ifaddrs **ifap) {
+    if (g_ifs == NULL) { return __real_getifaddrs(ifap); }
+    size_t n = 0;
+    while (g_ifs[n].name != NULL && n < sizeof g_ifa / sizeof g_ifa[0]) { n++; }
+    memset(g_ifa, 0, sizeof g_ifa);
+    for (size_t i = 0; i < n; i++) {
+        g_ifa[i].ifa_name = (char *)g_ifs[i].name;
+        g_ifa[i].ifa_flags = g_ifs[i].flags;
+        g_ifa[i].ifa_next = i + 1 < n ? &g_ifa[i + 1] : NULL;
+    }
+    *ifap = n > 0 ? g_ifa : NULL;
+    return 0;
+}
+
+void __real_freeifaddrs(struct ifaddrs *ifa);
+void __wrap_freeifaddrs(struct ifaddrs *ifa);
+void __wrap_freeifaddrs(struct ifaddrs *ifa) {
+    if (ifa != g_ifa) { __real_freeifaddrs(ifa); }
+}
+
+static void reset_stubs(void *ud) {
+    (void)ud;
+    g_ifs = NULL;
+    g_kn = NULL;
+}
 
 typedef struct harness {
     firc_loop_t *loop;
@@ -330,10 +394,11 @@ TEST the_netfilter_route_says_the_first_write_is_pending(void) {
 TEST a_tunnel_device_is_named_by_its_description(void) {
     harness_t *h = harness_start(false);
     ASSERT(h != NULL);
-    h->cfg.app.show_all_interfaces = true;
+    static const stub_if_t ifs[] = {{"eth2", 0}, {NULL, 0}};
+    g_ifs = ifs;
     firc_tunnel_t t[2];
     memset(t, 0, sizeof t);
-    snprintf(t[0].device, sizeof t[0].device, "lo");
+    snprintf(t[0].device, sizeof t[0].device, "eth2");
     snprintf(t[0].description, sizeof t[0].description, "PRAW-1");
     snprintf(t[1].device, sizeof t[1].device, "tunvless9");
     snprintf(t[1].description, sizeof t[1].description, "other");
@@ -342,17 +407,18 @@ TEST a_tunnel_device_is_named_by_its_description(void) {
 
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/interfaces", NULL, &out));
-    const cJSON *lo = NULL;
+    const cJSON *eth2 = NULL;
     const cJSON *it;
     cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(out, "interfaces")) {
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
-        if (cJSON_IsString(id) && strcmp(id->valuestring, "lo") == 0) { lo = it; }
+        if (cJSON_IsString(id) && strcmp(id->valuestring, "eth2") == 0) { eth2 = it; }
     }
-    ASSERT(lo != NULL);
-    const cJSON *name = cJSON_GetObjectItemCaseSensitive(lo, "name");
+    ASSERT(eth2 != NULL);
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(eth2, "name");
     ASSERT(cJSON_IsString(name));
     ASSERT_STR_EQ("PRAW-1", name->valuestring);
     cJSON_Delete(out);
+    g_ifs = NULL;
     harness_stop(h);
     PASS();
 }
@@ -385,7 +451,6 @@ TEST a_tunnel_description_wins_over_an_alias(void) {
 TEST list_interfaces_includes_blackhole_first(void) {
     harness_t *h = harness_start(false);
     ASSERT(h != NULL);
-    h->cfg.app.show_all_interfaces = true;
 
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/interfaces", NULL, &out));
@@ -608,31 +673,20 @@ TEST a_bypass_event_without_a_last_answer_has_no_last(void) {
     PASS();
 }
 
-/* catches: a tunnel device hidden from group pickers unless every interface is shown, or any tunvless-like name let through */
-TEST tunnel_devices_are_listed_without_show_all(void) {
-    ASSERT(firc_iface_listed_for_test("tunvless0", 0, false));
-    ASSERT(firc_iface_listed_for_test("tunvless12", IFF_UP, false));
-    ASSERT_FALSE(firc_iface_listed_for_test("tunvless", 0, false));
-    ASSERT_FALSE(firc_iface_listed_for_test("tunvlessx", 0, false));
-    ASSERT_FALSE(firc_iface_listed_for_test("tunvless1a", 0, false));
-    ASSERT_FALSE(firc_iface_listed_for_test("eth0", IFF_UP, false));
-    ASSERT(firc_iface_listed_for_test("ppp0", IFF_POINTOPOINT, false));
-    ASSERT(firc_iface_listed_for_test("eth0", 0, true));
-    PASS();
-}
-
-TEST ignored_interfaces_list(void) {
-#ifdef FIRC_ENTWARE_KN
-    ASSERT(firc_iface_is_ignored_for_test("ra0"));
-    ASSERT(firc_iface_is_ignored_for_test("ra15"));
-    ASSERT(firc_iface_is_ignored_for_test("ezcfg0"));
-    ASSERT(!firc_iface_is_ignored_for_test("br0"));
-    ASSERT(!firc_iface_is_ignored_for_test("ra16"));
-#else
-    ASSERT(!firc_iface_is_ignored_for_test("ra0"));
-    ASSERT(!firc_iface_is_ignored_for_test("ezcfg0"));
-    ASSERT(!firc_iface_is_ignored_for_test("br0"));
-#endif
+/* Catches: loopback, ezcfg0 or a radio name listed, a radio past ra15 shown, or a name only shaped like a radio hidden. */
+TEST only_loopback_ezcfg_and_radio_names_are_hidden(void) {
+    static const char *const hidden[] = {"lo",   "ezcfg0", "ra0",    "ra7",    "ra15",
+                                         "ra16", "rai1",   "ra7.1",  "rai7.1", "rai0.12"};
+    static const char *const shown[] = {"br0",    "ppp0",   "nwg1",   "eth2.1", "tunvless0", "opkgtun10",
+                                        "radio0", "ra",     "rai",    "rax",    "raid0",     "ra1x",
+                                        "ra1.",   "ra.1",   "ra1.2.3", "rai1.x", "lo0",       "ezcfg1",
+                                        "xra0",   "eth0",   "rai1a",  "ra-1"};
+    for (size_t i = 0; i < sizeof hidden / sizeof hidden[0]; i++) {
+        ASSERT_FALSEm(hidden[i], firc_iface_listed_for_test(hidden[i]));
+    }
+    for (size_t i = 0; i < sizeof shown / sizeof shown[0]; i++) {
+        ASSERTm(shown[i], firc_iface_listed_for_test(shown[i]));
+    }
     PASS();
 }
 
@@ -683,72 +737,81 @@ TEST the_hosts_route_answers_the_refreshers_table(void) {
     PASS();
 }
 
-static const char *g_kn_iface;
-static const char *g_kn_alias;
-static bool g_kn_inet;
-
-firc_err_t __real_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
-firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
-firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out) {
-    if (g_kn_iface == NULL) { return __real_firc_kn_get_iface_aliases(out); }
-    out->items = calloc(1, sizeof(*out->items));
-    if (out->items == NULL) { return FIRC_ERR_NOMEM; }
-    out->n = 1;
-    snprintf(out->items[0].system_name, sizeof(out->items[0].system_name), "%s", g_kn_iface);
-    snprintf(out->items[0].alias, sizeof(out->items[0].alias), "%s", g_kn_alias);
-    out->items[0].inet = g_kn_inet;
-    return FIRC_OK;
+/* Catches: a tunvless device, a point-to-point link, an inet one, a br segment or the rest given another role, or the order of the rules changed. */
+TEST each_interface_gets_its_role(void) {
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("nwg1", IFF_POINTOPOINT, false));
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("opkgtun10", IFF_POINTOPOINT | IFF_UP, false));
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("tunvless0", 0, false));
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("tunvless12", 0, true));
+    ASSERT_EQ(FIRC_IFACE_WAN, firc_iface_role_for_test("ppp0", IFF_POINTOPOINT, true));
+    ASSERT_EQ(FIRC_IFACE_WAN, firc_iface_role_for_test("eth3", 0, true));
+    ASSERT_EQ(FIRC_IFACE_WAN, firc_iface_role_for_test("br9", 0, true));
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("ppp0", IFF_POINTOPOINT, false));
+    ASSERT_EQ(FIRC_IFACE_LAN, firc_iface_role_for_test("br0", 0, false));
+    ASSERT_EQ(FIRC_IFACE_LAN, firc_iface_role_for_test("br12", IFF_UP, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("eth2.1", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("br", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("bridge0", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("br0.5", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("tunvlessx", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("tunvless01", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("tunvless100", 0, false));
+    ASSERT_EQ(FIRC_IFACE_TUNNEL, firc_iface_role_for_test("tunvless99", 0, false));
+    ASSERT_EQ(FIRC_IFACE_OTHER, firc_iface_role_for_test("radio0", 0, false));
+    ASSERT_STR_EQ("tunnel", firc_iface_role_name(FIRC_IFACE_TUNNEL));
+    ASSERT_STR_EQ("wan", firc_iface_role_name(FIRC_IFACE_WAN));
+    ASSERT_STR_EQ("lan", firc_iface_role_name(FIRC_IFACE_LAN));
+    ASSERT_STR_EQ("other", firc_iface_role_name(FIRC_IFACE_OTHER));
+    PASS();
 }
 
-static void stub_kn(const char *iface, const char *alias, bool inet) {
-    g_kn_iface = iface;
-    g_kn_alias = alias;
-    g_kn_inet = inet;
-}
-
-static const firc_iface_info_t *find_iface(const firc_iface_info_t *ifs, size_t n, const char *id) {
-    for (size_t i = 0; i < n; i++) {
-        if (strcmp(ifs[i].id, id) == 0) { return &ifs[i]; }
-    }
-    return NULL;
-}
-
-/* Catches: an external interface hidden without show-all, flagged when listed anyway, or a non-external one let through. */
-TEST an_external_interface_is_listed_only_for_the_uplink(void) {
-    firc_config_t cfg;
-    firc_config_init_defaults(&cfg);
-    firc_app_deps_t deps = {.cfg = &cfg};
-    firc_app_t *app = firc_app_create(&deps);
-    firc_iface_info_t *ifs = NULL;
+/* Catches: a hidden name listed, a shown one dropped, a name listed twice, the order changed, a role, description or NDMS name lost, or a kernel pseudo-device NDMS does not know listed. */
+TEST the_list_holds_what_ndms_knows_and_every_tunnel(void) {
+    static const stub_if_t ifs[] = {{"lo", 0},       {"br0", 0},       {"ra0", 0},      {"ppp0", IFF_POINTOPOINT},
+                                    {"br0", 0},      {"ezcfg0", 0},    {"rai1.2", 0},   {"nwg1", IFF_POINTOPOINT},
+                                    {"ppp0", IFF_POINTOPOINT},         {"eth2.1", 0},   {"tunl0", 0},
+                                    {"sit0", 0},     {"ip6tnl0", 0},   {"dummy0", 0},   {"apcli0", 0},
+                                    {"tunvless0", 0}, {NULL, 0}};
+    static const stub_kn_t kn[] = {{"ppp0", "Broadband", "PPPoE0", true},
+                                   {"br0", "", "", false},
+                                   {"eth2.1", "", "GigabitEthernet0/Vlan1", false},
+                                   {"apcli0", "", "WifiMaster0/WifiStation0", false},
+                                   {NULL, NULL, NULL, false}};
+    g_ifs = ifs;
+    g_kn = kn;
+    firc_iface_info_t *ifs_out = NULL;
     size_t n = 0;
+    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifs_out, &n));
+    static const char *const ids[] = {"br0", "ppp0", "nwg1", "eth2.1", "apcli0", "tunvless0"};
+    static const firc_iface_role_t roles[] = {FIRC_IFACE_LAN, FIRC_IFACE_WAN, FIRC_IFACE_TUNNEL,
+                                              FIRC_IFACE_OTHER, FIRC_IFACE_OTHER, FIRC_IFACE_TUNNEL};
+    ASSERT_EQ_FMT(sizeof(ids) / sizeof(ids[0]), n, "%zu");
+    for (size_t i = 0; i < n; i++) {
+        ASSERT_STR_EQ(ids[i], ifs_out[i].id);
+        ASSERT_EQm(ids[i], roles[i], ifs_out[i].role);
+    }
+    ASSERT_STR_EQ("Broadband", ifs_out[1].name);
+    ASSERT_STR_EQ("PPPoE0", ifs_out[1].ndms_name);
+    ASSERT_STR_EQ("", ifs_out[0].name);
+    ASSERT_STR_EQ("", ifs_out[0].ndms_name);
+    free(ifs_out);
+    PASS();
+}
 
-    stub_kn("lo", "", true);
-    cfg.app.show_all_interfaces = false;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(app, &ifs, &n));
-    const firc_iface_info_t *lo = find_iface(ifs, n, "lo");
-    ASSERT(lo != NULL);
-    ASSERT(lo->uplink_only);
-    ASSERT_STR_EQ("", lo->name);
-    free(ifs);
-
-    stub_kn("lo", "Loop", false);
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(app, &ifs, &n));
-    ASSERT(find_iface(ifs, n, "lo") == NULL);
-    free(ifs);
-
-    stub_kn("lo", "Loop", true);
-    cfg.app.show_all_interfaces = true;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(app, &ifs, &n));
-    lo = find_iface(ifs, n, "lo");
-    ASSERT(lo != NULL);
-    ASSERT_FALSE(lo->uplink_only);
-    ASSERT_STR_EQ("Loop", lo->name);
-    for (size_t i = 0; i < n; i++) { ASSERT_FALSEm(ifs[i].id, ifs[i].uplink_only); }
-    free(ifs);
-
-    stub_kn(NULL, NULL, false);
-    firc_app_destroy(app);
-    firc_config_clear(&cfg);
+/* Catches: an unreachable RCI hiding every interface but the tunnels, or the shape rules not applied then. */
+TEST without_ndms_data_the_list_falls_back_to_the_shape_rules(void) {
+    static const stub_if_t ifs[] = {{"lo", 0}, {"br0", 0}, {"ra0", 0}, {"tunl0", 0}, {"eth2.1", 0},
+                                    {"nwg1", IFF_POINTOPOINT}, {NULL, 0}};
+    static const stub_kn_t none[] = {{NULL, NULL, NULL, false}};
+    g_ifs = ifs;
+    g_kn = none;
+    firc_iface_info_t *ifs_out = NULL;
+    size_t n = 0;
+    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifs_out, &n));
+    static const char *const ids[] = {"br0", "tunl0", "eth2.1", "nwg1"};
+    ASSERT_EQ_FMT(sizeof(ids) / sizeof(ids[0]), n, "%zu");
+    for (size_t i = 0; i < n; i++) { ASSERT_STR_EQ(ids[i], ifs_out[i].id); }
+    free(ifs_out);
     PASS();
 }
 
@@ -761,29 +824,33 @@ static const cJSON *iface_item(const cJSON *out, const char *id) {
     return NULL;
 }
 
-/* Catches: uplinkOnly missing on an interface listed only for being external, or sent on one the setting lists. */
-TEST the_interfaces_route_marks_an_uplink_only_interface(void) {
+/* Catches: a role missing from an answer, the description and NDMS name merged into one field, an empty one sent, or the uplink flag still sent. */
+TEST the_interfaces_route_answers_role_description_and_ndms_name(void) {
     harness_t *h = harness_start(false);
     ASSERT(h != NULL);
-    stub_kn("lo", "Broadband", true);
+    static const stub_if_t ifs[] = {{"lo", 0}, {"eth3", 0}, {"br0", 0}, {"ra0", 0}, {NULL, 0}};
+    g_ifs = ifs;
+    static const stub_kn_t kn[] = {{"eth3", "", "GigabitEthernet1", true}, {"br0", "", "", false},
+                                   {NULL, NULL, NULL, false}};
+    g_kn = kn;
 
     cJSON *out = NULL;
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/interfaces", NULL, &out));
-    const cJSON *lo = iface_item(out, "lo");
-    ASSERT(lo != NULL);
-    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(lo, "uplinkOnly")));
-    ASSERT_STR_EQ("Broadband", cJSON_GetObjectItemCaseSensitive(lo, "name")->valuestring);
-    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(iface_item(out, "blackhole"), "uplinkOnly"));
+    ASSERT_EQ(3, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(out, "interfaces")));
+    const cJSON *eth3 = iface_item(out, "eth3");
+    ASSERT(eth3 != NULL);
+    ASSERT_STR_EQ("wan", cJSON_GetObjectItemCaseSensitive(eth3, "role")->valuestring);
+    ASSERT_STR_EQ("GigabitEthernet1", cJSON_GetObjectItemCaseSensitive(eth3, "ndmsName")->valuestring);
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(eth3, "name"));
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(eth3, "uplinkOnly"));
+    const cJSON *br0 = iface_item(out, "br0");
+    ASSERT_STR_EQ("lan", cJSON_GetObjectItemCaseSensitive(br0, "role")->valuestring);
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(br0, "ndmsName"));
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(iface_item(out, "blackhole"), "role"));
+    ASSERT_EQ(NULL, iface_item(out, "lo"));
     cJSON_Delete(out);
 
-    h->cfg.app.show_all_interfaces = true;
-    ASSERT_EQ(200, do_request("GET", "/api/v1/system/interfaces", NULL, &out));
-    lo = iface_item(out, "lo");
-    ASSERT(lo != NULL);
-    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(lo, "uplinkOnly"));
-    cJSON_Delete(out);
-
-    stub_kn(NULL, NULL, false);
+    g_ifs = NULL;
     harness_stop(h);
     PASS();
 }
@@ -792,6 +859,7 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
+    GREATEST_SET_TEARDOWN_CB(reset_stubs, NULL);
     RUN_TEST(the_events_route_answers_what_the_daemon_said);
     RUN_TEST(each_level_has_its_name_in_the_events);
     RUN_TEST(a_tunnel_line_names_its_device_as_the_source);
@@ -806,12 +874,13 @@ int main(int argc, char **argv) {
     RUN_TEST(every_resolver_source_has_its_name);
     RUN_TEST(a_bypass_event_is_answered_with_every_field);
     RUN_TEST(a_bypass_event_without_a_last_answer_has_no_last);
-    RUN_TEST(ignored_interfaces_list);
-    RUN_TEST(tunnel_devices_are_listed_without_show_all);
+    RUN_TEST(only_loopback_ezcfg_and_radio_names_are_hidden);
     RUN_TEST(the_hosts_route_answers_the_refreshers_table);
     RUN_TEST(the_netfilter_route_says_whether_the_committer_is_failing);
     RUN_TEST(the_netfilter_route_says_the_first_write_is_pending);
-    RUN_TEST(an_external_interface_is_listed_only_for_the_uplink);
-    RUN_TEST(the_interfaces_route_marks_an_uplink_only_interface);
+    RUN_TEST(each_interface_gets_its_role);
+    RUN_TEST(the_list_holds_what_ndms_knows_and_every_tunnel);
+    RUN_TEST(without_ndms_data_the_list_falls_back_to_the_shape_rules);
+    RUN_TEST(the_interfaces_route_answers_role_description_and_ndms_name);
     GREATEST_MAIN_END();
 }

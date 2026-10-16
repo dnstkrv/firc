@@ -34,7 +34,13 @@ void firc_httpd_destroy(firc_httpd_t *h);
 
 /* on failure errno is the socket call's (0 if addr is not an address at all) */
 firc_err_t firc_httpd_listen_tcp(firc_httpd_t *h, const char *addr, uint16_t port);
-/* tries ports in order, moving on only past EADDRINUSE and EACCES; *bound is the port taken; errno as above */
+
+/* Why the last TCP listen failed, in firc_listen_describe's words; "" when the address did not parse. */
+const char *firc_httpd_listen_error(const firc_httpd_t *h);
+
+/* "<addr>:<port>/tcp" the TCP listener is bound to. */
+void firc_httpd_tcp_name(const firc_httpd_t *h, char *out, size_t cap);
+/* tries ports in order, moving on only past EADDRINUSE and EACCES; *bound is the port taken, or the last one tried on failure; errno as above */
 firc_err_t firc_httpd_listen_tcp_first(firc_httpd_t *h, const char *addr, const uint16_t *ports,
                                        size_t n, uint16_t *bound);
 /* removes any existing socket file at path first */

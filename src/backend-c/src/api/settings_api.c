@@ -232,7 +232,7 @@ static firc_err_t probe_one(const listener_t *l, const char **field, char *why, 
     }
     static const int types[] = {SOCK_STREAM, SOCK_DGRAM};
     for (size_t i = 0; i < (l->udp ? 2u : 1u); i++) {
-        int fd = firc_listen_open(types[i], &sa, len, i == 0 ? l->tcp_opts : l->udp_opts);
+        int fd = firc_listen_open(NULL, types[i], &sa, len, i == 0 ? l->tcp_opts : l->udp_opts, NULL, 0);
         if (fd >= 0) {
             close(fd);
             continue;
@@ -340,9 +340,14 @@ firc_err_t firc_system_listen_web(firc_system_ctx_t *ctx, firc_httpd_t *h, const
     firc_err_t err = firc_httpd_listen_tcp_first(h, addr, ports, n, &bound);
     int e = errno;
     if (err != FIRC_OK) {
-        const char *why = e != 0 ? strerror(e) : err == FIRC_ERR_INVAL ? "not an address" : firc_err_str(err);
-        FIRC_ERROR("failed to listen HTTP %s on any of %zu port(s) from %u: %s; running on without the WebUI",
-                   addr, n, n > 0 ? ports[0] : 0, why);
+        char why[192];
+        if (e != 0) {
+            snprintf(why, sizeof(why), "%s", firc_httpd_listen_error(h));
+        } else {
+            snprintf(why, sizeof(why), "%s: %s", addr, err == FIRC_ERR_INVAL ? "not an address" : firc_err_str(err));
+        }
+        FIRC_ERROR("failed to listen HTTP on any of %zu port(s) from %u: %s; running on without the WebUI", n,
+                   n > 0 ? ports[0] : 0, why);
         return err;
     }
     ctx->web_port = bound;
@@ -356,7 +361,9 @@ firc_err_t firc_system_listen_web(firc_system_ctx_t *ctx, firc_httpd_t *h, const
             FIRC_WARN("HTTP WebUI port %u is in use; moved to %u and saved", ports[0], bound);
         }
     }
-    FIRC_INFO("HTTP WebUI listening on %s:%u", addr, bound);
+    char name[96];
+    firc_httpd_tcp_name(h, name, sizeof(name));
+    FIRC_INFO("HTTP WebUI listening on %s", name);
     return FIRC_OK;
 }
 

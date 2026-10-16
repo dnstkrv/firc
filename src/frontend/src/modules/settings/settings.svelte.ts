@@ -1,4 +1,3 @@
-import { fetchInterfaces } from "../../data/interfaces.svelte";
 import { t } from "../../data/locale.svelte";
 
 import { toast } from "../../utils/events";
@@ -108,7 +107,6 @@ export async function saveSettings(): Promise<boolean> {
     if (gen !== generation) return false;
     for (const k of keys) settings.saved[k] = JSON.parse(JSON.stringify(settings.draft[k]));
     settings.pendingRestart = res.pendingRestart;
-    if (res.applied.includes("app.showAllInterfaces")) void fetchInterfaces();
     toast.success(t("Settings saved"));
     return true;
   } catch (error) {

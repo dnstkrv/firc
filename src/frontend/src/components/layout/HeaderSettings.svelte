@@ -1,18 +1,15 @@
 <script lang="ts">
   import { token } from "../../data/auth.svelte";
   import { locale, locales, t } from "../../data/locale.svelte";
-  import { update } from "../../modules/settings/update.svelte";
+  import UpdatePopover from "../../modules/settings/UpdatePopover.svelte";
   import InfoDialog from "../InfoDialog.svelte";
   import Button from "../ui/Button.svelte";
   import Tooltip from "../ui/Tooltip.svelte";
   import ShortcutsSheet from "./ShortcutsSheet.svelte";
 
-  import { hasNewer } from "../../modules/settings/update";
   import { Info, Locale, LogOut } from "../ui/icons";
 
   const version = import.meta.env.VITE_PKG_VERSION || "0.0.0";
-  const isDev =
-    import.meta.env.VITE_PKG_VERSION_IS_DEV?.toLowerCase() === "true" || version === "0.0.0";
 
   let infoIsOpen = $state(false);
 
@@ -30,17 +27,7 @@
 
 <div class="container">
   <div class="version">
-    <Tooltip value={`${t("build")}: ${version}`}>
-      <span class="version-text">{version}</span>
-    </Tooltip>
-    {#if hasNewer(update.res)}
-      <Tooltip value={t("A newer release is available")}>
-        <span class="update-dot" data-testid="update-dot"></span>
-      </Tooltip>
-    {/if}
-    {#if isDev}
-      <div class="under-construction">dev</div>
-    {/if}
+    <UpdatePopover {version} />
   </div>
 
   <div class="keys">
@@ -81,20 +68,6 @@
 <InfoDialog bind:open={infoIsOpen} />
 
 <style>
-  .under-construction {
-    background: repeating-linear-gradient(45deg, #ffcc00, #ffcc00 10px, #ff6600 10px, #ff6600 20px);
-    color: black;
-    font-weight: bold;
-    padding: 4px 4px;
-    border-radius: 4px;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    flex: 0 0 auto;
-    margin-left: 0.5rem;
-    white-space: nowrap;
-    grid-column: 3;
-    justify-self: end;
-  }
-
   .container {
     display: flex;
     flex-direction: row;
@@ -105,36 +78,10 @@
   }
 
   .version {
-    display: grid;
-    grid-template-columns: minmax(0, max-content) auto 1fr;
+    display: flex;
     align-items: center;
     flex: 1;
     min-width: 0;
-  }
-
-  .update-dot {
-    display: block;
-    width: 8px;
-    height: 8px;
-    margin-left: 0.4rem;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .version :global(> *:first-child) {
-    min-width: 0;
-    display: block;
-    overflow: hidden;
-  }
-
-  .version-text {
-    display: block;
-    font-size: smaller;
-    color: var(--text-2);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    width: 100%;
   }
 
   .keys,
@@ -184,16 +131,18 @@
   }
 
   @media (max-width: 380px) {
-    .version-text {
+    .keys {
+      display: none;
+    }
+  }
+
+  @media (max-width: 960px) {
+    .info-label {
       display: none;
     }
   }
 
   @media (max-width: 700px) {
-    .info-label {
-      display: none;
-    }
-
     .locale,
     .logout {
       gap: 0.5rem;

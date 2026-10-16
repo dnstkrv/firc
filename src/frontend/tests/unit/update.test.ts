@@ -8,11 +8,15 @@ import {
   landed,
   needsCheck,
   reasonText,
+  releaseLinkText,
+  releaseUrl,
   resultCurrent,
   running,
+  runningText,
   tagRelease,
   UPDATE_LIMIT_MS,
   updatePhase,
+  updateStatus,
   type UpdateCheck,
   type UpdateRes,
 } from "../../src/modules/settings/update.ts";
@@ -273,5 +277,162 @@ describe("running", () => {
     for (const state of ["idle", "checking", "failed"] as const)
       assert.strictEqual(running({ ...res(null), state }), false, state);
     assert.strictEqual(running(null), false);
+  });
+});
+
+const LATEST = {
+  version: "0.3.0",
+  revision: 1,
+  tag: "0.3.0",
+  publishedAt: "2026-10-15T10:00:00Z",
+  notes: "",
+  asset: { name: "firc.ipk", size: 1 },
+};
+const idle = { checking: false, checkError: "" };
+
+describe("updateStatus", () => {
+  // Catches a fresh check read as anything but up to date, or its age not in whole minutes.
+  it("is up to date after a check that found nothing newer", () => {
+    assert.deepStrictEqual(updateStatus(res(check({ ageS: 299 })), idle), {
+      kind: "up-to-date",
+      minutes: 4,
+    });
+  });
+
+  // Catches a newer release not offered, offered when the router cannot install it, or the wrong version named.
+  it("offers a newer release only when it can be installed", () => {
+    const newer = check({ latest: LATEST, newer: true, installable: true });
+    assert.deepStrictEqual(updateStatus(res(newer), idle), {
+      kind: "newer",
+      version: "0.3.0",
+      offered: true,
+    });
+    assert.deepStrictEqual(updateStatus({ ...res(newer), canInstall: false }, idle), {
+      kind: "newer",
+      version: "0.3.0",
+      offered: false,
+    });
+  });
+
+  // Catches a failed check shown as up to date, or the page's own check error ranked below the daemon's.
+  it("names a failed check, the page's error first", () => {
+    assert.deepStrictEqual(updateStatus(res(check({ error: "timeout" })), idle), {
+      kind: "check-failed",
+      error: "timeout",
+    });
+    assert.deepStrictEqual(
+      updateStatus(res(check({ error: "timeout" })), { checking: false, checkError: "429" }),
+      { kind: "check-failed", error: "429" },
+    );
+  });
+
+  // Catches a failed install hidden behind a newer release, or an opkg failure on the last run not reported.
+  it("names a failed install before anything else that is settled", () => {
+    const newer = check({ latest: LATEST, newer: true, installable: true });
+    assert.deepStrictEqual(
+      updateStatus({ ...res(newer), state: "failed", error: "bad digest" }, idle),
+      {
+        kind: "install-failed",
+        error: "bad digest",
+      },
+    );
+    assert.deepStrictEqual(
+      updateStatus(
+        { ...res(check()), result: { version: "0.3.0", opkgExit: 255, finishedAt: 1 } },
+        idle,
+      ),
+      { kind: "not-installed", version: "0.3.0", code: 255 },
+    );
+  });
+
+  // Catches a running install or a check in flight shown as a settled state, or the download percentage wrong.
+  it("shows work in progress over everything", () => {
+    const newer = check({ latest: LATEST, newer: true, installable: true });
+    assert.deepStrictEqual(
+      updateStatus({ ...res(newer), state: "downloading", progress: { bytes: 1, total: 3 } }, idle),
+      { kind: "running", state: "downloading", version: "0.3.0", percent: 33 },
+    );
+    assert.deepStrictEqual(updateStatus({ ...res(newer), state: "installing" }, idle), {
+      kind: "running",
+      state: "installing",
+      version: "0.3.0",
+      percent: null,
+    });
+    assert.deepStrictEqual(
+      updateStatus(res(check({ error: "x" })), { checking: true, checkError: "" }),
+      {
+        kind: "checking",
+      },
+    );
+  });
+
+  // Catches a router that never checked shown as up to date.
+  it("says nothing was checked yet", () => {
+    assert.deepStrictEqual(updateStatus(res(null), idle), { kind: "unchecked" });
+  });
+});
+
+describe("releaseLinkText", () => {
+  // Catches the link naming the installed version while it opens the newer release, or a build named as if it were a release.
+  it("names the release the link opens, or all releases for a build", () => {
+    assert.strictEqual(releaseLinkText(res(check()), t), "0.2.0 · What's new");
+    assert.strictEqual(
+      releaseLinkText(res(check({ latest: LATEST, newer: true })), t),
+      "0.3.0 · What's new",
+    );
+    assert.strictEqual(
+      releaseLinkText(res(check({ latest: LATEST, newer: false })), t),
+      "0.2.0 · What's new",
+    );
+    const build = {
+      ...res(check()),
+      installed: { version: "0.3.1~git20261016192753.07a8f2a", revision: 1, target: "" },
+    };
+    assert.strictEqual(releaseLinkText(build, t), "All releases");
+    assert.strictEqual(releaseUrl(build), "https://github.com/hoaxisr/firc/releases");
+    const buildWithNewer = { ...build, check: check({ latest: LATEST, newer: true }) };
+    assert.strictEqual(releaseLinkText(buildWithNewer, t), "0.3.0 · What's new");
+    assert.strictEqual(
+      releaseUrl(buildWithNewer),
+      "https://github.com/hoaxisr/firc/releases/tag/0.3.0",
+    );
+  });
+});
+
+describe("runningText", () => {
+  // Catches a phase named wrongly, or the download without the version it fetches.
+  it("names each phase of an install", () => {
+    assert.strictEqual(runningText("downloading", "0.3.0", t), "Downloading 0.3.0…");
+    assert.strictEqual(runningText("verifying", "0.3.0", t), "Checking the package…");
+    assert.strictEqual(runningText("installing", "0.3.0", t), "Installing…");
+  });
+});
+
+describe("releaseUrl", () => {
+  // Catches a later revision linked to the first one's tag, or a development build linked to a tag that does not exist.
+  it("links the installed revision's tag, and the releases list for a development build", () => {
+    assert.strictEqual(
+      releaseUrl({ ...res(check()), installed: { version: "0.2.0", revision: 3, target: "" } }),
+      "https://github.com/hoaxisr/firc/releases/tag/0.2.0-rev3",
+    );
+    assert.strictEqual(
+      releaseUrl({
+        ...res(check()),
+        installed: { version: "0.0.0~git1.abc", revision: 1, target: "" },
+      }),
+      "https://github.com/hoaxisr/firc/releases",
+    );
+  });
+
+  // Catches the notes link pointing at the installed release while a newer one is offered, or at the wrong repository.
+  it("links the newer release when there is one, else the installed one", () => {
+    assert.strictEqual(
+      releaseUrl(res(check())),
+      "https://github.com/hoaxisr/firc/releases/tag/0.2.0",
+    );
+    assert.strictEqual(
+      releaseUrl(res(check({ latest: LATEST, newer: true }))),
+      "https://github.com/hoaxisr/firc/releases/tag/0.3.0",
+    );
   });
 });

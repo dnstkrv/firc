@@ -7,10 +7,6 @@ export const interfaces = $state({
   list: [] as InterfaceOption[],
 });
 
-export function groupInterfaces(): InterfaceOption[] {
-  return interfaces.list.filter((item) => !item.uplinkOnly);
-}
-
 export async function fetchInterfaces() {
   try {
     const data = await fetcher.get<Interfaces>("/system/interfaces");

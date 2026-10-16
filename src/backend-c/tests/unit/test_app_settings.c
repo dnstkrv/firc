@@ -61,7 +61,7 @@ static firc_err_t edited(const firc_app_t *app, firc_app_config_t *next) {
     firc_err_t err = firc_app_config_copy(next, firc_app_saved_settings(app));
     if (err == FIRC_OK) { err = firc_strset(&next->dns_proxy.upstream.address, "9.9.9.9"); }
     next->dns_proxy.disable_drop_aaaa = true;
-    next->show_all_interfaces = true;
+    next->update.check = true;
     next->fakeip.max_names = 4096;
     return err;
 }
@@ -99,14 +99,14 @@ TEST a_put_applies_the_live_settings_and_holds_the_rest(void) {
 
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
         bool want = i == row("app.dnsProxy.upstream.address") ||
-                    i == row("app.dnsProxy.disableDropAAAA") || i == row("app.showAllInterfaces");
+                    i == row("app.dnsProxy.disableDropAAAA") || i == row("app.update.check");
         ASSERT_EQm(firc_settings[i].path, want, applied[i]);
     }
     uint16_t port = 0;
     ASSERT_STR_EQ("9.9.9.9", firc_dnsproxy_upstream(r.proxy, &port));
     ASSERT_EQ(53, port);
     const firc_app_config_t *run = firc_app_running_settings(r.app);
-    ASSERT(run->show_all_interfaces);
+    ASSERT(run->update.check);
     ASSERT(run->dns_proxy.disable_drop_aaaa);
     ASSERT_STR_EQ("9.9.9.9", run->dns_proxy.upstream.address);
     ASSERT_EQm("a restart setting does not reach the running copy", 65536u, run->fakeip.max_names);
@@ -201,7 +201,7 @@ TEST a_put_whose_file_cannot_be_written_changes_nothing(void) {
     firc_app_config_clear(&next);
     ASSERT_EQ(65536u, firc_app_saved_settings(r.app)->fakeip.max_names);
     ASSERT_STR_EQ("127.0.0.1", firc_dnsproxy_upstream(r.proxy, NULL));
-    ASSERT_FALSE(firc_app_running_settings(r.app)->show_all_interfaces);
+    ASSERT_FALSE(firc_app_running_settings(r.app)->update.check);
     rig_down(&r);
     PASS();
 }

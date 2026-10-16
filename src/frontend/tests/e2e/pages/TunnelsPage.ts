@@ -51,8 +51,9 @@ export type Daemon = {
   tunnels: Json[];
   states: Json[];
   interfaces: string[];
-  uplinkOnly: string[];
   names: Record<string, string>;
+  ndms: Record<string, string>;
+  roles: Record<string, string>;
   groups: Json[];
   puts: Json[];
   previews: Json[];
@@ -70,8 +71,9 @@ export async function stubDaemon(page: Page, init: Partial<Daemon> = {}): Promis
     tunnels: [],
     states: [],
     interfaces: ["wg0"],
-    uplinkOnly: [],
     names: {},
+    ndms: {},
+    roles: {},
     groups: [],
     puts: [],
     previews: [],
@@ -89,11 +91,16 @@ export async function stubDaemon(page: Page, init: Partial<Daemon> = {}): Promis
     daemon.interfaceFetches++;
     return route.fulfill({
       json: {
-        interfaces: daemon.interfaces.map((id) => ({
-          id,
-          name: daemon.names[id] ?? id,
-          ...(daemon.uplinkOnly.includes(id) ? { uplinkOnly: true } : {}),
-        })),
+        interfaces: daemon.interfaces.map((id) =>
+          id === "blackhole"
+            ? { id }
+            : {
+                id,
+                role: daemon.roles[id] ?? "tunnel",
+                ...(daemon.names[id] ? { name: daemon.names[id] } : {}),
+                ...(daemon.ndms[id] ? { ndmsName: daemon.ndms[id] } : {}),
+              },
+        ),
       },
     });
   });

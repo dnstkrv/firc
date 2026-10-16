@@ -75,6 +75,7 @@ struct firc_http_deferred {
 };
 
 struct firc_httpd {
+    char listen_error[192];
     firc_loop_t *loop;
     int tcp_fd;
     int unix_fd;
@@ -1170,7 +1171,8 @@ firc_err_t firc_httpd_listen_tcp(firc_httpd_t *h, const char *addr, uint16_t por
         errno = 0; /* httpd.h: not the kernel's */
         return FIRC_ERR_INVAL;
     }
-    int fd = firc_listen_open(SOCK_STREAM, &sa, sa_len, FIRC_WEB_LISTEN);
+    int fd = firc_listen_open("WebUI", SOCK_STREAM, &sa, sa_len, FIRC_WEB_LISTEN, h->listen_error,
+                              sizeof(h->listen_error));
     if (fd < 0) {
         errno = -fd; /* httpd.h: the caller reads it */
         return firc_err_from_errno(-fd);
@@ -1184,16 +1186,20 @@ firc_err_t firc_httpd_listen_tcp(firc_httpd_t *h, const char *addr, uint16_t por
     return FIRC_OK;
 }
 
+const char *firc_httpd_listen_error(const firc_httpd_t *h) { return h->listen_error; }
+
+void firc_httpd_tcp_name(const firc_httpd_t *h, char *out, size_t cap) {
+    firc_listen_name(h->tcp_fd, SOCK_STREAM, out, cap);
+}
+
 firc_err_t firc_httpd_listen_tcp_first(firc_httpd_t *h, const char *addr, const uint16_t *ports,
                                        size_t n, uint16_t *bound) {
     firc_err_t err = FIRC_ERR_INVAL;
     errno = 0;
     for (size_t i = 0; i < n; i++) {
         err = firc_httpd_listen_tcp(h, addr, ports[i]);
-        if (err == FIRC_OK) {
-            *bound = ports[i];
-            return FIRC_OK;
-        }
+        *bound = ports[i];
+        if (err == FIRC_OK) { return FIRC_OK; }
         if (errno != EADDRINUSE && errno != EACCES) { return err; }
     }
     return err;

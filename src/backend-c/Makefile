@@ -58,6 +58,7 @@ CORE_SRCS := \
     src/util/instance_lock.c \
     src/util/spawn.c \
     src/util/listen.c \
+    src/util/tunvless_name.c \
     src/util/ifacename.c \
     src/util/utf8.c \
     src/core/lifecycle.c \
@@ -313,7 +314,14 @@ $(BUILDDIR)/tests/test_update: tests/unit/test_update.c $(LIB_OBJS) $(TEST_SUPPO
 	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(UPDATE_WRAP) -o $@ $< \
 	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
 
-SYSTEM_WRAP := -Wl,--wrap=firc_app_netfilter_health,--wrap=firc_kn_get_iface_aliases
+LISTEN_WRAP := -Wl,--wrap=socket
+
+$(BUILDDIR)/tests/test_listen: tests/unit/test_listen.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(LISTEN_WRAP) -o $@ $< \
+	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
+
+SYSTEM_WRAP := -Wl,--wrap=firc_app_netfilter_health,--wrap=firc_kn_get_iface_aliases,--wrap=getifaddrs,--wrap=freeifaddrs
 
 $(BUILDDIR)/tests/test_system: tests/unit/test_system.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
 	@mkdir -p $(dir $@)

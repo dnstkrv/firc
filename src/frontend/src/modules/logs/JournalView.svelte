@@ -108,10 +108,13 @@
     return next;
   }
 
+  let toolbarWidth = $state(0);
+
   function sourceLabel(s: Source): string {
     if (s === "tunnels") return t("Tunnels");
-    if (s === "bypass") return t("Bypass");
-    return s === "dns" ? "DNS" : "fircd";
+    if (s === "bypass") return t("Leaks");
+    if (s === "dns") return "DNS";
+    return toolbarWidth > 0 && toolbarWidth <= 600 ? t("core") : t("firc core");
   }
 
   function clearView() {
@@ -175,7 +178,7 @@
   });
 </script>
 
-<div class="tb">
+<div class="tb" bind:clientWidth={toolbarWidth}>
   <div class="toolbar">
     <div class="seg sources" role="group" aria-label={t("Sources")}>
       {#each SOURCES as s (s)}
@@ -298,7 +301,7 @@
         <div class="row l-{e.level}">
           <span class="at">{stamp(e.at)}</span>
           {#if e.source === "fircd"}
-            <span class="chip mono" style:--c={SOURCE_COLOR.fircd}>fircd</span>
+            <span class="chip" style:--c={SOURCE_COLOR.fircd}>{t("firc core")}</span>
           {:else}
             <button
               type="button"
@@ -329,7 +332,7 @@
       {:else}
         <div class="row bypass">
           <span class="at">{stamp(e.at)}</span>
-          <span class="chip" style:--c={SOURCE_COLOR.bypass}>{t("Bypass")}</span>
+          <span class="chip" style:--c={SOURCE_COLOR.bypass}>{t("Leaks")}</span>
           <span
             class="msg"
             title={e.how === "addr" ? t("the last name firc recorded for this address") : undefined}

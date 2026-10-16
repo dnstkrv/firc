@@ -336,7 +336,7 @@ static void handle_list_interfaces(firc_http_req_t *req, firc_http_res_t *res, v
 
     firc_iface_info_t *ifaces = NULL;
     size_t n = 0;
-    firc_err_t err = firc_app_list_interfaces(ctx->app, &ifaces, &n);
+    firc_err_t err = firc_app_list_interfaces(&ifaces, &n);
     if (err != FIRC_OK) {
         firc_http_res_write_error(res, 500, firc_err_str(err));
         return;
@@ -352,7 +352,8 @@ static void handle_list_interfaces(firc_http_req_t *req, firc_http_res_t *res, v
         cJSON *item = cJSON_CreateObject();
         cJSON_AddStringToObject(item, "id", ifaces[i].id);
         if (ifaces[i].name[0] != '\0') { cJSON_AddStringToObject(item, "name", ifaces[i].name); }
-        if (ifaces[i].uplink_only) { cJSON_AddBoolToObject(item, "uplinkOnly", true); }
+        if (ifaces[i].ndms_name[0] != '\0') { cJSON_AddStringToObject(item, "ndmsName", ifaces[i].ndms_name); }
+        cJSON_AddStringToObject(item, "role", firc_iface_role_name(ifaces[i].role));
         cJSON_AddItemToArray(arr, item);
     }
     free(ifaces);

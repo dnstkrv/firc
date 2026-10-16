@@ -131,24 +131,6 @@ TEST a_v6_engine_is_refused(void) {
     PASS();
 }
 
-/* Catches: a non-canonical or out-of-range device given a port, or a canonical one refused. */
-TEST only_a_canonical_tunvless_device_has_a_number(void) {
-    ASSERT_EQ(0, firc_redir_device("tunvless0"));
-    ASSERT_EQ(3, firc_redir_device("tunvless3"));
-    ASSERT_EQ(42, firc_redir_device("tunvless42"));
-    ASSERT_EQ(99, firc_redir_device("tunvless99"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless100"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless03"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless00"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless3a"));
-    ASSERT_EQ(-1, firc_redir_device("tunvless-1"));
-    ASSERT_EQ(-1, firc_redir_device("Tunvless3"));
-    ASSERT_EQ(-1, firc_redir_device("eth0"));
-    ASSERT_EQ(-1, firc_redir_device(NULL));
-    PASS();
-}
-
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -158,6 +140,5 @@ int main(int argc, char **argv) {
     RUN_TEST(the_jump_is_inserted_at_1_and_tcp_only);
     RUN_TEST(the_jump_excludes_local_destinations);
     RUN_TEST(a_v6_engine_is_refused);
-    RUN_TEST(only_a_canonical_tunvless_device_has_a_number);
     GREATEST_MAIN_END();
 }

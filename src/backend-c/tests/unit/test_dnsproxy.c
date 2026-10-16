@@ -1329,6 +1329,87 @@ TEST an_upstream_that_does_not_parse_changes_nothing(void) {
     PASS();
 }
 
+static firc_dnsproxy_t *proxy_on(firc_loop_t *loop, const char *addr, uint16_t port) {
+    firc_dnsproxy_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = addr;
+    cfg.listen_port = port;
+    cfg.upstream_addr = "127.0.0.1";
+    cfg.upstream_port = 53;
+    cfg.timeout_ms = 1000;
+    cfg.max_concurrent = 4;
+    cfg.max_idle_conns = 2;
+    firc_dnsproxy_t *p = NULL;
+    return firc_dnsproxy_create(&cfg, loop, live_hook, NULL, &p) == FIRC_OK ? p : NULL;
+}
+
+/* Catches: a busy port reported as a bare system error, without the address, port and protocol it was. */
+TEST a_port_another_socket_holds_is_named_with_its_reason(void) {
+    int held = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT(held >= 0);
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t len = sizeof(sa);
+    ASSERT_EQ(0, bind(held, (struct sockaddr *)&sa, len));
+    ASSERT_EQ(0, getsockname(held, (struct sockaddr *)&sa, &len));
+    uint16_t port = ntohs(sa.sin_port);
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_dnsproxy_t *p = proxy_on(loop, "127.0.0.1", port);
+    ASSERT(p != NULL);
+    ASSERT(firc_dnsproxy_start(p) != FIRC_OK);
+    char want[200];
+    snprintf(want, sizeof(want),
+             "127.0.0.1:%u/udp: address already in use (is another program using this port?)", port);
+    ASSERT_STR_EQ(want, firc_dnsproxy_listen_error(p));
+    firc_dnsproxy_destroy(p);
+    firc_loop_destroy(loop);
+    close(held);
+    PASS();
+}
+
+/* Catches: a TCP listener that cannot open leaving the UDP one open, or its failure described as UDP. */
+TEST a_tcp_port_held_closes_the_udp_listener_and_names_tcp(void) {
+    int held = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT(held >= 0);
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t len = sizeof(sa);
+    ASSERT_EQ(0, bind(held, (struct sockaddr *)&sa, len));
+    ASSERT_EQ(0, listen(held, 1));
+    ASSERT_EQ(0, getsockname(held, (struct sockaddr *)&sa, &len));
+    uint16_t port = ntohs(sa.sin_port);
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_dnsproxy_t *p = proxy_on(loop, "127.0.0.1", port);
+    ASSERT(p != NULL);
+    ASSERT(firc_dnsproxy_start(p) != FIRC_OK);
+    char want[200];
+    snprintf(want, sizeof(want),
+             "127.0.0.1:%u/tcp: address already in use (is another program using this port?)", port);
+    ASSERT_STR_EQ(want, firc_dnsproxy_listen_error(p));
+    int udp = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT(udp >= 0);
+    ASSERT_EQm("the UDP port is still held", 0, bind(udp, (struct sockaddr *)&sa, sizeof(sa)));
+    close(udp);
+    firc_dnsproxy_destroy(p);
+    firc_loop_destroy(loop);
+    close(held);
+    PASS();
+}
+
+/* Catches: an address the router does not have reported without saying so. */
+TEST an_address_not_on_the_router_is_named(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    firc_dnsproxy_t *p = proxy_on(loop, "192.0.2.1", 3553);
+    ASSERT(p != NULL);
+    ASSERT(firc_dnsproxy_start(p) != FIRC_OK);
+    ASSERT_STR_EQ("192.0.2.1:3553/udp: address not available (not an address of this router)",
+                  firc_dnsproxy_listen_error(p));
+    firc_dnsproxy_destroy(p);
+    firc_loop_destroy(loop);
+    PASS();
+}
+
 /* Catches: the proxy keeping the caller's upstream pointer, which a settings PUT frees. */
 TEST the_proxy_keeps_its_own_copy_of_the_upstream(void) {
     firc_loop_t *loop = NULL;
@@ -2135,16 +2216,18 @@ TEST a_silent_tcp_tunnel_leg_is_not_the_common_upstreams_miss(void) {
     atomic_store(&g_rep_ms, 1000);
     firc_logrep_set_clock_for_test(rep_clock);
     firc_event_reset_for_test();
-    ASSERT(live_start_retrying(&lv));
-    int silent = socket(AF_INET, SOCK_STREAM, 0);
-    uint16_t silent_port = 0;
-    ASSERT(silent >= 0 && bind_loopback(silent, 0, &silent_port) && listen(silent, 64) == 0);
     tcp_up_t up;
     memset(&up, 0, sizeof(up));
     up.fd = socket(AF_INET, SOCK_STREAM, 0);
     struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
     setsockopt(up.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ASSERT(up.fd >= 0 && bind_loopback(up.fd, lv.a.port, NULL) && listen(up.fd, 64) == 0);
+    uint16_t up_port = 0;
+    ASSERT(up.fd >= 0 && bind_loopback(up.fd, 0, &up_port) && listen(up.fd, 64) == 0);
+    g_live_upstream_port = up_port;
+    ASSERT(live_start_retrying(&lv));
+    int silent = socket(AF_INET, SOCK_STREAM, 0);
+    uint16_t silent_port = 0;
+    ASSERT(silent >= 0 && bind_loopback(silent, 0, &silent_port) && listen(silent, 64) == 0);
     ASSERT_EQ(0, pthread_create(&up.th, NULL, tcp_up_accept, &up));
     g_troute.ports[0] = silent_port;
     tcp_batch(lv.proxy_port, 0x6700);
@@ -4506,5 +4589,8 @@ int main(int argc, char **argv)
     RUN_TEST(a_tcp_tunnel_answer_landing_after_its_pool_was_closed_is_not_cached);
     RUN_TEST(a_tcp_tunnel_answer_after_an_earlier_pool_close_is_cached);
     RUN_TEST(a_hit_after_the_rest_ran_out_refreshes);
+    RUN_TEST(a_port_another_socket_holds_is_named_with_its_reason);
+    RUN_TEST(an_address_not_on_the_router_is_named);
+    RUN_TEST(a_tcp_port_held_closes_the_udp_listener_and_names_tcp);
     GREATEST_MAIN_END();
 }

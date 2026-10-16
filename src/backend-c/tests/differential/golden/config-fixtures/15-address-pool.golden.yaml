@@ -35,7 +35,6 @@ app:
     maxNames: 4096
   link:
   - br0
-  showAllInterfaces: false
   update:
     check: false
   check:

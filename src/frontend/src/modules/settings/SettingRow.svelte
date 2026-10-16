@@ -1,8 +1,7 @@
 <script lang="ts">
   import Switch from "../../components/ui/Switch.svelte";
-  import TagInput from "../../components/ui/TagInput.svelte";
-  import { groupInterfaces } from "../../data/interfaces.svelte";
   import { t } from "../../data/locale.svelte";
+  import LanPicker from "./LanPicker.svelte";
   import { settings } from "./settings.svelte";
 
   import type { Row } from "./catalogue";
@@ -24,11 +23,6 @@
     portMoves
       ? t("The page will open on port {port}").replace("{port}", String(settings.draft[WEB_PORT]))
       : row.hint(),
-  );
-  const suggestions = $derived(
-    groupInterfaces()
-      .map((i) => i.id)
-      .filter((id) => id !== "blackhole"),
   );
 </script>
 
@@ -54,10 +48,9 @@
           />
         </span>
       {:else if c.kind === "tags"}
-        <TagInput
+        <LanPicker
           ariaLabel={field.label()}
           values={settings.draft[field.key] as string[]}
-          {suggestions}
           onchange={(v) => (settings.draft[field.key] = v)}
           invalid={invalid(field.key)}
           changed={changedClass(field.key)}

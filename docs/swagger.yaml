@@ -856,13 +856,22 @@ definitions:
         example: nwg0
         type: string
       name:
-        description: 'Friendly name: the tunnel description for a tunvless device, else the Keenetic interface description; absent when none'
+        description: 'Description: the tunnel description for a tunvless device, else the Keenetic interface description; absent when none'
         example: PRAW-1
         type: string
-      uplinkOnly:
-        description: 'True when the interface is listed only because the router marks it external (inet role): offered as a tunnel uplink, not to groups; absent otherwise'
-        example: true
-        type: boolean
+      ndmsName:
+        description: 'Keenetic interface-name (e.g. Wireguard2); absent when unknown or equal to id'
+        example: Wireguard2
+        type: string
+      role:
+        description: 'tunnel (a tunvless device, or point-to-point and not external), wan (external by its Keenetic role), lan (a br<N> segment) or other; absent on blackhole only'
+        enum:
+        - tunnel
+        - wan
+        - lan
+        - other
+        example: tunnel
+        type: string
     type: object
   types.InterfaceResolvers:
     properties:
@@ -2688,7 +2697,7 @@ paths:
       - system
   /api/v1/system/interfaces:
     get:
-      description: 'Returns the list of interfaces; tunvless devices are listed even without showAllInterfaces, and so are external ones, flagged uplinkOnly'
+      description: 'Returns blackhole, then the router''s interfaces but lo, ezcfg0 and the Wi-Fi radios ra<N>/rai<N> and their sub-interfaces; on Keenetic only tunnels and interfaces NDMS knows (all of the rest when NDMS gives no data)'
       produces:
       - application/json
       responses:

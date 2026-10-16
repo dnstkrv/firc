@@ -57,7 +57,6 @@ app:
     disableIPv6: false
     startMarkTableIndex: 1718186595
   link: []
-  showAllInterfaces: true
 groups: []
 EOF
 

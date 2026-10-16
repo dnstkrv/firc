@@ -4,27 +4,23 @@
   import { checkUpdate, installUpdate, update } from "./update.svelte";
 
   import { CloudDownload, Refresh } from "../../components/ui/icons";
-  import { landed, reasonText, resultCurrent, running } from "./update";
+  import {
+    landed,
+    offered,
+    progressPercent,
+    reasonText,
+    resultCurrent,
+    running,
+    runningText,
+  } from "./update";
 
   const res = $derived(update.res);
   const check = $derived(res?.check ?? null);
   const latest = $derived(check?.latest ?? null);
-  const offered = $derived(
-    !!res?.canInstall && !!check?.newer && !!check.installable && latest !== null,
-  );
+  const canOffer = $derived(offered(res));
   const busy = $derived(update.checking || update.installing || running(res));
-  const percent = $derived(
-    res?.progress && res.progress.total > 0
-      ? Math.min(100, Math.floor((res.progress.bytes * 100) / res.progress.total))
-      : null,
-  );
-  const stateText = $derived(
-    res?.state === "downloading"
-      ? t("Downloading {version}…").replace("{version}", latest?.version ?? "")
-      : res?.state === "verifying"
-        ? t("Checking the package…")
-        : t("Installing…"),
-  );
+  const percent = $derived(progressPercent(res));
+  const stateText = $derived(runningText(res?.state ?? "installing", latest?.version ?? "", t));
   const result = $derived(res !== null && resultCurrent(res) ? res.result : null);
   const done = $derived(res !== null && landed(res));
 
@@ -46,7 +42,7 @@
         <Button small general inactive={busy} onclick={() => void checkUpdate()}>
           <span class="check"><Refresh size={16} />{t("Check")}</span>
         </Button>
-        {#if offered}
+        {#if canOffer}
           <Button small general inactive={busy} onclick={() => void installUpdate()}>
             <span class="check"><CloudDownload size={16} />{t("Install")}</span>
           </Button>

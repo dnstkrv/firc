@@ -18,7 +18,4 @@ typedef struct {
    local); n == 0 stages nothing, so the write drops both. A v4 engine only: v6 refuses REDIRECT. */
 firc_err_t firc_redir_build_rules(firc_ipt_t *ipt4, const char *chain_prefix, const firc_redir_group_t *g, size_t n);
 
-/* N of a canonical tunvless<N> with N 0..99, else -1. */
-int firc_redir_device(const char *iface);
-
 #endif
