@@ -200,26 +200,27 @@ TEST line_format_has_timestamp_and_tag(void)
 {
     char buf[256];
     firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    struct timespec before, after;
+    clock_gettime(CLOCK_REALTIME, &before);
     ASSERT(capture(FIRC_LOG_INFO, "fmt-check", buf, sizeof(buf)) > 0);
+    clock_gettime(CLOCK_REALTIME, &after);
     ASSERT_EQ('2', buf[0]);
     ASSERT_EQ('T', buf[10]);
     ASSERT_EQ('Z', buf[19]);
     ASSERT(strstr(buf, " INF fmt-check\n") != NULL);
     {
-        time_t now = time(NULL);
-        struct tm utc;
-        gmtime_r(&now, &utc);
-        char expect[24], expect_prev[24];
-        time_t prev = now - 1;
-        struct tm utc_prev;
-        gmtime_r(&prev, &utc_prev);
-        strftime(expect, sizeof(expect), "%Y-%m-%dT%H:%M:%SZ", &utc);
-        strftime(expect_prev, sizeof(expect_prev), "%Y-%m-%dT%H:%M:%SZ", &utc_prev);
         char got[21];
         memcpy(got, buf, 20);
         got[20] = '\0';
-        ASSERTm("the timestamp is UTC, not local time wearing a Z",
-                strcmp(got, expect) == 0 || strcmp(got, expect_prev) == 0);
+        bool utc_second = false;
+        for (time_t s = before.tv_sec; s <= after.tv_sec && !utc_second; s++) {
+            struct tm utc;
+            gmtime_r(&s, &utc);
+            char expect[24];
+            strftime(expect, sizeof(expect), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            utc_second = strcmp(got, expect) == 0;
+        }
+        ASSERTm("the timestamp is UTC, not local time wearing a Z", utc_second);
     }
     firc_log_set_output_floor(FIRC_LOG_INFO);
     PASS();
