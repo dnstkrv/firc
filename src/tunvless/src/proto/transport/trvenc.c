@@ -377,7 +377,7 @@ int tr_venc_open(struct transport *t, const struct tr_node *node, int timeout_s)
 
     /* Ticket id: the hash of the whole string. */
     sc_blake3_hash(e->tk_id, node->encryption, strlen(node->encryption));
-    unsigned char t_pfs[64], t_tk[16];
+    unsigned char t_pfs[64], t_tk[16] = {0};
     const int zrtt = c.zero_rtt && tk_get(e->tk_id, t_pfs, t_tk);
     if (getenv("STEER_VENC_TRACE"))
         fprintf(stderr, "tunvless[debug] venc: %s, mode %s, %u keys, cipher %s\n",

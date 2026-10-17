@@ -391,7 +391,7 @@ static bool wanted(const struct nlmsghdr *h, scan_t *s, ct_hit_t *out) {
         memcpy(stale_dst, orig_dst, sizeof(stale_dst));
     }
 
-    size_t whole = MNL_ALIGN(mnl_attr_get_len(orig));
+    size_t whole = (size_t)MNL_ALIGN(mnl_attr_get_len(orig));
     if (whole > FIRC_CT_TUPLE_MAX) {
         /* An overflow, not "not ours": skipping silently would leave a flow misrouted. */
         s->tuple_too_big = true;

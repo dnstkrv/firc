@@ -183,6 +183,25 @@ jobs:
           echo "::error title=Entware SDK ${{ matrix.name }}::$message"
           exit 1
 
+      - name: Fail on warnings in firc's own code
+        if: steps.entware_sdk.outcome == 'success'
+        run: |
+          set -eu
+          mapfile -t logs < <(
+            find "${{ steps.entware_feed.outputs.artifacts_dir }}/logs" \
+              -type f -path '*/firc/*' | sort
+          )
+          if [ "${#logs[@]}" -eq 0 ]; then
+            echo "::error title=Entware SDK ${{ matrix.name }}::no build log for firc" >&2
+            exit 1
+          fi
+          grep -h -E 'warning:' "${logs[@]}" | grep -v -E '^make(\[[0-9]+\])?: ' | sort -u > "${RUNNER_TEMP}/firc-warnings.txt" || true
+          if [ -s "${RUNNER_TEMP}/firc-warnings.txt" ]; then
+            while IFS= read -r line; do echo "::error title=Warning ${{ matrix.name }}::$line"; done \
+              < "${RUNNER_TEMP}/firc-warnings.txt"
+            exit 1
+          fi
+
       - name: Collect and verify package
         id: package_outputs
         if: steps.toolchain.outputs.ready == 'true'

@@ -228,7 +228,7 @@ static void *refresher(void *ud)
         if (r->stop) { break; }
         struct timespec until;
         clock_gettime(CLOCK_MONOTONIC, &until);
-        until.tv_sec += wait;
+        until.tv_sec += (time_t)wait;
         pthread_cond_timedwait(&r->cv, &r->mu, &until);
     }
     pthread_mutex_unlock(&r->mu);

@@ -2757,7 +2757,7 @@ void stack_stop(int wait_ms) {
 static int lst_open(int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     int one = 1;
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr = { .s_addr = htonl(INADDR_ANY) } };
     socklen_t al = sizeof a;
     if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
         bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 128) != 0 ||

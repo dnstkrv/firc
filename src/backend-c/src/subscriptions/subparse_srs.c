@@ -278,9 +278,11 @@ static rd_t rd_at(const uint8_t *at, const uint8_t *end) { return (rd_t){at, end
 static bool read_string(rd_t *r, char *buf, size_t cap) {
     uint64_t n = rd_uvarint(r);
     const uint8_t *s = rd_take(r, n);
-    if (s == NULL || n >= cap || memchr(s, 0, n) != NULL) { return false; }
-    memcpy(buf, s, n);
-    buf[n] = '\0';
+    if (s == NULL || n >= cap) { return false; }
+    size_t len = (size_t)n;
+    if (memchr(s, 0, len) != NULL) { return false; }
+    memcpy(buf, s, len);
+    buf[len] = '\0';
     return true;
 }
 
@@ -491,9 +493,10 @@ static firc_err_t emit_cidrs(firc_sub_walk_t *w, rd_t *r, const firc_sub_cidr_pl
 static firc_err_t emit_strings(firc_sub_walk_t *w, rd_t *r, const char *type, bool constrained) {
     uint64_t n = rd_uvarint(r);
     for (uint64_t i = 0; i < n && !r->bad; i++) {
-        uint64_t len = rd_uvarint(r);
-        const uint8_t *s = rd_take(r, len);
+        uint64_t n_len = rd_uvarint(r);
+        const uint8_t *s = rd_take(r, n_len);
         if (s == NULL) { break; }
+        size_t len = (size_t)n_len;
         if (memchr(s, 0, len) != NULL) {
             firc_err_t err = firc_sub_walk_drop(w);
             if (err != FIRC_OK) { return err; }

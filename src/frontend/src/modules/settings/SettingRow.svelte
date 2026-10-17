@@ -114,6 +114,7 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    max-width: 100%;
   }
   .unit,
   .joiner,
@@ -135,6 +136,8 @@
     border: 1px solid var(--bg-light);
     color: var(--text);
     font: inherit;
+    box-sizing: border-box;
+    max-width: 100%;
   }
   input.changed-live,
   .switch.changed-live,

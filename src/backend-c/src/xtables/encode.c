@@ -919,7 +919,7 @@ static bool generic_option(want_t *w, const char *a, const char *b, bool inv) {
     if (inv) {
         bool in = strcmp(a, "-i") == 0;
         if (!in && strcmp(a, "-o") != 0) { return false; }
-        w->invflags |= in ? XT_INV_VIA_IN : XT_INV_VIA_OUT;
+        w->invflags = (uint8_t)(w->invflags | (in ? XT_INV_VIA_IN : XT_INV_VIA_OUT));
     }
     if (strcmp(a, "-s") == 0) {
         if (w->has_s || !parse_addr(w->v6, false, b, w->src, w->smsk)) { return false; }

@@ -378,7 +378,7 @@ static bool suffix_offset(const name_table_t *t, size_t e, const uint8_t *suffix
             return true;
         }
         if (rest < slen || t->name[e][j] == 0) { return false; }
-        j += 1 + t->name[e][j];
+        j += 1u + t->name[e][j];
     }
     return false;
 }
@@ -395,7 +395,7 @@ static bool wr_name(writer_t *w, name_table_t *t, const uint8_t *name, size_t le
                 goto remember;
             }
         }
-        pos += 1 + name[pos];
+        pos += 1u + name[pos];
     }
     if (!wr_bytes(w, name, len)) { return false; }
 remember:
@@ -587,7 +587,7 @@ static bool reverse_addr(const uint8_t *name, size_t name_len, firc_ip_t *out)
     while (pos < name_len && name[pos] != 0) {
         if (n == 36 || pos + 1 + name[pos] >= name_len) { return false; }
         labels[n++] = name + pos;
-        pos += 1 + name[pos];
+        pos += 1u + name[pos];
     }
     if (n == 6 && label_is(labels[4], "in-addr") && label_is(labels[5], "arpa")) {
         firc_ip_t ip = {{0}, 4};
@@ -602,7 +602,7 @@ static bool reverse_addr(const uint8_t *name, size_t name_len, firc_ip_t *out)
         for (size_t i = 0; i < 32; i++) {
             int v = labels[i][0] == 1 ? hex_nibble(labels[i][1]) : -1;
             if (v < 0) { return false; }
-            ip.b[15 - i / 2] |= (uint8_t)(i % 2 == 0 ? v : v << 4);
+            ip.b[15 - i / 2] = (uint8_t)(ip.b[15 - i / 2] | (i % 2 == 0 ? v : v << 4));
         }
         *out = ip;
         return true;

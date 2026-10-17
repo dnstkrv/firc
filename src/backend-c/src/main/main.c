@@ -136,7 +136,7 @@ static int mask_prefix(const uint8_t *m, size_t len)
     bool seen_zero = false;
     for (size_t i = 0; i < len; i++) {
         for (int b = 7; b >= 0; b--) {
-            bool one = (m[i] >> b) & 1u;
+            bool one = ((unsigned)m[i] >> b) & 1u;
             if (one && seen_zero) { return -1; }
             if (one) { bits++; } else { seen_zero = true; }
         }

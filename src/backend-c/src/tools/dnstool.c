@@ -169,14 +169,14 @@ static void rr_rdata(const firc_dns_rr_t *rr, char *buf, size_t buf_len)
         size_t p = 0;
         size_t l1 = 0;
         while (p < rr->rdata_len && rr->rdata[p] != 0) {
-            p += 1 + rr->rdata[p];
+            p += 1u + rr->rdata[p];
         }
         p += 1;
         l1 = p;
         name_lower(rr->rdata, l1, mname, sizeof(mname));
         size_t p2 = p;
         while (p2 < rr->rdata_len && rr->rdata[p2] != 0) {
-            p2 += 1 + rr->rdata[p2];
+            p2 += 1u + rr->rdata[p2];
         }
         p2 += 1;
         name_lower(rr->rdata + l1, p2 - l1, rname, sizeof(rname));

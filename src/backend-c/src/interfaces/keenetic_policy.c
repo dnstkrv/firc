@@ -991,7 +991,7 @@ static void *refresher(void *ud) {
         if (p->stop) { break; }
         struct timespec until;
         clock_gettime(CLOCK_MONOTONIC, &until);
-        until.tv_sec += wait;
+        until.tv_sec += (time_t)wait;
         pthread_cond_timedwait(&p->cv, &p->mu, &until);
     }
     pthread_mutex_unlock(&p->mu);
@@ -1112,7 +1112,7 @@ bool firc_kn_policies_wait_first(firc_kn_policies_t *p, unsigned ms) {
     if (p == NULL) { return false; }
     struct timespec until;
     clock_gettime(CLOCK_MONOTONIC, &until);
-    until.tv_sec += ms / 1000;
+    until.tv_sec += (time_t)(ms / 1000);
     until.tv_nsec += (long)(ms % 1000) * 1000000L;
     if (until.tv_nsec >= 1000000000L) {
         until.tv_sec++;

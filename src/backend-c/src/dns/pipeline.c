@@ -182,7 +182,7 @@ static void journal_begin(firc_event_t *ev, int64_t now, const firc_ip_t *client
     ev->kind = FIRC_EVENT_DNS;
     ev->at = now;
     ev->u.dns.client = *client;
-    snprintf(ev->u.dns.name, sizeof(ev->u.dns.name), "%s", qname);
+    memcpy(ev->u.dns.name, qname, strnlen(qname, sizeof(ev->u.dns.name) - 1));
     ev->u.dns.qtype = msg->n_questions > 0 ? msg->questions[0].qtype : 0;
     ev->u.dns.rcode = (uint8_t)rcode;
     ev->u.dns.resolver = (uint8_t)resolver;

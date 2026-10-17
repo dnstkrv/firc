@@ -1146,11 +1146,11 @@ static bool addr_split(const family_t *fam, const firc_ip_t *addr, uint32_t *idx
     }
     uint32_t i = 0;
     for (unsigned bit = fam->pool_cidr; bit < fam->chunk_cidr; bit++) {
-        i = (i << 1) | ((addr->b[bit / 8] >> (7 - bit % 8)) & 1u);
+        i = (i << 1) | (((unsigned)addr->b[bit / 8] >> (7 - bit % 8)) & 1u);
     }
     uint64_t o = 0;
     for (unsigned bit = fam->chunk_cidr; bit < total; bit++) {
-        o = (o << 1) | ((addr->b[bit / 8] >> (7 - bit % 8)) & 1u);
+        o = (o << 1) | (((unsigned)addr->b[bit / 8] >> (7 - bit % 8)) & 1u);
     }
     *idx = i;
     *off = o;

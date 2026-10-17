@@ -375,7 +375,7 @@ define Build/Compile
 		PLATFORM=entware \
 		ENTWARE_KN=1 \
 		WITH_DEPS=1 \
-		CFLAGS_EXTRA="$(TARGET_CFLAGS) -I$(STAGING_DIR)/opt/include" \
+		CFLAGS_EXTRA="$(TARGET_CFLAGS) -isystem $(STAGING_DIR)/opt/include" \
 		LDLIBS="-lpthread -Wl,-Bstatic -latomic -Wl,-Bdynamic" \
 		LDFLAGS_EXTRA="$(TARGET_LDFLAGS) \
 			-Wl,--dynamic-linker=/opt/lib/$(FIRC_DYNAMIC_LINKER) \
