@@ -206,6 +206,48 @@ TEST duplicate_ids_fail(void)
     PASS();
 }
 
+static const char *rules_doc(const char *a, const char *b, const char *c)
+{
+    static char doc[512];
+    snprintf(doc, sizeof(doc),
+             "configVersion: 0.7.0\n"
+             "groups:\n"
+             "  - id: d663876a\n"
+             "    rules:\n"
+             "      - {id: %s, type: domain, rule: a.com, enable: true}\n"
+             "      - {id: %s, type: domain, rule: b.com, enable: true}\n"
+             "      - {id: %s, type: domain, rule: c.com, enable: true}\n",
+             a, b, c);
+    return doc;
+}
+
+/* Catches: a repeated rule id let through, or only neighbours compared. */
+TEST a_rule_id_repeated_anywhere_in_a_group_fails(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_ERR_EXIST, load_str(&cfg, rules_doc("0000aa01", "0000aa02", "0000aa01")));
+    firc_config_clear(&cfg);
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, rules_doc("0000aa01", "0000aa02", "0000aa03")));
+    ASSERT_EQ_FMT((size_t)3, cfg.groups[0]->n_rules, "%zu");
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+/* Catches: the zero id slipping past a set that never stores it. */
+TEST two_zero_rule_ids_fail_and_one_loads(void)
+{
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_ERR_EXIST, load_str(&cfg, rules_doc("00000000", "0000aa02", "00000000")));
+    firc_config_clear(&cfg);
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, rules_doc("00000000", "0000aa02", "0000aa03")));
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 TEST type_mismatch_fails(void)
 {
     firc_config_t cfg;
@@ -2027,6 +2069,8 @@ int main(int argc, char **argv)
     RUN_TEST(legacy_duration_normalization);
     RUN_TEST(absent_enable_is_false);
     RUN_TEST(duplicate_ids_fail);
+    RUN_TEST(a_rule_id_repeated_anywhere_in_a_group_fails);
+    RUN_TEST(two_zero_rule_ids_fail_and_one_loads);
     RUN_TEST(type_mismatch_fails);
     RUN_TEST(corrupt_yaml_fails);
     RUN_TEST(the_two_halves_hold_the_whole_config);

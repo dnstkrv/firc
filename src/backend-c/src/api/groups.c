@@ -159,20 +159,35 @@ static firc_err_t fill_rule_fields(firc_rule_t *rule, const cJSON *req, const ch
     return FIRC_OK;
 }
 
-/* an id matching baseline_rules keeps that identity; any other case silently gets a fresh random id */
-static firc_err_t rule_from_req(const cJSON *req, firc_rule_t **baseline_rules, size_t n_baseline,
-                                firc_rule_t **out, const char **why) {
+typedef struct {
+    firc_id_set_t ids;
+    bool zero;
+} rule_ids_t;
+
+static firc_err_t rule_ids_of(firc_rule_t **rules, size_t n, rule_ids_t *out) {
+    *out = (rule_ids_t){0};
+    firc_err_t err = FIRC_OK;
+    for (size_t i = 0; err == FIRC_OK && i < n; i++) {
+        if (firc_id_is_zero(rules[i]->id)) {
+            out->zero = true;
+        } else {
+            err = firc_id_set_add(&out->ids, rules[i]->id);
+        }
+    }
+    if (err != FIRC_OK) { firc_id_set_free(&out->ids); }
+    return err;
+}
+
+static bool rule_ids_has(const rule_ids_t *k, firc_id_t id) {
+    return firc_id_is_zero(id) ? k->zero : firc_id_set_contains(&k->ids, id);
+}
+
+/* an id in known keeps that identity; any other case silently gets a fresh random id */
+static firc_err_t rule_from_req(const cJSON *req, const rule_ids_t *known, firc_rule_t **out, const char **why) {
     firc_id_t id;
     bool has_id;
     bool found = false;
-    if (parse_optional_id(req, "id", &id, &has_id) == FIRC_OK && has_id) {
-        for (size_t i = 0; i < n_baseline; i++) {
-            if (firc_id_equal(baseline_rules[i]->id, id)) {
-                found = true;
-                break;
-            }
-        }
-    }
+    if (parse_optional_id(req, "id", &id, &has_id) == FIRC_OK && has_id) { found = rule_ids_has(known, id); }
     if (why != NULL) { *why = NULL; }
     if (!found) {
         firc_err_t err = firc_id_random(&id);
@@ -190,9 +205,9 @@ static firc_err_t rule_from_req(const cJSON *req, firc_rule_t **baseline_rules, 
     return FIRC_OK;
 }
 
-/* unlike rule_from_req, an explicit id that matches nothing in existing_rules is FIRC_ERR_NOENT */
-static firc_err_t rule_from_req_strict(const cJSON *req, firc_rule_t **existing_rules, size_t n_existing,
-                                     firc_rule_t **out, const char **why) {
+/* unlike rule_from_req, an explicit id not in known is FIRC_ERR_NOENT */
+static firc_err_t rule_from_req_strict(const cJSON *req, const rule_ids_t *known, firc_rule_t **out,
+                                       const char **why) {
     firc_id_t id;
     bool has_id;
     if (parse_optional_id(req, "id", &id, &has_id) != FIRC_OK) { return FIRC_ERR_INVAL; }
@@ -201,14 +216,7 @@ static firc_err_t rule_from_req_strict(const cJSON *req, firc_rule_t **existing_
         firc_err_t err = firc_id_random(&final_id);
         if (err != FIRC_OK) { return err; }
     } else {
-        bool found = false;
-        for (size_t i = 0; i < n_existing; i++) {
-            if (firc_id_equal(existing_rules[i]->id, id)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) { return FIRC_ERR_NOENT; }
+        if (!rule_ids_has(known, id)) { return FIRC_ERR_NOENT; }
         final_id = id;
     }
     firc_rule_t *rule = firc_rule_new();
@@ -427,14 +435,18 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
             *err_msg = "invalid rules";
             return FIRC_ERR_INVAL;
         }
-        firc_rule_t **baseline = existing ? existing->rules : NULL;
-        size_t n_baseline = existing ? existing->n_rules : 0;
+        rule_ids_t baseline;
+        err = rule_ids_of(existing ? existing->rules : NULL, existing ? existing->n_rules : 0, &baseline);
+        if (err != FIRC_OK) {
+            firc_group_free(group);
+            return err;
+        }
         int n = cJSON_GetArraySize(rules_j);
         for (int i = 0; i < n; i++) {
             const char *rule_why = NULL;
             cJSON *rule_j = cJSON_GetArrayItem(rules_j, i);
             firc_rule_t *r = NULL;
-            err = rule_from_req(rule_j, baseline, n_baseline, &r, &rule_why);
+            err = rule_from_req(rule_j, &baseline, &r, &rule_why);
             if (err == FIRC_ERR_INVAL && rule_why != NULL) {
                 /* falls back to existing->name when the PUT left "name" out, which is the one the operator is looking at */
                 const char *gname = (group->name != NULL && group->name[0] != '\0')
@@ -442,16 +454,19 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
                                         : (existing != NULL ? existing->name : NULL);
                 *err_msg = locate_rule(msgbuf, msgbuf_len, gname, get_string(rule_j, "type"),
                                        get_string(rule_j, "rule"), i, rule_why);
+                firc_id_set_free(&baseline.ids);
                 firc_group_free(group);
                 return FIRC_ERR_INVAL;
             }
             if (err == FIRC_OK) { err = firc_group_add_rule(group, r); }
             if (err != FIRC_OK) {
+                firc_id_set_free(&baseline.ids);
                 firc_rule_free(r);
                 firc_group_free(group);
                 return err;
             }
         }
+        firc_id_set_free(&baseline.ids);
     } else if (existing) {
         /* this returns an independent object, so existing's rules are deep-copied rather than aliased */
         for (size_t i = 0; i < existing->n_rules; i++) {
@@ -920,18 +935,25 @@ static void handle_put_rules(firc_http_req_t *req, firc_http_res_t *res, void *u
     }
 
     firc_group_t *group = firc_ruleset_group_mut(rs);
+    rule_ids_t known;
+    if (rule_ids_of(group->rules, group->n_rules, &known) != FIRC_OK) {
+        cJSON_Delete(json);
+        firc_http_res_write_error(res, 500, firc_err_str(FIRC_ERR_NOMEM));
+        return;
+    }
     int n = cJSON_GetArraySize(rules_j);
     firc_group_t built = {0}; /* built through firc_group_add_rule, as a later POST append assumes */
     for (int i = 0; i < n; i++) {
         const char *why = NULL;
         cJSON *rule_j = cJSON_GetArrayItem(rules_j, i);
         firc_rule_t *rule = NULL;
-        firc_err_t err = rule_from_req_strict(rule_j, group->rules, group->n_rules, &rule, &why);
+        firc_err_t err = rule_from_req_strict(rule_j, &known, &rule, &why);
         if (err == FIRC_OK) {
             err = firc_group_add_rule(&built, rule);
             if (err != FIRC_OK) { firc_rule_free(rule); }
         }
         if (err != FIRC_OK) {
+            firc_id_set_free(&known.ids);
             for (size_t j = 0; j < built.n_rules; j++) { firc_rule_free(built.rules[j]); }
             free(built.rules);
             if (err == FIRC_ERR_INVAL && why != NULL) {
@@ -954,6 +976,7 @@ static void handle_put_rules(firc_http_req_t *req, firc_http_res_t *res, void *u
             return;
         }
     }
+    firc_id_set_free(&known.ids);
     cJSON_Delete(json);
 
     for (size_t i = 0; i < group->n_rules; i++) { firc_rule_free(group->rules[i]); }
@@ -987,7 +1010,12 @@ static void handle_create_rule(firc_http_req_t *req, firc_http_res_t *res, void 
     firc_group_t *group = firc_ruleset_group_mut(rs);
     const char *why = NULL;
     firc_rule_t *rule = NULL;
-    firc_err_t err = rule_from_req(json, group->rules, group->n_rules, &rule, &why);
+    rule_ids_t known;
+    firc_err_t err = rule_ids_of(group->rules, group->n_rules, &known);
+    if (err == FIRC_OK) {
+        err = rule_from_req(json, &known, &rule, &why);
+        firc_id_set_free(&known.ids);
+    }
     if (err == FIRC_ERR_INVAL && why != NULL) {
         char msgbuf[FIRC_RULE_WHERE_MAX];
         const char *msg = locate_rule(msgbuf, sizeof(msgbuf), NULL, get_string(json, "type"),

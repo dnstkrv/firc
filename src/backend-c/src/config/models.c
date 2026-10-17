@@ -238,6 +238,26 @@ firc_err_t firc_group_add_rule(firc_group_t *g, firc_rule_t *r)
     return FIRC_OK;
 }
 
+firc_err_t firc_group_check_rule_ids(const firc_group_t *g)
+{
+    firc_id_set_t seen = {0};
+    bool zero = false;
+    firc_err_t err = FIRC_OK;
+    for (size_t i = 0; err == FIRC_OK && i < g->n_rules; i++) {
+        firc_id_t id = g->rules[i]->id;
+        if (firc_id_is_zero(id)) {
+            if (zero) { err = FIRC_ERR_EXIST; }
+            zero = true;
+        } else if (firc_id_set_contains(&seen, id)) {
+            err = FIRC_ERR_EXIST;
+        } else {
+            err = firc_id_set_add(&seen, id);
+        }
+    }
+    firc_id_set_free(&seen);
+    return err;
+}
+
 /* pointer equality across TUs isn't guaranteed; callers compare against these or use strcmp */
 static const char *const rule_type_names[] = {"",
                                               FIRC_RULE_DOMAIN,

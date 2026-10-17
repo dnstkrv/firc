@@ -1211,10 +1211,9 @@ static firc_err_t firc_app_add_group_unlocked(firc_app_t *app, firc_group_t *gro
     for (size_t i = 0; err == FIRC_OK && i < app->cfg->n_groups; i++) {
         if (firc_id_equal(app->cfg->groups[i]->id, group->id)) { err = FIRC_ERR_EXIST; }
     }
-    for (size_t i = 0; err == FIRC_OK && i < group->n_rules; i++) {
-        for (size_t j = i + 1; j < group->n_rules; j++) {
-            if (firc_id_equal(group->rules[i]->id, group->rules[j]->id)) { err = FIRC_ERR_INVAL; }
-        }
+    if (err == FIRC_OK) {
+        err = firc_group_check_rule_ids(group);
+        if (err == FIRC_ERR_EXIST) { err = FIRC_ERR_INVAL; }
     }
     if (err == FIRC_OK) { err = firc_config_add_group(app->cfg, group); }
     if (err != FIRC_OK) {

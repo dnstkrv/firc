@@ -771,18 +771,11 @@ static firc_err_t load_group(yaml_document_t *doc, node_t *n, firc_group_t *g)
     return FIRC_OK;
 }
 
-static bool group_ids_conflict(firc_config_t *cfg, firc_group_t *g)
+static bool group_id_taken(firc_config_t *cfg, firc_group_t *g)
 {
     for (size_t i = 0; i < cfg->n_groups; i++) {
         if (firc_id_equal(cfg->groups[i]->id, g->id)) {
             return true;
-        }
-    }
-    for (size_t i = 0; i < g->n_rules; i++) {
-        for (size_t j = i + 1; j < g->n_rules; j++) {
-            if (firc_id_equal(g->rules[i]->id, g->rules[j]->id)) {
-                return true;
-            }
         }
     }
     return false;
@@ -847,8 +840,11 @@ firc_err_t firc_config_load_buffer(firc_config_t *cfg, const char *buf, size_t l
                 goto out;
             }
             err = load_group(&doc, item, g);
-            if (err == FIRC_OK && group_ids_conflict(cfg, g)) {
+            if (err == FIRC_OK && group_id_taken(cfg, g)) {
                 err = FIRC_ERR_EXIST;
+            }
+            if (err == FIRC_OK) {
+                err = firc_group_check_rule_ids(g);
             }
             if (err == FIRC_OK) {
                 err = firc_config_add_group(cfg, g);

@@ -241,6 +241,8 @@ firc_err_t firc_rule_set_comment(firc_rule_t *r, const char *s, const char **why
 firc_group_t *firc_group_new(void);
 void firc_group_free(firc_group_t *g);
 firc_err_t firc_group_add_rule(firc_group_t *g, firc_rule_t *r); /* takes ownership */
+/* FIRC_ERR_EXIST when two of g's rules share an id (the zero id included); FIRC_ERR_NOMEM. */
+firc_err_t firc_group_check_rule_ids(const firc_group_t *g);
 
 /* The one interned copy of a rule type's name; pointers compare equal with ==. NULL folds to "". */
 const char *firc_rule_type_intern(const char *type);
