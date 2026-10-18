@@ -44,16 +44,40 @@ function resolverOf(group: any, active: string) {
   const live = (servers: string[]) => (group.enable === false ? [] : servers);
   if (!resolve.tunnel) return { source: "off", servers: [], fallbacks };
   if (active === "blackhole") return { source: "none", servers: [], fallbacks };
-  if (resolve.server) return { source: "group", servers: live([resolve.server]), fallbacks };
+  if (resolve.server)
+    return { source: "group", servers: live(serverEntries(resolve.server)), fallbacks };
   const fw = RESOLVERS.resolvers.find((r) => r.interface === active)?.servers ?? [];
   return fw.length
     ? { source: "firmware", servers: live(fw), fallbacks }
     : { source: "none", servers: [], fallbacks };
 }
 
+function serverEntries(server: string): string[] {
+  return server.split(",").map((e) => e.trim());
+}
+
 function resolveRefusal(group: any): { error: string; field: string; group: string } | null {
-  const server: string = group?.resolve?.server ?? "";
-  if (!server) return null;
+  const value: string = group?.resolve?.server ?? "";
+  if (!value) return null;
+  const refuse = (why: string) => ({
+    error: `resolve.server "${value}" ${why}`,
+    field: "resolve.server",
+    group: group.id,
+  });
+  const seen: string[] = [];
+  for (const [i, server] of serverEntries(value).entries()) {
+    if (server === "") return refuse("has an empty entry");
+    if (i === 4) return refuse("names more than 4 servers");
+    const refusal = entryRefusal(server, group.id);
+    if (refusal) return refusal;
+    const key = server.replace(/^\[(.*)\]:53$|^([^:]*):53$/, "$1$2");
+    if (seen.includes(key)) return refuse(`names "${server}" twice`);
+    seen.push(key);
+  }
+  return null;
+}
+
+function entryRefusal(server: string, id: string) {
   const host = server.startsWith("[")
     ? server.slice(1, server.indexOf("]"))
     : server.split(":").length === 2
@@ -63,14 +87,14 @@ function resolveRefusal(group: any): { error: string; field: string; group: stri
     return {
       error: `resolve.server "${server}" is a sink address`,
       field: "resolve.server",
-      group: group.id,
+      group: id,
     };
   }
   if (/^198\.(18|19)\./.test(host)) {
     return {
       error: `resolve.server "${server}" is inside firc's address pool`,
       field: "resolve.server",
-      group: group.id,
+      group: id,
     };
   }
   return null;

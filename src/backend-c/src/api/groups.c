@@ -265,17 +265,18 @@ static firc_err_t resolve_from_req(const cJSON *req, const firc_group_t *existin
         return FIRC_ERR_INVAL;
     }
     if (s->valuestring[0] == '\0') { return FIRC_OK; }
-    firc_resolver_addr_t a;
-    firc_resolver_addr_res_t pr = firc_resolver_addr_parse(s->valuestring, &a);
-    if (pr != FIRC_RESOLVER_ADDR_OK) {
-        snprintf(msgbuf, msgbuf_len, "resolve.server \"%.64s\" %s", s->valuestring, firc_resolver_addr_why(pr));
+    firc_resolver_list_t l;
+    char why[256];
+    if (firc_resolver_list_parse(s->valuestring, &l, why, sizeof(why)) != FIRC_RESOLVER_LIST_OK) {
+        snprintf(msgbuf, msgbuf_len, "resolve.server %s", why);
         *err_msg = msgbuf;
         *err_field = "resolve.server";
         return FIRC_ERR_INVAL;
     }
-    if (firc_resolve_server_in_pool(s->valuestring, pool)) {
-        snprintf(msgbuf, msgbuf_len, "resolve.server \"%.64s\" is inside firc's address pool, where no resolver can be",
-                 s->valuestring);
+    char hit[FIRC_RESOLVER_ADDR_STRLEN];
+    if (firc_resolve_server_in_pool(s->valuestring, pool, hit, sizeof(hit))) {
+        snprintf(msgbuf, msgbuf_len, "resolve.server \"%s\" is inside firc's address pool, where no resolver can be",
+                 hit);
         *err_msg = msgbuf;
         *err_field = "resolve.server";
         return FIRC_ERR_INVAL;

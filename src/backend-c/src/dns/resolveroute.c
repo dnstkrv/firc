@@ -67,14 +67,14 @@ static void route_fill(const firc_resolve_input_t *in, firc_resolve_route_t *r)
         r->source = FIRC_RESOLVE_SOURCE_NONE;
         return;
     }
-    firc_resolver_addr_t own;
+    firc_resolver_list_t own;
     const firc_resolver_addr_t *src = NULL;
     size_t n = 0;
     if (g->resolve.server != NULL && g->resolve.server[0] != '\0' &&
-        firc_resolver_addr_parse(g->resolve.server, &own) == FIRC_RESOLVER_ADDR_OK) {
+        firc_resolver_list_parse(g->resolve.server, &own, NULL, 0) == FIRC_RESOLVER_LIST_OK) {
         r->source = FIRC_RESOLVE_SOURCE_GROUP;
-        src = &own;
-        n = 1;
+        src = own.servers;
+        n = own.n;
     } else if (in->n_firmware > 0) {
         r->source = FIRC_RESOLVE_SOURCE_FIRMWARE;
         src = in->firmware;
@@ -177,7 +177,8 @@ size_t firc_resolve_route_describe(const firc_resolve_route_t *r, char *buf, siz
         w = snprintf(buf, cap, "uses the common upstream: the firmware binds no resolver to %s", r->iface);
     } else if (r->n_servers == 0) {
         if (r->source == FIRC_RESOLVE_SOURCE_GROUP) {
-            w = snprintf(buf, cap, "uses the common upstream: its resolver, resolve.server, is IPv6 and %s has no IPv6 route",
+            w = snprintf(buf, cap,
+                         "uses the common upstream: resolve.server names only IPv6 resolvers and %s has no IPv6 route",
                          r->iface);
         } else {
             w = snprintf(buf, cap, "uses the common upstream: its resolvers for %s are IPv6 and %s has no IPv6 route",

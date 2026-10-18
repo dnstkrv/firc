@@ -130,6 +130,54 @@ TEST v4_first_and_v6_only_with_a_v6_route(void)
     PASS();
 }
 
+/* Catches: only the first of several own servers kept, their order lost, or the list sent to the firmware's. */
+TEST a_groups_own_servers_are_all_routed_in_order(void)
+{
+    firc_group_t *g = group("g", "nwg0", 1);
+    firc_strset(&g->resolve.server, "1.1.1.1, 9.9.9.9:5353");
+    firc_resolver_addr_t fw[1] = {addr("8.8.8.8")};
+    firc_resolve_input_t in = {.group = g, .mark = MARK1, .firmware = fw, .n_firmware = 1};
+    firc_resolve_table_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_GROUP, t.items[0].source);
+    ASSERT_EQ((size_t)2, t.items[0].n_servers);
+    ASSERT_EQ(1, t.items[0].servers[0].ip.b[0]);
+    ASSERT_EQ(53, t.items[0].servers[0].port);
+    ASSERT_EQ(9, t.items[0].servers[1].ip.b[0]);
+    ASSERT_EQ(5353, t.items[0].servers[1].port);
+    char buf[256];
+    ASSERT(firc_resolve_route_describe(&t.items[0], buf, sizeof(buf)) > 0);
+    ASSERT_STR_EQ("resolves through nwg0: 1.1.1.1, 9.9.9.9:5353 (resolve.server)", buf);
+    firc_resolve_table_free(&t);
+    firc_group_free(g);
+    PASS();
+}
+
+/* Catches: an own IPv6 server kept without an IPv6 route, or put ahead of an IPv4 one. */
+TEST an_own_v6_server_needs_a_v6_route(void)
+{
+    firc_group_t *g = group("g", "nwg0", 1);
+    firc_strset(&g->resolve.server, "[2620:fe::fe]:53, 9.9.9.9");
+    firc_resolve_input_t in = {.group = g, .mark = MARK1};
+    firc_resolve_table_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
+    ASSERT_EQ(FIRC_RESOLVE_SOURCE_GROUP, t.items[0].source);
+    ASSERT_EQ((size_t)1, t.items[0].n_servers);
+    ASSERT_EQ(4, t.items[0].servers[0].ip.len);
+    ASSERT_EQ(9, t.items[0].servers[0].ip.b[0]);
+    firc_resolve_table_free(&t);
+
+    in.v6_route = true;
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
+    ASSERT_EQ((size_t)2, t.items[0].n_servers);
+    ASSERT_EQ(4, t.items[0].servers[0].ip.len);
+    ASSERT_EQ(16, t.items[0].servers[1].ip.len);
+    ASSERT_EQ(0xfe, t.items[0].servers[1].ip.b[15]);
+    firc_resolve_table_free(&t);
+    firc_group_free(g);
+    PASS();
+}
+
 /* Catches: a rebuild bumping the generation with nothing changed, or keeping it on a real change. */
 TEST the_generation_moves_only_on_a_real_change(void)
 {
@@ -231,7 +279,14 @@ TEST each_route_is_described_for_the_log(void)
     in.n_firmware = 0;
     ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
     firc_resolve_route_describe(&t.items[0], buf, sizeof(buf));
-    ASSERT_STR_EQ("uses the common upstream: its resolver, resolve.server, is IPv6 and nwg0 has no IPv6 route",
+    ASSERT_STR_EQ("uses the common upstream: resolve.server names only IPv6 resolvers and nwg0 has no IPv6 route",
+                  buf);
+    firc_resolve_table_free(&t);
+
+    firc_strset(&g->resolve.server, "2620:fe::9, [2620:fe::fe]:5353");
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
+    firc_resolve_route_describe(&t.items[0], buf, sizeof(buf));
+    ASSERT_STR_EQ("uses the common upstream: resolve.server names only IPv6 resolvers and nwg0 has no IPv6 route",
                   buf);
     firc_resolve_table_free(&t);
     firc_group_free(g);
@@ -664,6 +719,8 @@ int main(int argc, char **argv)
     RUN_TEST(precedence_is_server_then_firmware_then_none);
     RUN_TEST(a_group_with_no_mark_is_not_usable);
     RUN_TEST(v4_first_and_v6_only_with_a_v6_route);
+    RUN_TEST(a_groups_own_servers_are_all_routed_in_order);
+    RUN_TEST(an_own_v6_server_needs_a_v6_route);
     RUN_TEST(the_generation_moves_only_on_a_real_change);
     RUN_TEST(each_route_is_described_for_the_log);
     RUN_TEST(a_publish_logs_what_changed_and_hands_out_copies);

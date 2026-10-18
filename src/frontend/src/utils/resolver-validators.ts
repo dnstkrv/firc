@@ -2,18 +2,22 @@ import { parseV4, parseV6 } from "./device-validators";
 
 export type ResolverAddrProblem = "syntax" | "port" | "sink" | "mapped";
 
-export function resolverAddrProblem(text: string): ResolverAddrProblem | null {
-  if (text === "") return "syntax";
+export type ResolverListProblem = ResolverAddrProblem | "empty" | "too-many" | "duplicate";
+
+export const MAX_RESOLVERS = 4;
+
+function parseResolver(text: string): { key: string } | { problem: ResolverAddrProblem } {
+  if (text === "") return { problem: "syntax" };
   let host: string;
   let port: string | null = null;
   let v6Only = false;
   if (text.startsWith("[")) {
     const close = text.indexOf("]");
-    if (close < 0) return "syntax";
+    if (close < 0) return { problem: "syntax" };
     host = text.slice(1, close);
     const rest = text.slice(close + 1);
     if (rest.startsWith(":")) port = rest.slice(1);
-    else if (rest !== "") return "syntax";
+    else if (rest !== "") return { problem: "syntax" };
     v6Only = true;
   } else {
     const first = text.indexOf(":");
@@ -24,23 +28,44 @@ export function resolverAddrProblem(text: string): ResolverAddrProblem | null {
       host = text;
     }
   }
-  if (host === "") return "syntax";
+  if (host === "") return { problem: "syntax" };
   let bytes = v6Only ? null : parseV4(host);
   const v6 = bytes === null;
   if (bytes === null) bytes = parseV6(host);
-  if (bytes === null) return "syntax";
+  if (bytes === null) return { problem: "syntax" };
   if (port !== null) {
     const n = Number(port);
     if (!/^[0-9]{1,5}$/.test(port) || n < 1 || n > 65535) {
       const looksLikeAPort = port.length > 0 && /^[+-]?[0-9]*$/.test(port);
-      return looksLikeAPort ? "port" : "syntax";
+      return { problem: looksLikeAPort ? "port" : "syntax" };
     }
   }
   if (v6 && bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
-    return "mapped";
+    return { problem: "mapped" };
   }
-  if (!v6 && (bytes.every((b) => b === 0) || bytes[0] === 127)) return "sink";
+  if (!v6 && (bytes.every((b) => b === 0) || bytes[0] === 127)) return { problem: "sink" };
   if (v6 && bytes.slice(0, 15).every((b) => b === 0) && (bytes[15] === 0 || bytes[15] === 1))
-    return "sink";
+    return { problem: "sink" };
+  return { key: `${bytes.join(".")}#${port === null ? 53 : Number(port)}` };
+}
+
+export function resolverAddrProblem(text: string): ResolverAddrProblem | null {
+  const r = parseResolver(text);
+  return "problem" in r ? r.problem : null;
+}
+
+export function resolverListProblem(
+  text: string,
+): { problem: ResolverListProblem; entry: string } | null {
+  const entries = text.split(",").map((e) => e.replace(/^[ \t]+|[ \t]+$/g, ""));
+  const seen: string[] = [];
+  for (const [i, entry] of entries.entries()) {
+    if (entry === "") return { problem: "empty", entry: "" };
+    if (i === MAX_RESOLVERS) return { problem: "too-many", entry: "" };
+    const r = parseResolver(entry);
+    if ("problem" in r) return { problem: r.problem, entry };
+    if (seen.includes(r.key)) return { problem: "duplicate", entry };
+    seen.push(r.key);
+  }
   return null;
 }

@@ -521,7 +521,7 @@ static firc_err_t load_devices(yaml_document_t *doc, node_t *n, firc_devsel_spec
     return FIRC_OK;
 }
 
-/* absent/null resolve is {tunnel:true, server:""}; a server that doesn't parse is refused here */
+/* absent/null resolve is {tunnel:true, server:""}; a server list that doesn't parse is refused here */
 static firc_err_t load_resolve(yaml_document_t *doc, node_t *n, firc_group_resolve_t *r,
                                const char *group_name)
 {
@@ -536,11 +536,10 @@ static firc_err_t load_resolve(yaml_document_t *doc, node_t *n, firc_group_resol
     GET_OR_FAIL(get_bool(map_get(doc, res, "tunnel"), &r->tunnel, &err));
     GET_OR_FAIL(get_string(map_get(doc, res, "server"), &r->server, &err));
     if (r->server != NULL && r->server[0] != '\0') {
-        firc_resolver_addr_t a;
-        firc_resolver_addr_res_t pr = firc_resolver_addr_parse(r->server, &a);
-        if (pr != FIRC_RESOLVER_ADDR_OK) {
-            FIRC_ERROR("config: group \"%s\": resolve.server \"%s\" %s",
-                       group_name != NULL ? group_name : "", r->server, firc_resolver_addr_why(pr));
+        firc_resolver_list_t l;
+        char why[256];
+        if (firc_resolver_list_parse(r->server, &l, why, sizeof(why)) != FIRC_RESOLVER_LIST_OK) {
+            FIRC_ERROR("config: group \"%s\": resolve.server %s", group_name != NULL ? group_name : "", why);
             return FIRC_ERR_INVAL;
         }
     }

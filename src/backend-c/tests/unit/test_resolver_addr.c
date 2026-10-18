@@ -165,6 +165,76 @@ TEST an_address_becomes_a_sockaddr(void)
     PASS();
 }
 
+/* Catches: a comma list read as one address, blanks kept, the written order lost, or a v6 port misread. */
+TEST a_list_of_servers_splits_in_order(void)
+{
+    firc_resolver_list_t l;
+    ASSERT_EQ(FIRC_RESOLVER_LIST_OK, firc_resolver_list_parse("1.1.1.1, 9.9.9.9", &l, NULL, 0));
+    ASSERT_EQ((size_t)2, l.n);
+    ASSERT_EQ(1, l.servers[0].ip.b[0]);
+    ASSERT_EQ(9, l.servers[1].ip.b[3]);
+    ASSERT_EQ(53, l.servers[1].port);
+
+    ASSERT_EQ(FIRC_RESOLVER_LIST_OK, firc_resolver_list_parse("[2606:4700::1111]:53,1.1.1.1:5353", &l, NULL, 0));
+    ASSERT_EQ((size_t)2, l.n);
+    ASSERT_EQ(16, l.servers[0].ip.len);
+    ASSERT_EQ(0x26, l.servers[0].ip.b[0]);
+    ASSERT_EQ(0x11, l.servers[0].ip.b[15]);
+    ASSERT_EQ(53, l.servers[0].port);
+    ASSERT_EQ(4, l.servers[1].ip.len);
+    ASSERT_EQ(5353, l.servers[1].port);
+
+    ASSERT_EQ(FIRC_RESOLVER_LIST_OK, firc_resolver_list_parse("\t9.9.9.9 ", &l, NULL, 0));
+    ASSERT_EQ((size_t)1, l.n);
+    ASSERT_EQ(9, l.servers[0].ip.b[0]);
+
+    ASSERT_EQ(FIRC_RESOLVER_LIST_OK, firc_resolver_list_parse("1.1.1.1,1.0.0.1, 9.9.9.9 ,2620:fe::fe", &l, NULL, 0));
+    ASSERT_EQ((size_t)4, l.n);
+    ASSERT_EQ(1, l.servers[1].ip.b[3]);
+    ASSERT_EQ(0xfe, l.servers[3].ip.b[15]);
+    PASS();
+}
+
+/* Catches: a fifth server kept or silently dropped, an empty entry skipped, or a twin accepted. */
+TEST a_bad_list_is_refused_naming_what_is_wrong(void)
+{
+    firc_resolver_list_t l;
+    char why[256];
+    ASSERT_EQ(FIRC_RESOLVER_LIST_TOO_MANY,
+              firc_resolver_list_parse("1.1.1.1,1.0.0.1,9.9.9.9,8.8.8.8,8.8.4.4", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"1.1.1.1,1.0.0.1,9.9.9.9,8.8.8.8,8.8.4.4\" names more than 4 servers", why);
+
+    const char *empty[] = {"1.1.1.1,,9.9.9.9", "1.1.1.1,", ",1.1.1.1", "1.1.1.1, ,9.9.9.9", " ", ""};
+    for (size_t i = 0; i < sizeof(empty) / sizeof(empty[0]); i++) {
+        ASSERT_EQm(empty[i], FIRC_RESOLVER_LIST_EMPTY, firc_resolver_list_parse(empty[i], &l, why, sizeof(why)));
+        ASSERTm(why, strstr(why, "has an empty entry") != NULL);
+    }
+    ASSERT_EQ(FIRC_RESOLVER_LIST_EMPTY, firc_resolver_list_parse("1.1.1.1,", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"1.1.1.1,\" has an empty entry", why);
+
+    ASSERT_EQ(FIRC_RESOLVER_LIST_DUPLICATE, firc_resolver_list_parse("9.9.9.9, 1.1.1.1, 9.9.9.9:53", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"9.9.9.9, 1.1.1.1, 9.9.9.9:53\" names \"9.9.9.9:53\" twice", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_DUPLICATE, firc_resolver_list_parse("[2620:fe::fe]:53, 2620:fe::fe", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"[2620:fe::fe]:53, 2620:fe::fe\" names \"2620:fe::fe\" twice", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_OK, firc_resolver_list_parse("9.9.9.9, 9.9.9.9:5353", &l, NULL, 0));
+    ASSERT_EQ((size_t)2, l.n);
+
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse("1.1.1.1, dns.google", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"dns.google\" is not an address literal (addr, addr:port, [v6addr] or [v6addr]:port)", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse("127.0.0.1 ,1.1.1.1", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"127.0.0.1\" is a sink address (0.0.0.0, 127.0.0.0/8, ::, ::1), which no resolver answers from", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse("1.1.1.1,9.9.9.9:0", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"9.9.9.9:0\" has a port outside 1..65535", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse("1.1.1.1 9.9.9.9", &l, why, sizeof(why)));
+    ASSERT_STR_EQ("\"1.1.1.1 9.9.9.9\" is not an address literal (addr, addr:port, [v6addr] or [v6addr]:port)", why);
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse(NULL, &l, NULL, 0));
+
+    char tiny[8];
+    ASSERT_EQ(FIRC_RESOLVER_LIST_ADDR, firc_resolver_list_parse("dns.google", &l, tiny, sizeof(tiny)));
+    ASSERT_STR_EQ("\"dns.go", tiny);
+    PASS();
+}
+
 static char g_ula[192];
 
 /* A pool from the shipped defaults (198.18.0.0/15) with fd00:1234::/48 as its v6 half. */
@@ -191,23 +261,33 @@ TEST a_server_inside_the_pool_is_refused_at_startup(void)
 {
     firc_fakeip_t *pool = pool_for_test();
     ASSERT(pool != NULL);
-    ASSERT(firc_resolve_server_in_pool("198.18.0.1", pool));
-    ASSERT(firc_resolve_server_in_pool("198.19.255.255:5353", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool("198.20.0.0", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool("198.17.255.255", pool));
-    ASSERT(firc_resolve_server_in_pool("fd00:1234::53", pool));
-    ASSERT(firc_resolve_server_in_pool("[fd00:1234::ffff:1]:53", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool("[fd00:1234:ffff::1]:53", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool("fd00:1235::1", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool("", pool));
-    ASSERT_FALSE(firc_resolve_server_in_pool(NULL, pool));
+    ASSERT(firc_resolve_server_in_pool("198.18.0.1", pool, NULL, 0));
+    ASSERT(firc_resolve_server_in_pool("198.19.255.255:5353", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("198.20.0.0", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("198.17.255.255", pool, NULL, 0));
+    ASSERT(firc_resolve_server_in_pool("fd00:1234::53", pool, NULL, 0));
+    ASSERT(firc_resolve_server_in_pool("[fd00:1234::ffff:1]:53", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("[fd00:1234:ffff::1]:53", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("fd00:1235::1", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool(NULL, pool, NULL, 0));
+    ASSERT(firc_resolve_server_in_pool("9.9.9.9, 198.18.0.1", pool, NULL, 0));
+    ASSERT(firc_resolve_server_in_pool("1.1.1.1,[fd00:1234::53]:5353,9.9.9.9", pool, NULL, 0));
+    ASSERT_FALSE(firc_resolve_server_in_pool("9.9.9.9, 198.20.0.1", pool, NULL, 0));
 
     firc_group_t *g[3] = {firc_group_new(), firc_group_new(), firc_group_new()};
     ASSERT(g[0] && g[1] && g[2]);
     ASSERT_EQ(FIRC_OK, firc_strset(&g[1]->resolve.server, "9.9.9.9"));
     ASSERT_EQ(FIRC_OK, firc_strset(&g[2]->resolve.server, "198.18.7.7"));
-    ASSERT_EQ(g[2], firc_resolve_groups_in_pool(g, 3, pool));
-    ASSERT_EQ(NULL, firc_resolve_groups_in_pool(g, 2, pool));
+    char hit[FIRC_RESOLVER_ADDR_STRLEN];
+    ASSERT(firc_resolve_server_in_pool("2620:fe::fe, 2620:fe::9, 2606:4700::1111, 198.19.0.53:5353", pool, hit,
+                                       sizeof(hit)));
+    ASSERT_STR_EQ("198.19.0.53:5353", hit);
+    ASSERT(firc_resolve_server_in_pool("1.1.1.1,[fd00:1234::53]:53", pool, hit, sizeof(hit)));
+    ASSERT_STR_EQ("fd00:1234::53", hit);
+    ASSERT_EQ(g[2], firc_resolve_groups_in_pool(g, 3, pool, hit, sizeof(hit)));
+    ASSERT_STR_EQ("198.18.7.7", hit);
+    ASSERT_EQ(NULL, firc_resolve_groups_in_pool(g, 2, pool, NULL, 0));
     for (int i = 0; i < 3; i++) { firc_group_free(g[i]); }
     firc_fakeip_free(pool);
     unlink(g_ula);
@@ -236,6 +316,8 @@ int main(int argc, char **argv)
     RUN_TEST(the_sink_test_takes_a_bare_address);
     RUN_TEST(an_address_formats_back_to_what_parses);
     RUN_TEST(an_address_becomes_a_sockaddr);
+    RUN_TEST(a_list_of_servers_splits_in_order);
+    RUN_TEST(a_bad_list_is_refused_naming_what_is_wrong);
     RUN_TEST(a_server_inside_the_pool_is_refused_at_startup);
     RUN_TEST(a_new_group_resolves_through_its_tunnel);
     GREATEST_MAIN_END();

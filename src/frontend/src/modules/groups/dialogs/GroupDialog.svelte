@@ -18,7 +18,7 @@
   import { RULE_TYPES, type DeviceSelector, type Group, type ListRule } from "../../../types";
   import { coverageLabel } from "../../../utils/device-picker";
   import { fetcher, HttpError } from "../../../utils/fetcher";
-  import { resolverAddrProblem } from "../../../utils/resolver-validators";
+  import { resolverListProblem } from "../../../utils/resolver-validators";
   import { ifaceList, ifaceValue } from "../iface-list";
   import { intervalOptionsFor, parseIntervalSeconds } from "../intervals";
   import type { GroupLive } from "../live-state";
@@ -123,15 +123,24 @@
       firmwareServers,
     }),
   );
-  let serverProblem = $derived(
-    dnsMode === "own" && !isBlackhole ? resolverAddrProblem(dnsServer.trim()) : null,
+  let serverCheck = $derived(
+    dnsMode === "own" && !isBlackhole ? resolverListProblem(dnsServer.trim()) : null,
   );
+  let serverProblem = $derived(serverCheck?.problem ?? null);
   let serverProblemText = $derived.by(() => {
-    if (serverProblem === "port") return t("The port must be between 1 and 65535");
+    const entry = serverCheck?.entry ?? "";
+    const named = (text: string) => (dnsServer.includes(",") ? `${entry}: ${text}` : text);
+    if (serverProblem === "port") return named(t("The port must be between 1 and 65535"));
     if (serverProblem === "sink")
-      return t("This address cannot be a DNS server (0.0.0.0, 127.x, ::, ::1)");
-    if (serverProblem === "mapped") return t("Write the IPv4 address itself");
-    if (serverProblem === "syntax") return t("An address, address:port, or [IPv6]:port");
+      return named(t("This address cannot be a DNS server (0.0.0.0, 127.x, ::, ::1)"));
+    if (serverProblem === "mapped") return named(t("Write the IPv4 address itself"));
+    if (serverProblem === "duplicate")
+      return t("{entry} is written twice").replace("{entry}", entry);
+    if (serverProblem === "too-many") return t("At most four servers");
+    if (serverProblem === "syntax" && entry.includes(" "))
+      return named(t("Separate the servers with commas"));
+    if (serverProblem === "syntax" || serverProblem === "empty")
+      return t("One to four addresses separated by commas: address, address:port or [IPv6]:port");
     return "";
   });
   let dnsServerHasError = $derived(
@@ -272,7 +281,7 @@
               id="gd-dns-server"
               type="text"
               list="gd-dns-servers"
-              placeholder="9.9.9.9"
+              placeholder="9.9.9.9, 1.1.1.1"
               bind:value={dnsServer}
               oninput={() => (serverErrorShown = null)}
               class:invalid={dnsServerHasError}

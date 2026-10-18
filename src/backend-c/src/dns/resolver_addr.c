@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -143,4 +144,85 @@ size_t firc_resolver_addr_format(const firc_resolver_addr_t *a, char *buf, size_
         return 0;
     }
     return (size_t)w;
+}
+
+static bool is_blank(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+static int len_quoted(size_t n)
+{
+    return n > 64 ? 64 : (int)n;
+}
+
+static void say(char *why, size_t cap, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
+static void say(char *why, size_t cap, const char *fmt, ...)
+{
+    if (why == NULL || cap == 0) { return; }
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(why, cap, fmt, ap);
+    va_end(ap);
+}
+
+static bool same_server(const firc_resolver_addr_t *a, const firc_resolver_addr_t *b)
+{
+    return a->port == b->port && a->ip.len == b->ip.len && memcmp(a->ip.b, b->ip.b, a->ip.len) == 0;
+}
+
+firc_resolver_list_res_t firc_resolver_list_parse(const char *s, firc_resolver_list_t *out, char *why,
+                                                  size_t why_cap)
+{
+    memset(out, 0, sizeof(*out));
+    if (why != NULL && why_cap > 0) { why[0] = '\0'; }
+    if (s == NULL) {
+        say(why, why_cap, "is missing");
+        return FIRC_RESOLVER_LIST_ADDR;
+    }
+    int whole = len_quoted(strlen(s));
+    const char *p = s;
+    for (;;) {
+        const char *end = strchr(p, ',');
+        if (end == NULL) { end = p + strlen(p); }
+        const char *b = p;
+        const char *e = end;
+        while (b < e && is_blank(*b)) { b++; }
+        while (e > b && is_blank(e[-1])) { e--; }
+        size_t n = (size_t)(e - b);
+        if (n == 0) {
+            memset(out, 0, sizeof(*out));
+            say(why, why_cap, "\"%.*s\" has an empty entry", whole, s);
+            return FIRC_RESOLVER_LIST_EMPTY;
+        }
+        if (out->n == FIRC_RESOLVE_MAX_SERVERS) {
+            memset(out, 0, sizeof(*out));
+            say(why, why_cap, "\"%.*s\" names more than %d servers", whole, s, FIRC_RESOLVE_MAX_SERVERS);
+            return FIRC_RESOLVER_LIST_TOO_MANY;
+        }
+        char entry[INET6_ADDRSTRLEN + 16];
+        firc_resolver_addr_t a;
+        firc_resolver_addr_res_t r = FIRC_RESOLVER_ADDR_SYNTAX;
+        if (n < sizeof(entry)) {
+            memcpy(entry, b, n);
+            entry[n] = '\0';
+            r = firc_resolver_addr_parse(entry, &a);
+        }
+        if (r != FIRC_RESOLVER_ADDR_OK) {
+            memset(out, 0, sizeof(*out));
+            say(why, why_cap, "\"%.*s\" %s", len_quoted(n), b, firc_resolver_addr_why(r));
+            return FIRC_RESOLVER_LIST_ADDR;
+        }
+        for (size_t i = 0; i < out->n; i++) {
+            if (same_server(&out->servers[i], &a)) {
+                memset(out, 0, sizeof(*out));
+                say(why, why_cap, "\"%.*s\" names \"%.*s\" twice", whole, s, len_quoted(n), b);
+                return FIRC_RESOLVER_LIST_DUPLICATE;
+            }
+        }
+        out->servers[out->n++] = a;
+        if (*end == '\0') { return FIRC_RESOLVER_LIST_OK; }
+        p = end + 1;
+    }
 }

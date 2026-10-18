@@ -781,11 +781,14 @@ definitions:
     properties:
       server:
         description: >-
-          The group's own DNS -- address[:port] (IPv6 with a port in
-          brackets). Empty -- the DNS servers the firmware bound to the
-          group's interface. Not 0.0.0.0, ::, 127.0.0.0/8, ::1, or an address
-          from firc's pool. The query goes through the group's tunnel, so a
-          DNS server on the local network will not work this way.
+          The group's own DNS -- one to four servers separated by commas,
+          each address[:port] (IPv6 with a port in brackets), blanks around
+          each ignored, none twice; kept in the written order (preferred
+          first), IPv4 first.
+          Empty -- the DNS servers the firmware bound to the group's
+          interface. Not 0.0.0.0, ::, 127.0.0.0/8, ::1, or an address from
+          firc's pool. The query goes through the group's tunnel, so a DNS
+          server on the local network will not work this way.
         example: 9.9.9.9
         type: string
       tunnel:

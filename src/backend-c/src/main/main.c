@@ -472,12 +472,13 @@ static void reload_config(struct daemon *d)
 
     if (reload_cfg.groups_present) {
         /* Checked before anything is applied: a resolver inside the pool refuses the whole reload. */
+        char hit[FIRC_RESOLVER_ADDR_STRLEN];
         const firc_group_t *bad = d->pool != NULL
-            ? firc_resolve_groups_in_pool(reload_cfg.groups, reload_cfg.n_groups, d->pool) : NULL;
+            ? firc_resolve_groups_in_pool(reload_cfg.groups, reload_cfg.n_groups, d->pool, hit, sizeof(hit)) : NULL;
         if (bad != NULL) {
             FIRC_ERROR("reload: group \"%s\": resolve.server \"%s\" is inside firc's address pool; "
                        "the reload was refused",
-                       bad->name != NULL ? bad->name : "", bad->resolve.server);
+                       bad->name != NULL ? bad->name : "", hit);
             firc_config_clear(&reload_cfg);
             return;
         }
@@ -1203,11 +1204,12 @@ int main(int argc, char **argv)
     }
     {
         /* The resolver check the loader could not do before the pool existed. */
-        const firc_group_t *bad = firc_resolve_groups_in_pool(cfg.groups, cfg.n_groups, d.pool);
+        char hit[FIRC_RESOLVER_ADDR_STRLEN];
+        const firc_group_t *bad = firc_resolve_groups_in_pool(cfg.groups, cfg.n_groups, d.pool, hit, sizeof(hit));
         if (bad != NULL) {
             FIRC_ERROR("group \"%s\": resolve.server \"%s\" is inside firc's address pool, where no "
                        "resolver can be; change it in the groups file next to %s",
-                       bad->name != NULL ? bad->name : "", bad->resolve.server, config_path);
+                       bad->name != NULL ? bad->name : "", hit, config_path);
             daemon_teardown(&d);
             firc_config_clear(&cfg);
             return 1;

@@ -113,6 +113,26 @@ test.describe("A group's DNS", () => {
     await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
   });
 
+  // Catches a list of servers refused by the field, or Save rewriting it instead of sending it verbatim.
+  test("the field takes servers separated by commas and Save sends them as written", async ({
+    page,
+  }) => {
+    const saved = await setup(page);
+    await createGroup(page, async (p) => {
+      await chooseDns(p, "Through the tunnel — own server");
+      const dialog = p.getByRole("dialog");
+      await dialog.locator("#gd-dns-server").fill("1.1.1.1,,9.9.9.9");
+      await expect(dialog.locator(".dns-server-error")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+      await dialog.locator("#gd-dns-server").fill("1.1.1.1, 9.9.9.9, 1.1.1.1:53");
+      await expect(dialog.locator(".dns-server-error")).toContainText("1.1.1.1:53");
+      await dialog.locator("#gd-dns-server").fill("1.1.1.1, 9.9.9.9");
+      await expect(dialog.locator(".dns-server-error")).toHaveCount(0);
+    });
+    await expect.poll(() => saved.length).toBe(1);
+    expect(saved[0].groups[0].resolve).toEqual({ tunnel: true, server: "1.1.1.1, 9.9.9.9" });
+  });
+
   // Catches the daemon's 400 becoming only a toast, or aria-invalid never flipping.
   test("the daemon's refusal lands on the server field", async ({ page }) => {
     await setup(

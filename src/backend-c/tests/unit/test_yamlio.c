@@ -1659,6 +1659,62 @@ TEST a_sink_resolve_server_fails_the_load_and_names_the_key(void)
     PASS();
 }
 
+/* Catches: a list of servers refused, rewritten on save, or a bad list loading or refused without naming its entry. */
+TEST a_resolve_server_list_loads_and_a_bad_one_names_its_entry(void)
+{
+    const char *good =
+        "configVersion: 0.7.0\n"
+        "groups:\n"
+        "  - id: 0a1b2c3d\n"
+        "    name: nl\n"
+        "    interface: nwg0\n"
+        "    enable: true\n"
+        "    resolve: {server: '1.1.1.1, [2620:fe::fe]:853'}\n"
+        "    rules: []\n";
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, good));
+    ASSERT_STR_EQ("1.1.1.1, [2620:fe::fe]:853", cfg.groups[0]->resolve.server);
+    char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.7.0", FIRC_CFG_GROUPS, &out, &out_len));
+    firc_config_t back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    free(out);
+    ASSERT_STR_EQ("1.1.1.1, [2620:fe::fe]:853", back.groups[0]->resolve.server);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+
+    struct { const char *server; const char *named; } bad[] = {
+        {"1.1.1.1, dns.google", "\"dns.google\" is not an address literal"},
+        {"1.1.1.1,,9.9.9.9", "\"1.1.1.1,,9.9.9.9\" has an empty entry"},
+        {"1.1.1.1,", "\"1.1.1.1,\" has an empty entry"},
+        {"1.1.1.1,1.0.0.1,9.9.9.9,8.8.8.8,8.8.4.4", "names more than 4 servers"},
+        {"9.9.9.9, 9.9.9.9", "names \"9.9.9.9\" twice"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+        char doc[512];
+        snprintf(doc, sizeof(doc),
+                 "configVersion: 0.7.0\n"
+                 "groups:\n"
+                 "  - id: 0a1b2c3d\n"
+                 "    name: nl\n"
+                 "    interface: nwg0\n"
+                 "    enable: true\n"
+                 "    resolve: {server: '%s'}\n"
+                 "    rules: []\n",
+                 bad[i].server);
+        char log[2048];
+        ASSERT_FALSEm(bad[i].server, load_str_logged(&cfg, doc, log, sizeof(log)) == FIRC_OK);
+        ASSERTm(log, strstr(log, "resolve.server") != NULL);
+        ASSERTm(log, strstr(log, bad[i].named) != NULL);
+        firc_config_clear(&cfg);
+    }
+    PASS();
+}
+
 /* Catches: a non-mapping `resolve` or a non-bool `tunnel` loading. */
 TEST a_resolve_of_the_wrong_shape_fails_the_load(void)
 {
@@ -2052,6 +2108,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_group_without_resolve_tunnels_and_writes_no_resolve_key);
     RUN_TEST(a_group_resolve_round_trips);
     RUN_TEST(a_sink_resolve_server_fails_the_load_and_names_the_key);
+    RUN_TEST(a_resolve_server_list_loads_and_a_bad_one_names_its_entry);
     RUN_TEST(a_resolve_of_the_wrong_shape_fails_the_load);
     RUN_TEST(a_file_with_subscriptions_warns_once);
     RUN_TEST(a_long_subscriptions_key_names_three_urls_and_counts_the_rest);

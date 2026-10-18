@@ -24,6 +24,7 @@
 #include "firc/log.h"
 #include "firc/logrep.h"
 #include "firc/loop.h"
+#include "firc/resolveroute.h"
 
 static bool bind_loopback(int fd, uint16_t port, uint16_t *got) {
     struct sockaddr_in a;
@@ -343,6 +344,7 @@ typedef struct {
     uint8_t group;
     _Atomic int asked;
     _Atomic int saw_client;
+    const firc_resolve_route_t *own;
 } troute_t;
 
 static troute_t g_troute;
@@ -359,6 +361,13 @@ static bool test_route(void *ud, const firc_dns_msg_t *q, const firc_ip_t *clien
     out->group_id.b[3] = t->group ? t->group : 7;
     out->mark = t->mark;
     out->gen = t->gen != 0 ? t->gen : 1;
+    if (t->own != NULL) {
+        out->n_servers = t->own->n_servers;
+        for (size_t i = 0; i < t->own->n_servers; i++) {
+            firc_resolver_addr_sockaddr(&t->own->servers[i], &out->servers[i], &out->server_lens[i]);
+        }
+        return true;
+    }
     out->n_servers = t->n;
     for (size_t i = 0; i < t->n; i++) {
         struct sockaddr_in *s4 = (struct sockaddr_in *)&out->servers[i];
@@ -3652,6 +3661,66 @@ TEST every_group_resolver_is_asked_at_once_and_the_first_good_answer_wins(void) 
     PASS();
 }
 
+static _Atomic int g_testnet_connects;
+static _Atomic uint8_t g_testnet_order[4];
+
+static int testnet_connect(void *ud, int fd, const struct sockaddr *sa, socklen_t len) {
+    struct sockaddr_in to;
+    if (sa->sa_family == AF_INET && len == sizeof(to)) {
+        memcpy(&to, sa, sizeof(to));
+        uint32_t ip = ntohl(to.sin_addr.s_addr);
+        if ((ip & 0xffffff00u) == 0xc0000200u) {
+            int k = atomic_fetch_add(&g_testnet_connects, 1);
+            if (k < 4) { atomic_store(&g_testnet_order[k], (uint8_t)(ip & 0xffu)); }
+            to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            return rec_connect(ud, fd, (const struct sockaddr *)&to, len);
+        }
+    }
+    return rec_connect(ud, fd, sa, len);
+}
+
+static const firc_dnsproxy_sock_ops_t TESTNET_OPS = {
+    .open = rec_open, .set_mark = rec_mark, .connect = testnet_connect, .send = rec_send, .ud = &g_rec,
+};
+
+/* Catches: only the first of a group's own servers asked, so a silent first one waits out the tunnel timeout. */
+TEST a_groups_second_own_server_answers_when_the_first_is_silent(void) {
+    live_t lv;
+    tunnel_setup(0);
+    g_live_ops = &TESTNET_OPS;
+    atomic_store(&g_testnet_connects, 0);
+    ASSERT(live_start(&lv));
+    firc_group_t *g = firc_group_new();
+    ASSERT(g != NULL);
+    firc_strset(&g->name, "nl");
+    firc_strset(&g->iface, "nwg0");
+    char server[64];
+    snprintf(server, sizeof(server), "192.0.2.1:%u, 192.0.2.2:%u", (unsigned)lv.b.port, (unsigned)lv.c.port);
+    ASSERT_EQ(FIRC_OK, firc_strset(&g->resolve.server, server));
+    firc_resolve_input_t in = {.group = g, .mark = 0x40010000u};
+    firc_resolve_table_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_resolve_table_build(&in, 1, NULL, &t));
+    ASSERT_EQ((size_t)2, t.items[0].n_servers);
+    g_troute.own = &t.items[0];
+    atomic_store(&lv.b.hold, 1);
+    long t0 = ms_now();
+    ASSERT_EQ(3, ask(lv.proxy_port, 0xb181));
+    ASSERT_LT(ms_now() - t0, 600);
+    ASSERT(await_received(&lv.b, 1));
+    ASSERT_EQ(1, atomic_load(&lv.c.received));
+    ASSERT_EQ(0, atomic_load(&lv.a.received));
+    ASSERT_EQ(0u, live_fallbacks(&lv));
+    ASSERT_EQ(2, atomic_load(&g_testnet_connects));
+    ASSERT_EQ(1, atomic_load(&g_testnet_order[0]));
+    ASSERT_EQ(2, atomic_load(&g_testnet_order[1]));
+    atomic_store(&lv.b.go, 1);
+    live_stop(&lv);
+    g_troute.own = NULL;
+    firc_resolve_table_free(&t);
+    firc_group_free(g);
+    PASS();
+}
+
 /* Catches: a sink from one resolver ending the exchange or falling back while another can still answer well. */
 TEST a_sink_from_one_resolver_and_a_good_answer_from_another_delivers_the_good_one(void) {
     live_t lv;
@@ -4561,6 +4630,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_cached_answer_echoes_the_askers_case);
     RUN_TEST(a_query_the_router_declines_never_reads_the_cache);
     RUN_TEST(every_group_resolver_is_asked_at_once_and_the_first_good_answer_wins);
+    RUN_TEST(a_groups_second_own_server_answers_when_the_first_is_silent);
     RUN_TEST(a_sink_from_one_resolver_and_a_good_answer_from_another_delivers_the_good_one);
     RUN_TEST(every_resolver_failing_falls_back_with_the_last_reason);
     RUN_TEST(a_silent_resolver_beside_a_failed_one_falls_back_at_the_timeout);

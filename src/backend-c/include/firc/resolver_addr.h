@@ -35,6 +35,24 @@ const char *firc_resolver_addr_why(firc_resolver_addr_res_t r);
 /* 0.0.0.0, 127.0.0.0/8, :: or ::1 (v4-mapped too); the pool is not checked. */
 bool firc_resolver_ip_is_sink(const firc_ip_t *ip);
 
+typedef enum {
+    FIRC_RESOLVER_LIST_OK = 0,
+    FIRC_RESOLVER_LIST_EMPTY,
+    FIRC_RESOLVER_LIST_TOO_MANY,
+    FIRC_RESOLVER_LIST_DUPLICATE,
+    FIRC_RESOLVER_LIST_ADDR,
+} firc_resolver_list_res_t;
+
+typedef struct firc_resolver_list {
+    firc_resolver_addr_t servers[FIRC_RESOLVE_MAX_SERVERS];
+    size_t n;
+} firc_resolver_list_t;
+
+/* 1..FIRC_RESOLVE_MAX_SERVERS literals separated by commas, blanks around each ignored.
+   On failure why (may be NULL) gets the quoted bad entry or value and the reason. */
+firc_resolver_list_res_t firc_resolver_list_parse(const char *s, firc_resolver_list_t *out, char *why,
+                                                  size_t why_cap);
+
 void firc_resolver_addr_sockaddr(const firc_resolver_addr_t *a, struct sockaddr_storage *ss,
                                  socklen_t *len);
 

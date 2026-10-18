@@ -1613,6 +1613,44 @@ TEST a_groups_resolve_round_trips_and_its_resolver_is_shown(void) {
     PASS();
 }
 
+/* Catches: a list of servers refused or rewritten by the API, or a bad list or a pool entry after the first let through. */
+TEST a_resolve_server_list_is_kept_verbatim_and_a_bad_one_refused(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0a1b2c3d\",\"name\":\"nl\",\"interface\":\"nwg0\","
+                              "\"resolve\":{\"server\":\"1.1.1.1, 9.9.9.9\"}}",
+                              &out));
+    ASSERT_STR_EQ("1.1.1.1, 9.9.9.9",
+                  cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(out, "resolve"), "server")->valuestring);
+    cJSON_Delete(out);
+
+    struct { const char *server; const char *named; } bad[] = {
+        {"1.1.1.1, dns.google", "\"dns.google\" is not an address literal"},
+        {"1.1.1.1,,9.9.9.9", "has an empty entry"},
+        {"1.1.1.1,", "has an empty entry"},
+        {"1.1.1.1,1.0.0.1,9.9.9.9,8.8.8.8,8.8.4.4", "names more than 4 servers"},
+        {"9.9.9.9, 9.9.9.9:53", "names \"9.9.9.9:53\" twice"},
+        {"9.9.9.9, 198.19.0.53", "resolve.server \"198.19.0.53\" is inside firc's address pool"},
+        {"2620:fe::fe, 2620:fe::9, 2606:4700::1111, 198.19.0.53", "resolve.server \"198.19.0.53\" is inside"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char body[256];
+        snprintf(body, sizeof(body), "{\"resolve\":{\"server\":\"%s\"}}", bad[i].server);
+        ASSERT_EQm(bad[i].server, 400, do_request("PUT", "/api/v1/groups/0a1b2c3d", body, &out));
+        ASSERT_STR_EQm(bad[i].server, "resolve.server", jstr(out, "field"));
+        ASSERTm(jstr(out, "error"), strstr(jstr(out, "error"), bad[i].named) != NULL);
+        cJSON_Delete(out);
+    }
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups/0a1b2c3d", NULL, &out));
+    ASSERT_STR_EQm("the refused PUTs changed nothing", "1.1.1.1, 9.9.9.9",
+                   cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(out, "resolve"), "server")->valuestring);
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
 /* Catches: a sink or pool resolve server accepted, or refused without naming the field and group. */
 TEST a_bad_resolve_server_is_refused_naming_the_field_and_the_group(void) {
     harness_t *h = harness_start();
@@ -2206,6 +2244,7 @@ int main(int argc, char **argv) {
     RUN_TEST(rule_created_via_http_is_dns_matchable);
     RUN_TEST(a_groups_resolve_round_trips_and_its_resolver_is_shown);
     RUN_TEST(a_disabled_groups_resolver_lists_no_servers);
+    RUN_TEST(a_resolve_server_list_is_kept_verbatim_and_a_bad_one_refused);
     RUN_TEST(a_bad_resolve_server_is_refused_naming_the_field_and_the_group);
     RUN_TEST(a_post_with_no_id_names_no_group_in_its_refusal);
     RUN_TEST(a_put_group_keeps_its_route_marked);
