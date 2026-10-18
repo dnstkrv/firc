@@ -147,18 +147,9 @@ load_tun() {
   [ -c "$TUN_DEV" ] || logger "$DESC: $TUN_DEV is missing and the tun module did not load; tunnels cannot start."
 }
 
-load_addrtype() {
-  KO=/lib/modules/`uname -r`/xt_addrtype.ko
-  [ -f "$KO" ] || return 0
-  grep -qx addrtype /proc/net/ip_tables_matches 2>/dev/null && return 0
-  insmod "$KO" 2>/dev/null
-  return 0
-}
-
 # Detached from the caller's descriptors, or `$(S99firc start)` would wait for the daemon to exit.
 launch() {
   load_tun
-  load_addrtype
   # reset HUP: the boot loop ignores it, and an ignored disposition survives exec
   ( trap - HUP; exec > /dev/null 2>&1 < /dev/null; $PREARGS $PROC $ARGS 2>&1 | logger -t $PROC ) &
 }

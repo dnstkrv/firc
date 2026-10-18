@@ -66,6 +66,7 @@ CORE_SRCS := \
     src/logging/events.c \
     src/logging/logrep.c \
     src/platform/loop.c \
+    src/platform/kmod.c \
     src/dns/wire.c \
     src/netlink/nlattr_iter.c \
     src/dns/rewrite.c \

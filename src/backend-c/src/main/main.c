@@ -16,6 +16,7 @@
 #include <linux/rtnetlink.h>
 
 #include "firc/fakeip_from_config.h"
+#include "firc/kmod.h"
 #include "firc/instance_lock.h"
 #include "firc/conntrack.h"
 #include "firc/mark.h"
@@ -971,7 +972,10 @@ static firc_ipt_t *open_engine(firc_ipt_proto_t fam, bool purge, const char *pre
         firc_xt_free(xt);
         return NULL;
     }
-    if (!purge) { (void)firc_xt_probe(xt); }
+    if (!purge) {
+        (void)firc_kmod_load_netfilter(NULL);
+        (void)firc_xt_probe(xt);
+    }
     firc_ipt_t *ipt = firc_ipt_new(xt, prefix);
     if (!ipt) {
         FIRC_ERROR("netfilter helper init fail: out of memory");
