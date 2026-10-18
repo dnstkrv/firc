@@ -148,6 +148,20 @@ firc_xt_info_t firc_xt_left_shape(const firc_xt_t *xt, const char *table);
 /* One GET_INFO: true when table has the shape want, false when it moved or cannot be read. */
 bool firc_xt_shape_is(firc_xt_t *xt, const char *table, const firc_xt_info_t *want);
 
+#define FIRC_XT_ACL_MAX 32
+
+typedef struct firc_xt_acl {
+    char iface[FIRC_XT_ACL_MAX][16];
+    size_t n;
+    bool all;
+} firc_xt_acl_t;
+
+/* Lists, once each in rule order, in_chain's -i then out_chain's -o interfaces whose rule (a jump or goto followed one
+ * level) can meet anything but ACCEPT or RETURN; such a rule without an exact name sets all. A missing chain adds none.
+ * AGAIN when the table moved while read, LIMIT past FIRC_XT_ACL_MAX, INVAL on a v6 handle. */
+firc_err_t firc_xt_acl_denying(firc_xt_t *xt, const char *table, const char *in_chain, const char *out_chain,
+                               firc_xt_acl_t *out);
+
 /* The kernel through a raw socket of the family; NULL with errno set when the socket cannot be opened. */
 firc_xt_t *firc_xt_real_new(firc_ipt_proto_t fam);
 

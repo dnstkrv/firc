@@ -110,6 +110,8 @@ const stateOf = (id: string, status = "up") => ({
   lastExit: 0,
   uplinkOk: true,
   tcpPort: 0,
+  tcpSkipped: [],
+  tcpOff: "",
   active: [],
   groups: [],
   nodes: [],

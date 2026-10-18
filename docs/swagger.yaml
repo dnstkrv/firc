@@ -1386,6 +1386,20 @@ definitions:
         description: 'Local port tunvless takes the kernel-terminated TCP on; 0 for none'
         example: 0
         type: integer
+      tcpSkipped:
+        description: 'Kernel interface names of the segments whose access list can deny; their TCP keeps the TUN path. A WAN interface may appear (the WebUI hides it). Empty while tcpPort is 0'
+        items:
+          type: string
+        type: array
+      tcpOff:
+        description: 'Why no TCP of this tunnel is redirected now (acl: an access list cannot be read or judged; kernel: no REDIRECT or addrtype; refused: the kernel refused the rule). Empty while kernel TCP is off for the tunnel'
+        enum:
+        - ""
+        - acl
+        - kernel
+        - refused
+        example: ""
+        type: string
       txBps:
         example: 0
         type: integer

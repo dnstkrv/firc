@@ -360,3 +360,27 @@ bool firc_xt_shape_is(firc_xt_t *xt, const char *table, const firc_xt_info_t *wa
     firc_xt_info_t now;
     return xt->ops->get_info(xt->ud, xt->fam, table, &now) == 0 && same_shape(&now, want);
 }
+
+firc_err_t firc_xt_acl_denying(firc_xt_t *xt, const char *table, const char *in_chain, const char *out_chain,
+                               firc_xt_acl_t *out) {
+    if (out != NULL) { memset(out, 0, sizeof(*out)); }
+    if (xt == NULL || table == NULL || in_chain == NULL || out_chain == NULL || out == NULL ||
+        xt->fam != FIRC_IPT_PROTO_IPV4) {
+        return FIRC_ERR_INVAL;
+    }
+    firc_xt_info_t info;
+    if (xt->ops->get_info(xt->ud, xt->fam, table, &info) != 0) { return FIRC_ERR_IO; }
+    uint8_t *raw = malloc(FIRC_XT_HEADROOM + (info.size ? info.size : 1));
+    if (raw == NULL) { return FIRC_ERR_NOMEM; }
+    int e = xt->ops->get_entries(xt->ud, xt->fam, table, raw + FIRC_XT_HEADROOM, info.size);
+    firc_err_t err = e == EAGAIN ? FIRC_ERR_AGAIN : e != 0 ? FIRC_ERR_IO : FIRC_OK;
+    firc_xt_table_t view;
+    memset(&view, 0, sizeof(view));
+    const char *bad = NULL;
+    if (err == FIRC_OK) { err = firc_xt_parse(xt->fam, &info, raw + FIRC_XT_HEADROOM, &view, &bad); }
+    if (err == FIRC_OK) { err = firc_xt_acl_judge(&view, in_chain, out_chain, out); }
+    if (err != FIRC_OK) { memset(out, 0, sizeof(*out)); }
+    firc_xt_table_clear(&view);
+    free(raw);
+    return err;
+}

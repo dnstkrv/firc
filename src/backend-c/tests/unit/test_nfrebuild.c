@@ -1013,7 +1013,7 @@ typedef struct {
     uint16_t ports[FIRC_KTCP_DEVICES];
 } tun_rig_t;
 
-static bool tun_rig_up_lacking(tun_rig_t *r, bool target, const char *lack, uint8_t rev) {
+static bool tun_rig_build(tun_rig_t *r, bool target, const char *lack, uint8_t rev, firc_loop_t *loop) {
     memset(r, 0, sizeof(*r));
     r->pool = new_pool();
     if (r->pool == NULL) { return false; }
@@ -1028,7 +1028,7 @@ static bool tun_rig_up_lacking(tun_rig_t *r, bool target, const char *lack, uint
     r->kernel = fake_rtnl_start(&r->rtnl);
     if (r->kernel == NULL) { return false; }
     fake_rtnl_set_link_flags(r->kernel, 0x1 | 0x10);
-    firc_app_deps_t deps = {.cfg = &r->cfg, .ipt4 = r->ipt, .rtnl = r->rtnl, .pool = r->pool};
+    firc_app_deps_t deps = {.cfg = &r->cfg, .ipt4 = r->ipt, .rtnl = r->rtnl, .pool = r->pool, .loop = loop};
     r->app = firc_app_create(&deps);
     r->remap = firc_port_remap_new(r->cfg.app.netfilter.iptables.chain_prefix, 53, 3553, NULL, 0, r->ipt, NULL);
     if (r->app == NULL || firc_port_remap_enable(r->remap) != FIRC_OK) { return false; }
@@ -1037,7 +1037,11 @@ static bool tun_rig_up_lacking(tun_rig_t *r, bool target, const char *lack, uint
     return true;
 }
 
-static bool tun_rig_up(tun_rig_t *r) { return tun_rig_up_lacking(r, false, NULL, 0); }
+static bool tun_rig_up_lacking(tun_rig_t *r, bool target, const char *lack, uint8_t rev) {
+    return tun_rig_build(r, target, lack, rev, NULL);
+}
+
+static bool tun_rig_up(tun_rig_t *r) { return tun_rig_build(r, false, NULL, 0, NULL); }
 
 static void tun_rig_down(tun_rig_t *r) {
     firc_app_destroy(r->app);
@@ -1257,6 +1261,387 @@ TEST a_missing_redirect_target_keeps_nat_written(void) { return missing_extensio
 /* Catches: nat failing every pass on a kernel without the addrtype match. */
 TEST a_missing_addrtype_match_keeps_nat_written(void) { return missing_extension_keeps_nat(false, "addrtype", 1); }
 
+static bool seed(tun_rig_t *r, const char *chain, const char *const *words[], const size_t *lens, size_t n) {
+    return firc_fake_ipt_set_initial_rules(r->fake, "filter", chain, words, lens, n) == FIRC_OK;
+}
+
+static const char *const w_drop[] = {"-d", "203.0.113.9/32", "-j", "DROP"};
+static const char *const w_accept_s[] = {"-s", "192.168.1.5/32", "-j", "ACCEPT"};
+static const char *const w_accept_d[] = {"-d", "192.168.1.0/24", "-j", "ACCEPT"};
+static const char *const w_reject[] = {"-j", "REJECT", "--reject-with", "icmp-host-unreachable"};
+static const char *const w_j_bridge[] = {"-i", "br0", "-j", "@Bridge0"};
+static const char *const w_j_pppoe[] = {"-i", "ppp0", "-j", "@PPPoE0"};
+static const char *const w_j_guest[] = {"-i", "br1", "-j", "@Guest"};
+static const char *const w_j_noif[] = {"-j", "@PPPoE0"};
+static const char *const w_j_noif_ok[] = {"-j", "@Bridge0"};
+
+static bool seed_lists(tun_rig_t *r, bool pppoe_denies) {
+    const char *const *bridge[] = {w_accept_s, w_accept_d};
+    const size_t bl[] = {4, 4};
+    const char *const *pppoe[] = {pppoe_denies ? w_drop : w_accept_d};
+    const size_t pl[] = {4};
+    const char *const *guest[] = {w_reject};
+    const size_t gl[] = {4};
+    const char *const *acl[] = {w_j_bridge, w_j_pppoe, w_j_guest, w_j_noif_ok};
+    const size_t al[] = {4, 4, 4, 2};
+    return seed(r, "@Bridge0", bridge, bl, 2) && seed(r, "@PPPoE0", pppoe, pl, 1) && seed(r, "@Guest", guest, gl, 1) &&
+           seed(r, "_NDM_ACL_IN", acl, al, 4);
+}
+
+static size_t returns_for(tun_rig_t *r, const char *iface) {
+    const char *want[] = {"-i", iface, "-j", "RETURN"};
+    return count_rule(r->fake, "nat", "FIRC_REDIR", want, 4);
+}
+
+/* Catches: a denying segment left redirected (its list bypassed), an ACCEPT-only one given a RETURN, a permitting jump without -i read as a deny, the RETURN behind a REDIRECT, or the list changed by a pass over an unchanged one. */
+TEST denying_segments_keep_the_tun_path(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_lists(&r, true));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "br1"), "%zu");
+    ASSERT_EQ_FMT((size_t)0, returns_for(&r, "br0"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    ASSERT(firc_fake_ipt_get_rules(r.fake, "nat", "FIRC_REDIR", &rules, &n));
+    ASSERT_EQ_FMT((size_t)3, n, "%zu");
+    ASSERT_STR_EQ("RETURN", rules[0]->parts[3]);
+    ASSERT_STR_EQ("RETURN", rules[1]->parts[3]);
+    const firc_xt_acl_t *sk = firc_app_ktcp_skipped(r.app);
+    ASSERT_EQ_FMT((size_t)2, sk->n, "%zu");
+    ASSERT_STR_EQ("ppp0", sk->iface[0]);
+    ASSERT_STR_EQ("br1", sk->iface[1]);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    sk = firc_app_ktcp_skipped(r.app);
+    ASSERT_EQ_FMT((size_t)2, sk->n, "%zu");
+    ASSERT_STR_EQ("ppp0", sk->iface[0]);
+    ASSERT_STR_EQ("br1", sk->iface[1]);
+    ASSERT_FALSE(sk->all);
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: the daemon's report through the loop dropping the skip list, or never handing it over. */
+TEST the_skip_list_reaches_the_loop_with_the_report(void) {
+    firc_loop_t *loop = NULL;
+    ASSERT_EQ(FIRC_OK, firc_loop_create(&loop));
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_build(&r, false, NULL, 0, loop));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_lists(&r, true));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMTm("nothing has run on the loop yet", (size_t)0, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    ASSERT_EQ(FIRC_OK, firc_loop_post(loop, stop_the_loop, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(loop));
+    const firc_xt_acl_t *sk = firc_app_ktcp_skipped(r.app);
+    ASSERT_EQ_FMT((size_t)2, sk->n, "%zu");
+    ASSERT_STR_EQ("ppp0", sk->iface[0]);
+    ASSERT_STR_EQ("br1", sk->iface[1]);
+    tun_rig_down(&r);
+    firc_loop_destroy(loop);
+    PASS();
+}
+
+/* Catches: a RETURN kept after the firmware lifted the deny, a list change taken from an incremental pass's stale read only, or an incremental pass with nothing read yet staging no redirect. */
+TEST the_return_follows_the_list_at_the_next_full_pass(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_lists(&r, true));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    ASSERT_EQ_FMT((size_t)2, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    ASSERT(seed_lists(&r, false));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter_kind(r.app, NULL, false));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)0, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "br1"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    ASSERT_STR_EQ("br1", firc_app_ktcp_skipped(r.app)->iface[0]);
+    tun_rig_down(&r);
+    PASS();
+}
+
+static bool seed_unreadable(tun_rig_t *r) {
+    const char *const *pppoe[] = {w_drop};
+    const size_t pl[] = {4};
+    static char ifs[33][16];
+    static const char *jw[33][4];
+    static const char *const *acl[33];
+    static size_t al[33];
+    for (int i = 0; i < 33; i++) {
+        snprintf(ifs[i], sizeof(ifs[i]), "nwg%d", i);
+        jw[i][0] = "-i";
+        jw[i][1] = ifs[i];
+        jw[i][2] = "-j";
+        jw[i][3] = "@PPPoE0";
+        acl[i] = jw[i];
+        al[i] = 4;
+    }
+    return seed(r, "@PPPoE0", pppoe, pl, 1) && seed(r, "_NDM_ACL_IN", acl, al, 33);
+}
+
+static bool seed_permitting(tun_rig_t *r) {
+    const char *const *acl[] = {w_j_bridge};
+    const size_t al[] = {4};
+    return seed_lists(r, false) && seed(r, "_NDM_ACL_IN", acl, al, 1);
+}
+
+static bool pass_through_loop(tun_rig_t *r, firc_loop_t *loop) {
+    if (firc_app_rebuild_netfilter(r->app, NULL) != FIRC_OK) { return false; }
+    return firc_loop_post(loop, stop_the_loop, NULL) == FIRC_OK && firc_loop_run(loop) == FIRC_OK;
+}
+
+static bool loop_rig_up(tun_rig_t *r, firc_loop_t **loop, const char *lack) {
+    *loop = NULL;
+    if (firc_loop_create(loop) != FIRC_OK) { return false; }
+    firc_ip_t f1 = {{0}, 0};
+    return tun_rig_build(r, true, lack, 0, *loop) && add_tun_group(r, 1, "tunvless3", "a.example", NULL, &f1);
+}
+
+static void loop_rig_down(tun_rig_t *r, firc_loop_t *loop) {
+    tun_rig_down(r);
+    firc_loop_destroy(loop);
+}
+
+static const char *const w_jo_guest[] = {"-o", "br1", "-j", "@Guest"};
+
+/* Catches: a pass reading _NDM_ACL_IN only, so a segment whose out list denies keeps its redirect and is missing from the report. */
+TEST an_out_only_deny_keeps_its_segment_off_redir(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, NULL));
+    set_port(&r, 3, 3603);
+    const char *const *guest[] = {w_reject};
+    const size_t gl[] = {4};
+    const char *const *acl[] = {w_jo_guest};
+    const size_t al[] = {4};
+    ASSERT(seed(&r, "@Guest", guest, gl, 1) && seed(&r, "_NDM_ACL_OUT", acl, al, 1));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "br1"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    const firc_xt_acl_t *sk = firc_app_ktcp_skipped(r.app);
+    ASSERT_EQ_FMT((size_t)1, sk->n, "%zu");
+    ASSERT_STR_EQ("br1", sk->iface[0]);
+    ASSERT_FALSE(sk->all);
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: an unreadable list not reported as acl, the reason set before the report lands on the loop, or a reason left after the list is read again. */
+TEST an_unreadable_list_says_acl_through_the_loop(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, NULL));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_unreadable(&r));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQm("nothing has run on the loop yet", FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    ASSERT_EQ(FIRC_OK, firc_loop_post(loop, stop_the_loop, NULL));
+    ASSERT_EQ(FIRC_OK, firc_loop_run(loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_ACL, firc_app_ktcp_off(r.app));
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    ASSERT(seed_permitting(&r));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    ASSERT_EQ(FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: a deny with no exact -i not reported as acl, or its reason kept once the list names its segments. */
+TEST a_deny_without_an_exact_iface_says_acl(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, NULL));
+    set_port(&r, 3, 3603);
+    const char *const *pppoe[] = {w_drop};
+    const size_t pl[] = {4};
+    const char *const *acl[] = {w_j_noif};
+    const size_t al[] = {2};
+    ASSERT(seed(&r, "@PPPoE0", pppoe, pl, 1) && seed(&r, "_NDM_ACL_IN", acl, al, 1));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_ACL, firc_app_ktcp_off(r.app));
+    ASSERT(seed_permitting(&r));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: a kernel without the REDIRECT target not reported as kernel, or reported as acl. */
+TEST a_missing_redirect_target_says_kernel(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, "REDIRECT"));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_unreadable(&r));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_KERNEL, firc_app_ktcp_off(r.app));
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: a refused REDIR write not reported as refused, the redone pass reported as none, or the reason kept once the kernel takes the rule. */
+TEST a_refused_redirect_says_refused(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, NULL));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_permitting(&r));
+    firc_fake_ipt_refuse_rules_containing(r.fake, "-j REDIRECT");
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ(FIRC_KTCP_OFF_REFUSED, firc_app_ktcp_off(r.app));
+    firc_fake_ipt_refuse_rules_containing(r.fake, NULL);
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    ASSERT_EQ(FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: a reason given while no group would be redirected (kernel TCP off, nothing broken), or kept after the last port goes. */
+TEST no_redirected_group_says_no_reason(void) {
+    tun_rig_t r;
+    firc_loop_t *loop = NULL;
+    ASSERT(loop_rig_up(&r, &loop, "REDIRECT"));
+    ASSERT(seed_unreadable(&r));
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    set_port(&r, 3, 3603);
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_KERNEL, firc_app_ktcp_off(r.app));
+    set_port(&r, 3, 0);
+    ASSERT(pass_through_loop(&r, loop));
+    ASSERT_EQ(FIRC_KTCP_OFF_NONE, firc_app_ktcp_off(r.app));
+    loop_rig_down(&r, loop);
+    PASS();
+}
+
+/* Catches: an unread list (here 33 denying interfaces, LIMIT) staging the REDIRECTs anyway, nat failing, or the error or the recovery said every pass. */
+TEST an_unreadable_acl_stages_no_redirect(void) {
+    firc_event_reset_for_test();
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_unreadable(&r));
+    uint64_t mark = said_mark();
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT(dnat_of(&r, &f1));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, redir_jumps(&r), "%zu");
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_image(r.app)->n, "%zu");
+    ASSERT_EQ_FMT((size_t)1, said_since(mark, "kernel TCP cannot read the segments' access lists"), "%zu");
+    const char *const *one[] = {w_j_pppoe};
+    const size_t ol[] = {4};
+    ASSERT(seed(&r, "_NDM_ACL_IN", one, ol, 1));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ_FMT((size_t)1, redirects_of(&r, 1, 3603), "%zu");
+    ASSERT_EQ_FMT((size_t)1, said_since(mark, "kernel TCP reads the segments' access lists again"), "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: a deny with no exact -i (it covers every segment) letting any segment be redirected around it, or said every pass. */
+TEST a_deny_without_an_exact_iface_stages_no_redirect(void) {
+    firc_event_reset_for_test();
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    const char *const *pppoe[] = {w_drop};
+    const size_t pl[] = {4};
+    const char *const *acl[] = {w_j_noif};
+    const size_t al[] = {2};
+    ASSERT(seed(&r, "@PPPoE0", pppoe, pl, 1) && seed(&r, "_NDM_ACL_IN", acl, al, 1));
+    uint64_t mark = said_mark();
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT(dnat_of(&r, &f1));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, redir_jumps(&r), "%zu");
+    ASSERT_EQ_FMT((size_t)1,
+                  said_since(mark, "kernel TCP cannot tell which segments an access list covers; TCP stays on the TUN"),
+                  "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
+static tun_rig_t *g_race_rig;
+static bool g_race_done;
+
+static void move_filter_once(void *ud, const char *table) {
+    (void)ud;
+    if (g_race_done || strcmp(table, "filter") != 0) { return; }
+    g_race_done = true;
+    const char *const *bridge[] = {w_accept_s, w_accept_d, w_accept_s};
+    const size_t bl[] = {4, 4, 4};
+    (void)seed(g_race_rig, "@Bridge0", bridge, bl, 3);
+}
+
+/* Catches: a filter table that moved during the list read folded into "unreadable" (REDIR off and an ERR) instead of the pass starting over. */
+TEST a_moved_filter_table_restarts_the_pass(void) {
+    firc_event_reset_for_test();
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    set_port(&r, 3, 3603);
+    ASSERT(seed_lists(&r, true));
+    g_race_rig = &r;
+    g_race_done = false;
+    uint64_t mark = said_mark();
+    firc_fake_xt_on_read(firc_fake_ipt_xt(r.fake), move_filter_once, NULL);
+    ASSERT_EQ(FIRC_ERR_AGAIN, firc_app_rebuild_netfilter(r.app, NULL));
+    firc_fake_xt_on_read(firc_fake_ipt_xt(r.fake), NULL, NULL);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)1, returns_for(&r, "ppp0"), "%zu");
+    ASSERT_EQ_FMT((size_t)0, said_since(mark, "kernel TCP cannot read"), "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
+/* Catches: a router with kernel TCP off paying a filter read every pass, or a stale skip list shown with no redirect. */
+TEST no_redirected_group_reads_no_list(void) {
+    tun_rig_t r;
+    firc_ip_t f1 = {{0}, 0};
+    ASSERT(tun_rig_up(&r));
+    ASSERT(add_tun_group(&r, 1, "tunvless3", "a.example", NULL, &f1));
+    ASSERT(seed_lists(&r, true));
+    size_t before = firc_fake_xt_reads(firc_fake_ipt_xt(r.fake));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    size_t plain = firc_fake_xt_reads(firc_fake_ipt_xt(r.fake)) - before;
+    set_port(&r, 3, 3603);
+    before = firc_fake_xt_reads(firc_fake_ipt_xt(r.fake));
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    size_t redirected = firc_fake_xt_reads(firc_fake_ipt_xt(r.fake)) - before;
+    ASSERT_EQ_FMT(plain + 1, redirected, "%zu");
+    set_port(&r, 3, 0);
+    ASSERT_EQ(FIRC_OK, firc_app_rebuild_netfilter(r.app, NULL));
+    ASSERT_EQ_FMT((size_t)0, firc_app_ktcp_skipped(r.app)->n, "%zu");
+    tun_rig_down(&r);
+    PASS();
+}
+
 /* Catches: a rewritten nat left without DNSOR, REDIR or their jumps, a jump put back twice, or REDIR behind DNAT. */
 TEST rebuild_restores_the_table_after_a_wipe(void) {
     tun_rig_t r;
@@ -1324,5 +1709,18 @@ int main(int argc, char **argv) {
     RUN_TEST(a_missing_redirect_target_keeps_nat_written);
     RUN_TEST(a_refused_redirect_keeps_nat_written);
     RUN_TEST(a_missing_addrtype_match_keeps_nat_written);
+    RUN_TEST(denying_segments_keep_the_tun_path);
+    RUN_TEST(the_skip_list_reaches_the_loop_with_the_report);
+    RUN_TEST(an_out_only_deny_keeps_its_segment_off_redir);
+    RUN_TEST(the_return_follows_the_list_at_the_next_full_pass);
+    RUN_TEST(an_unreadable_acl_stages_no_redirect);
+    RUN_TEST(a_deny_without_an_exact_iface_stages_no_redirect);
+    RUN_TEST(a_moved_filter_table_restarts_the_pass);
+    RUN_TEST(no_redirected_group_reads_no_list);
+    RUN_TEST(an_unreadable_list_says_acl_through_the_loop);
+    RUN_TEST(a_deny_without_an_exact_iface_says_acl);
+    RUN_TEST(a_missing_redirect_target_says_kernel);
+    RUN_TEST(a_refused_redirect_says_refused);
+    RUN_TEST(no_redirected_group_says_no_reason);
     GREATEST_MAIN_END();
 }

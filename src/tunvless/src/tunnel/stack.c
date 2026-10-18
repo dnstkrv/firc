@@ -649,6 +649,13 @@ static __thread int g_worker;
 static __thread uint64_t g_now_ns;
 static __thread time_t g_now_s;
 
+#define KB_PERIOD_NS 1000000000ull
+#define KB_EARLY 0x80000000ull
+
+static __thread struct {
+    uint64_t rx, tx, sent_rx, sent_tx, at;
+} g_kb;
+
 /* ---- loop counters ----------------------------------------------------------------------
  *
  * Enabled by STEER_TUN_STATS=1, printed every two seconds. They answer "the CPU is idle and it is
@@ -1605,6 +1612,7 @@ static int emit_sock(void *arg, const unsigned char *p, size_t n) {
             return -1;
         }
         if (w > 0) {
+            g_kb.rx += (uint64_t)w;
             p += w;
             n -= (size_t)w;
             c->last = g_now_s;
@@ -1634,6 +1642,7 @@ static void sock_flush(struct conn *c) {
             return;
         }
         rtx_drop(&c->rtx, (uint32_t)w);
+        g_kb.rx += (uint64_t)w;
         c->last = g_now_s;
         if ((uint32_t)w < n) return;
     }
@@ -2480,6 +2489,7 @@ static int sock_read(struct conn *c, const struct tun_dev *tun) {
             c->client_fin = 1;
             return 0;
         }
+        g_kb.tx += (uint64_t)n;
         int sr = upstream_send(c, buf, (size_t)n);
         if (sr == SEND_AGAIN) {
             if (early_hold(c, buf, (size_t)n) == 0) return 0;
@@ -2920,6 +2930,16 @@ static void miss_report(uint64_t now) {
     g_miss.since = now;
 }
 
+static void bytes_report(uint64_t now) {
+    uint64_t drx = g_kb.rx - g_kb.sent_rx, dtx = g_kb.tx - g_kb.sent_tx;
+    if (drx < KB_EARLY && dtx < KB_EARLY && now - g_kb.at < KB_PERIOD_NS) return;
+    g_kb.at = now;
+    if (!drx && !dtx) return;
+    g_kb.sent_rx = g_kb.rx;
+    g_kb.sent_tx = g_kb.tx;
+    ctl_emit_bytes((uint32_t)drx, (uint32_t)dtx);
+}
+
 static void sock_take(const struct tun_dev *tun, int fd, const struct sockaddr_in *pa) {
     struct sockaddr_in od, me;
     socklen_t ol = sizeof od, ml = sizeof me;
@@ -3326,6 +3346,7 @@ static int loop_turn(struct loop *L, int max_ms) {
     if (L->own) {
         park_pass(tun);
         miss_report(now);
+        bytes_report(now);
     }
     for (int li = 0; li < g_live_n; ) {
         struct conn *c = &g_conns[g_live[li]];

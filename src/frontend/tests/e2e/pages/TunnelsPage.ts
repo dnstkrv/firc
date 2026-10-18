@@ -38,6 +38,8 @@ export const state = (id: string, device: string, extra: Json = {}): Json => ({
   lastExit: 0,
   uplinkOk: true,
   tcpPort: 0,
+  tcpSkipped: [],
+  tcpOff: "",
   ...extra,
 });
 

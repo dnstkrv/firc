@@ -1,9 +1,10 @@
 <script lang="ts">
   import Switch from "../../../components/ui/Switch.svelte";
+  import { interfaces } from "../../../data/interfaces.svelte";
   import { t } from "../../../data/locale.svelte";
   import type { TunnelsStore } from "../tunnels.svelte";
 
-  import { deviceProblem } from "../tunnel-editor";
+  import { deviceProblem, skippedLabels } from "../tunnel-editor";
   import type { ClientTunnel } from "../tunnels-data";
 
   let { store, tunnel = $bindable() }: { store: TunnelsStore; tunnel: ClientTunnel } = $props();
@@ -15,6 +16,23 @@
   );
   const deviceBad = $derived(deviceProblem(tunnel.device, store.data, tunnel.id, t));
   const tcpPort = $derived(store.stateOf(tunnel.id)?.tcpPort ?? 0);
+  const tcpSkipped = $derived(
+    skippedLabels(store.stateOf(tunnel.id)?.tcpSkipped ?? [], interfaces.list),
+  );
+  const tcpOff = $derived(store.stateOf(tunnel.id)?.tcpOff ?? "");
+  const offText = $derived(
+    tcpOff === "acl"
+      ? t(
+          "Not working now: an access list cannot be read or judged, TCP goes through the TUN. Details in the journal",
+        )
+      : tcpOff === "kernel"
+        ? t("Not working now: the kernel lacks REDIRECT or addrtype, TCP goes through the TUN")
+        : tcpOff === "refused"
+          ? t(
+              "Not working now: the kernel refused the redirect rule, TCP goes through the TUN. Details in the journal",
+            )
+          : t("Not working now: TCP goes through the TUN. Details in the journal"),
+  );
 </script>
 
 <div class="row">
@@ -56,10 +74,22 @@
         "Faster for TCP: the kernel accepts the connection and hands it to tunvless without TUN. IPv4 only; UDP and IPv6 go as before",
       )}
     </div>
-    {#if tunnel.advanced.kernelTcp && tcpPort > 0}
-      <div class="hint">
-        {t("Now: tunvless listens on port {port}").replace("{port}", String(tcpPort))}
-      </div>
+    {#if tunnel.advanced.kernelTcp && tcpOff !== ""}
+      <div class="hint bad">{offText}</div>
+    {:else}
+      {#if tunnel.advanced.kernelTcp && tcpPort > 0}
+        <div class="hint">
+          {t("Now: tunvless listens on port {port}").replace("{port}", String(tcpPort))}
+        </div>
+      {/if}
+      {#if tunnel.advanced.kernelTcp && tcpSkipped.length > 0}
+        <div class="hint">
+          {t("Not used for: {names} (access list denies)").replace(
+            "{names}",
+            tcpSkipped.join(", "),
+          )}
+        </div>
+      {/if}
     {/if}
   </div>
   <div class="controls">

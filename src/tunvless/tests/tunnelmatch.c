@@ -2151,6 +2151,22 @@ static void t_stop_wakes_the_loop(void) {
 
 /* ---- stack --------------------------------------------------------------------------------- */
 
+/* Catches counting moved into upstream_send or the dialer's emit path, so TUN bytes count as redirected and the card counts them twice. */
+static void t_bytes_tun(void) {
+    uint64_t rx0 = g_kb.rx, tx0 = g_kb.tx;
+    struct conn *c = pm_open(50021, 0x0a0a0a0cu);
+    if (!c) { check(0, "fixture: TUN connection did not open"); return; }
+    const unsigned char d[] = "GET / HTTP/1.1\r\n";
+    pm_send(50021, 0x0a0a0a0cu, 1001, c->our_seq, TCP_ACK | TCP_PSH, d, sizeof d - 1);
+    int s = pm_srv_of(c);
+    if (send(s, "abcdef", 6, 0) != 6) check(0, "fixture: server send failed");
+    struct timespec ts = { 0, 30000000 };
+    nanosleep(&ts, NULL);
+    drain_conn(c, &g_tun);
+    pm_drain(NULL, NULL);
+    check(g_kb.rx == rx0 && g_kb.tx == tx0, "TUN traffic does not move the redirected byte counters");
+}
+
 static void t_stack_abort(void) {
     fake_new();
     unsigned fl;
@@ -2601,6 +2617,7 @@ static int stack_part(void) {
     g_lport = ntohs(sa.sin_port);
     dev_drain(NULL);
     t_stack_abort();
+    t_bytes_tun();
     t_ack_paced();
     pool_part();
     return 0;
@@ -3256,6 +3273,67 @@ static void t_k_close_two_cmds(void) {
     close(a); close(b); close(c);
 }
 
+static void kb_sum(const char *out, uint64_t *rx, uint64_t *tx, int *n) {
+    *rx = 0; *tx = 0; *n = 0;
+    for (const char *p = out; (p = strstr(p, "{\"type\":\"bytes\",\"rx\":")) != NULL; p++) {
+        unsigned long long a = 0, b = 0;
+        if (sscanf(p, "{\"type\":\"bytes\",\"rx\":%llu,\"tx\":%llu}", &a, &b) == 2) { *rx += a; *tx += b; (*n)++; }
+    }
+}
+
+/* Catches a redirected download not counted (direct or queued write), counted as upload, or a bytes event sent while nothing moved. */
+static void t_k_bytes(void) {
+    static unsigned char big[100000], got[100000];
+    static char out[8192];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = pat(i);
+    k_fake();
+    int fd = k_sock(ip4(10, 0, 0, 11), 443, 1);
+    int small = 4096;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    k_connect(fd);
+    struct conn *c = k_ready(fd, 300);
+    if (!c) { check(0, "fixture: bytes connection did not open"); if (fd >= 0) close(fd); return; }
+    setsockopt(c->cfd, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    int s = pm_srv_of(c);
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    g_kb.sent_rx = g_kb.rx;
+    g_kb.sent_tx = g_kb.tx;
+    out_start();
+    if (send(fd, "hello", 5, 0) != 5) check(0, "fixture: client send failed");
+    size_t off = 0, rx = 0;
+    for (int i = 0; i < 20000 && rx < sizeof big; i++) {
+        if (off < sizeof big) {
+            ssize_t w = send(s, big + off, sizeof big - off, MSG_DONTWAIT);
+            if (w > 0) off += (size_t)w;
+        }
+        loop_turn(&g_L, 1);
+        if (i < 100) continue;
+        ssize_t r = recv(fd, got + rx, sizeof got - rx, MSG_DONTWAIT);
+        if (r > 0) rx += (size_t)r;
+    }
+    g_kb.at = g_now_ns - KB_PERIOD_NS - 1;
+    loop_turn(&g_L, 0);
+    out_end(out, sizeof out);
+    uint64_t srx, stx;
+    int n;
+    kb_sum(out, &srx, &stx, &n);
+    check(rx == sizeof big && n >= 1 && srx == 100000 && stx == 5,
+          "a redirected download counts 100000 down and 5 up in bytes events");
+    g_kb.at = g_now_ns - KB_PERIOD_NS - 1;
+    out_start();
+    loop_turn(&g_L, 0);
+    out_end(out, sizeof out);
+    check(strstr(out, "\"bytes\"") == NULL, "  and no bytes event once nothing moves");
+    g_kb.rx = g_kb.sent_rx + KB_EARLY;
+    g_kb.at = g_now_ns;
+    out_start();
+    loop_turn(&g_L, 0);
+    out_end(out, sizeof out);
+    check(strstr(out, "{\"type\":\"bytes\",\"rx\":2147483648,\"tx\":0}") != NULL,
+          "  2^31 bytes are sent at once, before the second, so a delta never wraps");
+    close(fd);
+}
+
 /* Catches freeing a pending record under its connector (use after free). */
 static void t_k_close_pending(void) {
     k_vless();
@@ -3635,6 +3713,7 @@ static void sock_part(void) {
     t_k_fd_table();
     t_k_close();
     t_k_close_two_cmds();
+    t_k_bytes();
     t_k_close_pending();
     t_k_full_client();
     t_k_aborted();

@@ -866,6 +866,35 @@ TEST rates_are_the_counter_difference_over_the_time_between_polls(void)
     PASS();
 }
 
+static void add_redirected(hx_t *h) { firc_tunrun_ktcp_bytes_add_for_test(h->run, "tunvless0", 600000u, 6000u); }
+
+/* catches: redirected bytes left off the card, added to the wrong direction, or replacing the sysfs counter */
+TEST redirected_bytes_add_to_the_sysfs_rates(void)
+{
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless0\n    enable: false\n", 0) != NULL);
+    write_counter(g_hx, "tunvless0", "rx_bytes", 1000);
+    write_counter(g_hx, "tunvless0", "tx_bytes", 50);
+    int64_t t0 = now_ms();
+    ASSERT_EQ(0, rate_of("rxBps"));
+    int64_t t1 = now_ms();
+    write_counter(g_hx, "tunvless0", "rx_bytes", 1000 + 400000);
+    write_counter(g_hx, "tunvless0", "tx_bytes", 50 + 40000);
+    on_loop(g_hx, add_redirected);
+    sleep_ms(400);
+    int64_t t2 = now_ms();
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    int64_t t3 = now_ms();
+    const cJSON *a = tunnel_named(ans, "a");
+    double rx = at(a, "rxBps")->valuedouble;
+    double tx = at(a, "txBps")->valuedouble;
+    cJSON_Delete(ans);
+    double lo_ms = (double)(t2 - t1), hi_ms = (double)(t3 - t0);
+    ASSERT(rx >= 1000000.0 * 1000.0 / hi_ms - 1 && rx <= 1000000.0 * 1000.0 / lo_ms + 1);
+    ASSERT(tx >= 46000.0 * 1000.0 / hi_ms - 1 && tx <= 46000.0 * 1000.0 / lo_ms + 1);
+    PASS();
+}
+
 /* catches: refresh or restart accepted for an unknown tunnel, or a restart that does not start the child again */
 TEST refresh_and_restart_answer_202_or_404(void)
 {
@@ -1130,6 +1159,102 @@ TEST state_reports_tcp_port(void)
     PASS();
 }
 
+static firc_xt_acl_t g_skip;
+static firc_ktcp_off_t g_off;
+static void set_skip(hx_t *h) { firc_app_set_ktcp_skipped_for_test(h->app, &g_skip, g_off); }
+
+static void skip_of(const char *const *names, size_t n)
+{
+    memset(&g_skip, 0, sizeof g_skip);
+    for (size_t i = 0; i < n; i++) {
+        snprintf(g_skip.iface[i], sizeof g_skip.iface[i], "%s", names[i]);
+    }
+    g_skip.n = n;
+}
+
+#define KTCP_TUNS "tunnels:\n  - id: a\n    device: tunvless0\n    advanced: { kernelTcp: true }\n    sources:\n" \
+                  "      - id: 0000000a\n        link: \"" LINK_A "\"\n" \
+                  "  - id: b\n    device: tunvless1\n    sources:\n" \
+                  "      - id: 0000000b\n        link: \"" LINK_B "\"\n"
+
+/* catches: tcpSkipped missing, out of rule order, renamed in fircd, listed for a tunnel with no port, or stale after a change */
+TEST tcp_skipped_lists_kernel_names_for_a_tunnel_with_a_port(void)
+{
+    setenv("FAKE_MODE", "ktcp", 1);
+    ASSERT(hx_start(KTCP_TUNS, 0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    static const char *const names[] = {"br1", "ppp0", "nwg2"};
+    skip_of(names, 3);
+    g_off = FIRC_KTCP_OFF_NONE;
+    on_loop(g_hx, set_skip);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT_EQ(3600, at(tunnel_named(ans, "a"), "tcpPort")->valueint);
+    ASSERT(same_json(at(tunnel_named(ans, "a"), "tcpSkipped"), "[\"br1\",\"ppp0\",\"nwg2\"]"));
+    ASSERT(same_json(at(tunnel_named(ans, "b"), "tcpSkipped"), "[]"));
+    cJSON_Delete(ans);
+    static const char *const one[] = {"br1"};
+    skip_of(one, 1);
+    on_loop(g_hx, set_skip);
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT(same_json(at(tunnel_named(ans, "a"), "tcpSkipped"), "[\"br1\"]"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: tcpOff missing, a reason given the wrong word, or a reason shown for a tunnel with no port */
+TEST tcp_off_names_the_reason_for_a_tunnel_with_a_port(void)
+{
+    setenv("FAKE_MODE", "ktcp", 1);
+    ASSERT(hx_start(KTCP_TUNS, 0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    skip_of(NULL, 0);
+    static const firc_ktcp_off_t offs[] = {FIRC_KTCP_OFF_ACL, FIRC_KTCP_OFF_KERNEL, FIRC_KTCP_OFF_REFUSED,
+                                           FIRC_KTCP_OFF_NONE};
+    static const char *const words[] = {"acl", "kernel", "refused", ""};
+    for (size_t i = 0; i < 4; i++) {
+        g_off = offs[i];
+        on_loop(g_hx, set_skip);
+        cJSON *ans = NULL;
+        ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+        ASSERT_EQ(3600, at(tunnel_named(ans, "a"), "tcpPort")->valueint);
+        ASSERT_EQ(0, at(tunnel_named(ans, "b"), "tcpPort")->valueint);
+        const cJSON *a = at(tunnel_named(ans, "a"), "tcpOff");
+        const cJSON *b = at(tunnel_named(ans, "b"), "tcpOff");
+        ASSERT(cJSON_IsString(a) && cJSON_IsString(b));
+        ASSERT_STR_EQm(words[i], words[i], a->valuestring);
+        ASSERT_STR_EQm(words[i], "", b->valuestring);
+        cJSON_Delete(ans);
+    }
+    PASS();
+}
+
+static void lack_redirect(hx_t *h) { firc_tunrun_set_ktcp_usable(h->run, false); }
+
+/* catches: tcpOff gated on the reported port, so a kernel without REDIRECT never shows "kernel" */
+TEST tcp_off_kernel_reaches_a_tunnel_whose_kernel_lacks_redirect(void)
+{
+    setenv("FAKE_MODE", "ktcp", 1);
+    ASSERT(hx_start(KTCP_TUNS, 0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    static const char *const names[] = {"br1"};
+    skip_of(names, 1);
+    g_off = FIRC_KTCP_OFF_KERNEL;
+    on_loop(g_hx, set_skip);
+    on_loop(g_hx, lack_redirect);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    const cJSON *a = tunnel_named(ans, "a");
+    const cJSON *b = tunnel_named(ans, "b");
+    ASSERT_EQ(0, at(a, "tcpPort")->valueint);
+    ASSERT(cJSON_IsString(at(a, "tcpOff")) && cJSON_IsString(at(b, "tcpOff")));
+    ASSERT_STR_EQ("kernel", at(a, "tcpOff")->valuestring);
+    ASSERT_STR_EQ("", at(b, "tcpOff")->valuestring);
+    ASSERT(same_json(at(a, "tcpSkipped"), "[]"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
 /* catches: a description over 63 bytes or with a control character saved instead of refused with its field */
 TEST a_bad_description_is_refused_with_its_field(void)
 {
@@ -1296,6 +1421,7 @@ SUITE(tunnels_api)
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);
     RUN_TEST(rates_are_the_counter_difference_over_the_time_between_polls);
+    RUN_TEST(redirected_bytes_add_to_the_sysfs_rates);
     RUN_TEST(refresh_and_restart_answer_202_or_404);
     RUN_TEST(probe_answers_per_node_key_without_links);
     RUN_TEST(a_second_probe_is_refused_while_one_runs);
@@ -1308,6 +1434,9 @@ SUITE(tunnels_api)
     RUN_TEST(kernel_tcp_must_be_a_bool);
     RUN_TEST(get_put_get_keeps_kernel_tcp);
     RUN_TEST(state_reports_tcp_port);
+    RUN_TEST(tcp_skipped_lists_kernel_names_for_a_tunnel_with_a_port);
+    RUN_TEST(tcp_off_names_the_reason_for_a_tunnel_with_a_port);
+    RUN_TEST(tcp_off_kernel_reaches_a_tunnel_whose_kernel_lacks_redirect);
     RUN_TEST(the_default_headers_route_lists_the_set);
     RUN_TEST(a_subscriptions_headers_go_through_get_and_put);
     RUN_TEST(a_bad_header_is_refused_with_its_field);

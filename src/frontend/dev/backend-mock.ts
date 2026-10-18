@@ -843,6 +843,8 @@ const tunnelState = (tn: any) => {
     lastExit: 0,
     uplinkOk: true,
     tcpPort: 0,
+    tcpSkipped: [],
+    tcpOff: "",
     active: nodes.filter((n: any) => n.state === "active").map((n: any) => n.name),
     groups: [],
     nodes,

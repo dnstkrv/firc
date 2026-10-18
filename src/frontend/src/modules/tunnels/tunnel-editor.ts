@@ -86,6 +86,16 @@ export function parseUplink(value: string): TunnelUplink {
   return { kind: "auto", ref: "" };
 }
 
+export function skippedLabels(names: string[], ifaces: IfaceItem[]): string[] {
+  const out: string[] = [];
+  for (const n of names) {
+    const i = ifaces.find((x) => x.id === n);
+    if (i?.role === "wan") continue;
+    out.push(i ? ifaceTitle(i).title : n);
+  }
+  return out;
+}
+
 export function uplinkOptions(
   self: Tunnel,
   tunnels: Tunnel[],

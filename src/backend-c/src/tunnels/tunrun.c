@@ -11,6 +11,7 @@
 #include "firc/mark.h"
 #include "firc/tunnet.h"
 #include "firc/tunnodes.h"
+#include "firc/tunvless_name.h"
 #include "firc/tunwatch.h"
 
 #define TUNVLESS_STDIN_MAX ((size_t)1 << 20)
@@ -69,6 +70,7 @@ struct firc_tunrun {
     firc_tunrun_ktcp_t k;
     uint16_t ports[FIRC_KTCP_DEVICES];
     uint8_t drifts[FIRC_KTCP_DEVICES];
+    uint64_t kb_rx[FIRC_KTCP_DEVICES], kb_tx[FIRC_KTCP_DEVICES];
     bool ktcp_unusable;
     int watch_timer;
     int64_t (*now)(void);
@@ -349,12 +351,28 @@ static void answer_miss(firc_tunrun_t *t, const firc_tunnel_t *tun, int dev, con
     firc_ktcp_cmds_free(&c);
 }
 
+static void add_bytes(firc_tunrun_t *t, const char *device, uint32_t rx, uint32_t tx)
+{
+    int n = firc_tunvless_index(device);
+    if (n < 0 || n >= FIRC_KTCP_DEVICES) {
+        return;
+    }
+    t->kb_rx[n] += rx;
+    t->kb_tx[n] += tx;
+}
+
 static void ktcp_event(firc_tunrun_t *t, const firc_tun_state_t *st, const firc_tev_t *ev)
 {
     if (ev == NULL) {
         return;
     }
     ssize_t i = find(&t->cur, st->id);
+    if (ev->kind == FIRC_TEV_BYTES) {
+        if (i >= 0) {
+            add_bytes(t, t->cur.t[i].device, ev->rx, ev->tx);
+        }
+        return;
+    }
     int dev = i < 0 ? -1 : ktcp_dev(&t->cur.t[i]);
     if (dev < 0 || !firc_tunsup_ready(t->sup, st->id)) {
         return;
@@ -1198,4 +1216,22 @@ int firc_tunrun_set_watch_for_test(firc_tunrun_t *t, int64_t (*now_ms)(void), in
         t->watch_timer = 0;
     }
     return t->watch_timer;
+}
+
+bool firc_tunrun_ktcp_bytes(const firc_tunrun_t *t, const char *device, uint64_t *rx, uint64_t *tx)
+{
+    *rx = 0;
+    *tx = 0;
+    int n = t != NULL ? firc_tunvless_index(device) : -1;
+    if (n < 0 || n >= FIRC_KTCP_DEVICES) {
+        return false;
+    }
+    *rx = t->kb_rx[n];
+    *tx = t->kb_tx[n];
+    return true;
+}
+
+void firc_tunrun_ktcp_bytes_add_for_test(firc_tunrun_t *t, const char *device, uint32_t rx, uint32_t tx)
+{
+    add_bytes(t, device, rx, tx);
 }

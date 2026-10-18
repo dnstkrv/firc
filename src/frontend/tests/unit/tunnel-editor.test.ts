@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "jsr:@std/testing@1.0.19/bdd";
 
+import type { IfaceItem } from "../../src/data/iface-choices.ts";
 import {
   agoText,
   descriptionProblem,
@@ -15,6 +16,7 @@ import {
   orderByLatency,
   parseUplink,
   restartingDevices,
+  skippedLabels,
   subscriptionError,
   subscriptionIntervals,
   subscriptionProblem,
@@ -484,5 +486,18 @@ describe("subscription errors", () => {
       subscriptionError("the server answered: pay $& or $' or $$ now", t),
       "the server answered: pay $& or $' or $$ now",
     );
+  });
+});
+
+describe("segments kernel TCP skips", () => {
+  /* Catches a kernel name shown where the interface list has a description, a WAN listed, or a name lost when the list lacks it. */
+  it("skippedLabels labels from the interface list, drops WANs and keeps unknown names", () => {
+    const ifaces = [
+      { id: "br1", name: "Home", ndmsName: "Bridge1", role: "lan" },
+      { id: "ppp0", name: "Internet", ndmsName: "PPPoE0", role: "wan" },
+    ] as IfaceItem[];
+    assert.deepStrictEqual(skippedLabels(["br1", "ppp0", "nwg2"], ifaces), ["Home", "nwg2"]);
+    assert.deepStrictEqual(skippedLabels(["br1"], []), ["br1"]);
+    assert.deepStrictEqual(skippedLabels(["ppp0", "nwg2", "br1"], ifaces), ["nwg2", "Home"]);
   });
 });

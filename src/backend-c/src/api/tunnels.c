@@ -744,6 +744,10 @@ static void rates_of(firc_tunnels_ctx_t *ctx, const char *dev, uint64_t *rx_bps,
     if (!read_counter(root, dev, "rx_bytes", &rx) || !read_counter(root, dev, "tx_bytes", &tx)) {
         return;
     }
+    uint64_t krx = 0, ktx = 0;
+    (void)firc_tunrun_ktcp_bytes(ctx->run, dev, &krx, &ktx);
+    rx += krx;
+    tx += ktx;
     int64_t now = mono_ms();
     size_t n = sizeof ctx->rates / sizeof ctx->rates[0];
     firc_tun_rate_t *slot = NULL;
@@ -849,6 +853,42 @@ static cJSON *groups_of(firc_tunnels_ctx_t *ctx, const char *device)
     return a;
 }
 
+static cJSON *skipped_json(firc_tunnels_ctx_t *ctx, uint16_t port)
+{
+    cJSON *a = cJSON_CreateArray();
+    const firc_xt_acl_t *acl = ctx->app != NULL ? firc_app_ktcp_skipped(ctx->app) : NULL;
+    if (a == NULL || port == 0 || acl == NULL) {
+        return a;
+    }
+    for (size_t i = 0; i < acl->n; i++) {
+        cJSON *s = cJSON_CreateString(acl->iface[i]);
+        if (s == NULL || !cJSON_AddItemToArray(a, s)) {
+            cJSON_Delete(s);
+            cJSON_Delete(a);
+            return NULL;
+        }
+    }
+    return a;
+}
+
+static const char *off_word(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t)
+{
+    if (firc_tunnel_tcp_port(t) == 0 || ctx->app == NULL) {
+        return "";
+    }
+    switch (firc_app_ktcp_off(ctx->app)) {
+    case FIRC_KTCP_OFF_ACL:
+        return "acl";
+    case FIRC_KTCP_OFF_KERNEL:
+        return "kernel";
+    case FIRC_KTCP_OFF_REFUSED:
+        return "refused";
+    case FIRC_KTCP_OFF_NONE:
+        break;
+    }
+    return "";
+}
+
 static cJSON *tunnel_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t, const firc_tun_state_t *st)
 {
     cJSON *o = cJSON_CreateObject();
@@ -902,6 +942,8 @@ static cJSON *tunnel_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t,
          cJSON_AddNumberToObject(o, "lastExit", st->last_exit) != NULL &&
          cJSON_AddBoolToObject(o, "uplinkOk", st->uplink_ok) != NULL &&
          cJSON_AddNumberToObject(o, "tcpPort", st->tcp_port) != NULL &&
+         put_item(o, "tcpSkipped", skipped_json(ctx, st->tcp_port)) &&
+         cJSON_AddStringToObject(o, "tcpOff", off_word(ctx, t)) != NULL &&
          cJSON_AddNumberToObject(o, "rxBps", (double)rx) != NULL &&
          cJSON_AddNumberToObject(o, "txBps", (double)tx) != NULL &&
          put_item(o, "groups", groups_of(ctx, t->device));

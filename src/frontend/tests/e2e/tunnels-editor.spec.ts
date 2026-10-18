@@ -50,6 +50,77 @@ test.describe("Tunnel editor", () => {
     await expect(card).toContainText("Now: tunvless listens on port 3600");
   });
 
+  // Catches the skipped segments not shown, shown by kernel name, shown with the switch off, or joined without a separator.
+  test("kernel TCP names the segments it leaves on the TUN", async ({ page }) => {
+    const daemon = await stubDaemon(page, {
+      interfaces: ["br1", "wg0"],
+      names: { br1: "Home" },
+      roles: { br1: "lan" },
+      tunnels: [
+        tunnel("a", "tunvless0", {
+          sources: [SUB, LINK],
+          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+        }),
+      ],
+      states: [state("a", "tunvless0", { tcpPort: 3600, tcpSkipped: ["br1", "nwg2"] })],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    await expect(card).toContainText("Not used for: Home, nwg2 (access list denies)");
+    await card.getByRole("switch", { name: "TCP through the kernel" }).click();
+    await expect(card).not.toContainText("Not used for:");
+    expect(daemon.puts.length).toBe(0);
+  });
+
+  // Catches a fail-closed kernel TCP shown as listening, a reason given the wrong text, an unknown reason shown as refused, the skipped hint kept beside it, or the port line not back once it works.
+  test("kernel TCP says why it is not working now", async ({ page }) => {
+    const off = (tcpOff: string) => [
+      state("a", "tunvless0", { tcpPort: 3600, tcpSkipped: ["nwg2"], tcpOff }),
+    ];
+    const daemon = await stubDaemon(page, {
+      tunnels: [
+        tunnel("a", "tunvless0", {
+          sources: [SUB, LINK],
+          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+        }),
+      ],
+      states: off("acl"),
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    await expect(card).toContainText(
+      "Not working now: an access list cannot be read or judged, TCP goes through the TUN. Details in the journal",
+    );
+    await expect(card).not.toContainText("tunvless listens on port");
+    await expect(card).not.toContainText("Not used for:");
+
+    daemon.states = off("kernel");
+    await expect(card).toContainText(
+      "Not working now: the kernel lacks REDIRECT or addrtype, TCP goes through the TUN",
+    );
+    daemon.states = off("refused");
+    await expect(card).toContainText(
+      "Not working now: the kernel refused the redirect rule, TCP goes through the TUN. Details in the journal",
+    );
+
+    daemon.states = off("future");
+    await expect(card).toContainText(
+      "Not working now: TCP goes through the TUN. Details in the journal",
+    );
+    await expect(card).not.toContainText("refused the redirect rule");
+
+    daemon.states = off("");
+    await expect(card).toContainText("Now: tunvless listens on port 3600");
+    await expect(card).toContainText("Not used for: nwg2 (access list denies)");
+    await expect(card).not.toContainText("Not working now");
+  });
+
   // Catches a preview request per keystroke, or the match count never shown.
   test("typing a filter asks for one preview after the debounce and shows the count", async ({
     page,

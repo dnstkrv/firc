@@ -174,6 +174,9 @@ struct firc_app {
     uint16_t ktcp_ports[FIRC_KTCP_DEVICES];
     firc_ktcp_image_t pass_image;
     firc_ktcp_image_t last_image;
+    firc_xt_acl_t acl_cached, pass_skip, last_skip;
+    bool acl_known, acl_fail_said, acl_all_said;
+    firc_ktcp_off_t pass_off, last_off;
     firc_app_ktcp_sink_t ktcp_sink;
     bool ktcp_lack_said, ktcp_cap_said, redir_refused_said;
     bool redir_off, redir_staged;
@@ -188,7 +191,8 @@ static void app_nf_leave(firc_app_t *app);
 static void on_tap_readable(firc_loop_t *loop, int fd, uint32_t events, void *ud);
 static void tap_reader_down(firc_app_t *app);
 static void on_tap_deadline(firc_loop_t *loop, void *ud);
-static void report_committed(firc_app_t *app, uint64_t gen, bool full, uint64_t ticket, firc_ktcp_image_t *image);
+static void report_committed(firc_app_t *app, uint64_t gen, bool full, uint64_t ticket, firc_ktcp_image_t *image,
+                             const firc_xt_acl_t *skip, firc_ktcp_off_t off);
 static const firc_fakeip_snapshot_t *rules_snapshot(void *ud);
 static void pool_forget_group_id(firc_app_t *app, firc_id_t gid);
 static void firc_app_request_sync_missing_unlocked(firc_app_t *app); /* needed from inside app_nf_enter below */
@@ -2670,8 +2674,9 @@ static void image_pair(void *ud, const char *group_id, unsigned family, const fi
     w->err = firc_ktcp_image_add(&w->app->pass_image, hit->dev, fake->b, real->b);
 }
 
-static firc_err_t stage_redir(firc_app_t *app, const firc_ruleset_t *skip, const char *prefix) {
+static firc_err_t stage_redir(firc_app_t *app, const firc_ruleset_t *skip, const char *prefix, bool full) {
     firc_ktcp_image_free(&app->pass_image);
+    app->pass_off = FIRC_KTCP_OFF_NONE;
     if (app->ipt4 == NULL) { return FIRC_OK; }
     firc_redir_group_t *groups = NULL;
     redir_id_t *ids = NULL;
@@ -2702,11 +2707,53 @@ static firc_err_t stage_redir(firc_app_t *app, const firc_ruleset_t *skip, const
             app->ktcp_lack_said = true;
             FIRC_ERROR("kernel TCP needs the REDIRECT target and the addrtype match; TCP stays on the TUN");
         }
+        app->pass_off = FIRC_KTCP_OFF_KERNEL;
         n = 0;
     }
-    if (app->redir_off) { n = 0; }
+    if (n > 0 && app->redir_off) {
+        app->pass_off = FIRC_KTCP_OFF_REFUSED;
+        n = 0;
+    }
+    memset(&app->pass_skip, 0, sizeof(app->pass_skip));
+    if (n > 0 && (full || !app->acl_known)) {
+        firc_xt_acl_t acl;
+        firc_err_t rd = firc_ipt_acl_denying(app->ipt4, "filter", FIRC_REDIR_ACL_CHAIN, FIRC_REDIR_ACL_OUT_CHAIN, &acl);
+        if (rd == FIRC_ERR_AGAIN) {
+            free(groups);
+            free(ids);
+            return rd;
+        }
+        app->acl_known = rd == FIRC_OK;
+        if (rd == FIRC_OK) {
+            app->acl_cached = acl;
+            if (app->acl_fail_said) {
+                app->acl_fail_said = false;
+                FIRC_INFO("kernel TCP reads the segments' access lists again");
+            }
+        } else if (!app->acl_fail_said) {
+            app->acl_fail_said = true;
+            FIRC_ERROR("kernel TCP cannot read the segments' access lists (%s); TCP stays on the TUN",
+                       firc_err_str(rd));
+        }
+    }
+    if (n > 0 && app->acl_known && app->acl_cached.all) {
+        if (!app->acl_all_said) {
+            app->acl_all_said = true;
+            FIRC_ERROR("kernel TCP cannot tell which segments an access list covers; TCP stays on the TUN");
+        }
+        app->pass_off = FIRC_KTCP_OFF_ACL;
+        n = 0;
+    } else if (n > 0 && app->acl_known) {
+        app->acl_all_said = false;
+    }
+    if (n > 0 && !app->acl_known) {
+        app->pass_off = FIRC_KTCP_OFF_ACL;
+        n = 0;
+    }
+    if (n > 0) { app->pass_skip = app->acl_cached; }
     app->redir_staged = n > 0;
-    firc_err_t err = firc_redir_build_rules(app->ipt4, prefix, groups, n);
+    firc_err_t err = firc_redir_build_rules(app->ipt4, prefix, groups, n, (const char (*)[16])app->pass_skip.iface,
+                                            app->pass_skip.n);
     if (err == FIRC_OK && n > 0 && app->pass_snap != NULL) {
         qsort(ids, n, sizeof(*ids), redir_id_cmp);
         image_walk_t w = {.app = app, .ids = ids, .n = n, .err = FIRC_OK};
@@ -2760,7 +2807,7 @@ static firc_err_t rebuild_netfilter_locked(firc_app_t *app, firc_cancel_t *cance
     }
     free(routed.ids);
     if (err != FIRC_OK) { return err; }
-    err = stage_redir(app, skip, prefix);
+    err = stage_redir(app, skip, prefix, full);
     if (err != FIRC_OK) { return err; }
 
     if (firc_cancel_raised(cancel)) { return FIRC_ERR_CANCELED; }
@@ -3409,13 +3456,15 @@ static firc_err_t firc_app_rebuild_netfilter_locked(firc_app_t *app, firc_cancel
     }
     firc_ktcp_image_t image = app->pass_image;
     memset(&app->pass_image, 0, sizeof(app->pass_image));
+    firc_xt_acl_t skip_list = app->pass_skip;
+    firc_ktcp_off_t off = app->pass_off;
     if (err != FIRC_OK) { firc_ktcp_image_free(&image); }
 
     if (app->ipt4) { firc_ipt_set_cancel(app->ipt4, NULL); }
     if (app->ipt6) { firc_ipt_set_cancel(app->ipt6, NULL); }
 
     if (app->nf_mu_ready) { pthread_mutex_unlock(&app->nf_mu); }
-    if (err == FIRC_OK) { report_committed(app, gen, full, ticket, &image); }
+    if (err == FIRC_OK) { report_committed(app, gen, full, ticket, &image, &skip_list, off); }
     return err;
 }
 
@@ -3453,6 +3502,8 @@ typedef struct committed_report {
     bool full;
     uint64_t ticket;
     firc_ktcp_image_t image;
+    firc_xt_acl_t skip;
+    firc_ktcp_off_t off;
 } committed_report_t;
 
 static void push_image(firc_app_t *app, firc_ktcp_image_t *image) {
@@ -3460,6 +3511,11 @@ static void push_image(firc_app_t *app, firc_ktcp_image_t *image) {
     firc_ktcp_image_free(&app->last_image);
     app->last_image = *image;
     memset(image, 0, sizeof(*image));
+}
+
+static void take_skip(firc_app_t *app, const firc_xt_acl_t *skip, firc_ktcp_off_t off) {
+    app->last_skip = *skip;
+    app->last_off = off;
 }
 
 static void drop_report(void *ud) {
@@ -3475,6 +3531,7 @@ static void on_committed_posted(firc_loop_t *loop, void *ud) {
     r->app->owed_full_sweep = false; /* a report landed, so whatever was owed is paid; the next failure is a new one */
     /* map first, so a released answer finds its pair sent; answers before the sweep, which blocks on netlink */
     push_image(r->app, &r->image);
+    take_skip(r->app, &r->skip, r->off);
     firc_app_pass_committed(r->app, r->gen);
     if (r->full) { sweep_fail_open_flows(r->app); }
     pay_flushes(r->app, r->ticket); /* the flushes this pass carried */
@@ -3483,11 +3540,13 @@ static void on_committed_posted(firc_loop_t *loop, void *ud) {
     drop_report(r);
 }
 
-static void report_committed(firc_app_t *app, uint64_t gen, bool full, uint64_t ticket, firc_ktcp_image_t *image) {
+static void report_committed(firc_app_t *app, uint64_t gen, bool full, uint64_t ticket, firc_ktcp_image_t *image,
+                             const firc_xt_acl_t *skip, firc_ktcp_off_t off) {
     if (app->loop == NULL) {
         /* no loop: the committer thread itself writes loop objects (pool, conntrack handle), all under nf_mu */
         if (app->nf_mu_ready) { pthread_mutex_lock(&app->nf_mu); }
         push_image(app, image);
+        take_skip(app, skip, off);
         firc_app_pass_committed(app, gen);
         if (full) { sweep_fail_open_flows(app); }
         pay_flushes(app, ticket);
@@ -3503,6 +3562,8 @@ static void report_committed(firc_app_t *app, uint64_t gen, bool full, uint64_t 
         r->ticket = ticket;
         r->image = *image;
         memset(image, 0, sizeof(*image));
+        r->skip = *skip;
+        r->off = off;
     }
     if (r == NULL ||
         firc_loop_post_with_drop(app->loop, on_committed_posted, r, drop_report) != FIRC_OK) {
@@ -3676,6 +3737,16 @@ void firc_app_ktcp_due_for_test(firc_app_t *app) {
 }
 
 const firc_ktcp_image_t *firc_app_ktcp_image(const firc_app_t *app) { return app != NULL ? &app->last_image : NULL; }
+
+const firc_xt_acl_t *firc_app_ktcp_skipped(const firc_app_t *app) {
+    return app != NULL ? &app->last_skip : NULL;
+}
+
+firc_ktcp_off_t firc_app_ktcp_off(const firc_app_t *app) { return app != NULL ? app->last_off : FIRC_KTCP_OFF_NONE; }
+
+void firc_app_set_ktcp_skipped_for_test(firc_app_t *app, const firc_xt_acl_t *acl, firc_ktcp_off_t off) {
+    take_skip(app, acl, off);
+}
 
 bool firc_app_ktcp_real_of(firc_app_t *app, uint8_t dev, const uint8_t fake[4], uint8_t real[4]) {
     if (app == NULL || dev >= FIRC_KTCP_DEVICES || app->ktcp_ports[dev] == 0) { return false; }

@@ -335,6 +335,21 @@ TEST map_and_close_carry_counts(void)
     PASS();
 }
 
+TEST bytes_carry_two_u32_counts(void)
+{
+    /* catches: the bytes event unrecognised, rx and tx swapped, the top of the u32 range refused, or a negative, fractional, oversize or missing count accepted */
+    firc_tev_t e = parse("{\"type\":\"bytes\",\"rx\":4294967295,\"tx\":7}");
+    ASSERT_EQ(FIRC_TEV_BYTES, e.kind);
+    ASSERT_EQ(4294967295u, e.rx);
+    ASSERT_EQ(7u, e.tx);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"bytes\",\"rx\":4294967296,\"tx\":0}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"bytes\",\"rx\":-1,\"tx\":0}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"bytes\",\"rx\":1.5,\"tx\":0}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"bytes\",\"rx\":1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"bytes\",\"rx\":\"1\",\"tx\":0}").kind);
+    PASS();
+}
+
 TEST miss_needs_a_dotted_quad_fake(void)
 {
     /* catches: the fake key misspelt, its bytes reversed, or an IPv6, short or garbage fake accepted */
@@ -449,6 +464,7 @@ int main(int argc, char **argv)
     RUN_TEST(ready_carries_tcp_port_and_absent_reads_as_zero);
     RUN_TEST(a_bad_tcp_port_is_bad);
     RUN_TEST(map_and_close_carry_counts);
+    RUN_TEST(bytes_carry_two_u32_counts);
     RUN_TEST(miss_needs_a_dotted_quad_fake);
     RUN_TEST(each_tag_gives_its_level_and_is_cut);
     RUN_TEST(anything_but_a_whole_tag_is_info_and_kept);

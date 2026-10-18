@@ -97,6 +97,10 @@ int firc_tunrun_close(firc_tunrun_t *t, uint8_t dev, const firc_nf_prefix_t *p, 
 /* false: the kernel cannot redirect (no REDIRECT or addrtype), so states report tcpPort 0. True by default. */
 void firc_tunrun_set_ktcp_usable(firc_tunrun_t *t, bool usable);
 
+/* Redirected bytes tunvless reported for device since fircd started, summed across child restarts. */
+bool firc_tunrun_ktcp_bytes(const firc_tunrun_t *t, const char *device, uint64_t *rx, uint64_t *tx);
+void firc_tunrun_ktcp_bytes_add_for_test(firc_tunrun_t *t, const char *device, uint32_t rx, uint32_t tx); /* test seam */
+
 void firc_tunrun_set_list_max_for_test(firc_tunrun_t *t, size_t bytes); /* test seam: tunvless's stdin limit */
 /* Test seam: the clock and the period of the check for a tunnel with no working node; returns its timer, 0 none. */
 int firc_tunrun_set_watch_for_test(firc_tunrun_t *t, int64_t (*now_ms)(void), int period_ms);

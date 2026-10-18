@@ -14,6 +14,7 @@ typedef enum firc_ipt_proto {
 } firc_ipt_proto_t;
 
 typedef struct firc_xt firc_xt_t;
+struct firc_xt_acl;
 
 /* argv-style rule parts, each owned. */
 typedef struct firc_ipt_rule {
@@ -75,6 +76,9 @@ firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *
                                 size_t n);
 /* firc_xt_has on the engine's handle; false for a NULL engine. */
 bool firc_ipt_has(const firc_ipt_t *ipt, const char *name);
+/* firc_xt_acl_denying on the engine's handle; INVAL for a NULL engine. */
+firc_err_t firc_ipt_acl_denying(firc_ipt_t *ipt, const char *table, const char *in_chain, const char *out_chain,
+                                struct firc_xt_acl *out);
 /* firc_xt_probe_capture on the engine's handle. */
 firc_err_t firc_ipt_probe_capture(firc_ipt_t *ipt);
 

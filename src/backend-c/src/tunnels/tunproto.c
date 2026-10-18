@@ -132,6 +132,15 @@ static bool parse_fake(const cJSON *root, uint8_t out[4])
     return cJSON_IsString(v) && v->valuestring && inet_pton(AF_INET, v->valuestring, out) == 1;
 }
 
+static bool u32_of(const cJSON *v, uint32_t *out)
+{
+    if (!cJSON_IsNumber(v) || !(v->valuedouble >= 0) || v->valuedouble > 4294967295.0 ||
+        (double)(uint32_t)v->valuedouble != v->valuedouble)
+        return false;
+    *out = (uint32_t)v->valuedouble;
+    return true;
+}
+
 static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
 {
     if (strcmp(type, "ready") == 0) {
@@ -162,6 +171,11 @@ static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
     if (strcmp(type, "miss") == 0) {
         out->kind = FIRC_TEV_MISS;
         return parse_fake(root, out->fake);
+    }
+    if (strcmp(type, "bytes") == 0) {
+        out->kind = FIRC_TEV_BYTES;
+        return u32_of(cJSON_GetObjectItemCaseSensitive(root, "rx"), &out->rx) &&
+               u32_of(cJSON_GetObjectItemCaseSensitive(root, "tx"), &out->tx);
     }
     if (strcmp(type, "pins_full") == 0) {
         out->kind = FIRC_TEV_PINS_FULL;

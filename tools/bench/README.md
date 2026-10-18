@@ -31,6 +31,10 @@ firc needs a figure from a script here.
   `/groups/{id}/list/*`. Runs against a router.
 - `run_ct_sweep.sh` — what a conntrack flush costs the DNS path. Run it on
   the router.
+- `run_ktcp_ab.sh` — one timed window of router CPU per payload, for kernel TCP
+  A/B runs. Run it on the router.
+- `ktcp_ab_summary.py` — medians and the `B<A` verdict from its lines;
+  `--self-test` checks the formulas.
 
 ## Micro-benchmarks
 

@@ -565,6 +565,8 @@ KT="$W/kt.py"
 ip route del prohibit $B/32
 sysctl -qw net.ipv4.ip_forward=1
 mkdir -p /run/ktsys && mount -t sysfs sysfs /run/ktsys
+# fircd reads the card rates from /sys, still the host netns's sysfs here
+mount --bind /run/ktsys /sys
 ip netns add $X
 ip link add v2 type veth peer name v3 netns $X
 ip addr add $LAN/24 dev v2
@@ -732,6 +734,101 @@ r=$(LX python3 "$KT" conn "$U" 80 3)
 # catches: an unmapped fake address served, dialled, or left to time out instead of reset
 check "an unmapped fake address in G0's chunk is reset within 1 s ($r)" "reset yes" \
     "${r%% *} $([ "${r##* }" -lt 1000 ] && echo yes || echo no)"
+
+hook() { curl -s --unix-socket "$SOCK" -X POST -H 'Content-Type: application/json' \
+    -d '{"type":"iptables","table":"filter"}' http://firc/api/v1/system/hooks/netfilterd >/dev/null; }
+wait_nat() {
+    i=0
+    while [ $i -lt 50 ]; do
+        [ "$(nat | grep -cxF -- "$1")" = "$2" ] && return 0
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+RET='-A FIRC_REDIR -i v2 -j RETURN'
+
+# the earlier downloads' bytes events land up to 2 s late and must fall before the window
+q0=$(date +%s%N)
+qe=$((q0 + 10000000000))
+while :; do
+    tn=$(date +%s%N)
+    [ "$(tstate tunvless0 rxBps)" = 0 ] || q0=$tn
+    [ $((tn - q0)) -ge 2200000000 ] || [ "$tn" -ge "$qe" ] && break
+    sleep 0.2
+done
+tstate tunvless0 rxBps >/dev/null
+tp=$(date +%s%N)
+r=$(LX python3 "$KT" conn "$F" 80 10 | cut -d' ' -f1,2)
+GOT=0
+i=0
+while [ $i -lt 25 ]; do
+    sleep 0.2
+    BPS=$(tstate tunvless0 rxBps)
+    tn=$(date +%s%N)
+    GOT=$(awk -v g="$GOT" -v b="$BPS" -v a="$tp" -v z="$tn" 'BEGIN { printf "%d", g + b * (z - a) / 1e9 }')
+    tp=$tn
+    i=$((i + 1))
+done
+# catches: a redirected download left off the card, which then shows only the UDP part
+check "the card's rate counts a redirected 1 MB download ($GOT bytes)" "data 1048576 yes" \
+    "$r $([ "$GOT" -ge 943718 ] && [ "$GOT" -le 1363149 ] && echo yes || echo no)"
+
+iptables-legacy -t filter -N @Seg
+iptables-legacy -t filter -A @Seg -d $REAL/32 -j DROP
+iptables-legacy -t filter -N _NDM_ACL_IN
+iptables-legacy -t filter -A _NDM_ACL_IN -i v2 -j @Seg
+iptables-legacy -t filter -I INPUT 1 -j _NDM_ACL_IN
+iptables-legacy -t filter -I FORWARD 1 -j _NDM_ACL_IN
+hook
+wait_nat "$RET" 1
+w=$?
+# catches: a segment whose list denies left redirected, so its list judges the router's address instead of the real one
+check "a denying list on v2 puts a RETURN for v2 at the head of FIRC_REDIR" "0 1 v2" \
+    "$w $(nat | grep -cxF -- "$RET") $(tstate tunvless0 tcpSkipped | tr -d "[]' ")"
+RX0=$(rx tunvless0)
+r=$(LX python3 "$KT" conn "$F" 80 3 | cut -d' ' -f1)
+# catches: the redirect bypassing the list: the denied real address must fail for TCP as it does on the TUN path
+check "the list's denied address fails for TCP" timeout "$r"
+r=$(LX python3 "$KT" conn 10.81.0.5 80 10 | cut -d' ' -f1,2)
+RXD=$(($(rx tunvless0) - RX0))
+# catches: a skipped segment's TCP lost instead of taking the TUN path
+check "an allowed address on the skipped segment downloads over the TUN" "data 1048576 yes" \
+    "$r $([ "$RXD" -ge 1048576 ] && echo yes || echo "no ($RXD)")"
+iptables-legacy -t filter -D _NDM_ACL_IN -i v2 -j @Seg
+hook
+wait_nat "$RET" 0
+w=$?
+RX0=$(rx tunvless0)
+r=$(LX python3 "$KT" conn "$F" 80 10 | cut -d' ' -f1,2)
+RXD=$(($(rx tunvless0) - RX0))
+# catches: the RETURN kept after the deny went, so the segment never gets the redirect back
+check "with the deny gone the segment is redirected again" "0 0 data 1048576 yes" \
+    "$w $(nat | grep -cxF -- "$RET") $r $([ "$RXD" -lt 65536 ] && echo yes || echo "no ($RXD)")"
+iptables-legacy -t filter -D INPUT -j _NDM_ACL_IN
+iptables-legacy -t filter -D FORWARD -j _NDM_ACL_IN
+iptables-legacy -t filter -X _NDM_ACL_IN
+iptables-legacy -t filter -N @SegO
+iptables-legacy -t filter -A @SegO -s $REAL/32 -j DROP
+iptables-legacy -t filter -N _NDM_ACL_OUT
+iptables-legacy -t filter -A _NDM_ACL_OUT -o v2 -j @SegO
+iptables-legacy -t filter -I FORWARD 1 -j _NDM_ACL_OUT
+iptables-legacy -t filter -I OUTPUT 1 -j _NDM_ACL_OUT
+hook
+wait_nat "$RET" 1
+w=$?
+r=$(LX python3 "$KT" conn "$F" 80 3 | cut -d' ' -f1)
+# catches: an out list left unread, so the redirected replies leave with the router's source and pass the deny
+check "a denying out list on v2 keeps v2 off the redirect and its denied source fails" "0 v2 timeout" \
+    "$w $(tstate tunvless0 tcpSkipped | tr -d "[]' ") $r"
+iptables-legacy -t filter -D FORWARD -j _NDM_ACL_OUT
+iptables-legacy -t filter -D OUTPUT -j _NDM_ACL_OUT
+iptables-legacy -t filter -F _NDM_ACL_OUT
+iptables-legacy -t filter -X _NDM_ACL_OUT
+iptables-legacy -t filter -F @SegO
+iptables-legacy -t filter -X @SegO
+iptables-legacy -t filter -F @Seg
+iptables-legacy -t filter -X @Seg
+hook
 
 P0=$(tpid tunvless0)
 kill -STOP "$P0"

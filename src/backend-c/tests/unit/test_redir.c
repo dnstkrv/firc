@@ -31,7 +31,7 @@ static void rig_down(rig_t *r) {
 
 static firc_err_t write_groups(rig_t *r, const firc_redir_group_t *g, size_t n) {
     firc_err_t err = firc_netfilter_register_base_chains(r->ipt, NULL);
-    if (err == FIRC_OK) { err = firc_redir_build_rules(r->ipt, "FIRC_", g, n); }
+    if (err == FIRC_OK) { err = firc_redir_build_rules(r->ipt, "FIRC_", g, n, NULL, 0); }
     if (err != FIRC_OK) {
         firc_ipt_discard(r->ipt);
         return err;
@@ -126,8 +126,50 @@ TEST a_v6_engine_is_refused(void) {
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
     firc_ipt_t *ipt = firc_ipt_new(firc_fake_ipt_as_xt(fake), "FIRC_");
     ASSERT(ipt != NULL);
-    ASSERT_EQ(FIRC_ERR_INVAL, firc_redir_build_rules(ipt, "FIRC_", k_two, 2));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_redir_build_rules(ipt, "FIRC_", k_two, 2, NULL, 0));
     firc_ipt_free(ipt);
+    PASS();
+}
+
+static firc_err_t write_skipping(rig_t *r, const firc_redir_group_t *g, size_t n, const char (*skip)[16], size_t ns) {
+    firc_err_t err = firc_netfilter_register_base_chains(r->ipt, NULL);
+    if (err == FIRC_OK) { err = firc_redir_build_rules(r->ipt, "FIRC_", g, n, skip, ns); }
+    if (err != FIRC_OK) {
+        firc_ipt_discard(r->ipt);
+        return err;
+    }
+    return firc_ipt_commit(r->ipt);
+}
+
+/* Catches: a RETURN behind the REDIRECTs (it would never match), one per group instead of one per interface, or the -i lost. */
+TEST skipped_interfaces_return_ahead_of_every_redirect(void) {
+    static const char skip[2][16] = {"ppp0", "br1"};
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT_EQ(FIRC_OK, write_skipping(&r, k_two, 2, skip, 2));
+    firc_ipt_rule_t *const *rules = NULL;
+    size_t n = 0;
+    ASSERT(firc_fake_ipt_get_rules(r.fake, "nat", "FIRC_REDIR", &rules, &n));
+    ASSERT_EQ_FMT((size_t)4, n, "%zu");
+    static const char *const ret0[] = {"-i", "ppp0", "-j", "RETURN"};
+    static const char *const ret1[] = {"-i", "br1", "-j", "RETURN"};
+    ASSERT(parts_are(rules[0], ret0, 4));
+    ASSERT(parts_are(rules[1], ret1, 4));
+    ASSERT_STR_EQ("REDIRECT", rules[2]->parts[7]);
+    ASSERT_STR_EQ("REDIRECT", rules[3]->parts[7]);
+    rig_down(&r);
+    PASS();
+}
+
+/* Catches: a REDIR chain of RETURNs alone (and its jump) left when no group is redirected. */
+TEST skips_without_a_group_stage_nothing(void) {
+    static const char skip[1][16] = {"ppp0"};
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT_EQ(FIRC_OK, write_skipping(&r, NULL, 0, skip, 1));
+    ASSERT_FALSE(firc_fake_ipt_chain_exists(r.fake, "nat", "FIRC_REDIR"));
+    ASSERT_EQ_FMT((size_t)0, jumps_in(&r), "%zu");
+    rig_down(&r);
     PASS();
 }
 
@@ -140,5 +182,7 @@ int main(int argc, char **argv) {
     RUN_TEST(the_jump_is_inserted_at_1_and_tcp_only);
     RUN_TEST(the_jump_excludes_local_destinations);
     RUN_TEST(a_v6_engine_is_refused);
+    RUN_TEST(skipped_interfaces_return_ahead_of_every_redirect);
+    RUN_TEST(skips_without_a_group_stage_nothing);
     GREATEST_MAIN_END();
 }

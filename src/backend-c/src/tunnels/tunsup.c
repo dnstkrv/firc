@@ -509,6 +509,7 @@ static void on_out_line(const char *line, size_t len, void *ud)
         break;
     case FIRC_TEV_CLOSE:
     case FIRC_TEV_MISS:
+    case FIRC_TEV_BYTES:
         break;
     case FIRC_TEV_PINS_FULL:
         if (!sl->terminating) {

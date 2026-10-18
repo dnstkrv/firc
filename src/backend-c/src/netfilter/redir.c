@@ -4,8 +4,10 @@
 
 #include "firc/mark.h"
 
-firc_err_t firc_redir_build_rules(firc_ipt_t *ipt4, const char *chain_prefix, const firc_redir_group_t *g, size_t n) {
-    if (ipt4 == NULL || chain_prefix == NULL || (n > 0 && g == NULL)) { return FIRC_ERR_INVAL; }
+firc_err_t firc_redir_build_rules(firc_ipt_t *ipt4, const char *chain_prefix, const firc_redir_group_t *g, size_t n,
+                                  const char (*skip)[16], size_t n_skip) {
+    if (ipt4 == NULL || chain_prefix == NULL || (n > 0 && g == NULL) ||
+        (n_skip > 0 && skip == NULL)) { return FIRC_ERR_INVAL; }
     if (n == 0) { return FIRC_OK; }
 
     char chain[128];
@@ -14,6 +16,12 @@ firc_err_t firc_redir_build_rules(firc_ipt_t *ipt4, const char *chain_prefix, co
     }
     firc_err_t err = firc_ipt_register_chain_override(ipt4, "nat", chain);
     if (err != FIRC_OK) { return err; }
+
+    for (size_t i = 0; i < n_skip; i++) {
+        const char *ret[] = {"-i", skip[i], "-j", "RETURN"};
+        err = firc_ipt_append(ipt4, "nat", chain, ret, 4);
+        if (err != FIRC_OK) { return err; }
+    }
 
     for (size_t i = 0; i < n; i++) {
         char mark[32], port[8];

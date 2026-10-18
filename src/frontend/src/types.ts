@@ -223,6 +223,8 @@ export type TunnelState = {
   lastExit: number;
   uplinkOk: boolean;
   tcpPort: number;
+  tcpSkipped: string[];
+  tcpOff: "" | "acl" | "kernel" | "refused";
   active: string[];
   groups: string[];
   nodes: TunnelNodeState[];

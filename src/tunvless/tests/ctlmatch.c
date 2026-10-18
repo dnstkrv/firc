@@ -14,6 +14,7 @@ static void ready3600(void) { ctl_emit_ready("tv0", 3600); }
 static void map3(void) { ctl_emit_map(3); }
 static void close2(void) { ctl_emit_close(2); }
 static void miss1(void) { ctl_emit_miss("198.18.0.1"); }
+static void bytes_max(void) { ctl_emit_bytes(4294967295u, 0); }
 
 static void capture(char *out, size_t cap, void (*f)(void)) {
     int p[2];
@@ -94,6 +95,8 @@ int main(void) {
     check_str("map ack", "{\"type\":\"map\",\"count\":3}\n", (capture(ev, sizeof ev, map3), ev));
     check_str("close ack", "{\"type\":\"close\",\"count\":2}\n", (capture(ev, sizeof ev, close2), ev));
     check_str("miss", "{\"type\":\"miss\",\"fake\":\"198.18.0.1\"}\n", (capture(ev, sizeof ev, miss1), ev));
+    /* catches: a bytes event with a signed or 64-bit printf (wrong text at the top of the range) or a missing key */
+    check_str("bytes event", "{\"type\":\"bytes\",\"rx\":4294967295,\"tx\":0}\n", (capture(ev, sizeof ev, bytes_max), ev));
     /* catches: a descriptor inherited from fircd's parent kept open by a tunnel for its lifetime */
     int high = dup2(0, 200);
     int many = 0;

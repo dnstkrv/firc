@@ -111,6 +111,7 @@ firc_err_t firc_xt_encode(firc_ipt_proto_t fam, uint8_t mac_rev, const firc_ipt_
 
 bool firc_xt_entry_same(firc_ipt_proto_t fam, const firc_xt_entry_t *a, const firc_xt_entry_t *b);
 firc_err_t firc_xt_merge(firc_xt_table_t *t, const firc_xt_stage_t *stage, uint32_t *exts, char *why, size_t why_len);
+firc_err_t firc_xt_acl_judge(firc_xt_table_t *t, const char *in_chain, const char *out_chain, firc_xt_acl_t *out);
 bool firc_xt_blob_equal(const firc_xt_info_t *ai, const uint8_t *a, const firc_xt_info_t *bi, const uint8_t *b);
 firc_err_t firc_xt_carry_counters(const int32_t *old_index, uint32_t n_new, const firc_xt_counter_t *old,
                                   uint32_t n_old, firc_xt_counter_t **out);

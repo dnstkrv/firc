@@ -2243,6 +2243,36 @@ TEST close_goes_to_the_live_child_only(void)
     PASS();
 }
 
+/* catches: bytes replacing instead of adding, lost across a child restart, or kept per tunnel id so a restart's new slot starts at zero */
+TEST bytes_accumulate_across_events_and_a_child_restart(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ktcp_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"bytes\",\"rx\":1000,\"tx\":20}", 1);
+    kx_attach(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", KT_ON));
+    uint64_t rx = 0, tx = 0;
+    for (int i = 0; i < 300 && rx < 1000; i++) {
+        run_ms(&f, 10);
+        (void)firc_tunrun_ktcp_bytes(f.run, "tunvless0", &rx, &tx);
+    }
+    ASSERT_EQ(1000u, (unsigned)rx);
+    ASSERT_EQ(20u, (unsigned)tx);
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
+    for (int i = 0; i < 300 && rx < 2000; i++) {
+        run_ms(&f, 10);
+        (void)firc_tunrun_ktcp_bytes(f.run, "tunvless0", &rx, &tx);
+    }
+    ASSERT_EQ(2000u, (unsigned)rx);
+    ASSERT_EQ(40u, (unsigned)tx);
+    ASSERT_EQ(0, journal_from("tunvless0", "bytes"));
+    unsetenv("FAKE_AFTER");
+    fx_down(&f);
+    PASS();
+}
+
 static bool state_port_is(fx_t *f, const void *arg)
 {
     return tcp_port_of(f, "a") == *(const uint16_t *)arg;
@@ -2340,6 +2370,7 @@ SUITE(tunrun)
     RUN_TEST(a_miss_for_another_device_s_group_gets_a_dash);
     RUN_TEST(a_miss_from_a_child_without_a_port_is_ignored);
     RUN_TEST(close_goes_to_the_live_child_only);
+    RUN_TEST(bytes_accumulate_across_events_and_a_child_restart);
     RUN_TEST(attaching_the_hooks_publishes_the_ports_held);
     RUN_TEST(the_pool_set_on_the_runner_reaches_the_child);
 }

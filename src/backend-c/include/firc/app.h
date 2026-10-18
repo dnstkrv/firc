@@ -28,6 +28,7 @@
 #include "firc/resolveroute.h"
 #include "firc/keenetic_resolvers.h"
 #include "firc/ktcp.h"
+#include "firc/xtables.h"
 
 typedef struct firc_app firc_app_t;
 
@@ -324,6 +325,15 @@ void firc_app_ktcp_due_for_test(firc_app_t *app); /* test seam: what the wait ti
 
 /* The image of the last completed pass, sorted by (dev, fake). Loop thread. */
 const firc_ktcp_image_t *firc_app_ktcp_image(const firc_app_t *app);
+
+typedef enum { FIRC_KTCP_OFF_NONE = 0, FIRC_KTCP_OFF_ACL, FIRC_KTCP_OFF_KERNEL, FIRC_KTCP_OFF_REFUSED } firc_ktcp_off_t;
+
+/* The interfaces the last completed pass kept on the TUN path. Loop thread. */
+const firc_xt_acl_t *firc_app_ktcp_skipped(const firc_app_t *app);
+/* Why the last completed pass staged no redirect for groups that would have had one; NONE otherwise. Loop thread. */
+firc_ktcp_off_t firc_app_ktcp_off(const firc_app_t *app);
+void firc_app_set_ktcp_skipped_for_test(firc_app_t *app, const firc_xt_acl_t *acl,
+                                        firc_ktcp_off_t off); /* test seam: as a report would */
 
 /* real of fake when its group is routed into tunvless<dev> with a port; false answers "-". Loop thread. */
 bool firc_app_ktcp_real_of(firc_app_t *app, uint8_t dev, const uint8_t fake[4], uint8_t real[4]);

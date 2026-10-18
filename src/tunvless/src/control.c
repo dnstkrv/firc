@@ -1,5 +1,6 @@
 #include "control.h"
 #include <dirent.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,12 @@ void ctl_emit_map(int count) { emit_count("map", count); }
 void ctl_emit_close(int count) { emit_count("close", count); }
 
 void ctl_emit_miss(const char *fake) { emit1("miss", "fake", fake); }
+
+void ctl_emit_bytes(uint32_t rx, uint32_t tx) {
+    char l[96];
+    int n = snprintf(l, sizeof l, "{\"type\":\"bytes\",\"rx\":%" PRIu32 ",\"tx\":%" PRIu32 "}\n", rx, tx);
+    if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
+}
 
 void ctl_emit_node_up(const char *node, int index) {
     char a[300], l[1024];

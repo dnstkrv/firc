@@ -43,6 +43,7 @@ endif
 XTABLES_SRCS := \
     src/xtables/blob.c \
     src/xtables/encode.c \
+    src/xtables/acl.c \
     src/xtables/table.c \
     src/xtables/commit.c \
     src/xtables/sock.c

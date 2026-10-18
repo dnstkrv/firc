@@ -654,4 +654,10 @@ firc_err_t firc_ipt_probe_chain(firc_ipt_t *ipt, const char *table, const char *
 }
 
 bool firc_ipt_has(const firc_ipt_t *ipt, const char *name) { return ipt != NULL && firc_xt_has(ipt->xt, name); }
+
+firc_err_t firc_ipt_acl_denying(firc_ipt_t *ipt, const char *table, const char *in_chain, const char *out_chain,
+                                struct firc_xt_acl *out) {
+    if (ipt == NULL) { return FIRC_ERR_INVAL; }
+    return firc_xt_acl_denying(ipt->xt, table, in_chain, out_chain, out);
+}
 firc_err_t firc_ipt_probe_capture(firc_ipt_t *ipt) { return ipt != NULL ? firc_xt_probe_capture(ipt->xt) : FIRC_ERR_INVAL; }
