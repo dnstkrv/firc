@@ -94,10 +94,6 @@
   let listSaved = $derived(group ? store.listSaved(group.id) : false);
   let ownRulesCount = $derived(group?.rules.length ?? 0);
 
-  let nameMirrorWidth = $state(0);
-  let nameFieldWidth = $derived(
-    Math.max(64, nameMirrorWidth + 20 + (duplicateConflicts.length > 0 ? 36 : 0)),
-  );
   let anyList = $derived(store.data.some((g) => Boolean(g.list)));
   let listPage = $derived(group ? store.lists.pageState[group.id] : undefined);
   const LIST_PAGE_SIZE = store.lists.pageSize;
@@ -372,7 +368,7 @@
 
           <div class="group-name-wrap">
             <div class="group-name-row">
-              <div class="group-name-field" style={`width: ${nameFieldWidth}px`}>
+              <div class="group-name-field">
                 <input
                   type="text"
                   placeholder={t("group name...")}
@@ -396,7 +392,10 @@
                     {/each}
                   </div>
                 {/if}
-                <span class="name-mirror" aria-hidden="true" bind:offsetWidth={nameMirrorWidth}
+                <span
+                  class="name-mirror"
+                  aria-hidden="true"
+                  class:has-warning={duplicateConflicts.length > 0}
                   >{group.name || t("group name...")}</span
                 >
                 {#if duplicateConflicts.length > 0}
@@ -878,23 +877,34 @@
 
   .group-name-field {
     position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     flex: 0 1 auto;
     min-width: 4rem;
   }
 
+  .group-name-field > .group-name,
   .name-mirror {
-    position: absolute;
-    top: 0;
-    left: 0;
+    grid-area: 1 / 1;
+  }
+
+  .name-mirror {
     visibility: hidden;
+    height: 0;
+    min-width: 0;
+    overflow: hidden;
     white-space: pre;
     pointer-events: none;
     font-size: 1.3rem;
     font-weight: 600;
     font-family: var(--font);
-    padding: 0;
+    padding: 0 20px 0 0;
     margin: 0;
     border: 0;
+  }
+
+  .name-mirror.has-warning {
+    padding-right: 56px;
   }
 
   .search-highlight-overlay {
