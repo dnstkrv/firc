@@ -106,7 +106,7 @@
   <Collapsible.Root bind:open={more}>
     <Collapsible.Trigger class="more">
       {#if more}<GroupCollapse size={15} />{:else}<ChevronRight size={15} />{/if}
-      {t("More: connect timeout, certificate check, own CA, device name")}
+      {t("More: connect timeout, certificate check, TCP through the kernel, own CA, device name")}
     </Collapsible.Trigger>
     <Collapsible.Content>
       {#if more}

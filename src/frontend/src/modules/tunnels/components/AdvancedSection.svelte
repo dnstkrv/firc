@@ -14,6 +14,7 @@
       tunnel.advanced.timeout > 600,
   );
   const deviceBad = $derived(deviceProblem(tunnel.device, store.data, tunnel.id, t));
+  const tcpPort = $derived(store.stateOf(tunnel.id)?.tcpPort ?? 0);
 </script>
 
 <div class="row">
@@ -44,6 +45,28 @@
       aria-label={t("Certificate check")}
       checked={!tunnel.advanced.insecure}
       onCheckedChange={(v: boolean) => (tunnel.advanced.insecure = !v)}
+    />
+  </div>
+</div>
+<div class="row">
+  <div class="label">
+    <div class="name">{t("TCP through the kernel")}</div>
+    <div class="hint">
+      {t(
+        "Faster for TCP: the kernel accepts the connection and hands it to tunvless without TUN. IPv4 only; UDP and IPv6 go as before",
+      )}
+    </div>
+    {#if tunnel.advanced.kernelTcp && tcpPort > 0}
+      <div class="hint">
+        {t("Now: tunvless listens on port {port}").replace("{port}", String(tcpPort))}
+      </div>
+    {/if}
+  </div>
+  <div class="controls">
+    <Switch
+      aria-label={t("TCP through the kernel")}
+      checked={tunnel.advanced.kernelTcp}
+      onCheckedChange={(v: boolean) => (tunnel.advanced.kernelTcp = v)}
     />
   </div>
 </div>

@@ -25,6 +25,31 @@ async function saved(page: import("@playwright/test").Page, extra = {}, rows = 3
 }
 
 test.describe("Tunnel editor", () => {
+  // Catches the kernel TCP switch not reaching `advanced.kernelTcp`, or the port shown from the saved flag instead of the daemon's answer.
+  test("the kernel TCP switch writes kernelTcp and the port comes from the daemon", async ({
+    page,
+  }) => {
+    const daemon = await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK] })],
+      states: [state("a", "tunvless0")],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    const sw = card.getByRole("switch", { name: "TCP through the kernel" });
+    await expect(sw).not.toBeChecked();
+    await sw.click();
+    await expect(card).not.toContainText("tunvless listens on port");
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+    expect(daemon.puts[0].tunnels[0].advanced.kernelTcp).toBe(true);
+
+    daemon.states = [state("a", "tunvless0", { tcpPort: 3600 })];
+    await expect(card).toContainText("Now: tunvless listens on port 3600");
+  });
+
   // Catches a preview request per keystroke, or the match count never shown.
   test("typing a filter asks for one preview after the debounce and shows the count", async ({
     page,

@@ -822,6 +822,25 @@ static struct {
     int started;
 } g_cq = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
 
+static uint32_t g_conn_busy_ms[CONNECTORS];
+
+static uint32_t mono_ms(void) { return (uint32_t)(now_ns() / 1000000) | 1u; }
+
+static uint32_t connq_busy_ms(void) {
+    uint32_t now = mono_ms(), most = 0;
+    for (int i = 0; i < CONNECTORS; i++) {
+        uint32_t t = __atomic_load_n(&g_conn_busy_ms[i], __ATOMIC_RELAXED);
+        if (t && now - t > most) most = now - t;
+    }
+    return most;
+}
+
+static const char *connq_full_cause(uint32_t busy_ms, char *b, size_t n) {
+    if (busy_ms < 3000) return "the CPU cannot keep up";
+    snprintf(b, n, "the node does not answer (a handshake waits %u s)", (unsigned)(busy_ms / 1000));
+    return b;
+}
+
 static uint64_t spare_now(void) { return g_spare_clock_ns ? g_spare_clock_ns : now_ns(); }
 
 static void spare_note(int ok) {
@@ -837,7 +856,7 @@ static void spare_note(int ok) {
 }
 
 static void *connector(void *arg) {
-    (void)arg;
+    int me = (int)(intptr_t)arg;
     for (;;) {
         pthread_mutex_lock(&g_cq.mu);
         while (g_cq.n == 0) pthread_cond_wait(&g_cq.cv, &g_cq.mu);
@@ -851,7 +870,9 @@ static void *connector(void *arg) {
              * the next SYN takes it. The slot is ours (FILLING) until we give it back. The
              * dialer reports the outcome to node health checking itself, inside connect. */
             struct spare *sp = j.sp;
+            __atomic_store_n(&g_conn_busy_ms[me], mono_ms(), __ATOMIC_RELAXED);
             int rc = g_dl->ops->connect(g_dl->ctx, j.sess, CONNECT_TIMEOUT_S);
+            __atomic_store_n(&g_conn_busy_ms[me], 0, __ATOMIC_RELAXED);
             pthread_mutex_lock(&g_spare_mu);
             if (rc == 0) {
                 sp->born_ns = spare_now();
@@ -866,7 +887,9 @@ static void *connector(void *arg) {
 
         /* The dialer also reports the outcome to node health checking (a series of failures
          * brings a check forward): whether the node is alive is its measure. */
+        __atomic_store_n(&g_conn_busy_ms[me], mono_ms(), __ATOMIC_RELAXED);
         int rc = g_dl->ops->connect(g_dl->ctx, j.sess, CONNECT_TIMEOUT_S);
+        __atomic_store_n(&g_conn_busy_ms[me], 0, __ATOMIC_RELAXED);
         spare_note(rc == 0);
         j.c->rc = rc;
         /* RELEASE: the loop reads done with ACQUIRE, and everything written into the session
@@ -903,13 +926,13 @@ static int connq_push(const struct connjob *j) {
         int made = 0, err = 0;
         for (int i = 0; i < CONNECTORS; i++) {
             pthread_t t;
-            err = pthread_create(&t, &a, connector, NULL);
+            err = pthread_create(&t, &a, connector, (void *)(intptr_t)i);
             /* EINVAL with a modest stack: glibc's minimum thread stack includes the static TLS
              * of all loaded libraries (thread-local buffers, nearly 300 KB), so 128 KB is below
              * the minimum. Retry with more; only the part actually used becomes resident. */
             if (err == EINVAL && !made) {
                 pthread_attr_setstacksize(&a, 1024 * 1024);
-                err = pthread_create(&t, &a, connector, NULL);
+                err = pthread_create(&t, &a, connector, (void *)(intptr_t)i);
             }
             if (err != 0) break;
             made++;
@@ -1811,14 +1834,14 @@ static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct f
             TR("UDP: job queued for a connector\n");
         } else {
             /* The connector queue is full. Say so: from outside it looks like "QUIC does not
-             * work through the tunnel", while the cause is the CPU, not the protocol. connq_push
-             * has already logged -2 (no connector threads). */
+             * work through the tunnel", while the cause is the CPU or a silent node, not the
+             * protocol. connq_push has already logged -2 (no connector threads). */
             static struct ratelog said_q;
             unsigned held;
-            char more[48];
+            char more[48], why[64];
             if (qr == -1 && ratelog_take(&said_q, (unsigned)g_now_s, 10, &held))
-                fprintf(stderr, LOG_W "connector queue full (%d), "
-                                "datagram dropped — the CPU cannot keep up%s\n", CONNQ,
+                fprintf(stderr, LOG_W "connector queue full (%d), datagram dropped — %s%s\n", CONNQ,
+                        connq_full_cause(connq_busy_ms(), why, sizeof why),
                         ratelog_more(more, sizeof more, held));
             conn_drop(c);
             return;
@@ -2136,15 +2159,15 @@ static void handle_packet(const struct tun_dev *tun, const unsigned char *pkt, s
         TR("SYN: job queued for a connector\n");
         int qr = conn_submit(c);
         if (qr != 0) {
-            /* Queue full: the CPU cannot digest that many handshakes at once. Do not drop the
-             * SYN silently: log it and free the record; the client retries the SYN itself.
-             * connq_push has already logged -2 (no connector threads). */
+            /* Queue full: the CPU cannot digest that many handshakes at once, or the node holds
+             * them. Do not drop the SYN silently: log it and free the record; the client retries
+             * the SYN itself. connq_push has already logged -2 (no connector threads). */
             static struct ratelog said_q;
             unsigned held;
-            char more[48];
+            char more[48], why[64];
             if (qr == -1 && ratelog_take(&said_q, (unsigned)g_now_s, 10, &held))
-                fprintf(stderr, LOG_W "connector queue full (%d), "
-                                "SYN refused — the CPU cannot keep up%s\n", CONNQ,
+                fprintf(stderr, LOG_W "connector queue full (%d), SYN refused — %s%s\n", CONNQ,
+                        connq_full_cause(connq_busy_ms(), why, sizeof why),
                         ratelog_more(more, sizeof more, held));
             conn_drop(c);
             return;

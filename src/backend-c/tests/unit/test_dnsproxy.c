@@ -40,20 +40,35 @@ static bool bind_loopback(int fd, uint16_t port, uint16_t *got) {
     return true;
 }
 
-/* Probes UDP and TCP, holding both ports open until both are known, or the proxy may get the stub's port. */
-static bool free_ports(uint16_t *a_out, uint16_t *b_out) {
-    int ua = socket(AF_INET, SOCK_DGRAM, 0);
-    int ub = socket(AF_INET, SOCK_DGRAM, 0);
-    int ta = socket(AF_INET, SOCK_STREAM, 0);
-    int tb = socket(AF_INET, SOCK_STREAM, 0);
-    bool ok = ua >= 0 && ub >= 0 && ta >= 0 && tb >= 0 && bind_loopback(ua, 0, a_out) &&
-              bind_loopback(ub, 0, b_out) && bind_loopback(ta, *a_out, NULL) &&
-              bind_loopback(tb, *b_out, NULL);
-    if (ua >= 0) { close(ua); }
-    if (ub >= 0) { close(ub); }
-    if (ta >= 0) { close(ta); }
-    if (tb >= 0) { close(tb); }
+static void ephemeral_range(unsigned *lo, unsigned *hi) {
+    *lo = 32768, *hi = 60999;
+    FILE *f = fopen("/proc/sys/net/ipv4/ip_local_port_range", "r");
+    if (f != NULL) {
+        if (fscanf(f, "%u %u", lo, hi) != 2) { *lo = 32768, *hi = 60999; }
+        fclose(f);
+    }
+}
+
+static bool port_free_both(uint16_t port) {
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    int t = socket(AF_INET, SOCK_STREAM, 0);
+    bool ok = u >= 0 && t >= 0 && bind_loopback(u, port, NULL) && bind_loopback(t, port, NULL);
+    if (u >= 0) { close(u); }
+    if (t >= 0) { close(t); }
     return ok;
+}
+
+/* Ports outside the ephemeral range, from the top down, so no socket the test opens can be handed one before it is bound. */
+static bool free_ports(uint16_t *a_out, uint16_t *b_out) {
+    unsigned lo, hi;
+    ephemeral_range(&lo, &hi);
+    uint16_t *outs[2] = {a_out, b_out};
+    int found = 0;
+    for (unsigned cand = 65535; cand >= 1024 && found < 2; cand--) {
+        if (cand >= lo && cand <= hi) { continue; }
+        if (port_free_both((uint16_t)cand)) { *outs[found++] = (uint16_t)cand; }
+    }
+    return found == 2;
 }
 
 static size_t build_query_for(uint8_t *buf, uint16_t id, uint16_t edns_size, char first) {
@@ -369,12 +384,8 @@ static long ms_now(void) {
 
 /* A free loopback UDP port outside the ephemeral range, so no socket of the test can be handed it. */
 static uint16_t closed_udp_port(void) {
-    unsigned lo = 32768, hi = 60999;
-    FILE *f = fopen("/proc/sys/net/ipv4/ip_local_port_range", "r");
-    if (f != NULL) {
-        if (fscanf(f, "%u %u", &lo, &hi) != 2) { lo = 32768, hi = 60999; }
-        fclose(f);
-    }
+    unsigned lo, hi;
+    ephemeral_range(&lo, &hi);
     for (unsigned cand = hi >= 65535 ? 1024 : hi + 1; cand != lo; cand = cand >= 65535 ? 1024 : cand + 1) {
         if (cand >= lo && cand <= hi) { continue; }
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -965,7 +976,7 @@ static firc_dns_verdict_t live_hook(firc_dns_msg_t *msg, const firc_ip_t *client
     return g_live_hold ? FIRC_DNS_HOLD : FIRC_DNS_PASS;
 }
 
-/* False when the harness could not be set up, such as a port taken between probing and binding. */
+/* False when the harness could not be set up. */
 static bool live_start(live_t *lv) {
     memset(lv, 0, sizeof(*lv));
     g_big_a = 0;
@@ -1197,19 +1208,12 @@ static int ask_tcp(uint16_t port, uint16_t id) {
     return last;
 }
 
-static bool live_start_retrying(live_t *lv) {
-    for (int attempt = 0; attempt < 8; attempt++) {
-        if (live_start(lv)) { return true; }
-    }
-    return false;
-}
-
 /* Catches: a TCP read with no deadline, or one that closes the connection but keeps the in-flight slot. */
 TEST a_tcp_client_that_never_finishes_its_request_gives_its_slot_back(void) {
     g_live_timeout_ms = 300;
     g_live_max_concurrent = 2;
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int a = tcp_open(lv.proxy_port);
     int b = tcp_open(lv.proxy_port);
     ASSERT(a >= 0 && b >= 0);
@@ -1262,7 +1266,7 @@ TEST no_read_deadline_fires_after_a_tcp_exchange_ends(void) {
 /* Catches: a new upstream address that keeps the idle sockets, or closes them but keeps the old sockaddr. */
 TEST a_changed_upstream_answers_the_next_query(void) {
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT_EQm("A answers before the change, and leaves an idle socket to A", 1,
                ask(lv.proxy_port, 0x1001));
     ASSERT_EQ(FIRC_OK, live_set_upstream(&lv, "127.0.0.1", lv.b.port));
@@ -1276,7 +1280,7 @@ TEST a_changed_upstream_answers_the_next_query(void) {
 static enum greatest_test_res in_flight_finishes_on_the_old_upstream(bool hold) {
     g_live_hold = hold;
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     atomic_store(&lv.a.hold, 1);
     int c1 = ask_send(lv.proxy_port, 0x2001);
     ASSERT(c1 >= 0);
@@ -1910,7 +1914,7 @@ TEST every_upstream_socket_goes_through_the_ops(void) {
     rec_reset();
     g_live_ops = &REC_OPS;
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT_EQ(1, ask(lv.proxy_port, 0x4101));
     ASSERT_EQ(1, atomic_load(&g_rec.opens));
     ASSERT_EQ(1, atomic_load(&g_rec.connects));
@@ -1929,7 +1933,7 @@ TEST a_common_upstream_that_cannot_open_is_no_answer(void) {
     atomic_store(&g_rec.fail_open, EMFILE);
     g_live_ops = &REC_OPS;
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT_EQ(-1, ask(lv.proxy_port, 0x4103));
     ASSERT_EQ(0, atomic_load(&g_rec.sends));
     ASSERT_EQ(0, (int)inflight_settled(lv.proxy, 0));
@@ -1942,7 +1946,7 @@ TEST a_tcp_upstream_socket_goes_through_the_ops(void) {
     rec_reset();
     g_live_ops = &REC_OPS;
     live_t lv;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT_EQ(-1, ask_tcp(lv.proxy_port, 0x4105));
     ASSERT_EQ(1, atomic_load(&g_rec.opens));
     ASSERT_EQ(1, atomic_load(&g_rec.connects));
@@ -1966,7 +1970,7 @@ static void tunnel_setup(uint16_t port) {
 TEST an_owned_covered_query_goes_through_the_tunnel(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0x5101));
     ASSERT_EQ(1, atomic_load(&g_rec.marks));
@@ -1985,7 +1989,7 @@ TEST a_tunnel_datagram_that_answers_another_query_is_ignored(void) {
     for (int kind = 1; kind <= 2; kind++) {
         live_t lv;
         tunnel_setup(0);
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.ports[0] = lv.b.port;
         atomic_store(&lv.b.decoy_first, kind);
         ASSERT_EQm(kind == 1 ? "wrong id" : "wrong question", 2,
@@ -2005,7 +2009,7 @@ TEST a_common_datagram_that_answers_another_query_is_ignored(void) {
         live_t lv;
         tunnel_setup(0);
         g_troute.take = false;
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         atomic_store(&lv.a.decoy_first, kind);
         ASSERT_EQm(kind == 1 ? "wrong id" : "wrong question", 1,
                    ask(lv.proxy_port, (uint16_t)(0x51a0 + kind)));
@@ -2021,7 +2025,7 @@ TEST a_query_the_router_declines_goes_to_the_common_upstream(void) {
     live_t lv;
     tunnel_setup(0);
     g_troute.take = false;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT_EQ(1, ask(lv.proxy_port, 0x5102));
     ASSERT_EQ(1, atomic_load(&g_troute.asked));
     ASSERT_EQ(0, atomic_load(&g_rec.marks));
@@ -2036,7 +2040,7 @@ TEST a_mark_that_cannot_be_set_is_never_used(void) {
     tunnel_setup(0);
     atomic_store(&g_rec.fail_mark, EPERM);
     firc_event_reset_for_test();
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(1, ask(lv.proxy_port, 0x5103));
     ASSERT_EQ(1, atomic_load(&g_rec.marks));
@@ -2144,7 +2148,7 @@ TEST answers_not_from_the_common_upstream_do_not_end_its_run(void) {
     atomic_store(&g_rep_ms, 1000);
     firc_logrep_set_clock_for_test(rep_clock);
     firc_event_reset_for_test();
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0x6601));
     g_troute.take = false;
@@ -2224,7 +2228,7 @@ TEST a_silent_tcp_tunnel_leg_is_not_the_common_upstreams_miss(void) {
     uint16_t up_port = 0;
     ASSERT(up.fd >= 0 && bind_loopback(up.fd, 0, &up_port) && listen(up.fd, 64) == 0);
     g_live_upstream_port = up_port;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int silent = socket(AF_INET, SOCK_STREAM, 0);
     uint16_t silent_port = 0;
     ASSERT(silent >= 0 && bind_loopback(silent, 0, &silent_port) && listen(silent, 64) == 0);
@@ -2251,7 +2255,7 @@ TEST a_mark_set_again_ends_the_refusal(void) {
         live_t lv;
         tunnel_setup(0);
         firc_event_reset_for_test();
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.ports[0] = lv.b.port;
         atomic_store(&g_rec.fail_mark, EPERM);
         if (tcp) { (void)ask_tcp(lv.proxy_port, 0x6401); } else { (void)ask(lv.proxy_port, 0x6401); }
@@ -2272,7 +2276,7 @@ TEST a_tunnel_that_cannot_start_falls_back(void) {
         if (which == 0) { atomic_store(&g_rec.fail_open_next, EMFILE); }
         if (which == 1) { atomic_store(&g_rec.fail_connect, ENETUNREACH); }
         if (which == 2) { atomic_store(&g_rec.fail_send, EPERM); }
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.ports[0] = lv.b.port;
         ASSERT_EQm(which == 0 ? "open" : which == 1 ? "connect" : "send", 1,
                    ask(lv.proxy_port, (uint16_t)(0x5110 + which)));
@@ -2288,7 +2292,7 @@ TEST a_tunnel_that_cannot_start_falls_back(void) {
 TEST a_tunnel_resolver_that_refuses_falls_back_at_once(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = closed_udp_port();
     ASSERT(g_troute.ports[0] != 0);
     long t0 = ms_now();
@@ -2303,7 +2307,7 @@ TEST a_tunnel_resolver_that_refuses_falls_back_at_once(void) {
 TEST a_silent_tunnel_resolver_falls_back_after_the_tunnel_timeout(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     long t0 = ms_now();
@@ -2353,7 +2357,7 @@ TEST each_unusable_tunnel_answer_falls_back(void) {
             live_t lv;
             tunnel_setup(0);
             g_live_cache = cached != 0;
-            ASSERT(live_start_retrying(&lv));
+            ASSERT(live_start(&lv));
             g_troute.ports[0] = lv.b.port;
             atomic_store(&lv.b.rcode, cases[i].rcode);
             atomic_store(&lv.b.a_set, cases[i].a_set ? 1 : 0);
@@ -2378,7 +2382,7 @@ TEST each_unusable_tunnel_answer_falls_back(void) {
 TEST the_fallback_gets_what_remains_of_the_deadline(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.a.hold, 1);
     atomic_store(&lv.b.hold, 1);
@@ -2409,7 +2413,7 @@ TEST a_short_deadline_still_leaves_the_fallback_its_floor(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_timeout_ms = 800;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     atomic_store(&lv.a.hold_ms, 150);
@@ -2616,7 +2620,7 @@ TEST a_tunnel_answer_the_client_reads_slowly_is_not_asked_again(void) {
     ASSERT(big_stub_start(&big));
     live_t lv;
     tunnel_setup(big.port);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     ASSERT(shrink_listener_sndbuf(lv.proxy_port));
 
     int c = socket(AF_INET, SOCK_STREAM, 0);
@@ -2699,7 +2703,7 @@ static uint64_t live_fallbacks(live_t *lv) {
 TEST an_unreachable_resolver_beside_a_working_one_costs_nothing(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = closed_udp_port();
     g_troute.ports[1] = lv.b.port;
@@ -2745,7 +2749,7 @@ TEST the_health_gate_rests_a_failing_group_and_probes_once(void) {
     tunnel_setup(0);
     g_live_rest_ms = 300;
     log_capture_start();
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = closed_udp_port();
     for (int i = 0; i < 3; i++) { ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0x7200 + i))); }
     ASSERT_EQ(3, atomic_load(&g_rec.marks));
@@ -2779,7 +2783,7 @@ TEST the_health_gate_rests_a_failing_group_and_probes_once(void) {
 TEST a_publish_mid_exchange_keeps_the_copied_route(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0x7301);
@@ -2802,7 +2806,7 @@ TEST a_publish_mid_exchange_keeps_the_copied_route(void) {
 TEST a_late_tunnel_answer_is_not_delivered_after_the_fallback(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0x7401);
@@ -2824,7 +2828,7 @@ TEST a_late_tunnel_answer_is_not_delivered_after_the_fallback(void) {
 TEST a_stale_generations_failure_does_not_reopen_a_newer_generations_gate(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.gen = 1;
     g_troute.ports[0] = lv.b.port;
@@ -2858,7 +2862,7 @@ TEST a_stale_generations_probe_ending_does_not_clear_a_newer_generations_probing
     live_t lv;
     tunnel_setup(0);
     g_live_rest_ms = 300;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.gen = 1;
     g_troute.ports[0] = closed_udp_port();
@@ -2920,7 +2924,7 @@ TEST only_one_query_probes_at_a_time(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_rest_ms = 300;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.ports[0] = closed_udp_port();
     for (int i = 0; i < 3; i++) { ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0x7600 + i))); }
@@ -2952,7 +2956,7 @@ TEST only_one_query_probes_at_a_time(void) {
 TEST a_success_clears_the_failure_count(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.ports[0] = closed_udp_port();
     ASSERT_EQ(1, ask(lv.proxy_port, 0x7620));
@@ -2980,7 +2984,7 @@ TEST a_success_clears_the_failure_count(void) {
 TEST a_new_generation_starts_health_afresh(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.gen = 1;
     g_troute.ports[0] = closed_udp_port();
@@ -3083,7 +3087,7 @@ TEST a_probe_that_ends_without_a_verdict_frees_the_probe_slot(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_rest_ms = 300;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
 
     g_troute.ports[0] = closed_udp_port();
     for (int i = 0; i < 3; i++) { ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0x7700 + i))); }
@@ -3154,7 +3158,7 @@ TEST the_callback_is_told_where_each_answer_came_from(void) {
         g_troute.take = cases[i].take;
         atomic_store(&g_rec.fail_mark, cases[i].fail_mark);
         atomic_store(&g_live_resolver, -1);
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.ports[0] = lv.b.port;
         atomic_store(&lv.b.hold, cases[i].silent ? 1 : 0);
         atomic_store(&lv.b.rcode, cases[i].rcode);
@@ -3202,7 +3206,7 @@ static void live_forget_group(live_t *lv, uint8_t group) { live_group_call(lv, g
 TEST idle_tunnel_sockets_are_pooled_per_group(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0x9101));
     ASSERT_EQ(2, ask(lv.proxy_port, 0x9102));
@@ -3224,7 +3228,7 @@ TEST idle_tunnel_sockets_are_pooled_per_group(void) {
 TEST a_tunnel_query_never_takes_the_common_pool_or_another_resolvers_socket(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     g_troute.take = false;
     ASSERT_EQ(1, ask(lv.proxy_port, 0x9401));
@@ -3249,7 +3253,7 @@ TEST a_tunnel_query_never_takes_the_common_pool_or_another_resolvers_socket(void
 TEST closing_a_groups_pool_closes_idle_and_in_flight_sockets(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0x9201));
     live_close_group(&lv, 7);
@@ -3283,7 +3287,7 @@ TEST closing_a_groups_pool_closes_idle_and_in_flight_sockets(void) {
 TEST a_new_generation_does_not_reuse_the_old_sockets(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0x9301));
     g_troute.gen = 2;
@@ -3299,7 +3303,7 @@ TEST a_new_generation_does_not_reuse_the_old_sockets(void) {
 TEST a_socket_of_an_older_generation_is_not_pooled_on_release(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0x9501);
@@ -3345,7 +3349,7 @@ TEST a_socket_of_an_older_generation_is_not_pooled_on_release(void) {
 TEST a_forgotten_group_leaves_no_health_and_a_closed_one_keeps_it(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = closed_udp_port();
     ASSERT_EQ(1, ask(lv.proxy_port, 0x9601));
     ASSERT_EQ(1u, live_fallbacks(&lv));
@@ -3385,7 +3389,7 @@ TEST a_repeat_query_is_answered_from_the_cache(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xa101));
     ASSERT_EQ(FIRC_DNS_RESOLVER_GROUP, atomic_load(&g_live_resolver));
@@ -3405,7 +3409,7 @@ TEST a_cached_answer_is_handed_out_with_its_age_taken_off(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(300, ask_a_ttl(lv.proxy_port, 0xa201));
     atomic_store(&g_cache_skew_ms, 100000);
@@ -3420,7 +3424,7 @@ TEST a_rewired_route_does_not_hit_the_old_generations_answer(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     g_troute.gen = 1;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xa301));
@@ -3436,7 +3440,7 @@ TEST closing_or_forgetting_a_group_drops_its_cached_answers(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     g_troute.group = 8;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xa401));
@@ -3461,7 +3465,7 @@ TEST a_resting_group_still_answers_from_its_cache(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xa501, 0, 'a'));
     g_troute.ports[0] = closed_udp_port();
@@ -3485,7 +3489,7 @@ TEST only_the_group_resolvers_good_answer_is_cached(void) {
         live_t lv;
         tunnel_setup(0);
         g_live_cache = true;
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.ports[0] = lv.b.port;
         atomic_store(&lv.b.rcode, cases[i].rcode);
         atomic_store(&lv.b.a_set, cases[i].sink ? 1 : 0);
@@ -3505,7 +3509,7 @@ TEST a_truncated_group_answer_is_delivered_but_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.tc, 1);
     ASSERT_EQ(2, ask(lv.proxy_port, 0xac01));
@@ -3523,7 +3527,7 @@ TEST a_tcp_client_is_answered_from_the_cache(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xa701));
     ASSERT_EQ(2, ask_tcp(lv.proxy_port, 0xa702));
@@ -3539,7 +3543,7 @@ TEST an_answer_too_big_for_the_asker_is_asked_again(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     g_big_a = 40;
     ASSERT(ask_for(lv.proxy_port, 0xa801, 1232, 'a') > 0);
@@ -3557,7 +3561,7 @@ TEST a_client_without_edns_is_not_given_an_edns_clients_answer(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xa901, 1232, 'a'));
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xa902, 0, 'a'));
@@ -3573,7 +3577,7 @@ TEST a_cached_answer_echoes_the_askers_case(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xaa01, 0, 'a'));
     int c = ask_send_for(lv.proxy_port, 0xaa02, 0, 'A');
@@ -3595,7 +3599,7 @@ TEST a_query_the_router_declines_never_reads_the_cache(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xab01));
     g_troute.take = false;
@@ -3631,7 +3635,7 @@ static void pause_ms(long ms) {
 TEST every_group_resolver_is_asked_at_once_and_the_first_good_answer_wins(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -3652,7 +3656,7 @@ TEST every_group_resolver_is_asked_at_once_and_the_first_good_answer_wins(void) 
 TEST a_sink_from_one_resolver_and_a_good_answer_from_another_delivers_the_good_one(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -3672,7 +3676,7 @@ TEST every_resolver_failing_falls_back_with_the_last_reason(void) {
     for (int order = 0; order < 2; order++) {
         live_t lv;
         tunnel_setup(0);
-        ASSERT(live_start_retrying(&lv));
+        ASSERT(live_start(&lv));
         g_troute.n = 2;
         g_troute.ports[0] = lv.b.port;
         g_troute.ports[1] = lv.c.port;
@@ -3693,7 +3697,7 @@ TEST every_resolver_failing_falls_back_with_the_last_reason(void) {
 TEST a_silent_resolver_beside_a_failed_one_falls_back_at_the_timeout(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -3714,7 +3718,7 @@ TEST a_silent_resolver_beside_a_failed_one_falls_back_at_the_timeout(void) {
 TEST a_losing_resolvers_socket_is_pooled_and_its_late_answer_ignored(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -3736,7 +3740,7 @@ TEST a_losing_resolvers_socket_is_pooled_and_its_late_answer_ignored(void) {
 TEST health_counts_one_failure_per_exchange(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     uint16_t closed = closed_udp_port();
     ASSERT(closed != 0);
     g_troute.n = 2;
@@ -3758,7 +3762,7 @@ TEST health_counts_one_failure_per_exchange(void) {
 TEST a_lone_resolver_is_asked_again_once_after_300_ms(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.drop, 1);
     long t0 = ms_now();
@@ -3780,7 +3784,7 @@ TEST a_lone_resolver_is_asked_again_once_after_300_ms(void) {
 TEST a_resends_late_twin_is_ignored_by_the_next_query(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold_ms, 400);
     ASSERT_EQ(2, ask(lv.proxy_port, 0xbb01));
@@ -3799,7 +3803,7 @@ TEST a_resends_late_twin_is_ignored_by_the_next_query(void) {
 TEST a_tcp_query_still_asks_one_resolver(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int lfd = -1;
     uint16_t port = tcp_probe_listen(lv.loop, &lfd);
     ASSERT(port != 0);
@@ -3820,7 +3824,7 @@ TEST a_tcp_query_still_asks_one_resolver(void) {
 TEST a_failed_tcp_query_moves_the_group_to_its_next_resolver(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int lfd = -1;
     uint16_t port = tcp_probe_listen(lv.loop, &lfd);
     ASSERT(port != 0);
@@ -3843,7 +3847,7 @@ TEST a_tcp_tunnel_answer_is_served_from_the_cache_to_a_udp_asker(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int lfd = -1;
     uint16_t port = tcp_probe_listen(lv.loop, &lfd);
     ASSERT(port != 0);
@@ -3866,7 +3870,7 @@ TEST a_tunnel_answer_after_its_group_is_forgotten_is_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0xbd01);
@@ -3886,7 +3890,7 @@ TEST a_tunnel_answer_after_its_group_is_forgotten_is_not_cached(void) {
 TEST a_silent_resolvers_socket_is_pooled_at_the_timeout(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     ASSERT_EQ(1, ask(lv.proxy_port, 0xbe01));
@@ -3905,7 +3909,7 @@ TEST a_late_answer_after_its_group_came_back_is_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0xbf01);
@@ -3931,7 +3935,7 @@ TEST an_answer_landing_after_its_pool_was_closed_is_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0xbf11);
@@ -3951,7 +3955,7 @@ TEST an_answer_landing_after_its_pool_was_closed_is_not_cached(void) {
 TEST a_send_that_would_block_is_covered_by_the_resend(void) {
     live_t lv;
     tunnel_setup(0);
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&g_rec.fail_send, EAGAIN);
     long t0 = ms_now();
@@ -3973,7 +3977,7 @@ TEST a_late_answer_from_a_replaced_generation_is_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     atomic_store(&lv.b.hold, 1);
     int c = ask_send(lv.proxy_port, 0xbf31);
@@ -4029,7 +4033,7 @@ TEST failed_refreshes_never_rest_the_group(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     for (int i = 0; i < 4; i++) { ASSERT_EQ(2, ask_for(lv.proxy_port, (uint16_t)(0xc500 + i), 0, (char)('a' + i))); }
     atomic_store(&g_cache_skew_ms, 271000);
@@ -4053,7 +4057,7 @@ TEST a_successful_refresh_clears_the_failure_count(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xca01, 0, 'a'));
     atomic_store(&lv.b.rcode, 2);
@@ -4079,7 +4083,7 @@ TEST a_hit_in_the_last_tenth_refreshes_the_entry_once(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -4112,7 +4116,7 @@ TEST a_failed_refresh_leaves_the_entry_and_a_later_hit_tries_again(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xc201));
     atomic_store(&g_cache_skew_ms, 271000);
@@ -4135,7 +4139,7 @@ TEST refreshes_are_capped_at_sixteen(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -4183,7 +4187,7 @@ TEST a_full_budget_warns_once_per_interval_with_the_count_dropped(void) {
     g_live_timeout_ms = 5000;
     g_live_max_concurrent = 2;
     log_capture_start();
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int a = tcp_open(lv.proxy_port);
     int b = tcp_open(lv.proxy_port);
     ASSERT(a >= 0 && b >= 0);
@@ -4220,7 +4224,7 @@ TEST the_budget_warning_names_the_setting(void) {
     g_live_timeout_ms = 5000;
     g_live_max_concurrent = 1;
     log_capture_start();
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int a = tcp_open(lv.proxy_port);
     ASSERT_EQ(1, send(a, "\0", 1, MSG_NOSIGNAL));
     ASSERT_EQ((uint64_t)1, inflight_settled(lv.proxy, 1));
@@ -4243,7 +4247,7 @@ TEST refreshes_do_not_take_the_client_budget(void) {
     tunnel_setup(0);
     g_live_cache = true;
     g_live_max_concurrent = 2;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     for (int i = 0; i < 3; i++) { ASSERT_EQ(2, ask_for(lv.proxy_port, (uint16_t)(0xc400 + i), 0, (char)('a' + i))); }
     atomic_store(&g_cache_skew_ms, 271000);
@@ -4264,7 +4268,7 @@ TEST no_refresh_starts_while_the_group_rests_or_probes(void) {
     tunnel_setup(0);
     g_live_cache = true;
     g_live_rest_ms = 1000;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xc601, 0, 'a'));
     g_troute.ports[0] = closed_udp_port();
@@ -4304,7 +4308,7 @@ TEST a_silent_refresh_ends_at_the_timeout_and_leaves_the_entry(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xc701));
     atomic_store(&g_cache_skew_ms, 271000);
@@ -4327,7 +4331,7 @@ TEST a_refresh_in_flight_at_shutdown_is_freed(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.n = 2;
     g_troute.ports[0] = lv.b.port;
     g_troute.ports[1] = lv.c.port;
@@ -4345,7 +4349,7 @@ static enum greatest_test_res refresh_cut_mid_flight(bool forget) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask(lv.proxy_port, 0xc901));
     atomic_store(&g_cache_skew_ms, 271000);
@@ -4391,7 +4395,7 @@ TEST a_tcp_tunnel_answer_landing_after_its_pool_was_closed_is_not_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int lfd = -1;
     uint16_t port = tcp_probe_listen(lv.loop, &lfd);
     ASSERT(port != 0);
@@ -4420,7 +4424,7 @@ TEST a_tcp_tunnel_answer_after_an_earlier_pool_close_is_cached(void) {
     live_t lv;
     tunnel_setup(0);
     g_live_cache = true;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     int lfd = -1;
     uint16_t port = tcp_probe_listen(lv.loop, &lfd);
     ASSERT(port != 0);
@@ -4445,7 +4449,7 @@ TEST a_hit_after_the_rest_ran_out_refreshes(void) {
     tunnel_setup(0);
     g_live_cache = true;
     g_live_rest_ms = 300;
-    ASSERT(live_start_retrying(&lv));
+    ASSERT(live_start(&lv));
     g_troute.ports[0] = lv.b.port;
     ASSERT_EQ(2, ask_for(lv.proxy_port, 0xcc01, 0, 'a'));
     g_troute.ports[0] = closed_udp_port();

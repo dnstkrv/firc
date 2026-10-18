@@ -1350,6 +1350,43 @@ static void t_pool_pick(void) {
     check(pl_pick(&k) == -1, "no slot has a node — none");
 }
 
+/* Catches: a connection bound to a slot the pool marked dead dialled anyway, so each SYN waits out the connect timeout. */
+static void t_pool_dead_slot_refuses(void) {
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 1);
+    _Alignas(max_align_t) unsigned char buf[PL_HDR + sizeof(struct fsess)];
+    memset(buf, 0, sizeof buf);
+    struct pl_sess *s = (struct pl_sess *)buf;
+    ((struct fsess *)INNER(s))->fd = -1;
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(s, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    g_pl.slot[0].up = 0;
+    check(pl_connect(NULL, s, 1) == TR_ECONNECT, "a slot the pool marked dead: refused without dialling");
+    g_pl.slot[0].up = 1;
+    int rc = pl_connect(NULL, s, 1);
+    check(rc == 0, "the same slot live again: dialled");
+    if (rc == 0) close(((struct fsess *)INNER(s))->fd);
+}
+
+/* Catches: a full connector queue blamed on the CPU while the handshakes wait for a silent node, or the other way round. */
+static void t_connq_full_cause(void) {
+    char b[96];
+    check(strstr(connq_full_cause(0, b, sizeof b), "the CPU cannot keep up") != NULL, "no handshake running: the CPU");
+    check(strstr(connq_full_cause(2999, b, sizeof b), "the CPU cannot keep up") != NULL, "a handshake under 3 s: the CPU");
+    check(strcmp(connq_full_cause(3000, b, sizeof b), "the node does not answer (a handshake waits 3 s)") == 0,
+          "a handshake at 3 s: the node, with its age");
+    check(strcmp(connq_full_cause(7999, b, sizeof b), "the node does not answer (a handshake waits 7 s)") == 0,
+          "the age in whole seconds");
+    memset(g_conn_busy_ms, 0, sizeof g_conn_busy_ms);
+    check(connq_busy_ms() == 0, "no connector busy: no age");
+    g_conn_busy_ms[1] = mono_ms() - 1000;
+    g_conn_busy_ms[3] = mono_ms() - 5000;
+    uint32_t got = connq_busy_ms();
+    check(got >= 5000 && got < 6000, "the oldest running handshake counts, not the first or the newest");
+    memset(g_conn_busy_ms, 0, sizeof g_conn_busy_ms);
+}
+
 static void t_pool_refill(void) {
     all_alive();
     g_fn[1].alive = 0;
@@ -1982,6 +2019,8 @@ static void pool_part(void) {
     t_pool_stale();
     t_pool_pick();
     t_pool_refill();
+    t_pool_dead_slot_refuses();
+    t_connq_full_cause();
     t_pool_spares();
     t_pool_kick_once();
     t_pool_unproven();
