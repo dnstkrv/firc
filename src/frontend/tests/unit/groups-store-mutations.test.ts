@@ -156,6 +156,34 @@ describe("GroupsStore mutations and validation", () => {
     assert.strictEqual(store.data.length, 0);
   });
 
+  // Catches the toolbar reading every group as open, or the open-all loop stopping short.
+  it("anyShownOpen is true while one group is open and setShownOpen moves every group", async () => {
+    const store = createStore([makeGroup("g1"), makeGroup("g2"), makeGroup("g3")]);
+    assert.strictEqual(store.anyShownOpen, false);
+
+    store.open_state.g2 = true;
+    assert.strictEqual(store.anyShownOpen, true);
+
+    await store.setShownOpen(false);
+    assert.deepStrictEqual(store.open_state, { g1: false, g2: false, g3: false });
+    assert.strictEqual(store.anyShownOpen, false);
+
+    await store.setShownOpen(true);
+    assert.deepStrictEqual(store.open_state, { g1: true, g2: true, g3: true });
+  });
+
+  // Catches opening all skipping the retry a single open gives a list whose page failed.
+  it("setShownOpen(true) lets a failed list page load again", async () => {
+    const store = createStore([
+      { ...makeGroup("g1"), list: { url: "https://l.example/x" } } as Group,
+    ]);
+    store.lists.pageState.g1 = { failed: true } as any;
+
+    await store.setShownOpen(true);
+
+    assert.strictEqual(store.lists.pageState.g1.failed, false);
+  });
+
   it("addGroup prepends group, adds default rule and opens it", async () => {
     const store = createStore([makeGroup("g1", [makeRule("r1")])]);
 

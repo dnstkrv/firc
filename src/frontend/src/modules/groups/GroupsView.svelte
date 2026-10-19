@@ -3,7 +3,9 @@
 
   import DevicesDialog from "../../components/DevicesDialog.svelte";
   import PageControls from "../../components/layout/PageControls.svelte";
+  import Button from "../../components/ui/Button.svelte";
   import Placeholder from "../../components/ui/Placeholder.svelte";
+  import Tooltip from "../../components/ui/Tooltip.svelte";
   import { fetchHosts } from "../../data/hosts.svelte";
   import { t } from "../../data/locale.svelte";
   import { fetchPolicies } from "../../data/policies.svelte";
@@ -21,6 +23,7 @@
     type GroupDropSlotData,
   } from "./groups.svelte";
 
+  import { GroupsCollapse, GroupsExpand } from "../../components/ui/icons";
   import { droppable } from "../../lib/dnd";
   import { type Group, type Rule } from "../../types";
   import { toast } from "../../utils/events";
@@ -296,6 +299,21 @@
   >
     {#snippet search()}
       <Search />
+    {/snippet}
+    {#snippet lead()}
+      <Tooltip value={t(store.anyShownOpen ? "Collapse All" : "Expand All")}>
+        <Button
+          id="toggle-groups"
+          inactive={!store.isAllRendered}
+          onclick={() => store.setShownOpen(!store.anyShownOpen)}
+        >
+          {#if store.anyShownOpen}
+            <GroupsCollapse size={22} />
+          {:else}
+            <GroupsExpand size={22} />
+          {/if}
+        </Button>
+      </Tooltip>
     {/snippet}
   </PageControls>
 

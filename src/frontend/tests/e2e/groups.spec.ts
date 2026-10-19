@@ -436,6 +436,57 @@ test.describe("Groups Management", () => {
     await expect(page.locator(".group-rules")).toBeVisible();
   });
 
+  // Catches the toolbar toggle missing a group, or reaching a group the search hides.
+  test("the toolbar toggle opens and closes every shown group, and only those", async ({
+    page,
+  }) => {
+    const group = (id: string, name: string) => ({
+      id,
+      name,
+      interface: "eth0",
+      enable: true,
+      rules: [
+        { id: `${id.slice(0, 7)}f`, name: "", type: "domain", rule: `${name}.com`, enable: true },
+      ],
+    });
+    await page.route("**/groups?with_rules=true", async (route) => {
+      await route.fulfill({
+        json: {
+          groups: [
+            group("aaaaaaa1", "alpha"),
+            group("aaaaaaa2", "beta"),
+            group("aaaaaaa3", "gamma"),
+          ],
+        },
+      });
+    });
+    await groupsPage.goto();
+
+    const toggle = page.locator("#toggle-groups");
+    const trigger = (id: string) =>
+      page.locator(`.group[data-uuid="${id}"] [data-collapsible-trigger]`);
+    const ids = ["aaaaaaa1", "aaaaaaa2", "aaaaaaa3"];
+
+    await groupsPage.expandGroup(1);
+    await toggle.click();
+    for (const id of ids) await expect(trigger(id)).toHaveAttribute("aria-expanded", "false");
+
+    await toggle.click();
+    for (const id of ids) await expect(trigger(id)).toHaveAttribute("aria-expanded", "true");
+
+    await toggle.click();
+    await groupsPage.expandGroup(0);
+    await groupsPage.search("beta");
+    await expect(page.locator(".group:visible")).toHaveCount(1);
+    await expect(toggle).toHaveAttribute("aria-label", "Expand All");
+    await toggle.click();
+    await expect(trigger("aaaaaaa2")).toHaveAttribute("aria-expanded", "true");
+
+    await groupsPage.searchInput.fill("");
+    await expect(trigger("aaaaaaa1")).toHaveAttribute("aria-expanded", "true");
+    await expect(trigger("aaaaaaa3")).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("should paginate rules", async ({ page }) => {
     const rules = Array.from({ length: 60 }, (_, i) => ({
       id: (10000000 + i).toString(), // 8 digit decimal string is mostly valid? Hex is safer.

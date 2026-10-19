@@ -9,6 +9,7 @@
 
   type Props = {
     search: Snippet;
+    lead?: Snippet;
     addLabel: string;
     canSave: boolean;
     ready?: boolean;
@@ -28,6 +29,7 @@
 
   let {
     search,
+    lead,
     addLabel,
     actionsClass = "",
     canSave,
@@ -46,7 +48,7 @@
   }: Props = $props();
 
   let importInputRef = $state<HTMLInputElement>();
-  let actionsCount = $derived(2 + (onImport ? 1 : 0) + (onExport ? 1 : 0));
+  let actionsCount = $derived(2 + (lead ? 1 : 0) + (onImport ? 1 : 0) + (onExport ? 1 : 0));
   let actionsReserve = $derived(`${actionsCount * 48 + Math.max(0, actionsCount - 1) * 8 + 4}px`);
 </script>
 
@@ -56,6 +58,8 @@
   </div>
 
   <div class={`page-controls-actions ${actionsClass}`}>
+    {@render lead?.()}
+
     <Tooltip value={saveError ?? saveLabel} keys={saveError ? [] : [MOD, "S"]}>
       <Button
         onclick={onSave}

@@ -301,6 +301,27 @@ export class GroupsStore {
 
   open_state = $state<Record<string, boolean>>({});
 
+  get #shownIds(): string[] {
+    return selectableIds(this.data, this.searchActive, this.visibilityMap);
+  }
+
+  get anyShownOpen(): boolean {
+    return this.#shownIds.some((id) => this.open_state[id]);
+  }
+
+  setOpen = (groupId: string, open: boolean) => {
+    const state = this.lists.pageState[groupId];
+    if (open && state?.failed) {
+      this.lists.pageState[groupId] = { ...state, failed: false };
+    }
+    this.open_state[groupId] = open;
+  };
+
+  setShownOpen = async (open: boolean) => {
+    if (this.searchActive) await this.#searchSettled();
+    for (const id of this.#shownIds) this.setOpen(id, open);
+  };
+
   selectedIds = $state<string[]>([]);
 
   get selection(): string[] {

@@ -22,7 +22,7 @@ test.describe("Import/Export", () => {
     await groupsPage.createGroup();
 
     const downloadPromise = page.waitForEvent("download");
-    await page.locator(".group-controls-actions button").nth(2).click();
+    await page.locator(".group-controls-actions button").nth(3).click();
 
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toBe("config.firc");
@@ -46,7 +46,7 @@ test.describe("Import/Export", () => {
     fs.writeFileSync(filePath, JSON.stringify(configData));
 
     const fileChooserPromise = page.waitForEvent("filechooser");
-    await page.locator(".group-controls-actions button").nth(1).click();
+    await page.locator(".group-controls-actions button").nth(2).click();
 
     const fileChooser = await fileChooserPromise;
     await fileChooser.setFiles(filePath);

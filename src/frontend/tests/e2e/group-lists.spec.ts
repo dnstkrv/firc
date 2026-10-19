@@ -777,6 +777,34 @@ test.describe("Groups with a list", () => {
     await expect(page.locator(".list-rule")).toContainText("beta.example.net");
   });
 
+  // Catches the toolbar toggle acting on the groups shown before the search settles.
+  test("the toolbar toggle waits for the daemon's search before opening", async ({ page }) => {
+    const voice = makeListGroup("b1b2c3d4", "https://a.example/voice.txt", "First", [
+      { enable: true, id: "b1b20001", rule: "voice.example.net", type: "domain" },
+    ]);
+    const other = makeListGroup("c1c2c3d4", "https://a.example/other.txt", "Second", [
+      { enable: true, id: "c1c20001", rule: "other.example.com", type: "domain" },
+    ]);
+    await setupGroupLists(page, [voice, other], { expand: false });
+    await page.route(/\/groups\/[0-9a-f]{8}\/list\/rules\?.*q=/, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await route.fallback();
+    });
+
+    await page
+      .locator('[data-tabs-content][data-state="active"] .group-controls-search .search-container')
+      .click();
+    await page
+      .locator('[data-tabs-content][data-state="active"] .group-controls-search .search-input')
+      .fill("voice");
+    await page.locator("#toggle-groups").click();
+
+    const trigger = (id: string) =>
+      page.locator(`.group[data-uuid="${id}"] [data-collapsible-trigger]`);
+    await expect(trigger("b1b2c3d4")).toHaveAttribute("aria-expanded", "true");
+    await expect(trigger("c1c2c3d4")).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("clearing the search reloads the page the daemon filtered", async ({ page }) => {
     const group = makeListGroup("a1b2c3d4", "https://old.example/list.txt");
     group.list.rules = [

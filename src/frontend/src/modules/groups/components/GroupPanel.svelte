@@ -118,14 +118,7 @@
 
   function toggleOpen() {
     if (!group) return;
-    const next = !effectiveOpen;
-    if (next && group.list) {
-      const state = store.lists.pageState[group.id];
-      if (state?.failed) {
-        store.lists.pageState[group.id] = { ...state, failed: false };
-      }
-    }
-    store.open_state[group.id] = next;
+    store.setOpen(group.id, !effectiveOpen);
   }
 
   type GroupDnD = {
