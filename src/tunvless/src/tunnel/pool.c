@@ -491,12 +491,12 @@ static int pl_connect(const void *ctx, void *sess, int timeout_s) {
             pl_bind(s, pick);
         }
         pthread_mutex_unlock(&g_pl.mu);
-        if (pick < 0) return TR_ECONNECT;
+        if (pick < 0) return TR_ENONODE;
     } else {
         pthread_mutex_lock(&g_pl.mu);
         int dead = s->slot >= 0 && !g_pl.slot[s->slot].up;
         pthread_mutex_unlock(&g_pl.mu);
-        if (dead) return TR_ECONNECT;
+        if (dead) return TR_ENONODE;
     }
     uint64_t started = pl_now_ms();
     int rc = g_pl.in->connect(s->node, INNER(s), timeout_s);

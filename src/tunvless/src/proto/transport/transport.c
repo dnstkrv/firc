@@ -227,7 +227,8 @@ const char *transport_strerror(int rc) {
         case 0: return "ok";
         case TR_EDNS: return "name did not resolve";
         case TR_ESOCK: return "no socket";
-        case TR_ECONNECT: return "TCP connect failed";
+        case TR_ECONNECT: case TR_ECONNTIMEOUT: case TR_ECONNREFUSED: case TR_EUNREACH:
+        case TR_ENONODE: return tr_dial_strerror(rc);
         case TR_EIO: return "I/O error";
         case TR_ECLOSED: return "server closed the connection";
         case TR_ENOH2: return "server did not agree to HTTP/2 (needed for grpc and xhttp)";

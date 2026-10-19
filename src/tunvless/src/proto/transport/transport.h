@@ -35,6 +35,10 @@
 #define TR_EIO       (-33)
 #define TR_ECLOSED   (-34)
 #define TR_EPINFULL  (-49)
+#define TR_ECONNTIMEOUT (-56)
+#define TR_ECONNREFUSED (-57)
+#define TR_EUNREACH     (-58)
+#define TR_ENONODE      (-59)
 /* The transport needs HTTP/2 and the server chose something else. A code of its own because all
  * else works and only the data does not flow: without it the node looks like it connects and
  * stays silent. */
@@ -432,6 +436,9 @@ void tr_h1_resp_feed(struct h1_resp *r, int ws, const char *accept,
 int tr_h1_resp_verdict(const struct h1_resp *r, int ws);
 /* The status of this thread's last TR_EUPSTATUS failure, for the reason text. */
 int tr_h1_last_status(void);
+
+/* The text of a dial failure code, or NULL if rc is not one. */
+const char *tr_dial_strerror(int rc);
 /* Free the bytes left after the 101 (t->h1.stash). */
 void tr_h1_free(struct transport *t);
 /* Random bytes from the kernel (ws request key, frame mask). 0 or -1. */

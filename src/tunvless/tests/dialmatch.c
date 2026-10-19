@@ -45,15 +45,31 @@ int main(void) {
     close(ls);
     char want[256];
     int fd = dial_logged("127.0.0.1", port);
-    snprintf(want, sizeof want, "tunvless[warn]: 127.0.0.1:%u — no address answered (1 addresses, 1 failed)\n",
+    snprintf(want, sizeof want,
+             "tunvless[warn]: 127.0.0.1:%u — node refused the TCP connection (nothing listens on that port)\n",
              port);
-    /* catches: a node none of whose addresses answers told untagged, so fircd keeps it at info */
-    check("no address answered: refused", TR_ECONNECT, fd);
-    check_str("no address answered: a warning", want, g_err);
+    /* catches: a closed port reported as a bare connect failure, or told untagged so fircd keeps it at info */
+    check("closed port: refused", TR_ECONNREFUSED, fd);
+    check_str("closed port: a warning naming the refusal", want, g_err);
     fd = dial_logged("127.0.0.1", port);
     /* catches: a dead node's every dial warned, flooding the journal while the pool keeps probing it */
-    check("no address answered again: refused", TR_ECONNECT, fd);
-    check_str("no address answered again: held back", "", g_err);
+    check("closed port again: refused", TR_ECONNREFUSED, fd);
+    check_str("closed port again: held back", "", g_err);
+
+    /* catches: an attempt still waiting at the deadline told as a refusal instead of silence */
+    check("in flight at the deadline: timeout", TR_ECONNTIMEOUT, dial_fail(1, ECONNREFUSED));
+    /* catches: a deadline with no answer at all told as some other failure */
+    check("no error seen: timeout", TR_ECONNTIMEOUT, dial_fail(0, 0));
+    /* catches: an unreachable host or network folded into refusal or timeout */
+    check("host unreachable", TR_EUNREACH, dial_fail(0, EHOSTUNREACH));
+    check("network unreachable", TR_EUNREACH, dial_fail(0, ENETUNREACH));
+    /* catches: an unexpected errno mapped onto a specific cause it is not */
+    check("other errno: generic", TR_ECONNECT, dial_fail(0, EACCES));
+    /* catches: a connect code left without its own text, so the log falls back to a bare number */
+    check("timeout has text", 1, tr_dial_strerror(TR_ECONNTIMEOUT) != NULL);
+    check("unreachable has text", 1, tr_dial_strerror(TR_EUNREACH) != NULL);
+    check("no node has text", 1, tr_dial_strerror(TR_ENONODE) != NULL);
+    check("a TLS code is not a dial code", 1, tr_dial_strerror(TLS13_ETIMEOUT) == NULL);
 
     ls = listener(&port);
     check("a second listener on 127.0.0.1", 1, ls >= 0);

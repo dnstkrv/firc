@@ -1362,7 +1362,7 @@ static void t_pool_dead_slot_refuses(void) {
     pl_bind(s, 0);
     pthread_mutex_unlock(&g_pl.mu);
     g_pl.slot[0].up = 0;
-    check(pl_connect(NULL, s, 1) == TR_ECONNECT, "a slot the pool marked dead: refused without dialling");
+    check(pl_connect(NULL, s, 1) == TR_ENONODE, "a slot the pool marked dead: refused without dialling");
     g_pl.slot[0].up = 1;
     int rc = pl_connect(NULL, s, 1);
     check(rc == 0, "the same slot live again: dialled");
@@ -1491,7 +1491,7 @@ static void t_pool_spares(void) {
     check(slots[0] >= 0 && slots[1] >= 0 && slots[0] != slots[1], "spares are opened to the live nodes in turn");
     g_pl.slot[0].up = g_pl.slot[1].up = 0;
     pl_clear(src);
-    check(pl_connect(&g_pl, src, 1) == TR_ECONNECT && s->slot == -1, "no live node — no spare is opened");
+    check(pl_connect(&g_pl, src, 1) == TR_ENONODE && s->slot == -1, "no live node — no spare is opened");
     g_pl.slot[0].up = g_pl.slot[1].up = 1;
 
     /* A streak of failed connects brings the check forward. */

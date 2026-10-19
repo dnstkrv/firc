@@ -357,6 +357,24 @@ static int attempt_start(struct in_addr ip, uint16_t port, int *done) {
     return fd;
 }
 
+const char *tr_dial_strerror(int rc) {
+    switch (rc) {
+        case TR_ECONNECT: return "TCP connect failed";
+        case TR_ECONNTIMEOUT: return "node did not answer the TCP connection (timeout)";
+        case TR_ECONNREFUSED: return "node refused the TCP connection (nothing listens on that port)";
+        case TR_EUNREACH: return "no route to the node (network or host unreachable)";
+        case TR_ENONODE: return "no node answers now";
+        default: return NULL;
+    }
+}
+
+static int dial_fail(unsigned in_flight, int err) {
+    if (in_flight || err == 0 || err == ETIMEDOUT) return TR_ECONNTIMEOUT;
+    if (err == ECONNREFUSED) return TR_ECONNREFUSED;
+    if (err == EHOSTUNREACH || err == ENETUNREACH || err == ENETDOWN) return TR_EUNREACH;
+    return TR_ECONNECT;
+}
+
 static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
     struct in_addr addr[ADDR_MAX];
     unsigned an = pinned(host, addr);
@@ -374,6 +392,7 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
     unsigned nf = 0;     /* attempts in flight */
     unsigned next = 0;   /* next address to start */
     unsigned dead = 0;   /* addresses that failed */
+    int last_err = 0;
     int64_t deadline = now_ms() + (long long)timeout_s * 1000;
     int64_t stagger_at = 0;
     int win = -1;
@@ -388,7 +407,7 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
             int d = 0;
             struct in_addr ip = addr[next++];
             int s = attempt_start(ip, port, &d);
-            if (s < 0) { dead++; continue; }
+            if (s < 0) { dead++; last_err = errno; continue; }
             if (d) {   /* connected at once: usually an address on the local network */
                 for (unsigned j = 0; j < nf; j++) close(fd[j]);
                 nf = 0;
@@ -430,6 +449,7 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
                 break;
             }
             /* This address failed: free its place and try the next one at once. */
+            last_err = err;
             close(fd[i]); dead++;
             nf--; fd[i] = fd[nf]; fa[i] = fa[nf]; pv[i] = pv[nf];
             stagger_at = 0;
@@ -437,6 +457,7 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
     }
 
     if (win < 0) {
+        int rc = dial_fail(nf, last_err);
         for (unsigned i = 0; i < nf; i++) close(fd[i]);
         /* The message gives the scale: when none of N addresses answers, the problem is the
          * node's name, not the local network. */
@@ -444,9 +465,9 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
         unsigned held;
         char more[48];
         if (ratelog_take(&said, ratelog_now(), 600, &held))
-            fprintf(stderr, "tunvless[warn]: %s:%u — no address answered (%u addresses, %u failed)%s\n",
-                    host, port, an, dead, ratelog_more(more, sizeof more, held));
-        return TR_ECONNECT;
+            fprintf(stderr, "tunvless[warn]: %s:%u — %s%s%s\n", host, port, tr_dial_strerror(rc),
+                    an > 1 ? " on every address" : "", ratelog_more(more, sizeof more, held));
+        return rc;
     }
     if (dead)
         fprintf(stderr, "tunvless[info]: %s:%u — connected after %u of %u addresses failed\n",

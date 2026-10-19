@@ -2521,15 +2521,15 @@ static int conn_ready(struct conn *c, const struct tun_dev *tun) {
         return 1;
     }
     if (c->rc != 0) {
-        /* With the reason, not just "did not open": the code tells "TCP did not connect", "the
+        /* With the reason, not just "did not open": the text tells "TCP did not connect", "the
          * server rejected the key" and "the server refused HTTP/2" apart. */
         static struct ratelog said_open;
         unsigned held;
         char more[48];
         if (ratelog_take(&said_open, ratelog_now(), 10, &held))
-            fprintf(stderr, LOG_W "flow to %s did not open: %s (rc=%d)%s\n",
+            fprintf(stderr, LOG_W "flow to %s did not open: %s%s\n",
                     d->peer_of ? d->peer_of(g_dl->ctx, SESS(c)) : d->peer(g_dl->ctx),
-                    d->strerror(c->rc), c->rc, ratelog_more(more, sizeof more, held));
+                    d->strerror(c->rc), ratelog_more(more, sizeof more, held));
         /* RST, not silence: otherwise the client waits for its timeout. With silence a video
          * page stopped opening at all: a browser handles a fast refusal better than a wait. */
         conn_reset(c, tun);
