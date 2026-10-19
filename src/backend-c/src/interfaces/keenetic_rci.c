@@ -44,6 +44,18 @@ static bool role_has_inet(const cJSON *entry) {
     return false;
 }
 
+static bool global_ethernet(const cJSON *entry) {
+    const cJSON *traits = cJSON_GetObjectItemCaseSensitive(entry, "traits");
+    const cJSON *tr = NULL;
+    if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(entry, "global")) || !cJSON_IsArray(traits)) {
+        return false;
+    }
+    cJSON_ArrayForEach(tr, traits) {
+        if (cJSON_IsString(tr) && strcmp(tr->valuestring, "Ethernet") == 0) { return true; }
+    }
+    return false;
+}
+
 static void mark_inet_for(const cJSON *entry, firc_kn_iface_meta_t *arr, size_t n) {
     const cJSON *role = cJSON_GetObjectItemCaseSensitive(entry, "role");
     const cJSON *r = NULL;
@@ -98,7 +110,7 @@ firc_err_t firc_kn_parse_interface_list(const char *json, firc_kn_iface_meta_t *
         copy_trimmed_member(arr[n].description, sizeof(arr[n].description), entry, "description");
         copy_trimmed_member(arr[n].interface_name, sizeof(arr[n].interface_name), entry,
                             "interface-name");
-        arr[n].inet = role_has_inet(entry);
+        arr[n].inet = role_has_inet(entry) || global_ethernet(entry);
         n++;
     }
 

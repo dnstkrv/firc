@@ -197,8 +197,8 @@ describe("the uplink choice", () => {
     assert.strictEqual(wouldCycle(set, "t0", "t1"), false);
   });
 
-  // Catches blackhole, a tunnel's own device, a LAN or other interface offered as an uplink, a description lost, or a cyclic tunnel left choosable.
-  it("offers auto, wan and tunnel interfaces and other tunnels, the cyclic one disabled", () => {
+  // Catches blackhole or a tunnel's own device offered, a WAN or tunnel interface hidden, the rest shown open, a description or the provider tag lost, or a cyclic tunnel left choosable.
+  it("offers wan and tunnel interfaces, the rest folded under more, and other tunnels", () => {
     const set = [
       tn("t0", "tunvless0"),
       tn("t1", "tunvless1", { uplink: { kind: "tunnel", ref: "t0" } }),
@@ -215,18 +215,45 @@ describe("the uplink choice", () => {
     ];
     const options = uplinkOptions(set[0], set, ifaces, t);
     assert.deepStrictEqual(
-      options.map((o) => [o.value, Boolean(o.disabled)]),
+      options.map((o) => [o.value, Boolean(o.disabled), Boolean(o.hidden)]),
       [
-        ["auto", false],
-        ["iface:ppp0", false],
-        ["iface:nwg1", false],
-        ["tunnel:t1", true],
-        ["tunnel:t2", false],
+        ["auto", false, false],
+        ["iface:ppp0", false, false],
+        ["iface:nwg1", false, false],
+        ["__more__", false, false],
+        ["iface:br0", false, true],
+        ["iface:eth2.1", false, true],
+        ["tunnel:t1", true, false],
+        ["tunnel:t2", false, false],
       ],
     );
     assert.ok(options.find((o) => o.value === "tunnel:t1")?.hint);
     assert.deepStrictEqual([options[1].label, options[1].description], ["Internet", "ppp0"]);
+    assert.strictEqual(options[1].tag, "provider");
     assert.deepStrictEqual([options[2].label, options[2].description], ["Wireguard1", "nwg1"]);
+    assert.strictEqual(options[2].tag, undefined);
+    assert.strictEqual(options[3].expanded, false);
+    assert.strictEqual(options[3].separator, true);
+  });
+
+  // Catches the folded section staying shut over the chosen uplink, or the toggle not reaching the caller.
+  it("opens the rest when the chosen uplink is in it, and on the toggle", () => {
+    const ifaces = [
+      { id: "ppp0", role: "wan" as const },
+      { id: "eth3", role: "other" as const },
+    ];
+    const chosen = tn("t0", "tunvless0", { uplink: { kind: "iface", ref: "eth3" } });
+    const open = uplinkOptions(chosen, [chosen], ifaces, t);
+    assert.strictEqual(open.find((o) => o.value === "iface:eth3")?.hidden, false);
+    assert.strictEqual(open.find((o) => o.value === "__more__")?.expanded, true);
+
+    const plain = tn("t0", "tunvless0");
+    let toggled = 0;
+    const shut = uplinkOptions(plain, [plain], ifaces, t, { onToggle: () => toggled++ });
+    shut.find((o) => o.value === "__more__")?.toggle?.();
+    assert.strictEqual(toggled, 1);
+    const forced = uplinkOptions(plain, [plain], ifaces, t, { opened: true });
+    assert.strictEqual(forced.find((o) => o.value === "iface:eth3")?.hidden, false);
   });
 
   // Catches the saved interface vanishing from the list when it is down, so the select reads empty.

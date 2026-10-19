@@ -1,4 +1,10 @@
-import { ifaceTitle, TUNVLESS_DEVICE, type IfaceItem } from "../../data/iface-choices";
+import {
+  BLACKHOLE,
+  ifaceTitle,
+  moreText,
+  TUNVLESS_DEVICE,
+  type IfaceItem,
+} from "../../data/iface-choices";
 import type { Tunnel, TunnelProbeRow, TunnelUplink } from "../../types";
 import { intervalLabel } from "../groups/intervals";
 
@@ -11,7 +17,14 @@ export type UplinkOption = {
   disabled?: boolean;
   hint?: string;
   mono?: boolean;
+  tag?: string;
+  hidden?: boolean;
+  separator?: boolean;
+  expanded?: boolean;
+  toggle?: () => void;
 };
+
+export const UPLINK_MORE = "__more__";
 
 export type NodeDnD = { scope: string; key: string; edge?: "before" | "after" };
 
@@ -101,18 +114,33 @@ export function uplinkOptions(
   tunnels: Tunnel[],
   ifaces: IfaceItem[],
   t: T,
+  more: { opened?: boolean | null; onToggle?: () => void; locale?: string } = {},
 ): UplinkOption[] {
   const devices = new Set(tunnels.map((tn) => tn.device));
   const usable = ifaces.filter(
-    (i) =>
-      (i.role === "wan" || i.role === "tunnel") &&
-      !TUNVLESS_DEVICE.test(i.id) &&
-      !devices.has(i.id),
+    (i) => i.id !== BLACKHOLE && !TUNVLESS_DEVICE.test(i.id) && !devices.has(i.id),
   );
-  const options: UplinkOption[] = [{ value: "auto", label: t("Auto") }];
-  for (const i of usable) {
+  const head = usable.filter((i) => i.role === "wan" || i.role === "tunnel");
+  const rest = usable.filter((i) => i.role !== "wan" && i.role !== "tunnel");
+  const expanded =
+    more.opened ?? (self.uplink.kind === "iface" && rest.some((i) => i.id === self.uplink.ref));
+  const option = (i: IfaceItem, extra: Partial<UplinkOption> = {}): UplinkOption => {
     const { title, sub } = ifaceTitle(i);
-    options.push({ value: `iface:${i.id}`, label: title, description: sub, mono: true });
+    return { value: `iface:${i.id}`, label: title, description: sub, mono: true, ...extra };
+  };
+  const options: UplinkOption[] = [{ value: "auto", label: t("Auto") }];
+  for (const i of head) {
+    options.push(option(i, { tag: i.role === "wan" ? t("provider") : undefined }));
+  }
+  if (rest.length > 0) {
+    options.push({
+      value: UPLINK_MORE,
+      label: moreText(rest.length, more.locale ?? "en", t),
+      separator: true,
+      expanded,
+      toggle: more.onToggle,
+    });
+    for (const i of rest) options.push(option(i, { hidden: !expanded }));
   }
   if (self.uplink.kind === "iface" && !usable.some((i) => i.id === self.uplink.ref)) {
     options.push({ value: `iface:${self.uplink.ref}`, label: self.uplink.ref });

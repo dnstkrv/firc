@@ -282,6 +282,37 @@ TEST a_port_role_reaches_an_interface_listed_after_it(void)
     PASS();
 }
 
+static const char *const GLOBAL_JSON =
+    "{\"GigabitEthernet1\":{\"interface-name\":\"ISP\",\"type\":\"GigabitEthernet\",\"global\":true,"
+    "\"traits\":[\"Mac\",\"Ethernet\",\"Ip\",\"EthernetIp\"]},"
+    "\"Bridge5\":{\"type\":\"Bridge\",\"global\":true,\"traits\":[\"Mac\",\"Ethernet\",\"Bridge\"],"
+    "\"role\":[{\"for\":\"Dsl0\",\"role\":\"inet\"}]},"
+    "\"OpkgTun10\":{\"type\":\"OpkgTun\",\"global\":true,\"traits\":[\"Ip\",\"Ip6\",\"OpkgTun\"]},"
+    "\"Bridge0\":{\"type\":\"Bridge\",\"global\":false,\"traits\":[\"Mac\",\"Ethernet\",\"Bridge\"]},"
+    "\"GigabitEthernet0\":{\"type\":\"GigabitEthernet\",\"traits\":[\"Mac\",\"Switch\",\"EthernetPort\"]},"
+    "\"WifiMaster0/WifiStation0\":{\"global\":\"true\",\"traits\":[\"Ethernet\"]},"
+    "\"X\":{\"global\":true,\"traits\":\"Ethernet\"},"
+    "\"Y\":{\"global\":true,\"traits\":[\"EthernetIp\",\"EthernetPort\"]}}";
+
+/* Catches: an Ethernet internet connection with no inet role left out, or a global tunnel, a private bridge, a switch, or a malformed flag or trait list taken for one. */
+TEST a_global_ethernet_interface_is_external(void)
+{
+    firc_kn_iface_meta_t *metas = NULL;
+    size_t n = 0;
+    ASSERT_EQ(FIRC_OK, firc_kn_parse_interface_list(GLOBAL_JSON, &metas, &n));
+    ASSERT_EQ(8, n);
+    ASSERT(find_meta(metas, n, "GigabitEthernet1")->inet);
+    ASSERT(find_meta(metas, n, "Bridge5")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "OpkgTun10")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "Bridge0")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "GigabitEthernet0")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "WifiMaster0/WifiStation0")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "X")->inet);
+    ASSERT_FALSE(find_meta(metas, n, "Y")->inet);
+    free(metas);
+    PASS();
+}
+
 /* Catches: a role of the wrong shape, case or kind taken as inet. */
 TEST malformed_roles_make_nothing_external(void)
 {
@@ -477,6 +508,7 @@ int main(int argc, char **argv)
     RUN_TEST(empty_list_yields_no_aliases);
     RUN_TEST(platform_default_is_empty_and_safe);
     RUN_TEST(inet_role_comes_from_the_entry_or_from_a_port);
+    RUN_TEST(a_global_ethernet_interface_is_external);
     RUN_TEST(a_port_role_reaches_an_interface_listed_after_it);
     RUN_TEST(malformed_roles_make_nothing_external);
     RUN_TEST(aliases_keep_external_interfaces_without_a_label);

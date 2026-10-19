@@ -364,8 +364,8 @@ test.describe("Tunnels page", () => {
     await expect(tunnels.save).toHaveClass(/inactive/);
   });
 
-  // Catches a LAN or other interface offered as an uplink, a wan or tunnel one left out, or its description lost.
-  test("the uplink offers wan and tunnel interfaces with their descriptions", async ({ page }) => {
+  // Catches the rest of the interfaces shown open or unreachable, a wan or tunnel one folded away, or a description or the provider tag lost.
+  test("the uplink offers wan and tunnel interfaces, the rest behind more", async ({ page }) => {
     await stubDaemon(page, {
       interfaces: ["ppp0", "nwg1", "br0", "eth2.1"],
       names: { ppp0: "Broadband", br0: "Home" },
@@ -381,9 +381,36 @@ test.describe("Tunnels page", () => {
     const item = (value: string) => page.locator(`[data-select-item][data-value="${value}"]`);
     await expect(item("iface:ppp0")).toContainText("Broadband");
     await expect(item("iface:ppp0")).toContainText("ppp0");
+    await expect(item("iface:ppp0")).toContainText("provider");
     await expect(item("iface:nwg1")).toContainText("Wireguard1");
     await expect(item("iface:br0")).toHaveCount(0);
     await expect(item("iface:eth2.1")).toHaveCount(0);
+
+    await item("__more__").click();
+    await expect(item("iface:br0")).toContainText("Home");
+    await item("iface:eth2.1").click();
+    await expect(
+      tunnels.card("a").getByRole("button", { name: "Way out to the internet" }),
+    ).toContainText("eth2.1");
+  });
+
+  // Catches a typeahead key on the closed uplink select landing on the more row and resetting the uplink to auto.
+  test("a key on the closed uplink select keeps the uplink", async ({ page }) => {
+    await stubDaemon(page, {
+      interfaces: ["ppp0", "br0", "eth2.1"],
+      names: { ppp0: "Broadband" },
+      roles: { ppp0: "wan", br0: "lan", "eth2.1": "other" },
+      tunnels: [tunnel("a", "tunvless0", { uplink: { kind: "iface", ref: "ppp0" } })],
+      states: [],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const trigger = tunnels.card("a").getByRole("button", { name: "Way out to the internet" });
+    await trigger.focus();
+    await page.keyboard.press("2");
+    await expect(trigger).toContainText("Broadband");
+    await expect(tunnels.save).toHaveClass(/inactive/);
   });
 
   // Catches an icon-only tunnel control, or a node switch, that a screen reader announces as nothing.
