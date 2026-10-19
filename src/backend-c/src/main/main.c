@@ -1,3 +1,4 @@
+#include <cjson/cJSON.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -25,6 +26,7 @@
 #include "firc/subnet.h"
 #include "firc/pool_reject.h"
 #include "firc/purge.h"
+#include "firc/rci_token.h"
 #include "firc/resolve_check.h"
 #include "firc/devices.h"
 #include "firc/keenetic_policy.h"
@@ -510,6 +512,7 @@ static void reload_config(struct daemon *d)
 
 static void apply_identity(firc_tunsubs_t *subs, const firc_router_id_t *id)
 {
+    firc_kn_token_set_release(id->release);
     firc_subhdr_set_t defaults;
     firc_subhdr_defaults(id->hwid, id->release, id->model, &defaults);
     firc_tunsubs_set_defaults(subs, &defaults);
@@ -522,6 +525,24 @@ static firc_err_t rci_identity_get(void *ud, const char *path, char **body)
     long timeout_s = strcmp(path, "/rci/show/defaults") == 0 ? FIRC_KN_RCI_SERIAL_TIMEOUT_SECONDS
                                                               : FIRC_KN_RCI_TIMEOUT_SECONDS;
     return firc_kn_rci_get_timeout(FIRC_KN_RCI_BASE_URL, path, timeout_s, body);
+}
+
+static void revoke_rci_token(void)
+{
+    char *body = NULL;
+    char release[64] = "";
+    if (firc_kn_rci_get(FIRC_KN_RCI_BASE_URL, "/rci/show/version", &body) == FIRC_OK) {
+        cJSON *v = cJSON_Parse(body);
+        const cJSON *r = cJSON_GetObjectItemCaseSensitive(v, "release");
+        if (cJSON_IsString(r)) { snprintf(release, sizeof release, "%s", r->valuestring); }
+        cJSON_Delete(v);
+    }
+    free(body);
+    firc_err_t err = firc_kn_token_revoke(FIRC_RCI_TOKEN_PATH, FIRC_NDMC_BIN, release);
+    if (err != FIRC_OK) {
+        FIRC_WARN("purge: firc's RCI token may be left on the router (%s); a new install deletes it",
+                  firc_err_str(err));
+    }
 }
 
 static void on_identity_tick(firc_loop_t *loop, void *ud)
@@ -1026,6 +1047,10 @@ int main(int argc, char **argv)
 
     /* libcurl: call once, before any thread performs a transfer. */
     firc_sub_fetch_global_init();
+#ifdef FIRC_ENTWARE_KN
+    firc_kn_token_setup(FIRC_RCI_TOKEN_PATH, FIRC_NDMC_BIN);
+    if (purge) { revoke_rci_token(); }
+#endif
 
     firc_config_t cfg;
     if (firc_config_init_defaults(&cfg) != FIRC_OK) {

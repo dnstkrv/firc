@@ -358,6 +358,7 @@ case "$$ACTION" in
     rm -rf /opt/var/lib/firc/tunnels
     rm -rf /opt/var/lib/firc/update
     rm -f /opt/var/lib/firc/hwid
+    rm -f /opt/var/lib/firc/rci-token
     rmdir /opt/var/lib/firc 2>/dev/null
     ;;
   upgrade) ;;

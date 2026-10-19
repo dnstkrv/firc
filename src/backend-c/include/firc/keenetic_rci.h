@@ -38,6 +38,9 @@ firc_err_t firc_kn_rci_get(const char *base_url, const char *path, char **out_bo
 /* The same with a timeout of its own, for a call slower than the others. */
 firc_err_t firc_kn_rci_get_timeout(const char *base_url, const char *path, long timeout_s, char **out_body);
 
+/* One RCI POST of body (JSON) to path under base_url; *out_body is NUL-terminated, caller frees. */
+firc_err_t firc_kn_rci_post(const char *base_url, const char *path, const char *body, char **out_body);
+
 /* NDMS description for system_name, or NULL; a NULL or empty set is fine. */
 const char *firc_kn_aliases_lookup(const firc_kn_aliases_t *aliases, const char *system_name);
 

@@ -5,11 +5,13 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <cjson/cJSON.h>
 #include <curl/curl.h>
 
 #include "firc/log.h"
+#include "firc/rci_token.h"
 
 static bool is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
@@ -308,43 +310,71 @@ static bool refusal_is_due(void) {
     return atomic_compare_exchange_strong(&last, &prev, now.tv_sec == 0 ? 1 : now.tv_sec);
 }
 
-static firc_err_t rci_call(const char *url, const char *post_body, long timeout_s, char **out_body) {
-    *out_body = NULL;
+#define DETAIL_MAX 128
 
+static size_t header_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
+    char *detail = ud;
+    size_t n = size * nmemb;
+    static const char name[] = "X-Detail:";
+    if (n > sizeof name - 1 && strncasecmp(ptr, name, sizeof name - 1) == 0) {
+        size_t v = sizeof name - 1;
+        while (v < n && (ptr[v] == ' ' || ptr[v] == '\t')) { v++; }
+        size_t e = n;
+        while (e > v && (ptr[e - 1] == '\r' || ptr[e - 1] == '\n')) { e--; }
+        snprintf(detail, DETAIL_MAX, "%.*s", (int)(e - v), ptr + v);
+    }
+    return n;
+}
+
+static firc_err_t rci_once(const char *url, const char *post_body, long timeout_s, const char *tok,
+                           long *status, char *detail, rci_buf_t *buf) {
+    *status = 0;
+    detail[0] = '\0';
     CURL *curl = curl_easy_init();
     if (!curl) { return FIRC_ERR_NOMEM; }
 
-    rci_buf_t buf = {0};
     struct curl_slist *headers = NULL;
+    char tok_header[FIRC_KN_TOKEN_MAX + 32];
+    bool ok = true;
+    if (tok[0] != '\0') {
+        snprintf(tok_header, sizeof tok_header, FIRC_KN_TOKEN_HEADER ": %s", tok);
+        struct curl_slist *h = curl_slist_append(headers, tok_header);
+        ok = h != NULL;
+        if (ok) { headers = h; }
+    }
+    if (ok && post_body) {
+        struct curl_slist *h = curl_slist_append(headers, "Content-Type: application/json");
+        ok = h != NULL;
+        if (ok) { headers = h; }
+    }
+    if (!ok) {
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        return FIRC_ERR_NOMEM;
+    }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, detail);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-
+    if (headers) { curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers); }
     if (post_body) {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        if (!headers) {
-            curl_easy_cleanup(curl);
-            return FIRC_ERR_NOMEM;
-        }
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(post_body));
     }
 
     CURLcode rc = curl_easy_perform(curl);
-    long status = 0;
-    if (rc == CURLE_OK) { curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status); }
+    if (rc == CURLE_OK) { curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status); }
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK) {
-        free(buf.data);
-        if (buf.truncated) {
+        if (buf->truncated) {
             FIRC_DEBUG("keenetic rci: %s response exceeded %d bytes", url,
                      FIRC_KN_RCI_MAX_BODY_BYTES);
             return FIRC_ERR_LIMIT;
@@ -352,27 +382,64 @@ static firc_err_t rci_call(const char *url, const char *post_body, long timeout_
         FIRC_DEBUG("keenetic rci: %s failed: %s (curl %d)", url, curl_easy_strerror(rc), (int)rc);
         return rc == CURLE_OPERATION_TIMEDOUT ? FIRC_ERR_TIMEOUT : FIRC_ERR_UPSTREAM;
     }
+    return FIRC_OK;
+}
+
+static firc_err_t rci_call(const char *url, const char *post_body, long timeout_s, char **out_body) {
+    *out_body = NULL;
+
+    char tok[FIRC_KN_TOKEN_MAX];
+    firc_kn_token_current(tok);
+    rci_buf_t first = {0};
+    rci_buf_t again = {0};
+    rci_buf_t *buf = &first;
+    long status = 0;
+    char detail[DETAIL_MAX];
+    firc_err_t err = rci_once(url, post_body, timeout_s, tok, &status, detail, &first);
+    if (err == FIRC_OK && firc_kn_token_refusal(status, detail)) {
+        char fresh[FIRC_KN_TOKEN_MAX];
+        firc_kn_token_refused(tok, fresh);
+        if (strcmp(fresh, tok) != 0) {
+            err = rci_once(url, post_body, timeout_s, fresh, &status, detail, &again);
+            free(first.data);
+            first.data = NULL;
+            buf = &again;
+        }
+    }
+    if (err != FIRC_OK) {
+        free(buf->data);
+        return err;
+    }
     if (status == 401 || status == 403) {
-        /* KeeneticOS 5.2 may demand a token; log 401/403 or device scoping fails open in silence. */
-        free(buf.data);
+        /* Logged, or device scoping fails open in silence. */
+        free(buf->data);
         if (refusal_is_due()) {
-            FIRC_WARN("keenetic rci refused %s (HTTP %ld): this firmware wants an authentication token, "
-                      "and until firc has one every policy: selector matches no device",
-                      url, status);
+            FIRC_WARN("keenetic rci refused %s (HTTP %ld, %s): firc has no token this firmware accepts, "
+                      "and until it has one every policy: selector matches no device",
+                      url, status, detail[0] != '\0' ? detail : "no detail");
         }
         return FIRC_ERR_UPSTREAM;
     }
     if (status != 200) {
-        free(buf.data);
+        free(buf->data);
         FIRC_DEBUG("keenetic rci: %s returned status %ld", url, status);
         return FIRC_ERR_UPSTREAM;
     }
-    if (!buf.data) {
-        free(buf.data);
+    if (!buf->data) {
         return FIRC_ERR_PROTO;
     }
 
-    *out_body = buf.data;
+    *out_body = buf->data;
+    return FIRC_OK;
+}
+
+static firc_err_t rci_url(const char *base_url, const char *path, char *url, size_t cap) {
+    if (!base_url || !path) { return FIRC_ERR_INVAL; }
+    size_t base_len = strlen(base_url);
+    while (base_len > 0 && base_url[base_len - 1] == '/') { base_len--; }
+    if (snprintf(url, cap, "%.*s%s", (int)base_len, base_url, path) >= (int)cap) {
+        return FIRC_ERR_INVAL;
+    }
     return FIRC_OK;
 }
 
@@ -382,30 +449,25 @@ firc_err_t firc_kn_rci_get(const char *base_url, const char *path, char **out_bo
 
 firc_err_t firc_kn_rci_get_timeout(const char *base_url, const char *path, long timeout_s, char **out_body) {
     *out_body = NULL;
-    if (!base_url || !path) { return FIRC_ERR_INVAL; }
-    size_t base_len = strlen(base_url);
-    while (base_len > 0 && base_url[base_len - 1] == '/') { base_len--; }
     char url[512];
-    if (snprintf(url, sizeof(url), "%.*s%s", (int)base_len, base_url, path) >= (int)sizeof(url)) {
-        return FIRC_ERR_INVAL;
-    }
-    return rci_call(url, NULL, timeout_s, out_body);
+    firc_err_t err = rci_url(base_url, path, url, sizeof url);
+    return err != FIRC_OK ? err : rci_call(url, NULL, timeout_s, out_body);
+}
+
+firc_err_t firc_kn_rci_post(const char *base_url, const char *path, const char *body, char **out_body) {
+    *out_body = NULL;
+    char url[512];
+    firc_err_t err = rci_url(base_url, path, url, sizeof url);
+    if (err == FIRC_OK && !body) { err = FIRC_ERR_INVAL; }
+    return err != FIRC_OK ? err : rci_call(url, body, FIRC_KN_RCI_TIMEOUT_SECONDS, out_body);
 }
 
 /* n == 0 leaves *metas NULL and makes no batch call. */
 static firc_err_t fetch_metas(const char *base_url, firc_kn_iface_meta_t **metas_out, size_t *n_out) {
     *metas_out = NULL;
     *n_out = 0;
-    if (!base_url) { return FIRC_ERR_INVAL; }
-
-    size_t base_len = strlen(base_url);
-    while (base_len > 0 && base_url[base_len - 1] == '/') { base_len--; }
-
-    char list_url[512];
-    snprintf(list_url, sizeof(list_url), "%.*s/rci/show/interface", (int)base_len, base_url);
-
     char *list_body = NULL;
-    firc_err_t err = rci_call(list_url, NULL, FIRC_KN_RCI_TIMEOUT_SECONDS, &list_body);
+    firc_err_t err = firc_kn_rci_get(base_url, "/rci/show/interface", &list_body);
     if (err != FIRC_OK) { return err; }
 
     firc_kn_iface_meta_t *metas = NULL;
@@ -425,11 +487,8 @@ static firc_err_t fetch_metas(const char *base_url, firc_kn_iface_meta_t **metas
         return FIRC_ERR_NOMEM;
     }
 
-    char batch_url[512];
-    snprintf(batch_url, sizeof(batch_url), "%.*s/rci/", (int)base_len, base_url);
-
     char *batch_body = NULL;
-    err = rci_call(batch_url, req_body, FIRC_KN_RCI_TIMEOUT_SECONDS, &batch_body);
+    err = firc_kn_rci_post(base_url, "/rci/", req_body, &batch_body);
     free(req_body);
     if (err != FIRC_OK) {
         free(metas);
@@ -518,4 +577,3 @@ firc_err_t firc_kn_get_iface_aliases(firc_kn_aliases_t *out) {
     return FIRC_OK;
 #endif
 }
-

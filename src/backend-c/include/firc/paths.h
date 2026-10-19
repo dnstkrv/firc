@@ -40,6 +40,12 @@
 #ifndef FIRC_HWID_PATH
 #define FIRC_HWID_PATH "/opt/var/lib/firc/hwid"
 #endif
+#ifndef FIRC_RCI_TOKEN_PATH
+#define FIRC_RCI_TOKEN_PATH "/opt/var/lib/firc/rci-token"
+#endif
+#ifndef FIRC_NDMC_BIN
+#define FIRC_NDMC_BIN "/bin/ndmc"
+#endif
 #ifndef FIRC_SH_BIN
 #define FIRC_SH_BIN "/opt/bin/sh"
 #endif
@@ -81,6 +87,12 @@
 #endif
 #ifndef FIRC_HWID_PATH
 #define FIRC_HWID_PATH "/var/lib/firc/hwid"
+#endif
+#ifndef FIRC_RCI_TOKEN_PATH
+#define FIRC_RCI_TOKEN_PATH "/var/lib/firc/rci-token"
+#endif
+#ifndef FIRC_NDMC_BIN
+#define FIRC_NDMC_BIN "ndmc"
 #endif
 #ifndef FIRC_SH_BIN
 #define FIRC_SH_BIN "/bin/sh"
