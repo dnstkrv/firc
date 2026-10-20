@@ -221,6 +221,22 @@ test.describe("The interface picker in the card", () => {
     await expect(circle(page, "nwg1")).toHaveText("");
   });
 
+  test("an active backup with a name shows the name over its id", async ({ page }) => {
+    await setup(page, [
+      listed({
+        interface: ["nwg0", "wg0"],
+        active: "wg0",
+        interfaces: [
+          { name: "nwg0", state: "dead", since: SINCE, error: "timed out" },
+          { name: "wg0", state: "alive", since: SINCE - 600, error: "" },
+        ],
+      }),
+    ]);
+    await expect(amber(page)).toHaveCount(1);
+    await expect(closedValue(page)).toHaveText("WireGuard Interface");
+    await expect(picker(page).locator(".selected-description")).toHaveText("wg0");
+  });
+
   test("a list group on its first entry shows no amber dot", async ({ page }) => {
     await setup(page, [listed({ active: "wg0" })]);
     await expect(closedValue(page)).toHaveText("WireGuard Interface");

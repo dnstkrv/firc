@@ -141,7 +141,7 @@
       >{list[0]} <span class="iface-chain">→ {chainLabel(list.slice(1))}</span></span
     >
   {:else}
-    {shown}
+    {options.find((o) => o.value === shown)?.label ?? shown}
     {#if note}
       {@const text = backupText(note, t, clockMinutes)}
       <span class="iface-note">
