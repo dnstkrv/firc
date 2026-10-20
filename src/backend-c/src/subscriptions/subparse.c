@@ -745,6 +745,16 @@ bool firc_sub_is_due(bool enable, const firc_group_list_t *l, int64_t now_unix)
     if (l->last_check == 0) {
         return true;
     }
+    if (!l->has_body_hash && l->failed_fetches > 0) {
+        unsigned shift = l->failed_fetches > 7 ? 6u : (unsigned)l->failed_fetches - 1u;
+        uint64_t delay = 60u << shift;
+        if (delay > 3600u) {
+            delay = 3600u;
+        }
+        if ((uint64_t)now_unix >= (uint64_t)l->last_check + delay) {
+            return true;
+        }
+    }
     if (l->interval == 0) {
         return false;
     }

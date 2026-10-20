@@ -1428,6 +1428,7 @@ static void carry_list(firc_group_list_t *nw, firc_group_list_t *old) {
     memcpy(nw->body_hash, old->body_hash, sizeof(nw->body_hash));
     nw->has_body_hash = old->has_body_hash;
     nw->last_check = old->last_check;
+    nw->failed_fetches = old->failed_fetches;
     nw->last_update = old->last_update; /* the daemon's, never a body's */
     firc_sub_apply_overrides(nw, &nw->rules);
 
@@ -1891,9 +1892,10 @@ static firc_err_t firc_app_apply_sync_result_unlocked(firc_app_t *app, firc_sub_
 
     switch (ev->result) {
     case FIRC_SUB_RESULT_ERROR:
-        /* set even on failure: firc_sub_is_due reads it, so a broken url is retried once per interval */
+        /* set even on failure: firc_sub_is_due reads it with failed_fetches to pace the retry */
         sync_set_error(list, ev->err, ev->http_status, ev->why);
         list->last_check = (uint32_t)now_unix;
+        if (list->failed_fetches < UINT8_MAX) { list->failed_fetches++; }
         FIRC_WARN("group \"%s\": its list was not synced: %s", name, list->sync_error);
         ret = ev->err;
         break;

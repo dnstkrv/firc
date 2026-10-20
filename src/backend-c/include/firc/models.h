@@ -152,6 +152,7 @@ typedef struct firc_group_list {
     /* SHA-256 of the last accepted body, so an unchanged fetch is not reparsed; runtime only */
     uint8_t body_hash[FIRC_SHA256_DIGEST_LEN];
     bool has_body_hash;
+    uint8_t failed_fetches;
     firc_sub_rules_t rules;
     firc_sub_override_t **overrides;
     size_t n_overrides;

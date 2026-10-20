@@ -1017,6 +1017,84 @@ TEST an_interval_of_zero_does_not_mean_never_fetch(void) {
     PASS();
 }
 
+/* Catches: a list that never loaded waiting a whole interval after a failed fetch. */
+TEST a_list_that_never_loaded_is_retried_with_a_growing_delay(void) {
+    firc_group_list_t *l = firc_group_list_new();
+    bool enable = true;
+    firc_strset(&l->url, "https://example.invalid/l.txt");
+    l->interval = 86400;
+    l->last_check = 1000;
+
+    l->failed_fetches = 1;
+    ASSERT_FALSEm("not before a minute", firc_sub_is_due(enable, l, 1059));
+    ASSERTm("a minute after the first failure", firc_sub_is_due(enable, l, 1060));
+    l->failed_fetches = 2;
+    ASSERT_FALSEm("the delay doubles", firc_sub_is_due(enable, l, 1119));
+    ASSERT(firc_sub_is_due(enable, l, 1120));
+    l->failed_fetches = 3;
+    ASSERT_FALSE(firc_sub_is_due(enable, l, 1239));
+    ASSERT(firc_sub_is_due(enable, l, 1240));
+    l->failed_fetches = 200;
+    ASSERT_FALSEm("capped at an hour", firc_sub_is_due(enable, l, 4599));
+    ASSERT(firc_sub_is_due(enable, l, 4600));
+
+    l->interval = 0;
+    l->failed_fetches = 1;
+    ASSERTm("retried even with no timer", firc_sub_is_due(enable, l, 1060));
+
+    firc_group_list_free(l);
+    PASS();
+}
+
+/* Catches: a list that holds rules retried before its interval. */
+TEST a_list_that_holds_rules_waits_its_interval_after_a_failure(void) {
+    firc_group_list_t *l = firc_group_list_new();
+    bool enable = true;
+    firc_strset(&l->url, "https://example.invalid/l.txt");
+    l->interval = 7200;
+    l->last_check = 1000;
+    l->has_body_hash = true;
+    l->failed_fetches = 3;
+
+    ASSERT_FALSE(firc_sub_is_due(enable, l, 1240));
+    ASSERT_FALSE(firc_sub_is_due(enable, l, 4600));
+    ASSERT(firc_sub_is_due(enable, l, 8200));
+
+    firc_group_list_free(l);
+    PASS();
+}
+
+/* Catches: failed fetches not counted, or the count lost when the group is saved. */
+TEST failed_fetches_are_counted_and_survive_a_save(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_group_t *sub = make_list_group("/404");
+    sub->list->interval = 86400;
+    ASSERT_EQ(FIRC_OK, add_list_group(h->app, sub));
+    firc_id_t id = sub->id;
+
+    bool changed = false;
+    ASSERT_EQ(FIRC_ERR_UPSTREAM, firc_app_sync_list_now(h->app, id, 1000, NULL, &changed));
+    const firc_group_t *cur = find_group(h->app, id);
+    ASSERT_FALSE(firc_sub_is_due(cur->enable, cur->list, 1059));
+    ASSERT(firc_sub_is_due(cur->enable, cur->list, 1060));
+
+    ASSERT_EQ(FIRC_ERR_UPSTREAM, firc_app_sync_list_now(h->app, id, 1060, NULL, &changed));
+
+    firc_group_t **arr = calloc(1, sizeof(*arr));
+    arr[0] = make_list_group("/404");
+    arr[0]->id = id;
+    arr[0]->list->interval = 86400;
+    ASSERT_EQ(FIRC_OK, firc_app_replace_groups(h->app, arr, 1));
+
+    cur = find_group(h->app, id);
+    ASSERT_FALSEm("the second failure waits two minutes", firc_sub_is_due(cur->enable, cur->list, 1179));
+    ASSERT(firc_sub_is_due(cur->enable, cur->list, 1180));
+
+    harness_stop(h);
+    PASS();
+}
+
 static firc_group_t *make_replacement(firc_id_t id, const char *path) {
     firc_group_t *nw = make_list_group(path);
     nw->id = id;
@@ -1435,6 +1513,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_fetch_that_yielded_nothing_still_counts_as_a_check);
     RUN_TEST(no_rules_does_not_override_the_other_refusals);
     RUN_TEST(an_interval_of_zero_does_not_mean_never_fetch);
+    RUN_TEST(a_list_that_never_loaded_is_retried_with_a_growing_delay);
+    RUN_TEST(a_list_that_holds_rules_waits_its_interval_after_a_failure);
+    RUN_TEST(failed_fetches_are_counted_and_survive_a_save);
     RUN_TEST(resync_same_content_is_unchanged_but_bumps_last_check);
     RUN_TEST(resync_different_content_updates_rules_and_last_update);
     RUN_TEST(the_same_body_is_not_parsed_twice);
