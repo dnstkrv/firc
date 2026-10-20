@@ -52,7 +52,6 @@ firc перехватывает DNS-запросы клиентов. Домен�
 grep -qs repo.hoaxisr.ru /opt/etc/opkg.conf /opt/etc/opkg/*.conf ||
   echo "src/gz hoaxisr http://repo.hoaxisr.ru/mipsel-k3.4" > /opt/etc/opkg/hoaxisr.conf
 opkg update && opkg install firc
-/opt/etc/init.d/S99firc start
 ```
 
 Первая строка добавляет репозиторий, только если его ещё нет ни в `/opt/etc/opkg.conf`, ни в `/opt/etc/opkg/*.conf` (например, он уже подключён для AWG Manager): два источника с одним именем opkg не нужны. Архитектуру роутера покажет `opkg print-architecture` (`mipsel-3.4_kn` → `mipsel-k3.4`).
@@ -70,12 +69,11 @@ opkg update && opkg install firc
 ```shell
 curl -L -O https://github.com/hoaxisr/firc/releases/download/<версия>/firc_<версия>-<ревизия>_entware_<таргет>.ipk
 opkg install ./firc_<версия>-<ревизия>_entware_<таргет>.ipk
-/opt/etc/init.d/S99firc start
 ```
 
 `-L` обязателен: GitHub отдаёт файл через перенаправление, и без него `curl` сохранит пустой файл, а `opkg` ответит `Malformed package file`.
 
-Обновление — тем же способом, с `restart` вместо `start`; из репозитория — `opkg update && opkg upgrade firc`.
+Пакет запускает firc сам, при обновлении — перезапускает. Обновление — тем же способом; из репозитория — `opkg update && opkg upgrade firc`.
 
 Нужен роутер Keenetic с Entware, aarch64, mipsel или mips. Памяти демону нужно немного: около 5 МБ без правил и около 21 МБ при 300 000 правил в списках; во время синхронизации большого списка — до 48 МБ (замеры ниже). OpenWrt не поддерживается. Сборка из исходников описана в [BUILDING.md](BUILDING.md).
 
