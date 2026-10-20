@@ -1,6 +1,7 @@
 #include "greatest.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -155,6 +156,7 @@ static size_t read_request(int c, char *buf, size_t cap)
     size_t len = 0;
     for (;;) {
         ssize_t n = recv(c, buf + len, cap - 1 - len, 0);
+        if (n < 0 && errno == EINTR) { continue; }
         if (n <= 0) { break; }
         len += (size_t)n;
         buf[len] = '\0';
@@ -173,6 +175,7 @@ static void *stub_serve(void *ud)
     rci_stub_t *s = ud;
     while (s->served < s->expect) {
         int c = accept(s->fd, NULL, NULL);
+        if (c < 0 && errno == EINTR) { continue; }
         if (c < 0) { break; }
         char *req = s->req[s->served < 8 ? s->served : 7];
         read_request(c, req, sizeof s->req[0]);
