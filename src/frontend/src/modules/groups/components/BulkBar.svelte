@@ -474,6 +474,14 @@
     .bulk-count {
       margin-right: auto;
     }
+
+    .bulk-actions {
+      flex-wrap: wrap;
+    }
+
+    .bulk-actions > :global(*) {
+      flex: 1 1 auto;
+    }
   }
 
   @media (max-width: 600px) {
