@@ -6,6 +6,7 @@
 
 #include <cjson/cJSON.h>
 
+#include "firc/events.h"
 #include "firc/id.h"
 #include "firc/ifacename.h"
 #include "firc/log.h"
@@ -624,7 +625,21 @@ cJSON *firc_groups_group_json(firc_app_t *app, const firc_group_t *g, bool with_
                 cJSON_AddItemToArray(servers, cJSON_CreateString(s));
             }
         }
-        cJSON_AddNumberToObject(rv, "fallbacks", (double)info.fallbacks);
+        const firc_dnsproxy_health_t *hl = &info.health;
+        cJSON *health = cJSON_AddObjectToObject(rv, "health");
+        if (health == NULL) {
+            cJSON_Delete(obj);
+            return NULL;
+        }
+        cJSON_AddNumberToObject(health, "window", FIRC_DNSPROXY_HEALTH_WINDOW_S);
+        cJSON_AddNumberToObject(health, "total", (double)hl->total);
+        cJSON_AddNumberToObject(health, "fallbacks", (double)hl->fallbacks);
+        cJSON_AddNumberToObject(health, "last",
+                                hl->has_last ? (double)(info.wall_s - (int64_t)(hl->last_ago_ms / 1000u)) : 0);
+        cJSON_AddStringToObject(health, "reason", hl->has_last ? firc_dns_resolver_name(hl->reason) : "");
+        cJSON_AddBoolToObject(health, "resting", hl->resting);
+        cJSON_AddNumberToObject(health, "since",
+                                hl->resting ? (double)(info.wall_s - (int64_t)(hl->since_ago_ms / 1000u)) : 0);
     }
     /* "rules" key omitted otherwise */
     if (with_rules) { cJSON_AddItemToObject(obj, "rules", rules_to_json_array(g->rules, g->n_rules)); }

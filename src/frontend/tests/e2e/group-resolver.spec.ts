@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { signedIn } from "./pages/session";
 
+const CALM = { window: 600, total: 0, fallbacks: 0, last: 0, reason: "", resting: false, since: 0 };
+
 const RESOLVERS = { resolvers: [{ interface: "nwg0", servers: ["9.9.9.9", "1.0.0.1"] }] };
 
 async function setup(
@@ -140,7 +142,7 @@ test.describe("A group's DNS", () => {
       [
         existing(
           { tunnel: true, server: "" },
-          { source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 },
+          { source: "firmware", servers: ["9.9.9.9"], health: CALM },
         ),
       ],
       (body) => ({
@@ -182,15 +184,17 @@ test.describe("A group's DNS", () => {
     await expect(dialog.locator("#gd-dns [data-select-trigger]")).toBeDisabled();
   });
 
-  // Catches a missing or wrong resolver tag, or a zero fallback count being shown.
-  test("the panel shows the effective resolver and a non-zero fallback count", async ({ page }) => {
+  // Catches a missing or wrong resolver tag, or a health tag on a calm group.
+  test("the panel shows the effective resolver and no health tag for a calm group", async ({
+    page,
+  }) => {
     await setup(page, [
       existing(
         { tunnel: true, server: "" },
-        { source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], fallbacks: 4 },
+        { source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], health: CALM },
       ),
       {
-        ...existing({ tunnel: false, server: "" }, { source: "off", servers: [], fallbacks: 0 }),
+        ...existing({ tunnel: false, server: "" }, { source: "off", servers: [], health: CALM }),
         id: "0a1b2c3e",
         name: "DE",
       },
@@ -199,8 +203,7 @@ test.describe("A group's DNS", () => {
     await expect(tags).toHaveCount(2);
     await expect(tags.nth(0)).toHaveText("DNS 9.9.9.9, 1.0.0.1");
     await expect(tags.nth(1)).toHaveText("DNS: not through the tunnel");
-    await expect(page.locator(".fallback-badge")).toHaveCount(1);
-    await expect(page.locator(".fallback-badge")).toHaveText("fallbacks: 4");
+    await expect(page.locator(".health-badge")).toHaveCount(0);
   });
 
   // Catches a hidden, invalid typed server riding the PUT instead of the group's own resolve.
@@ -209,7 +212,7 @@ test.describe("A group's DNS", () => {
   }) => {
     const original = { tunnel: true, server: "9.9.9.9" };
     const saved = await setup(page, [
-      existing(original, { source: "group", servers: ["9.9.9.9"], fallbacks: 0 }),
+      existing(original, { source: "group", servers: ["9.9.9.9"], health: CALM }),
     ]);
     await page.getByRole("button", { name: "Group Settings" }).first().click();
     const dialog = page.getByRole("dialog");
@@ -234,12 +237,12 @@ test.describe("A group's DNS", () => {
   test("group B's dialog closing does not drop group A's pending refusal", async ({ page }) => {
     const groupA = existing(
       { tunnel: true, server: "" },
-      { source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 },
+      { source: "firmware", servers: ["9.9.9.9"], health: CALM },
     );
     const groupB = {
       ...existing(
         { tunnel: true, server: "" },
-        { source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 },
+        { source: "firmware", servers: ["9.9.9.9"], health: CALM },
       ),
       id: "0a1b2c3e",
       name: "DE",
@@ -280,7 +283,7 @@ test.describe("A group's DNS", () => {
     page,
   }) => {
     await setup(page, [
-      existing({ tunnel: true, server: "" }, { source: "firmware", servers: [], fallbacks: 0 }),
+      existing({ tunnel: true, server: "" }, { source: "firmware", servers: [], health: CALM }),
     ]);
     await expect(page.locator(".resolver-badge")).toHaveText("DNS: common upstream");
 
@@ -299,7 +302,7 @@ test.describe("A group's DNS", () => {
       {
         ...existing(
           { tunnel: true, server: "" },
-          { source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], fallbacks: 0 },
+          { source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], health: CALM },
         ),
         name: "Video and streaming services through the tunnel in the Netherlands, long",
       },

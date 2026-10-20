@@ -142,6 +142,7 @@ struct firc_app {
     int64_t tap_ends_mono; /* the real deadline, on a clock no NTP step moves; tap_ends_at is for printing only */
     int64_t tap_seconds; /* FIRC_CAPTURE_SECONDS, or a test's */
     uint64_t (*mono_ms)(void); /* a failed group's retry spacing */
+    int64_t (*wall_s)(void);
     int retry_timer; /* the loop timer armed for the earliest due retry, 0 when none */
     uint64_t retry_timer_at;
     uint64_t retry_timer_delay;
@@ -700,6 +701,10 @@ static uint64_t real_mono_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+static int64_t real_wall_s(void) {
+    return (int64_t)time(NULL);
+}
+
 static bool retry_pending(firc_ruleset_t *rs) {
     return firc_ruleset_group(rs)->enable && !firc_ruleset_runtime_enabled(rs) &&
            firc_ruleset_retry(rs)->backoff_ms != 0;
@@ -1001,6 +1006,7 @@ const firc_fakeip_t *firc_app_pool(const firc_app_t *app) {
 void firc_app_group_resolver(const firc_app_t *app, const firc_group_t *g, firc_app_resolver_info_t *out) {
     memset(out, 0, sizeof(*out));
     firc_resolve_route_t r;
+    r.gen = 0;
     if (app != NULL && firc_resolve_router_route(app->router, g->id, &r)) {
         out->source = r.source;
         if (firc_resolve_route_usable(&r)) { /* a route with no mark lists no servers: queries go to the common upstream */
@@ -1010,7 +1016,10 @@ void firc_app_group_resolver(const firc_app_t *app, const firc_group_t *g, firc_
     } else { /* no router: not published yet */
         out->source = g->resolve.tunnel ? FIRC_RESOLVE_SOURCE_NONE : FIRC_RESOLVE_SOURCE_OFF;
     }
-    if (app != NULL && app->proxy != NULL) { out->fallbacks = firc_dnsproxy_group_fallbacks(app->proxy, g->id); }
+    if (app != NULL) { out->wall_s = app->wall_s(); }
+    if (app != NULL && app->proxy != NULL && out->n_servers > 0) {
+        firc_dnsproxy_group_health(app->proxy, g->id, r.gen, &out->health);
+    }
 }
 
 static bool group_in_view(const firc_group_t *g, void *ud) {
@@ -1059,6 +1068,7 @@ firc_app_t *firc_app_create(const firc_app_deps_t *deps) {
     app->tap_iface_index = deps->iface_index != NULL ? deps->iface_index : if_nametoindex;
     app->tap_seconds = deps->capture_seconds > 0 ? deps->capture_seconds : FIRC_CAPTURE_SECONDS;
     app->mono_ms = deps->mono_ms != NULL ? deps->mono_ms : real_mono_ms;
+    app->wall_s = deps->wall_s != NULL ? deps->wall_s : real_wall_s;
     app->proxy = deps->proxy;
     app->pool_snap = firc_fakeip_snapshot_take(deps->pool); /* so a pass before anything is issued still has a consistent view */
     pthread_mutex_init(&app->snap_mu, NULL);

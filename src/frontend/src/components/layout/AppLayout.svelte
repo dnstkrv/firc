@@ -1,6 +1,8 @@
 <script lang="ts">
   import { Tabs } from "bits-ui";
+  import { untrack } from "svelte";
 
+  import { journalFocus } from "../../data/journal-focus.svelte";
   import { t } from "../../data/locale.svelte";
   import GroupsView from "../../modules/groups/GroupsView.svelte";
   import JournalView from "../../modules/logs/JournalView.svelte";
@@ -31,6 +33,14 @@
 
   $effect(() => {
     lastActiveTab.current = active_tab;
+  });
+
+  let seenFocus = untrack(() => journalFocus.request?.seq ?? 0);
+  $effect(() => {
+    const request = journalFocus.request;
+    if (!request || request.seq <= seenFocus) return;
+    seenFocus = request.seq;
+    active_tab = "logs";
   });
 
   const toggleMenu = () => (isMenuOpen = !isMenuOpen);

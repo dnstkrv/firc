@@ -964,6 +964,10 @@ typedef struct {
 static bool g_live_hold;
 static bool g_live_cache;
 static _Atomic uint64_t g_cache_skew_ms;
+static _Atomic uint64_t g_health_ms;
+static bool g_live_health_clock;
+
+static uint64_t health_clock(void) { return atomic_load(&g_health_ms); }
 static _Atomic int g_live_hook_calls;
 
 static uint64_t skewed_ms(void) {
@@ -1038,6 +1042,7 @@ static bool live_start(live_t *lv) {
     firc_ip_t v6 = {.b = {0xfd, 0x00, 0x12, 0x34}, .len = 16};
     firc_dnsproxy_set_pool_prefixes(lv->proxy, &v4, 15, &v6, 48);
     if (g_live_rest_ms != 0) { firc_dnsproxy_set_health(lv->proxy, 0, g_live_rest_ms); }
+    if (g_live_health_clock) { firc_dnsproxy_set_health_clock_for_test(lv->proxy, health_clock); }
     if (firc_dnsproxy_start(lv->proxy) != FIRC_OK) {
         firc_dnsproxy_destroy(lv->proxy);
         stub_stop(&lv->c);
@@ -1065,6 +1070,7 @@ static void live_stop(live_t *lv) {
     g_live_max_concurrent = 0;
     g_live_rest_ms = 0;
     g_live_cache = false;
+    g_live_health_clock = false;
     atomic_store(&g_cache_skew_ms, 0);
 }
 
@@ -1992,6 +1998,7 @@ TEST an_owned_covered_query_goes_through_the_tunnel(void) {
 }
 
 static uint64_t live_fallbacks(live_t *lv);
+static bool live_health(live_t *lv, uint64_t gen, firc_dnsproxy_health_t *out);
 
 /* Catches: a tunnel datagram with another id or question delivered, or taken for a failure. */
 TEST a_tunnel_datagram_that_answers_another_query_is_ignored(void) {
@@ -2685,27 +2692,35 @@ TEST a_tunnel_answer_the_client_reads_slowly_is_not_asked_again(void) {
 typedef struct {
     firc_dnsproxy_t *proxy;
     firc_id_t id;
-    _Atomic uint64_t out;
+    uint64_t gen;
+    firc_dnsproxy_health_t out;
     _Atomic int done;
 } fb_t;
 
-static void fallbacks_on_loop(firc_loop_t *loop, void *ud) {
+static void health_on_loop(firc_loop_t *loop, void *ud) {
     (void)loop;
     fb_t *f = ud;
-    atomic_store(&f->out, firc_dnsproxy_group_fallbacks(f->proxy, f->id));
+    firc_dnsproxy_group_health(f->proxy, f->id, f->gen, &f->out);
     atomic_store(&f->done, 1);
 }
 
 /* The proxy's counters are loop state, so they are read on the loop. */
-static uint64_t live_fallbacks(live_t *lv) {
-    fb_t f = {.proxy = lv->proxy};
+static bool live_health(live_t *lv, uint64_t gen, firc_dnsproxy_health_t *out) {
+    fb_t f = {.proxy = lv->proxy, .gen = gen};
     f.id.b[3] = 7;
-    if (firc_loop_post(lv->loop, fallbacks_on_loop, &f) != FIRC_OK) { return UINT64_MAX; }
+    if (firc_loop_post(lv->loop, health_on_loop, &f) != FIRC_OK) { return false; }
     for (int i = 0; i < 200 && !atomic_load(&f.done); i++) {
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 10 * 1000000L};
         nanosleep(&ts, NULL);
     }
-    return atomic_load(&f.out);
+    if (!atomic_load(&f.done)) { return false; }
+    *out = f.out;
+    return true;
+}
+
+static uint64_t live_fallbacks(live_t *lv) {
+    firc_dnsproxy_health_t h;
+    return live_health(lv, g_troute.gen != 0 ? g_troute.gen : 1, &h) ? h.fallbacks : UINT64_MAX;
 }
 
 /* Catches: an unreachable resolver failing a query another resolver of the group answers. */
@@ -4534,6 +4549,245 @@ TEST a_hit_after_the_rest_ran_out_refreshes(void) {
     PASS();
 }
 
+static bool health_start(live_t *lv, uint64_t t0_ms, bool cache) {
+    tunnel_setup(0);
+    g_live_cache = cache;
+    g_live_health_clock = true;
+    atomic_store(&g_health_ms, t0_ms);
+    return live_start(lv);
+}
+
+static void health_at(uint64_t ms) { atomic_store(&g_health_ms, ms); }
+
+/* Catches: a tunnel answer not counted in total, a fallback not counted in both, or its reason and time not kept. */
+TEST health_counts_tunnel_and_fallback(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, false));
+    g_troute.ports[0] = lv.b.port;
+    for (int i = 0; i < 3; i++) { ASSERT_EQ(2, ask(lv.proxy_port, (uint16_t)(0xd100 + i))); }
+    g_troute.ports[0] = closed_udp_port();
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd110));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(4u, h.total);
+    ASSERT_EQ(1u, h.fallbacks);
+    ASSERT(h.has_last);
+    ASSERT_EQ(FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE, h.reason);
+    ASSERT_EQ(0u, h.last_ago_ms);
+    ASSERT_FALSE(h.resting);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: a health_skip not counted, or the rest run dated from its first failure instead of the one that closed the gate. */
+TEST health_skip_counts_as_fallback(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, false));
+    g_troute.ports[0] = closed_udp_port();
+    for (int i = 0; i < 3; i++) {
+        health_at(1000000 + (uint64_t)i * 1000);
+        ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0xd200 + i)));
+    }
+    health_at(1007000);
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd210));
+    ASSERT_EQm("resting: no tunnel attempt", 3, atomic_load(&g_rec.marks));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(4u, h.fallbacks);
+    ASSERT_EQ(4u, h.total);
+    ASSERT_EQ(FIRC_DNS_RESOLVER_HEALTH_SKIP, h.reason);
+    ASSERT(h.resting);
+    ASSERT_EQ(5000u, h.since_ago_ms);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: a cache hit counted as a query to the group resolver. */
+TEST health_cache_hit_counts_nothing(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, true));
+    g_troute.ports[0] = lv.b.port;
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd301));
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd302));
+    ASSERT_EQ(FIRC_DNS_RESOLVER_CACHE, atomic_load(&g_live_resolver));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(1u, h.total);
+    ASSERT_EQ(0u, h.fallbacks);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: a refresh's answer counted though no client asked. */
+TEST health_prefetch_counts_nothing(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, true));
+    g_troute.ports[0] = lv.b.port;
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd401));
+    atomic_store(&g_cache_skew_ms, 271000);
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd402));
+    ASSERT(await_replied(&lv.b, 2));
+    ASSERT(await_no_prefetch(&lv));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(1u, h.total);
+    ASSERT_EQ(0u, h.fallbacks);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: only the current bucket rotated on a read after a gap longer than the window. */
+TEST health_window_ages_out_after_gap(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 0, false));
+    g_troute.ports[0] = closed_udp_port();
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd501));
+    health_at(90000);
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd502));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(2u, h.fallbacks);
+    health_at(700000);
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(0u, h.total);
+    ASSERT_EQ(0u, h.fallbacks);
+    ASSERT_FALSE(h.has_last);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: a bucket reused ten minutes on keeping the counts of the minute it held before. */
+TEST health_reused_bucket_starts_empty(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 0, false));
+    g_troute.ports[0] = closed_udp_port();
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xdb01));
+    health_at(600000);
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xdb02));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(1u, h.total);
+    ASSERT_EQ(1u, h.fallbacks);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: the last fallback shown after its bucket left the window, or hidden while it is still in it. */
+TEST health_last_leaves_with_window(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 0, false));
+    g_troute.ports[0] = closed_udp_port();
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd601));
+    firc_dnsproxy_health_t h;
+    health_at(599000);
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT(h.has_last);
+    ASSERT_EQ(599000u, h.last_ago_ms);
+    ASSERT_EQ(FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE, h.reason);
+    ASSERT_EQ(1u, h.fallbacks);
+    health_at(601000);
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_FALSE(h.has_last);
+    ASSERT_EQ(0u, h.reason);
+    ASSERT_EQ(0u, h.fallbacks);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: the last fallback aged by its exact time instead of its bucket, outliving the count beside it. */
+TEST health_last_follows_its_bucket(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 59000, false));
+    g_troute.ports[0] = closed_udp_port();
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd701));
+    health_at(605000);
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_EQ(0u, h.fallbacks);
+    ASSERT_FALSE(h.has_last);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: resting read as the gate's condition, a failed probe restarting the run, or a good probe not ending it. */
+TEST health_resting_until_probe_answers(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, false));
+    g_troute.ports[0] = closed_udp_port();
+    for (int i = 0; i < 3; i++) { ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0xd800 + i))); }
+    health_at(1031000);
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT(h.resting);
+    ASSERT_EQ(31000u, h.since_ago_ms);
+    ASSERT_EQ(1, ask(lv.proxy_port, 0xd810));
+    ASSERT_EQm("the probe went through the tunnel", 4, atomic_load(&g_rec.marks));
+    health_at(1040000);
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT(h.resting);
+    ASSERT_EQ(40000u, h.since_ago_ms);
+    health_at(1062000);
+    g_troute.ports[0] = lv.b.port;
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd820));
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT_FALSE(h.resting);
+    ASSERT_EQ(0u, h.since_ago_ms);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: a rest of a generation the group has left read as resting, or the move losing the counts or the last fallback. */
+TEST health_old_generation_not_resting(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, false));
+    g_troute.gen = 1;
+    g_troute.ports[0] = closed_udp_port();
+    for (int i = 0; i < 3; i++) { ASSERT_EQ(1, ask(lv.proxy_port, (uint16_t)(0xd900 + i))); }
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 1, &h));
+    ASSERT(h.resting);
+    ASSERT(live_health(&lv, 2, &h));
+    ASSERT_FALSE(h.resting);
+    ASSERT_EQ(0u, h.since_ago_ms);
+    ASSERT_EQ(3u, h.fallbacks);
+    ASSERT_EQ(3u, h.total);
+    g_troute.gen = 2;
+    g_troute.ports[0] = lv.b.port;
+    ASSERT_EQ(2, ask(lv.proxy_port, 0xd910));
+    ASSERT(live_health(&lv, 2, &h));
+    ASSERT_EQ(4u, h.total);
+    ASSERT_EQ(3u, h.fallbacks);
+    ASSERT(h.has_last);
+    ASSERT_EQ(FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE, h.reason);
+    live_stop(&lv);
+    PASS();
+}
+
+/* Catches: an answer counted only when its generation is still the record's, dropping late answers after a move. */
+TEST health_counts_by_id_across_generations(void) {
+    live_t lv;
+    ASSERT(health_start(&lv, 1000000, false));
+    g_troute.gen = 1;
+    g_troute.ports[0] = lv.b.port;
+    atomic_store(&lv.b.hold, 1);
+    int c1 = ask_send(lv.proxy_port, 0xda01);
+    int c2 = ask_send(lv.proxy_port, 0xda02);
+    ASSERT(c1 >= 0 && c2 >= 0);
+    ASSERT(await_received(&lv.b, 1));
+    g_troute.gen = 2;
+    g_troute.ports[0] = lv.c.port;
+    ASSERT_EQ(3, ask(lv.proxy_port, 0xda10));
+    atomic_store(&lv.b.go, 1);
+    ASSERT_EQ(2, ask_read(c1));
+    ASSERT_EQ(2, ask_read(c2));
+    firc_dnsproxy_health_t h;
+    ASSERT(live_health(&lv, 2, &h));
+    ASSERT_EQ(3u, h.total);
+    ASSERT_EQ(0u, h.fallbacks);
+    live_stop(&lv);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
@@ -4663,6 +4917,17 @@ int main(int argc, char **argv)
     RUN_TEST(a_tcp_tunnel_answer_landing_after_its_pool_was_closed_is_not_cached);
     RUN_TEST(a_tcp_tunnel_answer_after_an_earlier_pool_close_is_cached);
     RUN_TEST(a_hit_after_the_rest_ran_out_refreshes);
+    RUN_TEST(health_counts_tunnel_and_fallback);
+    RUN_TEST(health_skip_counts_as_fallback);
+    RUN_TEST(health_cache_hit_counts_nothing);
+    RUN_TEST(health_prefetch_counts_nothing);
+    RUN_TEST(health_window_ages_out_after_gap);
+    RUN_TEST(health_reused_bucket_starts_empty);
+    RUN_TEST(health_last_leaves_with_window);
+    RUN_TEST(health_last_follows_its_bucket);
+    RUN_TEST(health_resting_until_probe_answers);
+    RUN_TEST(health_old_generation_not_resting);
+    RUN_TEST(health_counts_by_id_across_generations);
     RUN_TEST(a_port_another_socket_holds_is_named_with_its_reason);
     RUN_TEST(an_address_not_on_the_router_is_named);
     RUN_TEST(a_tcp_port_held_closes_the_udp_listener_and_names_tcp);

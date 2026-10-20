@@ -1,10 +1,11 @@
 import assert from "node:assert";
 import { describe, it } from "jsr:@std/testing@1.0.19/bdd";
 
+import ru from "../../src/locales/ru.json" with { type: "json" };
 import {
   autoEffectiveServers,
-  fallbackCountText,
   firmwareServersFor,
+  healthTag,
   isSavedAutoUnchanged,
   modeOf,
   resolveOf,
@@ -67,7 +68,7 @@ describe("the dialog's DNS choice", () => {
     assert.deepStrictEqual(
       autoEffectiveServers({
         isEditingSavedAuto: true,
-        resolver: { source: "firmware", servers: [], fallbacks: 0 },
+        resolver: { source: "firmware", servers: [], health: CALM },
         firmwareServers,
       }),
       [],
@@ -75,7 +76,7 @@ describe("the dialog's DNS choice", () => {
     assert.deepStrictEqual(
       autoEffectiveServers({
         isEditingSavedAuto: true,
-        resolver: { source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 },
+        resolver: { source: "firmware", servers: ["9.9.9.9"], health: CALM },
         firmwareServers,
       }),
       ["9.9.9.9"],
@@ -83,7 +84,7 @@ describe("the dialog's DNS choice", () => {
     assert.deepStrictEqual(
       autoEffectiveServers({
         isEditingSavedAuto: true,
-        resolver: { source: "none", servers: [], fallbacks: 0 },
+        resolver: { source: "none", servers: [], health: CALM },
         firmwareServers,
       }),
       firmwareServers,
@@ -95,7 +96,7 @@ describe("the dialog's DNS choice", () => {
     assert.deepStrictEqual(
       autoEffectiveServers({
         isEditingSavedAuto: false,
-        resolver: { source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 },
+        resolver: { source: "firmware", servers: ["9.9.9.9"], health: CALM },
         firmwareServers,
       }),
       firmwareServers,
@@ -118,42 +119,78 @@ describe("the dialog's DNS choice", () => {
 });
 
 const id = (s: string) => s;
+const toRu = (s: string) => (ru as Record<string, string>)[s] ?? s;
+const CALM = { window: 600, total: 0, fallbacks: 0, last: 0, reason: "", resting: false, since: 0 };
+const at = (h: number, m: number) => new Date(2026, 9, 20, h, m).getTime() / 1000;
+const firmware = (health: Partial<typeof CALM>, source = "firmware") =>
+  ({ source, servers: ["9.9.9.9"], health: { ...CALM, ...health } }) as any;
 
 describe("the panel's resolver tag", () => {
   // Catches hidden servers, "none"/"off" read as a tunnel, a tag with no report, or a zero count shown.
   it("says where the group's names are resolved", () => {
     assert.strictEqual(
-      resolverTag({ source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], fallbacks: 0 }, id),
+      resolverTag({ source: "firmware", servers: ["9.9.9.9", "1.0.0.1"], health: CALM }, id),
       "DNS 9.9.9.9, 1.0.0.1",
     );
     assert.strictEqual(
-      resolverTag({ source: "group", servers: ["[2620:fe::fe]:853"], fallbacks: 0 }, id),
+      resolverTag({ source: "group", servers: ["[2620:fe::fe]:853"], health: CALM }, id),
       "DNS [2620:fe::fe]:853",
     );
     assert.strictEqual(
-      resolverTag({ source: "none", servers: [], fallbacks: 0 }, id),
+      resolverTag({ source: "none", servers: [], health: CALM }, id),
       "DNS: common upstream",
     );
     assert.strictEqual(
-      resolverTag({ source: "off", servers: [], fallbacks: 0 }, id),
+      resolverTag({ source: "off", servers: [], health: CALM }, id),
       "DNS: not through the tunnel",
     );
     assert.strictEqual(
-      resolverTag({ source: "group", servers: [], fallbacks: 0 }, id),
+      resolverTag({ source: "group", servers: [], health: CALM }, id),
       "DNS: common upstream",
     );
     assert.strictEqual(resolverTag(undefined, id), null);
   });
+});
 
-  it("counts fallbacks only when there are some", () => {
+describe("the card's DNS health tag", () => {
+  // Catches a tag shown for no resolver, a calm window, or a group not asked through the tunnel.
+  it("shows nothing without a resolver, without failures, or with the resolver off", () => {
+    assert.strictEqual(healthTag(undefined, id), null);
+    assert.strictEqual(healthTag(firmware({ total: 40 }), id), null);
     assert.strictEqual(
-      fallbackCountText({ source: "firmware", servers: ["9.9.9.9"], fallbacks: 0 }, id),
+      healthTag(firmware({ total: 9, fallbacks: 4, last: at(14, 32) }, "off"), id),
       null,
     );
-    assert.strictEqual(
-      fallbackCountText({ source: "firmware", servers: ["9.9.9.9"], fallbacks: 12 }, id),
-      "fallbacks: 12",
+  });
+
+  // Catches the count, the total or the window minutes swapped or left unfilled.
+  it("reads the amber tag from the counts and the window", () => {
+    const tag = healthTag(
+      firmware({ total: 37, fallbacks: 4, last: at(14, 32), reason: "fallback_timeout" }),
+      toRu,
     );
-    assert.strictEqual(fallbackCountText(undefined, id), null);
+    assert.strictEqual(tag?.kind, "amber");
+    assert.strictEqual(tag?.text, "DNS группы сбоит: 4 из 37 за 10 мин");
+    assert.strictEqual(
+      tag?.tip,
+      "Последний сбой в 14:32: DNS группы не ответил вовремя, ответил общий upstream. Нажмите, чтобы открыть журнал группы.",
+    );
+    const wide = healthTag(firmware({ window: 1200, total: 5, fallbacks: 1, last: 1 }), id);
+    assert.ok(wide?.text.includes("in 20 min"));
+  });
+
+  // Catches a resting group staying amber, or the red tag waiting for a count.
+  it("goes red when the group rests, whatever the counts say", () => {
+    const tag = healthTag(firmware({ resting: true, since: at(9, 5) }), toRu);
+    assert.strictEqual(tag?.kind, "red");
+    assert.strictEqual(tag?.text, "DNS группы не отвечает");
+    assert.strictEqual(
+      tag?.tip,
+      "С 09:05 DNS группы не отвечает, на запросы отвечает общий upstream. firc проверяет его раз в 30 с. Нажмите, чтобы открыть журнал группы.",
+    );
+    assert.strictEqual(
+      healthTag(firmware({ resting: true, fallbacks: 3, total: 3 }), id)?.kind,
+      "red",
+    );
   });
 });

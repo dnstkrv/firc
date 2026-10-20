@@ -98,10 +98,31 @@ export const GroupResolveSchema = object({
 });
 export type GroupResolve = InferOutput<typeof GroupResolveSchema>;
 
+export const GroupResolverHealthSchema = object({
+  window: fallback(number(), 600),
+  total: fallback(number(), 0),
+  fallbacks: fallback(number(), 0),
+  last: fallback(number(), 0),
+  reason: fallback(string(), ""),
+  resting: fallback(boolean(), false),
+  since: fallback(number(), 0),
+});
+export type GroupResolverHealth = InferOutput<typeof GroupResolverHealthSchema>;
+
+const NO_HEALTH = (): GroupResolverHealth => ({
+  window: 600,
+  total: 0,
+  fallbacks: 0,
+  last: 0,
+  reason: "",
+  resting: false,
+  since: 0,
+});
+
 export const GroupResolverSchema = object({
   source: fallback(picklist(["group", "firmware", "none", "off"]), "none"),
   servers: fallback(array(string()), []),
-  fallbacks: fallback(number(), 0),
+  health: fallback(GroupResolverHealthSchema, NO_HEALTH),
 });
 export type GroupResolver = InferOutput<typeof GroupResolverSchema>;
 

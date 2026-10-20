@@ -63,8 +63,28 @@ void firc_dnsproxy_set_sock_ops(firc_dnsproxy_t *p, const firc_dnsproxy_sock_ops
 /* 0 keeps the default for either. */
 void firc_dnsproxy_set_health(firc_dnsproxy_t *p, unsigned fails, uint32_t rest_ms);
 
-/* Fallbacks to the common upstream since start. Loop thread. */
-uint64_t firc_dnsproxy_group_fallbacks(const firc_dnsproxy_t *p, firc_id_t group_id);
+#define FIRC_DNSPROXY_HEALTH_WINDOW_S 600u
+
+typedef struct firc_dnsproxy_health {
+    uint64_t total, fallbacks;
+    uint64_t last_ago_ms;
+    bool has_last;
+    uint8_t reason;
+    bool resting;
+    uint64_t since_ago_ms;
+} firc_dnsproxy_health_t;
+
+/* The group's last FIRC_DNSPROXY_HEALTH_WINDOW_S; last_ago_ms and reason (a firc_dns_resolver_t) hold
+ * when has_last, since_ago_ms when resting on `gen`. Zeros for an unknown group. Loop thread. */
+void firc_dnsproxy_group_health(const firc_dnsproxy_t *p, firc_id_t group_id, uint64_t gen,
+                                firc_dnsproxy_health_t *out);
+
+/* Tests only: the clock of the health gate and window. NULL restores the monotonic one. */
+void firc_dnsproxy_set_health_clock_for_test(firc_dnsproxy_t *p, uint64_t (*now_ms)(void));
+
+/* Tests only: the health getter answers *h for (id, gen) until replaced; NULL clears. */
+void firc_dnsproxy_set_group_health_for_test(firc_dnsproxy_t *p, firc_id_t id, uint64_t gen,
+                                             const firc_dnsproxy_health_t *h);
 
 /* Closes idle tunnel sockets now and in-flight ones on return; health stays. Loop thread. */
 void firc_dnsproxy_close_group_pools(firc_dnsproxy_t *p, firc_id_t group_id);

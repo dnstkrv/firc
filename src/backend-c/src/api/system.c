@@ -93,22 +93,6 @@ static const char *bypass_how_name(uint8_t how) {
     return "addr";
 }
 
-/* an unknown byte (a newer daemon's) reads as upstream */
-static const char *resolver_name(uint8_t r) {
-    switch ((firc_dns_resolver_t)r) {
-    case FIRC_DNS_RESOLVER_UPSTREAM: return "upstream";
-    case FIRC_DNS_RESOLVER_GROUP: return "group";
-    case FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE: return "fallback_unreachable";
-    case FIRC_DNS_RESOLVER_FALLBACK_TIMEOUT: return "fallback_timeout";
-    case FIRC_DNS_RESOLVER_FALLBACK_SERVFAIL: return "fallback_servfail";
-    case FIRC_DNS_RESOLVER_FALLBACK_REFUSED: return "fallback_refused";
-    case FIRC_DNS_RESOLVER_FALLBACK_SINK: return "fallback_sink";
-    case FIRC_DNS_RESOLVER_HEALTH_SKIP: return "health_skip";
-    case FIRC_DNS_RESOLVER_CACHE: return "cache";
-    }
-    return "upstream";
-}
-
 static void dns_to_json(cJSON *item, const firc_event_dns_t *d) {
     char tmp[16];
     put_ip(item, "client", &d->client);
@@ -116,7 +100,7 @@ static void dns_to_json(cJSON *item, const firc_event_dns_t *d) {
     cJSON_AddStringToObject(item, "qtype", qtype_name(d->qtype, tmp, sizeof(tmp)));
     cJSON_AddStringToObject(item, "rcode", rcode_name(d->rcode, tmp, sizeof(tmp)));
     cJSON_AddStringToObject(item, "decision", decision_name(d->decision));
-    cJSON_AddStringToObject(item, "resolver", resolver_name(d->resolver));
+    cJSON_AddStringToObject(item, "resolver", firc_dns_resolver_name(d->resolver));
     if (d->group_id[0] != '\0') {
         cJSON *g = cJSON_AddObjectToObject(item, "group");
         if (g != NULL) {

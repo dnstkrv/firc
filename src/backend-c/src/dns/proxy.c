@@ -39,14 +39,25 @@ typedef struct tunnel_pool {
     sock_pool_t pool;
 } tunnel_pool_t;
 
+#define HEALTH_BUCKETS 10u
+#define HEALTH_BUCKET_MS (FIRC_DNSPROXY_HEALTH_WINDOW_S * 1000u / HEALTH_BUCKETS)
+
+typedef struct health_bucket {
+    uint64_t minute;
+    uint32_t total, fallbacks;
+} health_bucket_t;
+
 typedef struct group_health {
     firc_id_t id;
     uint64_t gen;
     size_t preferred;
     unsigned fails;
     uint64_t rest_until_ms; /* 0: not resting */
+    uint64_t rest_start_ms;
     bool probing;
-    uint64_t fallbacks;
+    health_bucket_t buckets[HEALTH_BUCKETS];
+    uint64_t last_ms;
+    uint8_t last_reason;
 } group_health_t;
 
 struct firc_dnsproxy {
@@ -79,9 +90,14 @@ struct firc_dnsproxy {
     uint32_t ptr_ttl;
     firc_anscache_t *cache;
     uint64_t (*cache_now)(void);
+    uint64_t (*health_clock)(void);
 
     group_health_t *health;
     size_t n_health, cap_health;
+    bool health_planted;
+    firc_id_t planted_id;
+    uint64_t planted_gen;
+    firc_dnsproxy_health_t planted;
     unsigned health_fails;
     uint32_t health_rest_ms;
 
@@ -333,6 +349,42 @@ static bool id_same(firc_id_t a, firc_id_t b)
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
+static uint64_t health_now(const firc_dnsproxy_t *p)
+{
+    return p->health_clock();
+}
+
+static bool health_in_window(uint64_t minute, uint64_t now_minute)
+{
+    return minute + HEALTH_BUCKETS - 1u >= now_minute;
+}
+
+static health_bucket_t *health_bucket(group_health_t *h, uint64_t now)
+{
+    uint64_t minute = now / HEALTH_BUCKET_MS;
+    health_bucket_t *b = &h->buckets[minute % HEALTH_BUCKETS];
+    if (b->minute != minute) {
+        b->minute = minute;
+        b->total = 0;
+        b->fallbacks = 0;
+    }
+    return b;
+}
+
+static void health_answered(group_health_t *h, uint64_t now)
+{
+    health_bucket(h, now)->total++;
+}
+
+static void health_fell_back(group_health_t *h, uint64_t now, firc_dns_resolver_t why)
+{
+    health_bucket_t *b = health_bucket(h, now);
+    b->total++;
+    b->fallbacks++;
+    h->last_ms = now;
+    h->last_reason = (uint8_t)why;
+}
+
 static group_health_t *health_for(firc_dnsproxy_t *p, firc_id_t id, uint64_t gen)
 {
     group_health_t *h = NULL;
@@ -353,23 +405,15 @@ static group_health_t *health_for(firc_dnsproxy_t *p, firc_id_t id, uint64_t gen
         h->gen = gen;
     }
     if (h->gen != gen) {
-        uint64_t keep = h->fallbacks;
+        group_health_t keep = *h;
         memset(h, 0, sizeof(*h));
         h->id = id;
         h->gen = gen;
-        h->fallbacks = keep;
+        memcpy(h->buckets, keep.buckets, sizeof(h->buckets));
+        h->last_ms = keep.last_ms;
+        h->last_reason = keep.last_reason;
     }
     return h;
-}
-
-static void health_fallback_counted(firc_dnsproxy_t *p, firc_id_t id)
-{
-    for (size_t i = 0; i < p->n_health; i++) {
-        if (id_same(p->health[i].id, id)) {
-            p->health[i].fallbacks++;
-            return;
-        }
-    }
 }
 
 /* Never creates or resets: an outcome belongs to the exchange's own generation. */
@@ -379,6 +423,12 @@ static group_health_t *health_lookup(firc_dnsproxy_t *p, firc_id_t id)
         if (id_same(p->health[i].id, id)) { return &p->health[i]; }
     }
     return NULL;
+}
+
+static void health_fallback_counted(firc_dnsproxy_t *p, firc_id_t id, firc_dns_resolver_t why)
+{
+    group_health_t *h = health_lookup(p, id);
+    if (h != NULL) { health_fell_back(h, health_now(p), why); }
 }
 
 static void health_failure(firc_dnsproxy_t *p, exchange_t *ex)
@@ -399,7 +449,9 @@ static void health_failure(firc_dnsproxy_t *p, exchange_t *ex)
                       "to the common upstream until one query every %u s finds it answering",
                       g[0], g[1], g[2], g[3], h->fails, (unsigned)(p->health_rest_ms / 1000u));
         }
-        h->rest_until_ms = mono_ms() + p->health_rest_ms;
+        uint64_t now = health_now(p);
+        if (h->rest_until_ms == 0) { h->rest_start_ms = now; }
+        h->rest_until_ms = now + p->health_rest_ms;
         h->probing = false;
     }
 }
@@ -412,6 +464,7 @@ static bool health_success(firc_dnsproxy_t *p, exchange_t *ex)
     bool was_resting = h->rest_until_ms != 0;
     h->fails = 0;
     h->rest_until_ms = 0;
+    h->rest_start_ms = 0;
     h->probing = false;
     if (was_resting) { FIRC_INFO("group resolver: answering again; the group's names go through its tunnel"); }
     return true;
@@ -423,12 +476,35 @@ void firc_dnsproxy_set_health(firc_dnsproxy_t *p, unsigned fails, uint32_t rest_
     p->health_rest_ms = rest_ms ? rest_ms : FIRC_RESOLVE_HEALTH_SKIP_MS;
 }
 
-uint64_t firc_dnsproxy_group_fallbacks(const firc_dnsproxy_t *p, firc_id_t group_id)
+void firc_dnsproxy_group_health(const firc_dnsproxy_t *p, firc_id_t group_id, uint64_t gen,
+                                firc_dnsproxy_health_t *out)
 {
-    for (size_t i = 0; i < p->n_health; i++) {
-        if (id_same(p->health[i].id, group_id)) { return p->health[i].fallbacks; }
+    memset(out, 0, sizeof(*out));
+    if (p->health_planted && id_same(p->planted_id, group_id) && p->planted_gen == gen) {
+        *out = p->planted;
+        return;
     }
-    return 0;
+    const group_health_t *h = NULL;
+    for (size_t i = 0; i < p->n_health && h == NULL; i++) {
+        if (id_same(p->health[i].id, group_id)) { h = &p->health[i]; }
+    }
+    if (h == NULL) { return; }
+    uint64_t now = health_now(p);
+    uint64_t minute = now / HEALTH_BUCKET_MS;
+    for (size_t i = 0; i < HEALTH_BUCKETS; i++) {
+        if (!health_in_window(h->buckets[i].minute, minute)) { continue; }
+        out->total += h->buckets[i].total;
+        out->fallbacks += h->buckets[i].fallbacks;
+    }
+    if (h->last_reason != 0 && health_in_window(h->last_ms / HEALTH_BUCKET_MS, minute)) {
+        out->has_last = true;
+        out->last_ago_ms = now > h->last_ms ? now - h->last_ms : 0;
+        out->reason = h->last_reason;
+    }
+    if (h->gen == gen && h->rest_until_ms != 0) {
+        out->resting = true;
+        out->since_ago_ms = now > h->rest_start_ms ? now - h->rest_start_ms : 0;
+    }
 }
 
 static bool server_same(const tunnel_pool_t *t, const firc_dnsproxy_route_t *rt, size_t server)
@@ -934,6 +1010,10 @@ static void deliver_parsed(exchange_t *ex, firc_dns_msg_t *msg, const uint8_t *r
 static void tunnel_won(exchange_t *ex, const firc_dns_msg_t *msg, const uint8_t *resp, size_t resp_len)
 {
     firc_dnsproxy_t *p = ex->p;
+    if (!ex->prefetch) {
+        group_health_t *h = health_lookup(p, ex->route.group_id);
+        if (h != NULL) { health_answered(h, health_now(p)); }
+    }
     if (health_success(p, ex) && ex->cacheable) {
         (void)firc_anscache_put(p->cache, &ex->ckey, resp, resp_len, firc_anscache_lifetime(msg), p->cache_now());
     }
@@ -1265,7 +1345,7 @@ static void tunnel_failed(exchange_t *ex, firc_dns_resolver_t why)
         return;
     }
     health_failure(p, ex);
-    health_fallback_counted(p, ex->route.group_id);
+    health_fallback_counted(p, ex->route.group_id, why);
     ex->resolver = (uint8_t)why;
     start_upstream(p, ex);
 }
@@ -1383,7 +1463,7 @@ static void prefetch_start(firc_dnsproxy_t *p, const exchange_t *src)
 {
     group_health_t *h = health_lookup(p, src->route.group_id);
     bool own = h != NULL && h->gen == src->route.gen;
-    uint64_t now = mono_ms();
+    uint64_t now = health_now(p);
     bool gated = own && h->rest_until_ms != 0 && (now < h->rest_until_ms || h->probing);
     exchange_t *ex = (p->n_prefetch < FIRC_DNSPROXY_MAX_PREFETCH && !gated) ? calloc(1, sizeof(*ex)) : NULL;
     uint8_t *req = ex != NULL ? malloc(src->req_len) : NULL;
@@ -1513,11 +1593,11 @@ static request_disp_t handle_request_common(firc_dnsproxy_t *p, exchange_t *ex)
                 free(hit.wire);
             }
             group_health_t *h = health_for(p, rt.group_id, rt.gen);
-            uint64_t now = mono_ms();
+            uint64_t now = health_now(p);
             bool resting = h != NULL && h->rest_until_ms != 0 && (now < h->rest_until_ms || h->probing);
             if (resting) {
                 ex->resolver = FIRC_DNS_RESOLVER_HEALTH_SKIP;
-                h->fallbacks++;
+                health_fell_back(h, now, FIRC_DNS_RESOLVER_HEALTH_SKIP);
             } else {
                 if (h != NULL && h->rest_until_ms != 0) {
                     h->probing = true;
@@ -1766,6 +1846,7 @@ firc_err_t firc_dnsproxy_create(const firc_dnsproxy_config_t *cfg, firc_loop_t *
     }
     p->cfg.upstream_addr = p->upstream_addr;
     p->cache_now = mono_ms;
+    p->health_clock = mono_ms;
     p->cache = firc_anscache_new(FIRC_ANSCACHE_ENTRIES, FIRC_ANSCACHE_BYTES);
 
     int fam_listen;
@@ -1956,6 +2037,20 @@ void firc_dnsproxy_set_cache(firc_dnsproxy_t *p, size_t max_entries, size_t max_
 void firc_dnsproxy_set_cache_clock_for_test(firc_dnsproxy_t *p, uint64_t (*now_ms)(void))
 {
     p->cache_now = now_ms != NULL ? now_ms : mono_ms;
+}
+
+void firc_dnsproxy_set_health_clock_for_test(firc_dnsproxy_t *p, uint64_t (*now_ms)(void))
+{
+    p->health_clock = now_ms != NULL ? now_ms : mono_ms;
+}
+
+void firc_dnsproxy_set_group_health_for_test(firc_dnsproxy_t *p, firc_id_t id, uint64_t gen,
+                                             const firc_dnsproxy_health_t *h)
+{
+    p->health_planted = h != NULL;
+    p->planted_id = id;
+    p->planted_gen = gen;
+    if (h != NULL) { p->planted = *h; }
 }
 
 size_t firc_dnsproxy_prefetching(const firc_dnsproxy_t *p)

@@ -1,3 +1,4 @@
+import type { GroupResolver } from "../../types";
 import type { IfaceState } from "./iface-list";
 
 export type LiveReason =
@@ -13,6 +14,7 @@ export type GroupLive = {
   liveReason?: LiveReason;
   active?: string;
   interfaces?: IfaceState[];
+  resolver?: GroupResolver;
 };
 
 export function liveOfRecord(record: any): GroupLive | null {
@@ -22,6 +24,7 @@ export function liveOfRecord(record: any): GroupLive | null {
     liveReason: record.live ? undefined : record.liveReason,
     ...(record.active !== undefined && { active: record.active }),
     ...(record.interfaces !== undefined && { interfaces: record.interfaces }),
+    ...(record.resolver !== undefined && { resolver: record.resolver }),
   };
 }
 

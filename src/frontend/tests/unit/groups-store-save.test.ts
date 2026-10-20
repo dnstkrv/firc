@@ -571,7 +571,7 @@ describe("a group's resolve", () => {
           {
             ...makeGroup(id),
             resolve: { tunnel: true, server: "9.9.9.9" },
-            resolver: { source: "group", servers: ["9.9.9.9"], fallbacks: 0 },
+            resolver: { source: "group", servers: ["9.9.9.9"] },
           },
         ],
       },
@@ -580,7 +580,7 @@ describe("a group's resolve", () => {
       const store = new GroupsStore();
       const group = {
         ...makeGroup(id),
-        resolver: { source: "none", servers: [], fallbacks: 3 },
+        resolver: { source: "none", servers: [] },
       } as any;
       seed(store, [group]);
       store.updateGroupFromDialog(0, {
@@ -665,7 +665,7 @@ describe("a group's resolve", () => {
     const source = {
       ...makeGroup("5e5e0004"),
       resolve: { tunnel: false, server: "1.1.1.1" },
-      resolver: { source: "off", servers: [], fallbacks: 9 },
+      resolver: { source: "off", servers: [] },
     } as any;
     const copy = cloneGroupWithNewIds(source) as any;
     assert.deepStrictEqual(copy.resolve, { tunnel: false, server: "1.1.1.1" });
@@ -679,7 +679,7 @@ describe("a group's resolve", () => {
     const source = {
       ...makeGroup("5e5e0005"),
       resolve: { tunnel: false, server: "1.1.1.1" },
-      resolver: { source: "off", servers: [], fallbacks: 9 },
+      resolver: { source: "off", servers: [] },
     } as any;
     const [copy] = (await cloneGroupsWithNewIds([source])) as any[];
     assert.deepStrictEqual(copy.resolve, { tunnel: false, server: "1.1.1.1" });

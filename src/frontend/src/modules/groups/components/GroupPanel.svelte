@@ -9,6 +9,7 @@
   import Switch from "../../../components/ui/Switch.svelte";
   import Tooltip from "../../../components/ui/Tooltip.svelte";
   import { hosts } from "../../../data/hosts.svelte";
+  import { journalFocus } from "../../../data/journal-focus.svelte";
   import { locale, t } from "../../../data/locale.svelte";
   import { policies } from "../../../data/policies.svelte";
   import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
@@ -41,7 +42,7 @@
   import { coverageLabel } from "../../../utils/device-picker";
   import { counted } from "../../../utils/plural";
   import { type SortDirection } from "../../../utils/rule-sorter";
-  import { fallbackCountText, resolverTag } from "../resolve-choice";
+  import { healthTag, resolverTag } from "../resolve-choice";
 
   type Props = {
     group_index: number;
@@ -90,7 +91,9 @@
 
   let hasList = $derived(Boolean(group?.list));
   let resolverTagText = $derived(resolverTag(group?.resolver, t));
-  let fallbackText = $derived(fallbackCountText(group?.resolver, t));
+  let dnsHealth = $derived(
+    healthTag((group && store.liveOf(group.id)?.resolver) ?? group?.resolver, t),
+  );
   let listSaved = $derived(group ? store.listSaved(group.id) : false);
   let ownRulesCount = $derived(group?.rules.length ?? 0);
 
@@ -418,13 +421,14 @@
               {#if resolverTagText}
                 <span class="resolver-badge" title={resolverTagText}>{resolverTagText}</span>
               {/if}
-              {#if fallbackText}
-                <span
-                  class="fallback-badge"
-                  title={t(
-                    "Queries sent to the common upstream instead of the group's DNS since the daemon started",
-                  )}>{fallbackText}</span
-                >
+              {#if dnsHealth}
+                <Tooltip value={dnsHealth.tip}>
+                  <button
+                    type="button"
+                    class="health-badge {dnsHealth.kind}"
+                    onclick={() => journalFocus.open(group.id)}>{dnsHealth.text}</button
+                  >
+                </Tooltip>
               {/if}
             </div>
             {#if group.list}
@@ -822,7 +826,7 @@
   }
 
   .resolver-badge,
-  .fallback-badge {
+  .health-badge {
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
@@ -839,7 +843,18 @@
     color: var(--text-2);
   }
 
-  .fallback-badge {
+  .health-badge {
+    border: 0;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .health-badge.amber {
+    background: color-mix(in oklab, var(--orange) 18%, transparent);
+    color: var(--orange);
+  }
+
+  .health-badge.red {
     background: color-mix(in oklab, var(--red) 18%, transparent);
     color: var(--red);
   }
@@ -1125,7 +1140,7 @@
     }
 
     .resolver-badge,
-    .fallback-badge {
+    .health-badge {
       max-width: 100%;
     }
 

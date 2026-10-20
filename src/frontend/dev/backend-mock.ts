@@ -35,21 +35,22 @@ const RESOLVERS = {
   ],
 };
 
-/* Fallbacks since "start", so the panel's count has something to show. */
-const FALLBACKS: Record<string, number> = {};
+const NOW = () => Math.floor(Date.now() / 1000);
+const CALM = { window: 600, total: 0, fallbacks: 0, last: 0, reason: "", resting: false, since: 0 };
+const FLAKY: Record<string, any> = {};
 
 function resolverOf(group: any, active: string) {
   const resolve = group.resolve ?? { tunnel: true, server: "" };
-  const fallbacks = FALLBACKS[group.id] ?? 0;
+  const health = FLAKY[group.id] ?? CALM;
   const live = (servers: string[]) => (group.enable === false ? [] : servers);
-  if (!resolve.tunnel) return { source: "off", servers: [], fallbacks };
-  if (active === "blackhole") return { source: "none", servers: [], fallbacks };
+  if (!resolve.tunnel) return { source: "off", servers: [], health: CALM };
+  if (active === "blackhole") return { source: "none", servers: [], health: CALM };
   if (resolve.server)
-    return { source: "group", servers: live(serverEntries(resolve.server)), fallbacks };
+    return { source: "group", servers: live(serverEntries(resolve.server)), health };
   const fw = RESOLVERS.resolvers.find((r) => r.interface === active)?.servers ?? [];
   return fw.length
-    ? { source: "firmware", servers: live(fw), fallbacks }
-    : { source: "none", servers: [], fallbacks };
+    ? { source: "firmware", servers: live(fw), health }
+    : { source: "none", servers: [], health: CALM };
 }
 
 function serverEntries(server: string): string[] {
@@ -110,7 +111,17 @@ function loadGroups() {
 }
 
 const DATA = loadGroups();
-if (DATA.groups[0]) FALLBACKS[DATA.groups[0].id] = 3;
+if (DATA.groups[0]) {
+  FLAKY[DATA.groups[0].id] = {
+    window: 600,
+    total: 37,
+    fallbacks: 4,
+    last: NOW() - 90,
+    reason: "fallback_timeout",
+    resting: false,
+    since: 0,
+  };
+}
 
 if (!DATA.groups.some((g: any) => g.id === "a1b2c3d4")) {
   DATA.groups.push({

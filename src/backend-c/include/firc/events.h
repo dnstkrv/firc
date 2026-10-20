@@ -45,6 +45,9 @@ typedef enum firc_dns_resolver {
     FIRC_DNS_RESOLVER_CACHE,
 } firc_dns_resolver_t;
 
+/* The journal's string for a firc_dns_resolver_t; an unknown byte (a newer daemon's) reads as upstream. */
+const char *firc_dns_resolver_name(uint8_t r);
+
 typedef enum firc_bypass_how { FIRC_BYPASS_BY_ADDR = 0, FIRC_BYPASS_BY_SNI } firc_bypass_how_t;
 
 /* No recorded answer for (client, name) within the recall horizon. */

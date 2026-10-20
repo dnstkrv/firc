@@ -1,10 +1,14 @@
+import type { DnsResolverSource } from "../../data/events.svelte";
+
 import {
   DEFAULT_RESOLVE,
   type GroupResolve,
   type GroupResolver,
   type SystemResolvers,
 } from "../../types";
+import { resolverNote } from "../logs/journal";
 import { ifaceList } from "./iface-list";
+import { clockMinutes } from "./live-state";
 
 export type DnsMode = "auto" | "own" | "off";
 
@@ -74,10 +78,30 @@ export function resolverTag(r: GroupResolver | undefined, t: (s: string) => stri
   return `${t("DNS")} ${r.servers.join(", ")}`;
 }
 
-export function fallbackCountText(
+export type HealthTag = { kind: "amber" | "red"; text: string; tip: string };
+
+export function healthTag(
   r: GroupResolver | undefined,
   t: (s: string) => string,
-): string | null {
-  if (!r || r.fallbacks <= 0) return null;
-  return t("fallbacks: {n}").replace("{n}", String(r.fallbacks));
+): HealthTag | null {
+  if (!r || r.source === "off") return null;
+  const h = r.health;
+  const open = t("Click to open the group's journal.");
+  if (h.resting) {
+    return {
+      kind: "red",
+      text: t("The group's DNS is not answering"),
+      tip: `${t("Since {time} the group's DNS is not answering, the common upstream answers. firc checks it every 30 s.").replace("{time}", clockMinutes(h.since))} ${open}`,
+    };
+  }
+  if (h.fallbacks <= 0) return null;
+  const note = resolverNote(h.reason as DnsResolverSource, t);
+  return {
+    kind: "amber",
+    text: t("The group's DNS is failing: {fallbacks} of {total} in {minutes} min")
+      .replace("{fallbacks}", String(h.fallbacks))
+      .replace("{total}", String(h.total))
+      .replace("{minutes}", String(Math.round(h.window / 60))),
+    tip: `${t("Last failure at {time}: {note}.").replace("{time}", clockMinutes(h.last)).replace("{note}", note)} ${open}`,
+  };
 }

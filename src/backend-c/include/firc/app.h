@@ -51,6 +51,7 @@ typedef struct firc_app_deps {
     unsigned (*iface_index)(const char *name); /* NULL takes if_nametoindex */
     int64_t capture_seconds; /* 0 takes FIRC_CAPTURE_SECONDS */
     uint64_t (*mono_ms)(void); /* NULL takes CLOCK_MONOTONIC */
+    int64_t (*wall_s)(void); /* NULL takes time() */
     const char *config_path; /* nullable; NULL means write nothing */
     const char *config_version;
 } firc_app_deps_t;
@@ -67,7 +68,8 @@ typedef struct firc_app_resolver_info {
     firc_resolve_source_t source;
     size_t n_servers;
     firc_resolver_addr_t servers[FIRC_RESOLVE_MAX_SERVERS];
-    uint64_t fallbacks;
+    firc_dnsproxy_health_t health;
+    int64_t wall_s;
 } firc_app_resolver_info_t;
 void firc_app_group_resolver(const firc_app_t *app, const firc_group_t *g, firc_app_resolver_info_t *out);
 

@@ -189,3 +189,19 @@ void firc_event_reset_for_test(void)
     for (size_t r = 0; r < N_LOG_RINGS; r++) { g_logs[r].head = g_logs[r].used = 0; }
     pthread_mutex_unlock(&g_mu);
 }
+
+const char *firc_dns_resolver_name(uint8_t r)
+{
+    switch ((firc_dns_resolver_t)r) {
+    case FIRC_DNS_RESOLVER_UPSTREAM: return "upstream";
+    case FIRC_DNS_RESOLVER_GROUP: return "group";
+    case FIRC_DNS_RESOLVER_FALLBACK_UNREACHABLE: return "fallback_unreachable";
+    case FIRC_DNS_RESOLVER_FALLBACK_TIMEOUT: return "fallback_timeout";
+    case FIRC_DNS_RESOLVER_FALLBACK_SERVFAIL: return "fallback_servfail";
+    case FIRC_DNS_RESOLVER_FALLBACK_REFUSED: return "fallback_refused";
+    case FIRC_DNS_RESOLVER_FALLBACK_SINK: return "fallback_sink";
+    case FIRC_DNS_RESOLVER_HEALTH_SKIP: return "health_skip";
+    case FIRC_DNS_RESOLVER_CACHE: return "cache";
+    }
+    return "upstream";
+}

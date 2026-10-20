@@ -21,6 +21,8 @@
 #include "firc/app.h"
 #include "firc/conntrack.h"
 #include "firc/dnspipeline.h"
+#include "firc/dnsproxy.h"
+#include "firc/events.h"
 #include "firc/mark.h"
 #include "firc/fakeip.h"
 #include "firc/groups.h"
@@ -37,6 +39,7 @@ typedef struct harness {
     firc_app_t *app;
     firc_groups_ctx_t ctx;
     firc_resolve_router_t *router;
+    firc_dnsproxy_t *proxy;
     pthread_t thread;
     firc_fake_ipt_t *fipt;
     firc_ipt_t *ipt;
@@ -56,6 +59,20 @@ static void *loop_thread(void *ud) {
 
 static harness_t *live_harness;
 
+#define TEST_WALL_S 1792485000
+
+static int64_t fixed_wall_s(void) { return TEST_WALL_S; }
+
+static firc_dns_verdict_t pass_hook(firc_dns_msg_t *msg, const firc_ip_t *client, const char *network,
+                                    firc_dns_resolver_t resolver, void *ud) {
+    (void)msg;
+    (void)client;
+    (void)network;
+    (void)resolver;
+    (void)ud;
+    return FIRC_DNS_PASS;
+}
+
 static harness_t *harness_start_with_kernels(bool kernels);
 static harness_t *harness_start(void) { return harness_start_with_kernels(false); }
 
@@ -70,7 +87,13 @@ static harness_t *harness_start_with_kernels(bool kernels) {
     if (firc_fakeip_new(&pc, &h->pool) != FIRC_OK) { abort(); }
     firc_dns_pipeline_set_pool(h->pipeline, h->pool, 300);
     h->router = firc_resolve_router_new(h->pipeline);
-    firc_app_deps_t deps = {.cfg = &h->cfg, .pipeline = h->pipeline, .pool = h->pool, .router = h->router};
+    if (firc_loop_create(&h->loop) != FIRC_OK) { return NULL; }
+    firc_dnsproxy_config_t pcfg = {.listen_addr = "127.0.0.1", .listen_port = 1,
+                                   .upstream_addr = "127.0.0.1", .upstream_port = 53,
+                                   .timeout_ms = 1000, .max_concurrent = 4, .max_idle_conns = 2};
+    if (firc_dnsproxy_create(&pcfg, h->loop, pass_hook, NULL, &h->proxy) != FIRC_OK) { return NULL; }
+    firc_app_deps_t deps = {.cfg = &h->cfg, .pipeline = h->pipeline, .pool = h->pool, .router = h->router,
+                            .proxy = h->proxy, .wall_s = fixed_wall_s};
     if (kernels) {
         h->fipt = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV4);
         h->ipt = firc_ipt_new(firc_fake_ipt_as_xt(h->fipt), "FIRC_");
@@ -90,7 +113,6 @@ static harness_t *harness_start_with_kernels(bool kernels) {
     h->ctx.config_path = NULL;
     h->ctx.config_version = NULL;
 
-    if (firc_loop_create(&h->loop) != FIRC_OK) { return NULL; }
     if (firc_httpd_create(h->loop, &h->tcp) != FIRC_OK) { return NULL; }
     firc_groups_register_routes(h->tcp, &h->ctx);
     if (firc_httpd_listen_tcp(h->tcp, "127.0.0.1", TEST_PORT) != FIRC_OK) { return NULL; }
@@ -105,8 +127,9 @@ static void harness_stop(harness_t *h) {
     firc_loop_stop(h->loop);
     pthread_join(h->thread, NULL);
     firc_httpd_destroy(h->tcp);
-    firc_loop_destroy(h->loop);
     firc_app_destroy(h->app);
+    firc_dnsproxy_destroy(h->proxy);
+    firc_loop_destroy(h->loop);
     firc_resolve_router_free(h->router);
     if (h->ct) { firc_ct_close(h->ct); }
     if (h->ctk) { fake_ct_stop(h->ctk); }
@@ -1566,7 +1589,6 @@ TEST a_groups_resolve_round_trips_and_its_resolver_is_shown(void) {
     cJSON *rv = cJSON_GetObjectItemCaseSensitive(out, "resolver");
     ASSERT_STR_EQ("none", cJSON_GetObjectItemCaseSensitive(rv, "source")->valuestring);
     ASSERT_EQ(0, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(rv, "servers")));
-    ASSERT_EQ(0, cJSON_GetObjectItemCaseSensitive(rv, "fallbacks")->valueint);
     cJSON_Delete(out);
 
     ASSERT_EQ(200, do_request("PUT", "/api/v1/groups/0a1b2c3d",
@@ -1758,6 +1780,139 @@ TEST a_put_group_keeps_its_route_marked(void) {
 
 static bool has_key(cJSON *obj, const char *key) {
     return cJSON_GetObjectItemCaseSensitive(obj, key) != NULL;
+}
+
+static uint64_t route_gen(harness_t *h, const char *id_str) {
+    firc_id_t id;
+    firc_resolve_route_t r;
+    if (firc_id_parse(id_str, &id) != FIRC_OK || !firc_resolve_router_route(h->router, id, &r)) { return 0; }
+    return r.gen;
+}
+
+static void plant_health(harness_t *h, const char *id_str, const firc_dnsproxy_health_t *hl) {
+    firc_id_t id;
+    if (firc_id_parse(id_str, &id) != FIRC_OK) { abort(); }
+    firc_dnsproxy_set_group_health_for_test(h->proxy, id, route_gen(h, id_str), hl);
+}
+
+static cJSON *group_health(const char *id_str, cJSON **out) {
+    char path[64];
+    snprintf(path, sizeof(path), "/api/v1/groups/%s", id_str);
+    if (do_request("GET", path, NULL, out) != 200) { return NULL; }
+    return cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(*out, "resolver"), "health");
+}
+
+static double jnum(cJSON *obj, const char *key) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(v) ? v->valuedouble : -1;
+}
+
+static const firc_dnsproxy_health_t failing = {.total = 37, .fallbacks = 4, .last_ago_ms = 60000, .has_last = true,
+                                               .reason = FIRC_DNS_RESOLVER_FALLBACK_TIMEOUT, .resting = true,
+                                               .since_ago_ms = 120000};
+
+/* Catches: health read for a group whose resolver is off or has no servers, so old fallbacks still warn. */
+TEST group_json_health_zeros_when_off(void) {
+    harness_t *h = harness_start_with_kernels(true);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0a1b2c3d\",\"name\":\"nl\",\"interface\":\"lo\",\"resolve\":{\"server\":\"9.9.9.9\"}}",
+                              &out));
+    cJSON_Delete(out);
+    plant_health(h, "0a1b2c3d", &failing);
+    cJSON *hl = group_health("0a1b2c3d", &out);
+    ASSERT_EQm("usable: the planted record is read", 4, jnum(hl, "fallbacks"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("PUT", "/api/v1/groups/0a1b2c3d", "{\"resolve\":{\"tunnel\":false}}", &out));
+    cJSON_Delete(out);
+    const char *ids[] = {"0a1b2c3d", "0a1b2c3e"};
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0a1b2c3e\",\"name\":\"bare\",\"interface\":\"lo\"}", &out));
+    cJSON_Delete(out);
+    for (size_t i = 0; i < 2; i++) {
+        plant_health(h, ids[i], &failing);
+        hl = group_health(ids[i], &out);
+        ASSERT(hl != NULL);
+        ASSERT_EQm(ids[i], 600, jnum(hl, "window"));
+        ASSERT_EQm(ids[i], 0, jnum(hl, "total"));
+        ASSERT_EQm(ids[i], 0, jnum(hl, "fallbacks"));
+        ASSERT_EQm(ids[i], 0, jnum(hl, "last"));
+        ASSERT_STR_EQm(ids[i], "", or_none(jstr(hl, "reason")));
+        ASSERT_FALSEm(ids[i], jbool(hl, "resting"));
+        ASSERT(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(hl, "resting")));
+        ASSERT_EQm(ids[i], 0, jnum(hl, "since"));
+        cJSON_Delete(out);
+    }
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: last/since not wall clock minus the age, the window or reason wrong, or a stale reason shown. */
+TEST group_json_health_wall_times(void) {
+    harness_t *h = harness_start_with_kernels(true);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups",
+                              "{\"id\":\"0a1b2c3d\",\"name\":\"nl\",\"interface\":\"lo\",\"resolve\":{\"server\":\"9.9.9.9\"}}",
+                              &out));
+    cJSON_Delete(out);
+    ASSERTm("the route is published with a generation", route_gen(h, "0a1b2c3d") != 0);
+    plant_health(h, "0a1b2c3d", &failing);
+    cJSON *hl = group_health("0a1b2c3d", &out);
+    ASSERT(hl != NULL);
+    ASSERT_EQ(600, jnum(hl, "window"));
+    ASSERT_EQ(37, jnum(hl, "total"));
+    ASSERT_EQ(4, jnum(hl, "fallbacks"));
+    ASSERT_EQ(1792484940, jnum(hl, "last"));
+    ASSERT_STR_EQ("fallback_timeout", or_none(jstr(hl, "reason")));
+    ASSERT(jbool(hl, "resting"));
+    ASSERT_EQ(1792484880, jnum(hl, "since"));
+    cJSON_Delete(out);
+
+    firc_dnsproxy_health_t quiet = {.total = 5, .last_ago_ms = 60000, .has_last = false,
+                                    .reason = FIRC_DNS_RESOLVER_HEALTH_SKIP, .resting = false, .since_ago_ms = 120000};
+    plant_health(h, "0a1b2c3d", &quiet);
+    hl = group_health("0a1b2c3d", &out);
+    ASSERT(hl != NULL);
+    ASSERT_EQ(5, jnum(hl, "total"));
+    ASSERT_EQ(0, jnum(hl, "fallbacks"));
+    ASSERT_EQm("no fallback in the window: no time", 0, jnum(hl, "last"));
+    ASSERT_STR_EQm("no fallback in the window: no reason", "", or_none(jstr(hl, "reason")));
+    ASSERT_FALSE(jbool(hl, "resting"));
+    ASSERT_EQm("not resting: no since", 0, jnum(hl, "since"));
+    cJSON_Delete(out);
+
+    quiet.has_last = true;
+    quiet.reason = FIRC_DNS_RESOLVER_HEALTH_SKIP;
+    quiet.last_ago_ms = 1500;
+    plant_health(h, "0a1b2c3d", &quiet);
+    hl = group_health("0a1b2c3d", &out);
+    ASSERT_STR_EQ("health_skip", or_none(jstr(hl, "reason")));
+    ASSERT_EQm("the age counts in whole seconds", 1792484999, jnum(hl, "last"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the since-start fallbacks key left beside health. */
+TEST group_json_has_no_fallbacks_key(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("POST", "/api/v1/groups", "{\"id\":\"0a1b2c3d\",\"name\":\"nl\",\"interface\":\"nwg0\"}", &out));
+    cJSON *rv = cJSON_GetObjectItemCaseSensitive(out, "resolver");
+    ASSERT_FALSE(has_key(rv, "fallbacks"));
+    ASSERT(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(rv, "health")));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/groups", NULL, &out));
+    rv = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(out, "groups"), 0), "resolver");
+    ASSERT_FALSE(has_key(rv, "fallbacks"));
+    ASSERT(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(rv, "health")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
 }
 
 /* Catches: a missing live field, a live group with a reason, or GET and POST disagreeing. */
@@ -2248,6 +2403,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_bad_resolve_server_is_refused_naming_the_field_and_the_group);
     RUN_TEST(a_post_with_no_id_names_no_group_in_its_refusal);
     RUN_TEST(a_put_group_keeps_its_route_marked);
+    RUN_TEST(group_json_health_zeros_when_off);
+    RUN_TEST(group_json_health_wall_times);
+    RUN_TEST(group_json_has_no_fallbacks_key);
     RUN_TEST(every_group_body_says_whether_it_is_live);
     RUN_TEST(a_group_body_reads_its_interface_link);
     RUN_TEST(a_save_whose_second_group_fails_answers_200_group_by_group);

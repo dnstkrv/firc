@@ -798,10 +798,8 @@ definitions:
     type: object
   types.GroupResolver:
     properties:
-      fallbacks:
-        description: 'How many queries since the daemon started went to the common upstream instead of the group''s DNS'
-        example: 0
-        type: integer
+      health:
+        $ref: '#/definitions/types.GroupResolverHealth'
       servers:
         description: >-
           The group's DNS servers, in query order (IPv4 first). An empty list
@@ -824,6 +822,40 @@ definitions:
         - none
         - off
         type: string
+    type: object
+  types.GroupResolverHealth:
+    description: >-
+      The group's DNS over the last ten minutes. All zeros, resting false,
+      when source is "off" or servers is empty.
+    properties:
+      fallbacks:
+        description: 'Queries in the window that went to the common upstream instead of the group''s DNS'
+        example: 4
+        type: integer
+      last:
+        description: 'Unix seconds of the last fallback in the window, 0 when none'
+        example: 1792485000
+        type: integer
+      reason:
+        description: 'Why the last fallback in the window happened, as the journal''s resolver field names it (fallback_timeout, health_skip, ...); empty when none'
+        example: fallback_timeout
+        type: string
+      resting:
+        description: 'The group''s DNS has not answered since its last rest began; its names go to the common upstream, one query probes it every 30 s'
+        example: false
+        type: boolean
+      since:
+        description: 'Unix seconds the current rest began, 0 when not resting'
+        example: 0
+        type: integer
+      total:
+        description: 'Queries in the window answered through the group''s DNS or by a fallback; cached answers are not counted'
+        example: 37
+        type: integer
+      window:
+        description: The window in seconds
+        example: 600
+        type: integer
     type: object
   types.DeviceSelector:
     description: 'Which client devices the group rewrites answers for -- for its manual rules and its list alike. An entry is an address, a CIDR prefix, policy:<Keenetic policy name> or mac:<device MAC> (the hotspot table host with that MAC, any of its addresses; : and - are accepted, any case; stored and returned lower-case with :). An address means the device the router knows behind it (all its addresses, up to 63 others). A MAC not in the table matches nobody -- in deny too. deny is checked before allow; an empty allow means every device. A bad entry is 400 with field devices.allow or devices.deny and group.'

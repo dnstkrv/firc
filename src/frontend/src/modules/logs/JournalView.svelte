@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
 
   import Button from "../../components/ui/Button.svelte";
   import Select from "../../components/ui/Select.svelte";
@@ -19,6 +19,7 @@
     type JournalEvent,
     type LogLevel,
   } from "../../data/events.svelte";
+  import { journalFocus } from "../../data/journal-focus.svelte";
   import { ensureKnownGroups, knownGroups } from "../../data/known-groups.svelte";
   import { locale, t } from "../../data/locale.svelte";
 
@@ -170,6 +171,17 @@
     if (timer) clearInterval(timer);
     if (captureTimer) clearTimeout(captureTimer);
     resizeObserver?.disconnect();
+  });
+
+  let seenFocus = untrack(() => journalFocus.request?.seq ?? 0);
+  $effect(() => {
+    const request = journalFocus.request;
+    if (!request || request.seq <= seenFocus) return;
+    seenFocus = request.seq;
+    untrack(() => {
+      group = request.group;
+      if (!sources.has("dns")) sources = new Set([...sources, "dns"]);
+    });
   });
 
   $effect(() => {
