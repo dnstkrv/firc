@@ -40,7 +40,16 @@
       label: title,
       description: sub,
       mono: true,
-      missing: !interfaces.list.some((i) => i.id === item.id),
+      ...(interfaces.list.some((i) => i.id === item.id)
+        ? {}
+        : {
+            missing: true,
+            tag: t("not on the router"),
+            remove:
+              list.length > 1
+                ? { label: t("Remove from the list"), run: () => toggle(item.id) }
+                : undefined,
+          }),
       ariaDescription: canBackup(list, item.id)
         ? t("Shift+Enter — add as a backup or remove")
         : undefined,
@@ -170,7 +179,7 @@
   bind:selected={
     () => list[0],
     (v: string) => {
-      if (v && v !== MORE) value = v;
+      if (v && v !== MORE && options.some((o) => o.value === v)) value = v;
     }
   }
   {shown}

@@ -350,6 +350,57 @@ test.describe("The interface picker in the card", () => {
     await expect(row(page, "gone0")).toHaveCount(0);
   });
 
+  // Catches an entry the router lacks drawn like a present one, or a present one struck through.
+  test("an entry the router lacks is struck through", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "gone0"] })]);
+    await openPicker(page);
+    await expect(row(page, "gone0").locator(".option-label")).toHaveClass(/gone/);
+    await expect(row(page, "nwg0").locator(".option-label")).not.toHaveClass(/gone/);
+    await expect(row(page, "nwg0").locator(".option-remove")).toHaveCount(0);
+    await expect(row(page, "gone0").locator(".option-tag")).toHaveText("not on the router");
+    await expect(row(page, "nwg0").locator(".option-tag")).toHaveCount(0);
+  });
+
+  // Catches Enter after the bin choosing the removed row, which would leave it the group's only entry.
+  test("Enter after the bin keeps the list", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "gone0", "gone1"] })]);
+    await openPicker(page);
+    const bin = row(page, "gone0").locator(".option-remove");
+    await bin.hover();
+    await bin.click();
+    await expect(row(page, "gone0")).toHaveCount(0);
+    await page.keyboard.press("Enter");
+    await expect(closedValue(page)).not.toHaveText(/gone0/);
+  });
+
+  // Catches the bin withheld from a list of two, the case an imported config leaves most.
+  test("the bin works in a list of two", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "gone0"] })]);
+    await openPicker(page);
+    await row(page, "gone0").locator(".option-remove").click();
+    await expect(row(page, "gone0")).toHaveCount(0);
+    await expect(circle(page, "nwg0")).toHaveText("1");
+  });
+
+  // Catches the bin missing or choosing the row instead of removing it, the first entry included.
+  test("the bin of an entry the router lacks removes it, even the first", async ({ page }) => {
+    await setup(page, [listed({ interface: ["gone0", "nwg0", "gone1"], active: "nwg0" })]);
+    await openPicker(page);
+    await row(page, "gone0").locator(".option-remove").click();
+    await expect(row(page, "gone0")).toHaveCount(0);
+    await expect(circle(page, "nwg0")).toHaveText("1");
+    await expect(circle(page, "gone1")).toHaveText("2");
+    await expect(content(page)).toBeVisible();
+  });
+
+  // Catches a bin on the only entry, which would leave the group with none.
+  test("the only entry has no bin", async ({ page }) => {
+    await setup(page, [plain({ interface: "gone0" })]);
+    await openPicker(page);
+    await expect(row(page, "gone0")).toBeVisible();
+    await expect(row(page, "gone0").locator(".option-remove")).toHaveCount(0);
+  });
+
   test("Shift+Enter toggles the highlighted row's circle and keeps the picker open", async ({
     page,
   }) => {
@@ -372,6 +423,16 @@ test.describe("The interface picker in the card", () => {
 
 test.describe("The interface picker by touch", () => {
   test.use({ hasTouch: true });
+
+  // Catches a tapped bin choosing the row or closing the picker instead of removing the entry.
+  test("a tapped bin removes an entry the router lacks", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "gone0", "gone1"] })]);
+    await openPicker(page);
+    await row(page, "gone0").locator(".option-remove").tap();
+    await expect(row(page, "gone0")).toHaveCount(0);
+    await expect(circle(page, "gone1")).toHaveText("2");
+    await expect(content(page)).toBeVisible();
+  });
 
   test("a tapped circle adds a backup and the picker stays open", async ({ page }) => {
     await setup(page, [plain()]);

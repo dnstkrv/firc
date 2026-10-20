@@ -650,5 +650,7 @@
   "Header {name} is set by the fetch itself": "Заголовок {name} задаёт сама загрузка",
   "The value of {name} is up to 512 bytes without control characters": "Значение {name} — до 512 байт, без управляющих символов",
   "At most 16 own headers": "Не больше 16 своих заголовков",
-  "Value of {name}": "Значение {name}"
+  "Value of {name}": "Значение {name}",
+  "not on the router": "нет на роутере",
+  "Remove from the list": "Убрать из списка"
 }

@@ -4,7 +4,7 @@
 
   import Tooltip from "./Tooltip.svelte";
 
-  import { Check, SelectOpen } from "./icons";
+  import { Check, Delete, SelectOpen } from "./icons";
 
   type Option = {
     value: string;
@@ -19,6 +19,7 @@
     separator?: boolean;
     hidden?: boolean;
     missing?: boolean;
+    remove?: { label: string; run: () => void };
     toggle?: () => void;
     expanded?: boolean;
   };
@@ -83,10 +84,12 @@
 </script>
 
 {#snippet body(option: Option, selected: boolean)}
-  <div class="option">
+  <div class="option" class:wide={option.remove}>
     {#if lead}{@render lead(option)}{/if}
     <div class="option-text">
-      <span class="option-label" class:danger={option.danger}>{option.label}</span>
+      <span class="option-label" class:danger={option.danger} class:gone={option.missing}
+        >{option.label}</span
+      >
       {#if option.description}
         <span class="option-description" class:mono={option.mono}>{option.description}</span>
       {/if}
@@ -97,6 +100,20 @@
     <div class="option-check" class:open={option.expanded}>
       {#if option.toggle}<SelectOpen size={16} />{:else if selected}<Check size={16} />{/if}
     </div>
+    {#if option.remove}
+      <button
+        type="button"
+        class="option-remove"
+        tabindex="-1"
+        aria-hidden="true"
+        title={option.remove.label}
+        onpointerup={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onclick={() => option.remove?.run()}><Delete size={16} /></button
+      >
+    {/if}
   </div>
 {/snippet}
 
@@ -176,6 +193,31 @@
 </div>
 
 <style>
+  .option-label.gone {
+    text-decoration: line-through;
+    color: var(--text-2);
+  }
+
+  .option.wide {
+    width: 100%;
+  }
+
+  .option-remove {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    padding: 0 0.25rem;
+    border-radius: 0.3rem;
+  }
+
+  .option-remove:hover {
+    color: var(--danger);
+  }
+
   .select-wrap {
     display: inline-block;
     width: max-content;
