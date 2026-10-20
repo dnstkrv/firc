@@ -254,7 +254,7 @@ test("the LAN panel fits a 360 px phone", async ({ page }) => {
   expect(box!.x + box!.width).toBeLessThanOrEqual(360);
 });
 
-test("the interface check shows its three fields and saves the interval as a live change", async ({
+test("the interface check shows its four fields and saves the interval as a live change", async ({
   page,
 }) => {
   const puts: unknown[] = [];
@@ -268,9 +268,10 @@ test("the interface check shows its three fields and saves the interval as a liv
   });
   const section = page.locator('[data-section="check"]');
   await expect(section.locator("header")).toContainText("Interface check");
-  await expect(section.getByRole("textbox", { name: "Check URL" })).toHaveValue(
+  await expect(section.getByRole("textbox", { name: "Check URL", exact: true })).toHaveValue(
     "http://cp.cloudflare.com/generate_204",
   );
+  await expect(section.getByRole("textbox", { name: "WAN check URL" })).toHaveValue("");
   await expect(section.getByRole("spinbutton", { name: "Check timeout" })).toHaveValue("5");
   const interval = section.getByRole("spinbutton", { name: "Check interval" });
   await expect(interval).toHaveValue("30");
@@ -286,4 +287,57 @@ test("the interface check shows its three fields and saves the interval as a liv
 
   await expect(page.getByRole("dialog")).toBeHidden();
   expect(puts).toEqual([{ settings: { "app.check.interval": 45 } }]);
+});
+
+const YANDEX = "http://api.browser.yandex.ru/generate_204";
+
+test("the Yandex chip fills the WAN check URL, a save sends it, clearing sends an empty string", async ({
+  page,
+}) => {
+  // Catches the chip filling another key, a draft never marked changed, or a clear that sends nothing.
+  const puts: unknown[] = [];
+  let wan = "";
+  await openSettings(page, async (route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON();
+      puts.push(body);
+      wan = body.settings["app.check.wanUrl"];
+      await route.fulfill({ json: { applied: ["app.check.wanUrl"], pendingRestart: [] } });
+      return;
+    }
+    await route.fulfill({ json: answer({ "app.check.wanUrl": wan }) });
+  });
+  const section = page.locator('[data-section="check"]');
+  const field = section.getByRole("textbox", { name: "WAN check URL" });
+  await expect(field).toHaveAttribute("placeholder", "same as the check URL");
+  await expect(section.getByRole("textbox", { name: "Check URL", exact: true })).toHaveValue(
+    "http://cp.cloudflare.com/generate_204",
+  );
+  await section.getByRole("button", { name: "Yandex" }).click();
+  await expect(field).toHaveValue(YANDEX);
+  await expect(field).toHaveClass(/changed-live/);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  expect(puts).toEqual([{ settings: { "app.check.wanUrl": YANDEX } }]);
+
+  await page.reload();
+  await expect(field).toHaveValue(YANDEX);
+  await field.fill("");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  expect(puts[1]).toEqual({ settings: { "app.check.wanUrl": "" } });
+});
+
+test("the Yandex chip stays inside a 390 px phone", async ({ page }) => {
+  // Catches the chip wrapping or being pushed past the screen edge by the field.
+  await openSettings(page, (r) => r.fulfill({ json: answer() }));
+  await page.setViewportSize({ width: 390, height: 800 });
+  const chip = page
+    .locator('[data-row="app.check.wanUrl"]')
+    .getByRole("button", { name: "Yandex" });
+  const box = await chip.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(390);
 });

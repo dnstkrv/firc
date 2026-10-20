@@ -217,6 +217,7 @@ typedef struct firc_app_config {
     } update;
     struct {
         char *url;
+        char *wan_url; /* "" means url */
         firc_duration_t interval;
         firc_duration_t timeout;
     } check;

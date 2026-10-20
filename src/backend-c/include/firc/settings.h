@@ -43,7 +43,7 @@ typedef struct firc_setting {
     firc_setting_apply_t apply; /* FIRC_APPLY_NONE for update.check and every restart row */
 } firc_setting_t;
 
-#define FIRC_SETTINGS_COUNT 27
+#define FIRC_SETTINGS_COUNT 28
 extern const firc_setting_t firc_settings[FIRC_SETTINGS_COUNT];
 
 /* An http or https URL with a name or IPv4 host, no blanks, 512 characters at most; what the check's fetch accepts,

@@ -35,7 +35,7 @@ static const char EVERY_FIELD[] =
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
     "  update: {check: true}\n"
-    "  check: {url: 'https://check.example/204', interval: 45s, timeout: 3s}\n";
+    "  check: {url: 'https://check.example/204', wanUrl: 'http://wan.example/204', interval: 45s, timeout: 3s}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -223,6 +223,42 @@ TEST the_check_names_the_field_that_broke(void) {
     PASS();
 }
 
+/* Catches: a default that is not empty, or a key the saved file drops. */
+TEST wan_url_defaults_empty(void) {
+    firc_config_t d, back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&d));
+    ASSERT_STR_EQ("", d.app.check.wan_url);
+    char *y = emit_settings(&d.app);
+    ASSERT(y != NULL);
+    ASSERT(strstr(y, "wanUrl: ''") != NULL || strstr(y, "wanUrl: \"\"") != NULL);
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, firc_config_load_buffer(&back, y, strlen(y)));
+    ASSERT_STR_EQ("", back.app.check.wan_url);
+    free(y);
+    firc_config_clear(&d);
+    firc_config_clear(&back);
+    PASS();
+}
+
+/* Catches: a WAN URL checked less than the URL, an empty one refused, or the wrong key blamed. */
+TEST wan_url_takes_a_url_or_empty(void) {
+    firc_app_config_t c;
+    ASSERT_EQ(FIRC_OK, firc_app_config_init_defaults(&c));
+    const char *field = NULL, *why = NULL;
+    ASSERT_EQ(FIRC_OK, firc_strset(&c.check.wan_url, "http://api.browser.yandex.ru/generate_204"));
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&c, &field, &why));
+    ASSERT_EQ(FIRC_OK, firc_strset(&c.check.wan_url, ""));
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&c, &field, &why));
+    free(c.check.wan_url);
+    c.check.wan_url = NULL;
+    ASSERT_EQm("a key absent from the file leaves NULL-safe", FIRC_OK, firc_app_config_check(&c, &field, &why));
+    ASSERT_EQ(FIRC_OK, firc_strset(&c.check.wan_url, "ftp://x"));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&c, &field, &why));
+    ASSERT_STR_EQ("app.check.wanUrl", field);
+    firc_app_config_clear(&c);
+    PASS();
+}
+
 TEST the_check_settings_default_to_the_spec_and_are_live(void) {
     firc_app_config_t c;
     ASSERT_EQ(FIRC_OK, firc_app_config_init_defaults(&c));
@@ -308,6 +344,7 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
         {"app.update.check", FIRC_APPLY_NONE},
         {"app.check.url", FIRC_APPLY_CHECK},
+        {"app.check.wanUrl", FIRC_APPLY_CHECK},
         {"app.check.interval", FIRC_APPLY_CHECK},
         {"app.check.timeout", FIRC_APPLY_CHECK},
     };
@@ -417,6 +454,8 @@ int main(int argc, char **argv) {
     RUN_TEST(the_table_covers_every_field_but_enabled);
     RUN_TEST(the_check_names_the_field_that_broke);
     RUN_TEST(the_check_passes_what_the_daemon_accepts);
+    RUN_TEST(wan_url_defaults_empty);
+    RUN_TEST(wan_url_takes_a_url_or_empty);
     RUN_TEST(the_check_settings_default_to_the_spec_and_are_live);
     RUN_TEST(a_disabled_webui_host_is_not_checked);
     RUN_TEST(each_row_has_the_specs_class_and_apply);

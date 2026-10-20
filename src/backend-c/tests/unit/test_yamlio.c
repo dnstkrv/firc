@@ -493,6 +493,7 @@ TEST save_shape_matches_committed_fixture(void)
         "    check: false\n"
         "  check:\n"
         "    url: http://cp.cloudflare.com/generate_204\n"
+        "    wanUrl: \"\"\n"
         "    interval: 30s\n"
         "    timeout: 5s\n"
         "groups:\n"

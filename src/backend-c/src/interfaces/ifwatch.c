@@ -363,8 +363,15 @@ void firc_ifwatch_tick(firc_ifwatch_t *w) {
 void firc_ifwatch_results(firc_ifwatch_t *w, const firc_ifcheck_result_t *r, size_t n) {
     int64_t now = now_ms(w);
     const firc_ifcheck_result_t *guard = NULL;
+    bool any_passed = false;
+    char names[FIRC_IFCHECK_BATCH * 18] = "";
+    size_t at = 0;
     for (size_t i = 0; i < n; i++) {
         if (r[i].control_failed && (guard == NULL || (r[i].control_ran && !guard->control_ran))) { guard = &r[i]; }
+        any_passed = any_passed || r[i].passed;
+        if (r[i].control_failed && !r[i].control_ran && at < sizeof(names)) {
+            at += (size_t)snprintf(names + at, sizeof(names) - at, "%s%s", at > 0 ? ", " : "", r[i].iface);
+        }
         watched_if_t *wi = find_if(w, r[i].iface);
         if (wi == NULL || wi->tunnel || r[i].gen != wi->gen) { continue; }
         wi->in_flight = false;
@@ -375,6 +382,8 @@ void firc_ifwatch_results(firc_ifwatch_t *w, const firc_ifcheck_result_t *r, siz
     if (guard != NULL && guard->control_ran) {
         firc_logrep_fail(&w->guard, FIRC_LOG_WARN, NULL, "the interface check fails, even through the WAN: %s",
                          guard->error);
+    } else if (guard != NULL && any_passed) {
+        firc_logrep_fail(&w->guard, FIRC_LOG_WARN, NULL, "cannot check %s: %s", names, guard->error);
     } else if (guard != NULL) {
         firc_logrep_fail(&w->guard, FIRC_LOG_WARN, NULL, "the interface check cannot run: %s", guard->error);
     } else if (n > 0) {

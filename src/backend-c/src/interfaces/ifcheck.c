@@ -18,6 +18,7 @@
 
 #include "firc/dnswire.h"
 #include "firc/duration.h"
+#include "firc/keenetic_rci.h"
 #include "firc/rand.h"
 #include "firc/sub_fetch.h"
 
@@ -35,6 +36,9 @@ struct firc_ifcheck {
     firc_ifcheck_settings_t s;
     firc_ifcheck_job_t q[FIRC_IFCHECK_BATCH];
     size_t n_q;
+    char seen[FIRC_IFCHECK_BATCH][16];
+    bool seen_wan[FIRC_IFCHECK_BATCH];
+    size_t n_seen, oldest;
 };
 
 typedef struct batch {
@@ -68,6 +72,7 @@ static bool url_parts(const char *url, char *host, size_t cap, uint16_t *port) {
 void firc_ifcheck_settings_from(const firc_app_config_t *a, firc_ifcheck_settings_t *out) {
     memset(out, 0, sizeof(*out));
     snprintf(out->url, sizeof(out->url), "%s", a->check.url != NULL ? a->check.url : "");
+    snprintf(out->wan_url, sizeof(out->wan_url), "%s", a->check.wan_url != NULL ? a->check.wan_url : "");
     out->timeout_s = (uint32_t)(a->check.timeout / FIRC_DURATION_SEC);
     const char *u = a->dns_proxy.upstream.address != NULL ? a->dns_proxy.upstream.address : "";
     size_t n = strlen(u);
@@ -227,47 +232,86 @@ firc_err_t firc_ifcheck_resolve(const char *server, uint16_t port, const char *u
 }
 
 typedef struct one_check {
-    const firc_ifcheck_settings_t *s;
+    const char *url;
     const char *addr;
     uint32_t mark;
+    uint32_t timeout_s;
     _Atomic bool *stop;
     firc_ifcheck_result_t *r;
 } one_check_t;
 
 static void *run_one(void *ud) {
     one_check_t *o = ud;
-    o->r->passed = firc_ifcheck_once(o->s->url, o->addr, o->mark, o->s->timeout_s, o->stop, &o->r->status, o->r->error,
+    o->r->passed = firc_ifcheck_once(o->url, o->addr, o->mark, o->timeout_s, o->stop, &o->r->status, o->r->error,
                                      sizeof(o->r->error));
     return NULL;
 }
 
-void firc_ifcheck_round(const firc_ifcheck_settings_t *s, const firc_ifcheck_job_t *jobs, size_t n, _Atomic bool *stop,
-                        firc_ifcheck_result_t *out) {
-    char addr[64] = "", why[FIRC_IF_ERROR_MAX] = "";
-    if (n > FIRC_IFCHECK_BATCH) { n = FIRC_IFCHECK_BATCH; }
-    firc_err_t rerr =
-        firc_ifcheck_resolve(s->upstream, s->upstream_port, s->url, s->timeout_s, addr, sizeof(addr), stop);
-    if (rerr != FIRC_OK) {
-        snprintf(why, sizeof(why), "the check's host does not resolve through %s: %s", s->upstream, firc_err_str(rerr));
+typedef struct pin {
+    bool done, ok;
+    char host[256];
+    char addr[64];
+    char why[FIRC_IF_ERROR_MAX];
+} pin_t;
+
+static const pin_t *pin_of(const firc_ifcheck_settings_t *s, const char *url, pin_t *p, const pin_t *other,
+                           _Atomic bool *stop) {
+    if (p->done) { return p; }
+    uint16_t port = 0;
+    if (!url_parts(url, p->host, sizeof(p->host), &port)) { p->host[0] = '\0'; }
+    if (other->done && strcmp(other->host, p->host) == 0) {
+        *p = *other;
+        return p;
     }
+    p->done = true;
+    firc_err_t err =
+        firc_ifcheck_resolve(s->upstream, s->upstream_port, url, s->timeout_s, p->addr, sizeof(p->addr), stop);
+    p->ok = err == FIRC_OK;
+    if (!p->ok) {
+        char why[512];
+        snprintf(why, sizeof(why), "the check's host %s does not resolve through %s: %s", p->host, s->upstream,
+                 firc_err_str(err));
+        snprintf(p->why, sizeof(p->why), "%.159s", why);
+    }
+    return p;
+}
+
+static firc_ifcheck_wan_fn g_wan_fn;
+static void *g_wan_ud;
+
+void firc_ifcheck_set_wan_fn_for_test(firc_ifcheck_wan_fn fn, void *ud) {
+    g_wan_fn = fn;
+    g_wan_ud = ud;
+}
+
+void firc_ifcheck_round(const firc_ifcheck_settings_t *s, const firc_ifcheck_job_t *jobs, size_t n, const bool *wan,
+                        _Atomic bool *stop, firc_ifcheck_result_t *out) {
+    if (n > FIRC_IFCHECK_BATCH) { n = FIRC_IFCHECK_BATCH; }
+    const char *wan_url = s->wan_url[0] != '\0' ? s->wan_url : s->url;
+    pin_t pins[2];
+    memset(pins, 0, sizeof(pins));
+    one_check_t one[FIRC_IFCHECK_BATCH];
+    pthread_t th[FIRC_IFCHECK_BATCH];
+    bool held[FIRC_IFCHECK_BATCH] = {false}, started[FIRC_IFCHECK_BATCH] = {false};
     for (size_t i = 0; i < n; i++) {
         memset(&out[i], 0, sizeof(out[i]));
         snprintf(out[i].iface, sizeof(out[i].iface), "%s", jobs[i].iface);
         out[i].gen = jobs[i].gen;
-        if (rerr != FIRC_OK) {
+        size_t k = wan != NULL && wan[i] ? 1 : 0;
+        const char *url = k == 1 ? wan_url : s->url;
+        const pin_t *p = pin_of(s, url, &pins[k], &pins[1 - k], stop);
+        held[i] = !p->ok;
+        if (held[i]) {
             out[i].control_failed = true;
-            snprintf(out[i].error, sizeof(out[i].error), "%s", why);
+            snprintf(out[i].error, sizeof(out[i].error), "%s", p->why);
         }
+        one[i] = (one_check_t){url, p->addr, jobs[i].mark, s->timeout_s, stop, &out[i]};
     }
-    if (rerr != FIRC_OK) { return; }
-    one_check_t one[FIRC_IFCHECK_BATCH];
-    pthread_t th[FIRC_IFCHECK_BATCH];
-    bool started[FIRC_IFCHECK_BATCH] = {false};
     pthread_attr_t attr;
     bool attr_ok = pthread_attr_init(&attr) == 0;
     if (attr_ok) { (void)pthread_attr_setstacksize(&attr, 256 * 1024); }
     for (size_t i = 0; i < n; i++) {
-        one[i] = (one_check_t){s, addr, jobs[i].mark, stop, &out[i]};
+        if (held[i]) { continue; }
         started[i] = pthread_create(&th[i], attr_ok ? &attr : NULL, run_one, &one[i]) == 0;
         if (!started[i]) { run_one(&one[i]); }
     }
@@ -277,19 +321,23 @@ void firc_ifcheck_round(const firc_ifcheck_settings_t *s, const firc_ifcheck_job
     if (attr_ok) { pthread_attr_destroy(&attr); }
     bool any = false;
     for (size_t i = 0; i < n; i++) {
-        if (out[i].passed) { continue; }
+        if (held[i] || out[i].passed) { continue; }
         if (out[i].status == -1) {
             out[i].control_failed = true;
+            held[i] = true;
             continue;
         }
         any = true;
     }
     if (!any) { return; }
+    const pin_t *wp = pin_of(s, wan_url, &pins[1], &pins[0], stop);
+    char why[FIRC_IF_ERROR_MAX];
+    snprintf(why, sizeof(why), "%s", wp->why);
     long cs = 0;
-    bool control = firc_ifcheck_once(s->url, addr, 0, s->timeout_s, stop, &cs, why, sizeof(why));
+    bool control = wp->ok && firc_ifcheck_once(wan_url, wp->addr, 0, s->timeout_s, stop, &cs, why, sizeof(why));
     for (size_t i = 0; i < n; i++) {
-        if (out[i].passed || out[i].status == -1) { continue; }
-        out[i].control_ran = true;
+        if (held[i] || out[i].passed) { continue; }
+        out[i].control_ran = wp->ok;
         if (control) { continue; }
         out[i].control_failed = true;
         snprintf(out[i].error, sizeof(out[i].error), "%s", why);
@@ -347,6 +395,61 @@ static void post(firc_ifcheck_t *c, batch_t *b) {
     }
 }
 
+static firc_err_t rci_wan(const firc_ifcheck_job_t *jobs, size_t n, bool *wan, void *ud) {
+    const _Atomic bool *stop = ud;
+    if (atomic_load(stop)) { return FIRC_ERR_CANCELED; }
+    firc_kn_aliases_t a = {0};
+    firc_err_t err = firc_kn_get_iface_aliases(&a);
+    for (size_t i = 0; err == FIRC_OK && i < n; i++) { wan[i] = firc_kn_aliases_inet(&a, jobs[i].iface); }
+    firc_kn_aliases_free(&a);
+    return err;
+}
+
+static size_t seen_at(const firc_ifcheck_t *c, const char *iface) {
+    size_t i = 0;
+    while (i < c->n_seen && strcmp(c->seen[i], iface) != 0) { i++; }
+    return i;
+}
+
+static void learn_wan(firc_ifcheck_t *c, const char *iface, bool wan) {
+    size_t at = seen_at(c, iface);
+    if (at == c->n_seen) {
+        if (c->n_seen < FIRC_IFCHECK_BATCH) {
+            c->n_seen++;
+        } else {
+            at = c->oldest;
+            c->oldest = (c->oldest + 1) % FIRC_IFCHECK_BATCH;
+        }
+        snprintf(c->seen[at], sizeof(c->seen[0]), "%.15s", iface);
+    }
+    c->seen_wan[at] = wan;
+}
+
+static firc_err_t pick_wan(firc_ifcheck_t *c, const firc_ifcheck_job_t *jobs, size_t n, bool *wan) {
+    firc_err_t err = g_wan_fn != NULL ? g_wan_fn(jobs, n, wan, g_wan_ud) : rci_wan(jobs, n, wan, &c->stop);
+    for (size_t i = 0; i < n; i++) {
+        if (err == FIRC_OK) {
+            learn_wan(c, jobs[i].iface, wan[i]);
+            continue;
+        }
+        size_t at = seen_at(c, jobs[i].iface);
+        if (at == c->n_seen) { return err; }
+        wan[i] = c->seen_wan[at];
+    }
+    return FIRC_OK;
+}
+
+static void hold_round(const firc_ifcheck_job_t *jobs, size_t n, firc_err_t err, firc_ifcheck_result_t *out) {
+    for (size_t i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        snprintf(out[i].iface, sizeof(out[i].iface), "%.15s", jobs[i].iface);
+        out[i].gen = jobs[i].gen;
+        out[i].control_failed = true;
+        snprintf(out[i].error, sizeof(out[i].error), "which interfaces are the provider's is not known yet: %s",
+                 firc_err_str(err));
+    }
+}
+
 static void *worker(void *ud) {
     firc_ifcheck_t *c = ud;
     for (;;) {
@@ -366,7 +469,14 @@ static void *worker(void *ud) {
         if (b == NULL) { continue; }
         b->c = c;
         b->n = n;
-        firc_ifcheck_round(&s, jobs, n, &c->stop, b->r);
+        bool wan[FIRC_IFCHECK_BATCH] = {false};
+        bool split = s.wan_url[0] != '\0' && strcmp(s.wan_url, s.url) != 0;
+        firc_err_t werr = split ? pick_wan(c, jobs, n, wan) : FIRC_OK;
+        if (werr != FIRC_OK) {
+            hold_round(jobs, n, werr, b->r);
+        } else {
+            firc_ifcheck_round(&s, jobs, n, split ? wan : NULL, &c->stop, b->r);
+        }
         post(c, b);
     }
 }

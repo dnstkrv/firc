@@ -80,6 +80,16 @@
             style:width={c.width ?? "11rem"}
             bind:value={settings.draft[field.key]}
           />
+          {#if c.suggest}
+            {@const suggest = c.suggest}
+            <button
+              type="button"
+              class="suggest"
+              onclick={() => (settings.draft[field.key] = suggest.value)}
+            >
+              {suggest.label()}
+            </button>
+          {/if}
         </span>
       {/if}
     {/each}
@@ -115,6 +125,17 @@
     align-items: center;
     gap: 8px;
     max-width: 100%;
+  }
+  .suggest {
+    flex: none;
+    padding: 4px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--text-2);
+    background: transparent;
+    color: var(--text-2);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
   }
   .unit,
   .joiner,

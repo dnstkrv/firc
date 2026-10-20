@@ -26,9 +26,11 @@ static void h_204(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     g_hits_204++;
     firc_http_res_write(res, 204, NULL, NULL, 0);
 }
+static _Atomic int g_hits_200;
 static void h_200(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)req;
     (void)ud;
+    g_hits_200++;
     firc_http_res_write(res, 200, "text/plain", (const uint8_t *)"ok", 2);
 }
 static void h_moved(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
@@ -53,6 +55,7 @@ static void *loop_thread(void *ud) {
 static bool start(harness_t *h) {
     memset(h, 0, sizeof(*h));
     g_hits_204 = 0;
+    g_hits_200 = 0;
     if (firc_loop_create(&h->loop) != FIRC_OK || firc_httpd_create(h->loop, &h->srv) != FIRC_OK) { return false; }
     firc_httpd_route(h->srv, "GET", "/204", h_204, NULL);
     firc_httpd_route(h->srv, "GET", "/200", h_200, NULL);
@@ -197,7 +200,7 @@ TEST a_round_tries_the_control_once_and_only_for_failures(void) {
     snprintf(s.url, sizeof(s.url), "%s", url_at(PORT, "/204"));
     firc_ifcheck_job_t jobs[3] = {{"up0", 0x10000, 4}, {"up1", 0x20000, 5}, {"up2", 0, 6}};
     firc_ifcheck_result_t out[3];
-    firc_ifcheck_round(&s, jobs, 3, NULL, out);
+    firc_ifcheck_round(&s, jobs, 3, NULL, NULL, out);
     ASSERT_FALSE(out[0].passed);
     ASSERT_FALSE(out[1].passed);
     ASSERT(out[2].passed);
@@ -224,7 +227,7 @@ TEST a_refused_mark_guards_the_round(void) {
     snprintf(s.url, sizeof(s.url), "%s", url_at(PORT, "/204"));
     firc_ifcheck_job_t jobs[2] = {{"up0", 0x10000, 1}, {"up1", 0x20000, 2}};
     firc_ifcheck_result_t out[2];
-    firc_ifcheck_round(&s, jobs, 2, NULL, out);
+    firc_ifcheck_round(&s, jobs, 2, NULL, NULL, out);
     ASSERT(out[0].control_failed && out[1].control_failed);
     ASSERT_FALSE(out[0].control_ran || out[1].control_ran);
     ASSERT_STR_EQ("the socket refused the check's mark", out[0].error);
@@ -244,7 +247,7 @@ TEST a_slow_entry_does_not_delay_the_others(void) {
     firc_ifcheck_result_t out[4];
     struct timespec a;
     clock_gettime(CLOCK_MONOTONIC, &a);
-    firc_ifcheck_round(&s, jobs, 4, NULL, out);
+    firc_ifcheck_round(&s, jobs, 4, NULL, NULL, out);
     long ms = ms_since(&a);
     ASSERTm("four timeouts and a control run as two timeouts, not five", ms < 7000);
     stop(&h);
@@ -256,7 +259,7 @@ TEST a_round_whose_control_fails_marks_every_failure_guarded(void) {
     snprintf(s.url, sizeof(s.url), "%s", url_at(18112, "/204"));
     firc_ifcheck_job_t jobs[2] = {{"up0", 0, 1}, {"up1", 0, 2}};
     firc_ifcheck_result_t out[2];
-    firc_ifcheck_round(&s, jobs, 2, NULL, out);
+    firc_ifcheck_round(&s, jobs, 2, NULL, NULL, out);
     ASSERT(out[0].control_failed && out[1].control_failed);
     ASSERT(out[0].control_ran && out[1].control_ran);
     ASSERT(out[0].error[0] != '\0');
@@ -268,10 +271,126 @@ TEST a_round_whose_host_does_not_resolve_is_guarded(void) {
     snprintf(s.url, sizeof(s.url), "http://nowhere.test:%d/204", PORT);
     firc_ifcheck_job_t jobs[1] = {{"up0", 0x10000, 1}};
     firc_ifcheck_result_t out[1];
-    firc_ifcheck_round(&s, jobs, 1, NULL, out);
+    firc_ifcheck_round(&s, jobs, 1, NULL, NULL, out);
     ASSERT(out[0].control_failed);
     ASSERT_FALSE(out[0].control_ran);
-    ASSERT(strncmp(out[0].error, "the check's host does not resolve", 33) == 0);
+    ASSERT_STR_EQ("the check's host nowhere.test does not resolve through 127.0.0.1: system error", out[0].error);
+    PASS();
+}
+
+/* Catches: the WAN URL never reaching the check thread, or an empty one filled in before the round. */
+TEST the_settings_carry_the_wan_url_as_is(void) {
+    firc_app_config_t a;
+    ASSERT_EQ(FIRC_OK, firc_app_config_init_defaults(&a));
+    firc_ifcheck_settings_t s;
+    firc_ifcheck_settings_from(&a, &s);
+    ASSERT_STR_EQ("", s.wan_url);
+    ASSERT_EQ(FIRC_OK, firc_strset(&a.check.wan_url, "http://api.browser.yandex.ru/generate_204"));
+    firc_ifcheck_settings_from(&a, &s);
+    ASSERT_STR_EQ("http://api.browser.yandex.ru/generate_204", s.wan_url);
+    ASSERT_STR_EQ("http://cp.cloudflare.com/generate_204", s.url);
+    firc_app_config_clear(&a);
+    PASS();
+}
+
+static firc_ifcheck_settings_t two_urls(const char *url, const char *wan_url) {
+    firc_ifcheck_settings_t s = {.timeout_s = 2, .upstream = "127.0.0.1", .upstream_port = 15398};
+    snprintf(s.url, sizeof(s.url), "%s", url);
+    snprintf(s.wan_url, sizeof(s.wan_url), "%s", wan_url);
+    return s;
+}
+
+/* Catches: a WAN job sent to the check URL, a tunnel job sent to the WAN URL, or the control on the check URL. */
+TEST each_job_checks_its_own_url(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    firc_ifcheck_job_t jobs[2] = {{"eth3", 0, 1}, {"nwg0", 0, 2}};
+    bool wan[2] = {true, false};
+    firc_ifcheck_result_t out[2];
+    firc_ifcheck_round(&s, jobs, 2, wan, NULL, out);
+    ASSERT(out[0].passed);
+    ASSERT_FALSE(out[1].passed);
+    ASSERT(out[1].control_ran);
+    ASSERT_FALSE(out[1].control_failed);
+    ASSERT_EQ_FMT(2, g_hits_204, "%d");
+    ASSERT_EQ_FMT(1, g_hits_200, "%d");
+    stop(&h);
+    PASS();
+}
+
+/* Catches: the control sent to the check URL, so a whitelist guards a dead tunnel forever. */
+TEST a_wan_control_lets_a_tunnel_failure_count(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    firc_ifcheck_job_t jobs[1] = {{"nwg0", 0, 1}};
+    bool wan[1] = {false};
+    firc_ifcheck_result_t out[1];
+    firc_ifcheck_round(&s, jobs, 1, wan, NULL, out);
+    ASSERT_FALSE(out[0].passed);
+    ASSERT(out[0].control_ran);
+    ASSERT_FALSE(out[0].control_failed);
+    ASSERT_STR_EQ("answered 200, not 204", out[0].error);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a control that passes on the check URL while the WAN URL fails. */
+TEST a_failing_wan_control_guards_the_round(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    firc_sub_fetch_set_setsockopt_for_test(break_marked);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/204", "http://127.0.0.1:18110/200");
+    firc_ifcheck_job_t jobs[2] = {{"nwg0", 0x10000, 1}, {"nwg1", 0x20000, 2}};
+    firc_ifcheck_result_t out[2];
+    firc_ifcheck_round(&s, jobs, 2, NULL, NULL, out);
+    ASSERT(out[0].control_ran && out[1].control_ran);
+    ASSERT(out[0].control_failed && out[1].control_failed);
+    ASSERT_STR_EQ("answered 200, not 204", out[1].error);
+    ASSERT_EQ_FMT(1, g_hits_200, "%d");
+    ASSERT_EQ_FMT(0, g_hits_204, "%d");
+    firc_sub_fetch_set_setsockopt_for_test(NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a tunnel failure that counts though no control could run on the WAN URL. */
+TEST an_unresolvable_wan_host_guards_every_failure(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://nonexistent.invalid:18110/204");
+    firc_ifcheck_job_t jobs[2] = {{"eth3", 0, 1}, {"nwg0", 0, 2}};
+    bool wan[2] = {true, false};
+    firc_ifcheck_result_t out[2];
+    firc_ifcheck_round(&s, jobs, 2, wan, NULL, out);
+    const char *why = "the check's host nonexistent.invalid does not resolve through 127.0.0.1: system error";
+    ASSERT(out[0].control_failed && out[1].control_failed);
+    ASSERT_FALSE(out[0].control_ran || out[1].control_ran);
+    ASSERT_STR_EQ(why, out[0].error);
+    ASSERT_STR_EQ(why, out[1].error);
+    ASSERT_EQ_FMTm("the tunnel job still ran", 1, g_hits_200, "%d");
+    ASSERT_EQ_FMT(0, g_hits_204, "%d");
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a WAN job guarded because the check URL's host does not resolve. */
+TEST an_unresolvable_check_host_guards_only_its_jobs(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    firc_ifcheck_settings_t s = two_urls("http://nowhere.invalid:18110/204", "http://127.0.0.1:18110/204");
+    firc_ifcheck_job_t jobs[2] = {{"eth3", 0, 1}, {"nwg0", 0, 2}};
+    bool wan[2] = {true, false};
+    firc_ifcheck_result_t out[2];
+    firc_ifcheck_round(&s, jobs, 2, wan, NULL, out);
+    ASSERT(out[0].passed);
+    ASSERT_FALSE(out[0].control_failed);
+    ASSERT(out[1].control_failed);
+    ASSERT_FALSE(out[1].control_ran);
+    ASSERT_STR_EQ("the check's host nowhere.invalid does not resolve through 127.0.0.1: system error", out[1].error);
+    ASSERT_EQ_FMT(1, g_hits_204, "%d");
+    stop(&h);
     PASS();
 }
 
@@ -354,6 +473,31 @@ TEST resolve_asks_the_upstream_for_an_a_record(void) {
     PASS();
 }
 
+static int queries_for(stub_t *dns, const char *url, const char *wan_url) {
+    firc_ifcheck_settings_t s = two_urls(url, wan_url);
+    s.upstream_port = 15401;
+    firc_ifcheck_job_t jobs[1] = {{"nwg0", 0, 1}};
+    firc_ifcheck_result_t out[1];
+    atomic_store(&dns->queries, 0);
+    firc_ifcheck_round(&s, jobs, 1, NULL, NULL, out);
+    return out[0].control_ran ? atomic_load(&dns->queries) : -1;
+}
+
+/* Catches: a host resolved again for the control, or the WAN URL's host never resolved for it. */
+TEST a_round_resolves_each_host_once(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    stub_t dns;
+    ASSERT(stub_start(&dns, 15401, true));
+    ASSERT_EQ(2, queries_for(&dns, "http://a.test:18110/200", "http://b.test:18110/204"));
+    ASSERT_EQ(1, queries_for(&dns, "http://a.test:18110/200", "http://a.test:18110/204"));
+    ASSERT_EQ(1, queries_for(&dns, "http://a.test:18110/200", ""));
+    ASSERT_EQ_FMTm("every control reached its server", 2, g_hits_204, "%d");
+    stub_stop(&dns);
+    stop(&h);
+    PASS();
+}
+
 TEST the_settings_check_and_the_fetch_agree_on_every_url(void) {
     static const char *const urls[] = {"http://a/",        "https://a.b:8443/x?y", "HTTP://A/",  "ftp://a/",
                                        "http:///x",        "http://",              "http://a b/", "https://1.2.3.4/204",
@@ -371,12 +515,18 @@ typedef struct {
     pthread_cond_t cv;
     int count;
     firc_ifcheck_result_t first;
+    firc_ifcheck_result_t last[FIRC_IFCHECK_BATCH];
+    size_t n_last;
+    bool first_passed[8];
 } got_t;
 
 static void done(void *ud, const firc_ifcheck_result_t *r, size_t n) {
     got_t *g = ud;
     pthread_mutex_lock(&g->mu);
     if (g->count == 0 && n > 0) { g->first = r[0]; }
+    g->n_last = n < FIRC_IFCHECK_BATCH ? n : FIRC_IFCHECK_BATCH;
+    memcpy(g->last, r, g->n_last * sizeof(r[0]));
+    if (g->count < 8 && n > 0) { g->first_passed[g->count] = r[0].passed; }
     g->count++;
     pthread_cond_signal(&g->cv);
     pthread_mutex_unlock(&g->mu);
@@ -396,22 +546,35 @@ typedef struct {
     firc_err_t err;
 } owner_t;
 
-static void owner_signal(owner_t *o, bool *flag) {
-    pthread_mutex_lock(&o->got->mu);
+static void got_signal(got_t *g, bool *flag) {
+    pthread_mutex_lock(&g->mu);
     *flag = true;
-    pthread_cond_broadcast(&o->got->cv);
-    pthread_mutex_unlock(&o->got->mu);
+    pthread_cond_broadcast(&g->cv);
+    pthread_mutex_unlock(&g->mu);
 }
 
-static void owner_wait(owner_t *o, const bool *flag) {
+static void got_wait(got_t *g, const bool *flag) {
     struct timespec until;
     clock_gettime(CLOCK_REALTIME, &until);
     until.tv_sec += 5;
-    pthread_mutex_lock(&o->got->mu);
+    pthread_mutex_lock(&g->mu);
     while (!*flag) {
-        if (pthread_cond_timedwait(&o->got->cv, &o->got->mu, &until) != 0) { break; }
+        if (pthread_cond_timedwait(&g->cv, &g->mu, &until) != 0) { break; }
     }
-    pthread_mutex_unlock(&o->got->mu);
+    pthread_mutex_unlock(&g->mu);
+}
+
+static bool got_rounds(got_t *g, int want) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 10;
+    pthread_mutex_lock(&g->mu);
+    while (g->count < want) {
+        if (pthread_cond_timedwait(&g->cv, &g->mu, &until) != 0) { break; }
+    }
+    bool ok = g->count == want;
+    pthread_mutex_unlock(&g->mu);
+    return ok;
 }
 
 static void owner_setup(firc_loop_t *loop, void *ud) {
@@ -424,7 +587,7 @@ static void owner_setup(firc_loop_t *loop, void *ud) {
         firc_ifcheck_configure(o->c, &s);
         o->err = firc_ifcheck_queue(o->c, "up0", 0, 7);
     }
-    owner_signal(o, &o->ready);
+    got_signal(o->got, &o->ready);
 }
 
 static void owner_teardown(firc_loop_t *loop, void *ud) {
@@ -432,7 +595,7 @@ static void owner_teardown(firc_loop_t *loop, void *ud) {
     owner_t *o = ud;
     (void)firc_ifcheck_queue(o->c, "up1", 0, 8);
     firc_ifcheck_free(o->c);
-    owner_signal(o, &o->freed);
+    got_signal(o->got, &o->freed);
 }
 
 TEST the_thread_posts_a_round_to_the_loop(void) {
@@ -441,7 +604,7 @@ TEST the_thread_posts_a_round_to_the_loop(void) {
     got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
     owner_t o = {.got = &got};
     ASSERT_EQ(FIRC_OK, firc_loop_post(h.loop, owner_setup, &o));
-    owner_wait(&o, &o.ready);
+    got_wait(&got, &o.ready);
     ASSERT_EQ(FIRC_OK, o.err);
     struct timespec until;
     clock_gettime(CLOCK_REALTIME, &until);
@@ -459,11 +622,245 @@ TEST the_thread_posts_a_round_to_the_loop(void) {
     ASSERT(first.passed);
     ASSERT_EQ(204, first.status);
     ASSERT_EQ(FIRC_OK, firc_loop_post(h.loop, owner_teardown, &o));
-    owner_wait(&o, &o.freed);
+    got_wait(&got, &o.freed);
     ASSERT(o.freed);
     struct timespec ts = {0, 100 * 1000000L};
     nanosleep(&ts, NULL);
     ASSERT_EQ_FMTm("no done runs after free", 1, got_count(&got), "%d");
+    stop(&h);
+    PASS();
+}
+
+typedef struct {
+    int calls;
+    firc_err_t err[4];
+    bool wan[4];
+} wan_script_t;
+
+static firc_err_t scripted_wan(const firc_ifcheck_job_t *jobs, size_t n, bool *wan, void *ud) {
+    (void)jobs;
+    wan_script_t *w = ud;
+    int k = w->calls < 4 ? w->calls : 3;
+    w->calls++;
+    for (size_t i = 0; i < n; i++) { wan[i] = w->wan[k]; }
+    return w->err[k];
+}
+
+static const char *const g_names[FIRC_IFCHECK_BATCH + 1] = {
+    "eth3", "nwg0", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14", "e15", "e16"};
+
+typedef struct {
+    size_t at, n;
+} slice_t;
+
+typedef struct {
+    got_t *got;
+    firc_ifcheck_t *c;
+    firc_ifcheck_settings_t s;
+    slice_t now;
+    bool ready, freed;
+    firc_err_t err;
+} rounds_t;
+
+static void queue_slice(const rounds_t *o) {
+    for (size_t i = o->now.at; i < o->now.at + o->now.n; i++) {
+        (void)firc_ifcheck_queue(o->c, g_names[i], 0, (unsigned)i + 1);
+    }
+}
+
+static void rounds_setup(firc_loop_t *loop, void *ud) {
+    rounds_t *o = ud;
+    o->c = firc_ifcheck_new(loop, done, o->got);
+    o->err = o->c == NULL ? FIRC_ERR_NOMEM : FIRC_OK;
+    if (o->c != NULL) {
+        firc_ifcheck_configure(o->c, &o->s);
+        queue_slice(o);
+        o->err = firc_ifcheck_start(o->c);
+    }
+    got_signal(o->got, &o->ready);
+}
+
+static void rounds_queue(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    queue_slice(ud);
+}
+
+static void rounds_teardown(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    rounds_t *o = ud;
+    firc_ifcheck_free(o->c);
+    got_signal(o->got, &o->freed);
+}
+
+static bool run_slices(harness_t *h, got_t *got, const firc_ifcheck_settings_t *s, const slice_t *sl, int rounds) {
+    rounds_t o = {.got = got, .s = *s, .now = sl[0]};
+    bool ok = firc_loop_post(h->loop, rounds_setup, &o) == FIRC_OK;
+    got_wait(got, &o.ready);
+    ok = ok && o.ready && o.err == FIRC_OK && got_rounds(got, 1);
+    for (int r = 2; ok && r <= rounds; r++) {
+        o.now = sl[r - 1];
+        ok = firc_loop_post(h->loop, rounds_queue, &o) == FIRC_OK && got_rounds(got, r);
+    }
+    if (o.c != NULL && firc_loop_post(h->loop, rounds_teardown, &o) == FIRC_OK) { got_wait(got, &o.freed); }
+    return ok && o.freed;
+}
+
+static bool run_rounds(harness_t *h, got_t *got, const firc_ifcheck_settings_t *s, size_t n_jobs, int rounds) {
+    const slice_t sl[3] = {{0, n_jobs}, {0, n_jobs}, {0, n_jobs}};
+    return run_slices(h, got, s, sl, rounds);
+}
+
+/* Catches: an RCI lookup, a second resolve or a different control URL while the WAN URL is unset or the same. */
+TEST an_empty_wan_url_changes_nothing(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    stub_t dns;
+    ASSERT(stub_start(&dns, 15401, true));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_OK}, .wan = {true, true}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    static const char *const wan_urls[] = {"", "http://check.test:18110/200"};
+    for (size_t i = 0; i < 2; i++) {
+        firc_ifcheck_settings_t s = two_urls("http://check.test:18110/200", wan_urls[i]);
+        s.upstream_port = 15401;
+        got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+        g_hits_200 = 0;
+        atomic_store(&dns.queries, 0);
+        ASSERT(run_rounds(&h, &got, &s, 1, 1));
+        ASSERT(got.first.control_ran && got.first.control_failed);
+        ASSERT_EQ_FMTm("the job and the control on the check URL", 2, g_hits_200, "%d");
+        ASSERT_EQ_FMT(1, atomic_load(&dns.queries), "%d");
+    }
+    ASSERT_EQ_FMT(0, script.calls, "%d");
+    ASSERT_EQ_FMT(0, g_hits_204, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stub_stop(&dns);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a WAN answer the failed lookup half-wrote, used instead of the last good one. */
+TEST a_failed_aliases_lookup_checks_every_job_on_the_url(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_ERR_IO}, .wan = {false, true}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    ASSERT(run_rounds(&h, &got, &s, 1, 2));
+    ASSERT_EQ_FMT(2, script.calls, "%d");
+    ASSERT_FALSE(got.last[0].passed);
+    ASSERT(got.last[0].control_ran);
+    ASSERT_FALSE(got.last[0].control_failed);
+    ASSERT_EQ_FMTm("the job on the check URL in both rounds", 2, g_hits_200, "%d");
+    ASSERT_EQ_FMTm("the control on the WAN URL in both rounds", 2, g_hits_204, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a WAN entry checked on the check URL when RCI fails after a good answer. */
+TEST a_failed_lookup_reuses_the_last_answer(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_ERR_UPSTREAM}, .wan = {true, false}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    ASSERT(run_rounds(&h, &got, &s, 1, 2));
+    ASSERT_EQ_FMT(2, script.calls, "%d");
+    ASSERT(got.last[0].passed);
+    ASSERT_EQ_FMT(2, g_hits_204, "%d");
+    ASSERT_EQ_FMT(0, g_hits_200, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: an interface kept as the WAN after a good answer said it no longer is. */
+TEST a_good_answer_forgets_a_wan_it_no_longer_names(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_OK, FIRC_ERR_UPSTREAM}, .wan = {true, false, true}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    ASSERT(run_rounds(&h, &got, &s, 1, 3));
+    ASSERT_EQ_FMT(3, script.calls, "%d");
+    ASSERT_FALSE(got.last[0].passed);
+    ASSERT_EQ_FMTm("rounds 2 and 3 on the check URL", 2, g_hits_200, "%d");
+    ASSERT_EQ_FMTm("round 1, then the two controls", 3, g_hits_204, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a round guessed with no WAN answer yet, which counts a whitelisted WAN dead. */
+TEST a_failed_first_lookup_guards_the_round(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_ERR_UPSTREAM, FIRC_ERR_UPSTREAM}, .wan = {true, true}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    ASSERT(run_rounds(&h, &got, &s, 2, 1));
+    ASSERT_EQ_FMT((size_t)2, got.n_last, "%zu");
+    for (size_t i = 0; i < 2; i++) {
+        ASSERT_FALSE(got.last[i].passed);
+        ASSERT(got.last[i].control_failed);
+        ASSERT_FALSE(got.last[i].control_ran);
+        ASSERT_STR_EQ("which interfaces are the provider's is not known yet: upstream fetch failed", got.last[i].error);
+    }
+    ASSERT_STR_EQ("nwg0", got.last[1].iface);
+    ASSERT_EQ_FMT(2u, got.last[1].gen, "%u");
+    ASSERT_EQ_FMT(0, g_hits_200 + g_hits_204, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a job no good lookup ever named, guessed from the names other jobs taught. */
+TEST a_job_never_seen_in_a_good_lookup_holds_the_round(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_ERR_UPSTREAM}, .wan = {true, false}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    const slice_t sl[2] = {{0, 1}, {0, 2}};
+    ASSERT(run_slices(&h, &got, &s, sl, 2));
+    ASSERT_EQ_FMT(2, script.calls, "%d");
+    ASSERT_EQ_FMT((size_t)2, got.n_last, "%zu");
+    for (size_t i = 0; i < 2; i++) {
+        ASSERT_FALSE(got.last[i].passed);
+        ASSERT(got.last[i].control_failed);
+        ASSERT_STR_EQ("which interfaces are the provider's is not known yet: upstream fetch failed", got.last[i].error);
+    }
+    ASSERT_EQ_FMTm("only round 1's WAN job", 1, g_hits_204, "%d");
+    ASSERT_EQ_FMT(0, g_hits_200, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
+    stop(&h);
+    PASS();
+}
+
+/* Catches: a seventeenth name dropped, or a full memory losing a name other than its oldest. */
+TEST a_full_memory_forgets_its_oldest_name(void) {
+    harness_t h;
+    ASSERT(start(&h));
+    wan_script_t script = {.err = {FIRC_OK, FIRC_OK, FIRC_OK, FIRC_ERR_UPSTREAM}, .wan = {true, true, true, true}};
+    firc_ifcheck_set_wan_fn_for_test(scripted_wan, &script);
+    firc_ifcheck_settings_t s = two_urls("http://127.0.0.1:18110/200", "http://127.0.0.1:18110/204");
+    got_t got = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    const slice_t sl[8] = {{0, FIRC_IFCHECK_BATCH}, {FIRC_IFCHECK_BATCH, 1}, {0, 1}, {1, 1}, {FIRC_IFCHECK_BATCH, 1},
+                           {0, 1}, {FIRC_IFCHECK_BATCH - 1, 1}, {2, 1}};
+    ASSERT(run_slices(&h, &got, &s, sl, 8));
+    ASSERT_EQ_FMT(8, script.calls, "%d");
+    ASSERT_STR_EQ("e2", got.last[0].iface);
+    static const bool passed[8] = {true, true, true, false, true, true, true, true};
+    for (size_t r = 0; r < 8; r++) {
+        ASSERT_EQ_FMTm("eth3, e16, eth3, nwg0 forgotten, e16, eth3, e15, e2", passed[r], got.first_passed[r], "%d");
+    }
+    ASSERT_EQ_FMT(0, g_hits_200, "%d");
+    firc_ifcheck_set_wan_fn_for_test(NULL, NULL);
     stop(&h);
     PASS();
 }
@@ -514,9 +911,23 @@ int main(int argc, char **argv) {
     RUN_TEST(a_slow_entry_does_not_delay_the_others);
     RUN_TEST(a_round_whose_control_fails_marks_every_failure_guarded);
     RUN_TEST(a_round_whose_host_does_not_resolve_is_guarded);
+    RUN_TEST(the_settings_carry_the_wan_url_as_is);
+    RUN_TEST(each_job_checks_its_own_url);
+    RUN_TEST(a_wan_control_lets_a_tunnel_failure_count);
+    RUN_TEST(a_failing_wan_control_guards_the_round);
+    RUN_TEST(an_unresolvable_wan_host_guards_every_failure);
+    RUN_TEST(an_unresolvable_check_host_guards_only_its_jobs);
     RUN_TEST(resolve_asks_the_upstream_for_an_a_record);
+    RUN_TEST(a_round_resolves_each_host_once);
     RUN_TEST(the_settings_check_and_the_fetch_agree_on_every_url);
     RUN_TEST(the_thread_posts_a_round_to_the_loop);
+    RUN_TEST(an_empty_wan_url_changes_nothing);
+    RUN_TEST(a_failed_aliases_lookup_checks_every_job_on_the_url);
+    RUN_TEST(a_failed_lookup_reuses_the_last_answer);
+    RUN_TEST(a_good_answer_forgets_a_wan_it_no_longer_names);
+    RUN_TEST(a_failed_first_lookup_guards_the_round);
+    RUN_TEST(a_job_never_seen_in_a_good_lookup_holds_the_round);
+    RUN_TEST(a_full_memory_forgets_its_oldest_name);
     RUN_TEST(a_full_queue_refuses_the_seventeenth_job);
     RUN_TEST(a_batch_still_queued_at_loop_destroy_is_dropped_without_a_leak);
     GREATEST_MAIN_END();

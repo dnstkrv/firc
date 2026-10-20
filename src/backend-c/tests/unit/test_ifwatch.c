@@ -597,6 +597,28 @@ TEST a_round_that_ran_no_control_does_not_blame_the_wan(void) {
     PASS();
 }
 
+/* Catches: a round that checked some entries said to be one where the check cannot run. */
+TEST a_round_with_a_pass_names_the_entries_it_could_not_check(void) {
+    firc_ifwatch_t *w = fresh();
+    static const char *const ABC[] = {"up0", "up1", "up2"};
+    g_groups[g_n++] = grp(1, ABC, 3);
+    firc_ifwatch_tick(w);
+    firc_ifcheck_result_t r[3];
+    memset(r, 0, sizeof(r));
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(r[i].iface, sizeof(r[i].iface), "%s", ABC[i]);
+        r[i].gen = last_gen(ABC[i]);
+        r[i].control_failed = i > 0;
+        snprintf(r[i].error, sizeof(r[i].error), "%s", i > 0 ? "the check's host a.test does not resolve" : "");
+    }
+    r[0].passed = true;
+    firc_ifwatch_results(w, r, 3);
+    ASSERT(said(FIRC_LOG_WARN, "cannot check up1, up2: the check's host a.test does not resolve"));
+    ASSERT_FALSE(said(FIRC_LOG_WARN, "the interface check cannot run"));
+    done(w);
+    PASS();
+}
+
 TEST a_result_from_before_a_forget_is_dropped(void) {
     firc_ifwatch_t *w = fresh();
     g_groups[g_n++] = grp(1, AB, 2);
@@ -900,6 +922,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_tunnel_entry_dies_with_its_link);
     RUN_TEST(a_failed_control_moves_nothing_and_says_the_check_fails);
     RUN_TEST(a_round_that_ran_no_control_does_not_blame_the_wan);
+    RUN_TEST(a_round_with_a_pass_names_the_entries_it_could_not_check);
     RUN_TEST(a_result_from_before_a_forget_is_dropped);
     RUN_TEST(every_entry_dead_blocks_the_group_and_errors_after_5_min);
     RUN_TEST(an_unblock_by_pick_ends_the_all_dead_run);

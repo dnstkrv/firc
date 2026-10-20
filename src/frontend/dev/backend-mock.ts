@@ -1075,6 +1075,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.httpWeb.host.port": 666,
   "app.update.check": false,
   "app.check.url": "http://cp.cloudflare.com/generate_204",
+  "app.check.wanUrl": "",
   "app.check.interval": 30,
   "app.check.timeout": 5,
 };
@@ -1085,6 +1086,7 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.unmatchedTtl",
   "app.update.check",
   "app.check.url",
+  "app.check.wanUrl",
   "app.check.interval",
   "app.check.timeout",
 ]);

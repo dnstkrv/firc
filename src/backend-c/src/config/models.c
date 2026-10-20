@@ -670,7 +670,8 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
             FIRC_OK ||
         (err = firc_strset(&c->fakeip.v4.pool, "198.18.0.0/15")) != FIRC_OK ||
         (err = firc_strset(&c->fakeip.v6.pool, "")) != FIRC_OK ||
-        (err = firc_strset(&c->check.url, "http://cp.cloudflare.com/generate_204")) != FIRC_OK) {
+        (err = firc_strset(&c->check.url, "http://cp.cloudflare.com/generate_204")) != FIRC_OK ||
+        (err = firc_strset(&c->check.wan_url, "")) != FIRC_OK) {
         firc_app_config_clear(c);
         return err;
     }
@@ -703,6 +704,7 @@ void firc_app_config_clear(firc_app_config_t *c)
     free(c->fakeip.v6.pool);
     free(c->netfilter.iptables.chain_prefix);
     free(c->check.url);
+    free(c->check.wan_url);
     for (size_t i = 0; i < c->n_link; i++) {
         free(c->link[i]);
     }

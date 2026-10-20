@@ -3,7 +3,12 @@ import { t } from "../../data/locale.svelte";
 import type { SettingValue } from "./settings";
 
 export type Control =
-  | { kind: "text"; placeholder?: () => string; width?: string }
+  | {
+      kind: "text";
+      placeholder?: () => string;
+      width?: string;
+      suggest?: { label: () => string; value: string };
+    }
   | { kind: "number"; unit?: () => string; width?: string }
   | { kind: "switch"; invert?: boolean; caption?: string }
   | { kind: "tags" };
@@ -250,6 +255,28 @@ export const SECTIONS: Section[] = [
             key: "app.check.url",
             label: () => t("Check URL"),
             control: { kind: "text", width: "22rem" },
+          },
+        ],
+      ),
+      row(
+        () => t("WAN check URL"),
+        () =>
+          t(
+            "For the provider's interfaces and the control request. Empty means the same as the check URL. If the provider lets only some sites through (whitelists), give an allowed address",
+          ),
+        [
+          {
+            key: "app.check.wanUrl",
+            label: () => t("WAN check URL"),
+            control: {
+              kind: "text",
+              width: "18rem",
+              placeholder: () => t("same as the check URL"),
+              suggest: {
+                label: () => t("Yandex"),
+                value: "http://api.browser.yandex.ru/generate_204",
+              },
+            },
           },
         ],
       ),

@@ -403,6 +403,8 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     map_start(ctx);
     emit_plain(ctx, "url");
     emit_string(ctx, a->check.url != NULL ? a->check.url : "");
+    emit_plain(ctx, "wanUrl");
+    emit_string(ctx, a->check.wan_url != NULL ? a->check.wan_url : "");
     emit_plain(ctx, "interval");
     emit_duration(ctx, a->check.interval);
     emit_plain(ctx, "timeout");

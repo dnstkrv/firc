@@ -458,6 +458,7 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
             return FIRC_ERR_INVAL;
         }
         GET_OR_FAIL(get_string(map_get(doc, cn, "url"), &c->check.url, &err));
+        GET_OR_FAIL(get_string(map_get(doc, cn, "wanUrl"), &c->check.wan_url, &err));
         GET_OR_FAIL(get_duration(map_get(doc, cn, "interval"), &c->check.interval, &err));
         GET_OR_FAIL(get_duration(map_get(doc, cn, "timeout"), &c->check.timeout, &err));
     }

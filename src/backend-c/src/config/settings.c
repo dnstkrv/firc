@@ -51,6 +51,7 @@ const firc_setting_t firc_settings[] = {
     {"app.httpWeb.host.port", FIRC_SK_PORT, RESTART, AT(http_web.host.port), 0, FIRC_APPLY_NONE},
     {"app.update.check", FIRC_SK_BOOL, LIVE, AT(update.check), 0, FIRC_APPLY_NONE},
     {"app.check.url", FIRC_SK_STRING, LIVE, AT(check.url), 0, FIRC_APPLY_CHECK},
+    {"app.check.wanUrl", FIRC_SK_STRING, LIVE, AT(check.wan_url), 0, FIRC_APPLY_CHECK},
     {"app.check.interval", FIRC_SK_SEC, LIVE, AT(check.interval), 0, FIRC_APPLY_CHECK},
     {"app.check.timeout", FIRC_SK_SEC, LIVE, AT(check.timeout), 0, FIRC_APPLY_CHECK},
 };
@@ -357,6 +358,9 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
         }
     }
     if (!firc_check_url_ok(c->check.url)) { REFUSE("app.check.url", "an http:// or https:// URL with a name or IPv4 host"); }
+    if (c->check.wan_url != NULL && c->check.wan_url[0] != '\0' && !firc_check_url_ok(c->check.wan_url)) {
+        REFUSE("app.check.wanUrl", "empty, or an http:// or https:// URL with a name or IPv4 host");
+    }
     if (c->check.interval < 10 * FIRC_DURATION_SEC || c->check.interval > 3600 * FIRC_DURATION_SEC) {
         REFUSE("app.check.interval", "10 to 3600 seconds");
     }

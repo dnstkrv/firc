@@ -40,6 +40,7 @@ app:
     check: true
   check:
     url: http://cp.cloudflare.com/generate_204
+    wanUrl: ""
     interval: 30s
     timeout: 5s
 groups:

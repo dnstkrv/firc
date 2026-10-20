@@ -243,7 +243,7 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(27, cJSON_GetArraySize(s));
+    ASSERT_EQ(28, cJSON_GetArraySize(s));
     ASSERT_EQ(NULL, item(s, "app.logLevel"));
     ASSERT_EQ(NULL, item(s, "app.showAllInterfaces"));
     ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
@@ -268,7 +268,7 @@ TEST get_answers_every_setting_typed(void) {
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(8, live);
+    ASSERT_EQ(9, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);
@@ -484,6 +484,38 @@ TEST a_put_of_the_check_interval_answers_it_live(void) {
     cJSON_Delete(out);
     harness_join(h);
     ASSERT_EQ(45 * FIRC_DURATION_SEC, firc_app_running_settings(h->app)->check.interval);
+    harness_stop(h);
+    PASS();
+}
+
+static _Atomic int check_applies;
+static void count_apply(void *ud, const firc_app_config_t *run) {
+    (void)ud;
+    (void)run;
+    check_applies++;
+}
+
+/* Catches: wanUrl listed as a restart setting, or a save of it that never reaches the check. */
+TEST wan_url_is_live(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    check_applies = 0;
+    firc_app_ifaces_t hooks = {.settings = count_apply};
+    firc_app_set_ifaces(h->app, &hooks);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("PUT", "/api/v1/system/settings",
+                              "{\"settings\":{\"app.check.wanUrl\":\"http://wan.example/204\"}}", &out));
+    static const char *const applied[] = {"app.check.wanUrl"};
+    ASSERT(strings_are(item(out, "applied"), applied, 1));
+    ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
+    cJSON_Delete(out);
+    out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
+    ASSERT_STR_EQ("live", item(item(out, "classes"), "app.check.wanUrl")->valuestring);
+    cJSON_Delete(out);
+    harness_join(h);
+    ASSERT_EQ(1, check_applies);
+    ASSERT_STR_EQ("http://wan.example/204", firc_app_running_settings(h->app)->check.wan_url);
     harness_stop(h);
     PASS();
 }
@@ -1216,6 +1248,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_live_put_changes_the_upstream);
     RUN_TEST(a_live_put_applies_unmatched_ttl);
     RUN_TEST(a_put_of_the_check_interval_answers_it_live);
+    RUN_TEST(wan_url_is_live);
     RUN_TEST(pending_restart_is_the_whole_list_after_each_save);
     RUN_TEST(a_value_equal_to_the_saved_one_is_not_a_change);
     RUN_TEST(a_web_port_another_program_holds_is_refused);
