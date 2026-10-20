@@ -334,6 +334,22 @@ test.describe("The interface picker in the card", () => {
     await expect(picker(page)).toHaveClass(/missing/);
   });
 
+  // Catches an active interface outside both the list and the router shown as present.
+  test("an active entry outside the list shows greyed", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "wg0"], active: "gone9" })]);
+    await expect(closedValue(page)).toHaveText("gone9");
+    await expect(picker(page)).toHaveClass(/missing/);
+  });
+
+  // Catches an entry the router lacks left out of the picker, so it can be neither seen nor removed.
+  test("a backup gone from the router is a row whose circle removes it", async ({ page }) => {
+    await setup(page, [listed({ interface: ["nwg0", "gone0"] })]);
+    await openPicker(page);
+    await expect(circle(page, "gone0")).toHaveText("2");
+    await circle(page, "gone0").click();
+    await expect(row(page, "gone0")).toHaveCount(0);
+  });
+
   test("Shift+Enter toggles the highlighted row's circle and keeps the picker open", async ({
     page,
   }) => {

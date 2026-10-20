@@ -58,6 +58,13 @@ describe("interface choices", () => {
     assert.strictEqual(groupChoices(LIST, ["nwg0", "br1"]).expanded, true);
   });
 
+  // Catches a chosen entry the router lacks left out of the picker, so it can be neither seen nor removed.
+  it("a chosen entry the router lacks is offered after the tunnels", () => {
+    const c = groupChoices(LIST, ["nwg0", "nwg3", "ppp0", "nwg4"]);
+    assert.deepStrictEqual(ids(c.head), ["nwg0", "nwg2", "tunvless0", "nwg3", "nwg4"]);
+    assert.strictEqual(ids(c.rest).includes("nwg3"), false);
+  });
+
   // Catches an interface without a role dropped instead of counted among the rest.
   it("an interface without a role is one of the rest", () => {
     assert.deepStrictEqual(ids(groupChoices([{ id: "eth9" }], []).rest), ["eth9"]);

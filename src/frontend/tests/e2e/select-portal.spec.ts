@@ -65,3 +65,34 @@ test.describe("Select list placement", () => {
     await expect(trigger).toContainText("wg1");
   });
 });
+
+test.describe("Select value", () => {
+  // Catches a Select greyed as missing while its value is one of its options.
+  test("a value among the options is not greyed", async ({ page }) => {
+    await signedIn(page);
+    await page.route("**/system/interfaces", (route) =>
+      route.fulfill({ json: { interfaces: [{ id: "eth0" }] } }),
+    );
+    await page.route("**/groups?with_rules=true", (route) =>
+      route.fulfill({
+        json: {
+          groups: [
+            {
+              id: "aaaaaaaa",
+              name: "g",
+              interface: "eth0",
+              enable: true,
+              rules: [{ id: "bbbbbbbb", type: "domain", rule: "a.com", enable: true }],
+            },
+          ],
+        },
+      }),
+    );
+    const groups = new GroupsPage(page);
+    await groups.goto();
+    await groups.expandGroup(0);
+    const wrap = page.locator(".rule .select-wrap").first();
+    await expect(wrap).toBeVisible();
+    await expect(wrap).not.toHaveClass(/missing/);
+  });
+});

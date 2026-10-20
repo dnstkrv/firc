@@ -18,6 +18,7 @@
     danger?: boolean;
     separator?: boolean;
     hidden?: boolean;
+    missing?: boolean;
     toggle?: () => void;
     expanded?: boolean;
   };
@@ -75,8 +76,9 @@
   const selected_description = $derived(
     showSelectedDescription ? (selected_option?.description ?? "") : "",
   );
+  const shown_option = $derived(options.find((o) => o.value === shown_value));
   const missing_selection = $derived(
-    Boolean(shown_value) && !options.some((o) => o.value === shown_value),
+    Boolean(shown_value) && (shown_option === undefined || shown_option.missing === true),
   );
 </script>
 

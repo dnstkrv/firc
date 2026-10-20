@@ -40,6 +40,7 @@
       label: title,
       description: sub,
       mono: true,
+      missing: !interfaces.list.some((i) => i.id === item.id),
       ariaDescription: canBackup(list, item.id)
         ? t("Shift+Enter — add as a backup or remove")
         : undefined,

@@ -12,8 +12,9 @@ export function ifaceTitle(i: IfaceItem): { title: string; sub: string | undefin
   return title ? { title, sub: i.id } : { title: i.id, sub: undefined };
 }
 
-export function groupChoices<T extends IfaceItem>(list: T[], chosen: string[]) {
-  const head = list.filter((i) => i.role === "tunnel");
+export function groupChoices(list: IfaceItem[], chosen: string[]) {
+  const missing = chosen.filter((id) => !list.some((i) => i.id === id)).map((id) => ({ id }));
+  const head = [...list.filter((i) => i.role === "tunnel"), ...missing];
   const blackhole = list.find((i) => i.id === BLACKHOLE);
   const rest = list
     .filter((i) => i.id !== BLACKHOLE && i.role !== "tunnel")
