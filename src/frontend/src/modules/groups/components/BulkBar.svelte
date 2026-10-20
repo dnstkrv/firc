@@ -2,13 +2,18 @@
   import { DropdownMenu } from "bits-ui";
   import { getContext } from "svelte";
 
+  import { hosts } from "../../../data/hosts.svelte";
   import { interfaces } from "../../../data/interfaces.svelte";
   import { locale, t } from "../../../data/locale.svelte";
-  import { GROUPS_STORE_CONTEXT, type GroupsStore } from "../groups.svelte";
+  import { policies } from "../../../data/policies.svelte";
+  import { ask } from "../../../utils/confirm.svelte";
+  import BulkDevicesDialog from "../dialogs/BulkDevicesDialog.svelte";
+  import { GROUPS_STORE_CONTEXT, groupTitle, type GroupsStore } from "../groups.svelte";
 
   import {
     Check,
     Delete,
+    Devices,
     Network,
     SelectOpen,
     ToggleLeft,
@@ -16,6 +21,9 @@
     X,
   } from "../../../components/ui/icons";
   import { groupChoices, ifaceTitle, moreText, type IfaceItem } from "../../../data/iface-choices";
+  import { replaceWith } from "../../../utils/device-bulk";
+  import { coverageLabel } from "../../../utils/device-picker";
+  import { counted } from "../../../utils/plural";
   import { selectionCountText } from "../selection";
 
   type Props = {
@@ -32,6 +40,58 @@
   const store = getContext<GroupsStore>(GROUPS_STORE_CONTEXT);
   if (!store) {
     throw new Error("GroupsStore context is missing");
+  }
+
+  let devicesOpen = $state(false);
+  let devicesView = $state<"edit" | "replace">("edit");
+
+  function editDevices(view: "edit" | "replace") {
+    devicesView = view;
+    devicesOpen = true;
+  }
+
+  const every = { allow: [], deny: [] };
+  let selectedGroups = $derived.by(() => {
+    const ids = new Set(store.selection);
+    return store.data.filter((g) => ids.has(g.id));
+  });
+  let resetting = $derived(selectedGroups.filter((g) => replaceWith(g.devices, every) !== null));
+
+  async function resetDevices() {
+    const groups = selectedGroups;
+    const changing = resetting;
+    if (changing.length === 0) return;
+    const items = groups.map((g) =>
+      changing.includes(g)
+        ? t("{group}: {now} → every device")
+            .replace("{group}", () => groupTitle(g))
+            .replace("{now}", () =>
+              coverageLabel(g.devices, hosts.list, policies.list, t, locale.current),
+            )
+        : t("{group}: already every device, unchanged").replace("{group}", () => groupTitle(g)),
+    );
+    const ok = await ask({
+      tone: "danger",
+      title: counted(
+        groups.length,
+        locale.current,
+        t("Reset the devices of {n} group?"),
+        t("Reset the devices of {n} groups? (2-4)"),
+        t("Reset the devices of {n} groups?"),
+      ),
+      message: t(
+        "The groups will work for every device, new ones included. Traffic of the devices excluded now goes through the group as soon as the change applies. The change needs saving, like any other group edit.",
+      ),
+      items,
+      confirm: counted(
+        changing.length,
+        locale.current,
+        t("Reset in {n} group"),
+        t("Reset in {n} groups (2-4)"),
+        t("Reset in {n} groups"),
+      ),
+    });
+    if (ok) store.setSelectedDevices((g) => replaceWith(g.devices, every));
   }
 
   let countText = $derived(selectionCountText(store.selection.length, locale.current, t));
@@ -137,6 +197,53 @@
     </DropdownMenu.Root>
 
     <DropdownMenu.Root>
+      <DropdownMenu.Trigger class="bulk-button bulk-devices" aria-label={t("Devices")}>
+        <Devices size={18} /><span class="bulk-label label-devices">{t("Devices")}</span><span
+          class="devices-chevron"><SelectOpen size={16} /></span
+        >
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          class="bulk-menu"
+          side="top"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+        >
+          <DropdownMenu.Item class="bulk-menu-item" onSelect={() => editDevices("edit")}>
+            <span class="bulk-menu-text">
+              <span class="bulk-menu-label">{t("Edit…")}</span>
+              <span class="bulk-menu-desc"
+                >{t(
+                  "Add or remove devices and policies; everything else stays as each group has it",
+                )}</span
+              >
+            </span>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item class="bulk-menu-item" onSelect={() => editDevices("replace")}>
+            <span class="bulk-menu-text">
+              <span class="bulk-menu-label">{t("Replace…")}</span>
+              <span class="bulk-menu-desc"
+                >{t("Give every selected group the same device choice")}</span
+              >
+            </span>
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator class="bulk-menu-separator" />
+          <DropdownMenu.Item
+            class="bulk-menu-item"
+            disabled={resetting.length === 0}
+            onSelect={() => void resetDevices()}
+          >
+            <span class="bulk-menu-text">
+              <span class="bulk-menu-label bulk-menu-danger">{t("Reset: every device")}</span>
+              <span class="bulk-menu-desc">{t("Remove every device restriction")}</span>
+            </span>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+
+    <DropdownMenu.Root>
       <DropdownMenu.Trigger class="bulk-button">
         <ToggleLeft size={18} />
         <span class="bulk-label label-long">{t("Enable / disable")}</span>
@@ -168,6 +275,8 @@
     </button>
   </div>
 </div>
+
+<BulkDevicesDialog bind:open={devicesOpen} bind:view={devicesView} />
 
 {#snippet ifaceItem(item: IfaceItem)}
   {@const label = ifaceTitle(item)}
@@ -267,6 +376,10 @@
     display: none;
   }
 
+  .devices-chevron {
+    display: inline-flex;
+  }
+
   :global(.bulk-menu[data-dropdown-menu-content]) {
     z-index: 11;
     min-width: 13rem;
@@ -295,6 +408,24 @@
 
   :global(.bulk-menu-label) {
     white-space: nowrap;
+  }
+
+  .bulk-menu-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    max-width: 20rem;
+  }
+
+  .bulk-menu-desc {
+    font-size: 0.75rem;
+    color: var(--text-2);
+    white-space: normal;
+  }
+
+  :global(.bulk-menu-item[data-dropdown-menu-item][data-disabled]) {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   :global(.bulk-menu-sub) {
@@ -382,6 +513,15 @@
 
     .label-short {
       display: inline;
+    }
+
+    .label-devices,
+    .devices-chevron {
+      display: none;
+    }
+
+    .bulk-actions > :global(.bulk-devices) {
+      flex: 0 0 auto;
     }
   }
 </style>

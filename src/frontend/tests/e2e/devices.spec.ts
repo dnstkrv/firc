@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { answerConfirm } from "./pages/confirm";
 import { GroupsPage } from "./pages/GroupsPage";
 import { signedIn } from "./pages/session";
 
@@ -469,5 +470,168 @@ test.describe("Device dialog", () => {
     expect(m.thumb).not.toBe(m.bg);
     expect(m.thumb).not.toBe("rgba(0, 0, 0, 0)");
     expect(m.overflowX).toBe(false);
+  });
+});
+
+async function stubGroups(page: Page, devices: { allow: string[]; deny: string[] }[]) {
+  const names = ["Media", "Work", "Games"];
+  await page.route("**/groups?with_rules=true", (route) =>
+    route.fulfill({
+      json: {
+        groups: devices.map((d, i) => ({
+          id: `0b00000${i + 1}`,
+          name: names[i],
+          interface: "eth0",
+          enable: true,
+          devices: d,
+          rules: [],
+        })),
+      },
+    }),
+  );
+  await page.route("**/interfaces", (route) => route.fulfill({ json: { interfaces: ["eth0"] } }));
+  await page.route("**/system/hosts", (route) => route.fulfill({ json: { hosts: HOSTS } }));
+  await page.route("**/system/policies", (route) =>
+    route.fulfill({ json: { policies: POLICIES } }),
+  );
+}
+
+const cardLabels = (page: Page) =>
+  page
+    .locator("button", { has: page.locator(".devices-icon") })
+    .evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
+const selectGroup = (page: Page, name: string) =>
+  page.getByRole("button", { name: `Select group ${name}`, exact: true }).click();
+const bulkBar = (page: Page) => page.getByRole("region", { name: "Selected groups" });
+
+test.describe("Bulk devices", () => {
+  let groupsPage: GroupsPage;
+
+  test.beforeEach(async ({ page }) => {
+    groupsPage = new GroupsPage(page);
+    await signedIn(page);
+  });
+
+  // Catches a bulk edit reaching an unselected group, missing a selected one, or never lighting Save.
+  test("a device switched off in Edit is excluded in every selected group", async ({ page }) => {
+    await stubGroups(page, [
+      { allow: [], deny: [] },
+      { allow: [], deny: [] },
+      { allow: [], deny: [] },
+    ]);
+    await groupsPage.goto();
+    await selectGroup(page, "Media");
+    await selectGroup(page, "Work");
+    await bulkBar(page).getByRole("button", { name: "Devices" }).click();
+    await page.getByRole("menuitem", { name: /Edit…/ }).click();
+    const tv = page.locator('.modal li.row[data-mac="aa:00:00:00:00:01"]');
+    const tri = tv.getByRole("checkbox");
+    await expect(tri).toHaveAttribute("aria-checked", "true");
+    await expect(tv.locator(".state")).toHaveText("on in all");
+    await expect(page.locator(".modal .footer")).toHaveText("0 groups of 2 will change");
+    await tri.click();
+    await tri.click();
+    await expect(tri).toHaveAttribute("aria-checked", "false");
+    await expect(tv.locator(".state")).toHaveText("on → off in all");
+    await expect(page.locator(".modal .footer")).toHaveText("2 groups of 2 will change");
+    await page.locator(".modal form button[type=submit]").click();
+    await expect(page.locator(".modal")).toHaveCount(0);
+    expect(await cardLabels(page)).toEqual([
+      "All but 1 device",
+      "All but 1 device",
+      "Every device",
+    ]);
+    await expect(page.locator("#save-changes")).not.toHaveClass(/inactive/);
+    let saved: any = null;
+    await page.route("**/groups?save=true", async (route) => {
+      saved = route.request().postDataJSON();
+      await route.fulfill({ json: {} });
+    });
+    await groupsPage.save();
+    await expect.poll(() => saved?.groups?.length).toBe(3);
+    expect(saved.groups.map((g: any) => g.devices)).toEqual([
+      { allow: [], deny: ["mac:aa:00:00:00:00:01"] },
+      { allow: [], deny: ["mac:aa:00:00:00:00:01"] },
+      { allow: [], deny: [] },
+    ]);
+  });
+
+  // Catches Replace giving the groups different selectors, losing its draft on a switch to Edit, or a wrong count.
+  test("Replace gives every selected group the same devices", async ({ page }) => {
+    await stubGroups(page, [
+      { allow: [], deny: ["mac:aa:00:00:00:00:02"] },
+      { allow: ["policy:Kids"], deny: [] },
+    ]);
+    await groupsPage.goto();
+    await selectGroup(page, "Media");
+    await selectGroup(page, "Work");
+    await bulkBar(page).getByRole("button", { name: "Devices" }).click();
+    await page.getByRole("menuitem", { name: /Replace…/ }).click();
+    await expect(page.locator(".modal .footer")).toHaveText("Same for 2 groups");
+    const submit = page.locator(".modal form button[type=submit]");
+    await expect(submit).toHaveText("Replace in 2 groups");
+    const tv = page.locator('.modal li.host[data-mac="aa:00:00:00:00:01"] [role=switch]');
+    await tv.click();
+    await expect(tv).toHaveAttribute("aria-checked", "false");
+    await page.locator(".modal .view-edit").click();
+    await page.locator(".modal .view-replace").click();
+    await expect(tv).toHaveAttribute("aria-checked", "false");
+    await submit.click();
+    await expect(page.locator(".modal")).toHaveCount(0);
+    let saved: any = null;
+    await page.route("**/groups?save=true", async (route) => {
+      saved = route.request().postDataJSON();
+      await route.fulfill({ json: {} });
+    });
+    await groupsPage.save();
+    await expect.poll(() => saved?.groups?.length).toBe(2);
+    expect(saved.groups.map((g: any) => g.devices)).toEqual([
+      { allow: [], deny: ["mac:aa:00:00:00:00:01"] },
+      { allow: [], deny: ["mac:aa:00:00:00:00:01"] },
+    ]);
+  });
+
+  // Catches Reset counting or changing a group already at every device, or not saying it stays.
+  test("Reset lists a group already at every device as unchanged", async ({ page }) => {
+    await stubGroups(page, [
+      { allow: [], deny: ["mac:aa:00:00:00:00:02"] },
+      { allow: [], deny: [] },
+    ]);
+    await groupsPage.goto();
+    await selectGroup(page, "Media");
+    await selectGroup(page, "Work");
+    await bulkBar(page).getByRole("button", { name: "Devices" }).click();
+    await page.getByRole("menuitem", { name: /Reset: every device/ }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog.locator(".confirm-title")).toHaveText("Reset the devices of 2 groups?");
+    await expect(dialog.locator("li")).toHaveText([
+      "Media: All but 1 device → every device",
+      "Work: already every device, unchanged",
+    ]);
+    await expect(dialog.locator(".confirm-action")).toHaveText("Reset in 1 group");
+    await answerConfirm(page, true);
+    expect(await cardLabels(page)).toEqual(["Every device", "Every device"]);
+    await expect(page.locator("#save-changes")).not.toHaveClass(/inactive/);
+    const live = page.locator(".group .live-status");
+    await expect(live.nth(0)).toHaveAttribute("data-kind", "unsaved");
+    await expect(live.nth(1)).not.toHaveAttribute("data-kind", "unsaved");
+  });
+
+  // Catches Reset offered when no selected group would change.
+  test("Reset is unavailable when every selected group is already at every device", async ({
+    page,
+  }) => {
+    await stubGroups(page, [
+      { allow: [], deny: [] },
+      { allow: [], deny: [] },
+    ]);
+    await groupsPage.goto();
+    await selectGroup(page, "Media");
+    await selectGroup(page, "Work");
+    await bulkBar(page).getByRole("button", { name: "Devices" }).click();
+    await expect(page.getByRole("menuitem", { name: /Reset: every device/ })).toHaveAttribute(
+      "data-disabled",
+      "",
+    );
   });
 });

@@ -112,7 +112,7 @@ function namesPolicy(key: string, id: string, policies: PickerPolicy[]): boolean
   return pol ? pol.name === id : key === id;
 }
 
-function policySide(p: Picked, id: string, policies: PickerPolicy[]): Side | null {
+export function policySide(p: Picked, id: string, policies: PickerPolicy[]): Side | null {
   const sides: Side[] = [];
   for (const [k, side] of p.policies) if (namesPolicy(k, id, policies)) sides.push(side);
   for (const side of ["allow", "deny"] as Side[])
@@ -122,7 +122,7 @@ function policySide(p: Picked, id: string, policies: PickerPolicy[]): Side | nul
   return sides.includes("deny") ? "deny" : sides.includes("allow") ? "allow" : null;
 }
 
-function writeKey(p: Picked, id: string, policies: PickerPolicy[]): string | null {
+export function writeKey(p: Picked, id: string, policies: PickerPolicy[]): string | null {
   const pol = policies.find((x) => x.name === id);
   if (pol === undefined) return id;
   const stored = [...p.policies.keys()].find((k) => namesPolicy(k, id, policies));

@@ -327,7 +327,7 @@ test.describe("Group bulk actions", () => {
     const selectAll = await region.getByRole("button", { name: "Выбрать все" }).boundingBox();
     const del = await region.getByRole("button", { name: "Удалить" }).boundingBox();
     expect(del!.y).toBeGreaterThan(selectAll!.y + selectAll!.height - 1);
-    for (const name of ["Интерфейс", "Вкл/выкл", "Удалить"]) {
+    for (const name of ["Интерфейс", "Устройства", "Вкл/выкл", "Удалить"]) {
       const b = await region.getByRole("button", { name }).boundingBox();
       expect(b!.x + b!.width, name).toBeLessThanOrEqual(box!.x + box!.width);
     }
@@ -337,7 +337,7 @@ test.describe("Group bulk actions", () => {
         .filter((l) => l.offsetParent && l.scrollWidth > l.clientWidth)
         .map((l) => l.textContent),
       ...Array.from(root.querySelectorAll("svg"))
-        .filter((svg) => svg.getBoundingClientRect().width < 15)
+        .filter((svg) => svg.getClientRects().length > 0 && svg.getBoundingClientRect().width < 15)
         .map(() => "icon"),
     ]);
     expect(squeezed).toEqual([]);

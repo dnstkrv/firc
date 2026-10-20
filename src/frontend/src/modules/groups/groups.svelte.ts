@@ -79,7 +79,7 @@ export function invalidRulesByGroup(groups: Group[]): Map<string, string[]> {
   return byGroup;
 }
 
-function groupTitle(group: Group) {
+export function groupTitle(group: Group) {
   return group.name.trim() || t("untitled");
 }
 
@@ -367,6 +367,13 @@ export class GroupsStore {
   setSelectedInterface(iface: string) {
     this.#editSelected((group) => {
       if (group.interface !== iface) group.interface = iface;
+    });
+  }
+
+  setSelectedDevices(edit: (group: Group) => DeviceSelector | null) {
+    this.#editSelected((group) => {
+      const next = edit(group);
+      if (next !== null) group.devices = next;
     });
   }
 

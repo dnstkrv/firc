@@ -203,6 +203,39 @@ describe("GroupsStore bulk actions", () => {
     );
   });
 
+  // Catches bulk devices skipping a selected group, touching another, or bypassing the tracker.
+  it("sets the devices of every selected group as an edit", () => {
+    const store = seeded([makeGroup("a"), makeGroup("b"), makeGroup("c")]);
+    store.toggleSelected("a");
+    store.toggleSelected("c");
+    store.setSelectedDevices(() => ({ allow: [], deny: ["mac:aa:00:00:00:00:02"] }));
+    assert.deepStrictEqual(
+      store.data.map((g) => g.devices),
+      [
+        { allow: [], deny: ["mac:aa:00:00:00:00:02"] },
+        { allow: [], deny: [] },
+        { allow: [], deny: ["mac:aa:00:00:00:00:02"] },
+      ],
+    );
+    assert.strictEqual(store.canSave, true);
+    assert.strictEqual(store.groupDirty(store.data[0]), true);
+    assert.strictEqual(store.groupDirty(store.data[1]), false);
+  });
+
+  // Catches a null answer for a group assigned to it, so a group already at the value turns unsaved.
+  it("a group already at the value is not marked unsaved", () => {
+    const store = seeded([makeGroup("a"), makeGroup("b")]);
+    store.toggleSelected("a");
+    store.toggleSelected("b");
+    store.setSelectedDevices((g) =>
+      g.id === "a" ? null : { allow: ["mac:aa:00:00:00:00:01"], deny: [] },
+    );
+    assert.deepStrictEqual(store.data[0].devices, { allow: [], deny: [] });
+    assert.strictEqual(store.groupDirty(store.data[0]), false);
+    assert.deepStrictEqual(store.data[1].devices, { allow: ["mac:aa:00:00:00:00:01"], deny: [] });
+    assert.strictEqual(store.groupDirty(store.data[1]), true);
+  });
+
   // Catches Select all without a search missing a group.
   it("selects all groups without a search", async () => {
     const store = seeded([makeGroup("a"), makeGroup("b"), makeGroup("c")]);
