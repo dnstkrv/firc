@@ -100,7 +100,16 @@ function entryRefusal(server: string, id: string) {
   return null;
 }
 
-const DATA = JSON.parse(Deno.readTextFileSync("./dev/groups.json"));
+function loadGroups() {
+  try {
+    return JSON.parse(Deno.readTextFileSync("./dev/groups.json"));
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return { groups: [] };
+    throw e;
+  }
+}
+
+const DATA = loadGroups();
 if (DATA.groups[0]) FALLBACKS[DATA.groups[0].id] = 3;
 
 if (!DATA.groups.some((g: any) => g.id === "a1b2c3d4")) {
