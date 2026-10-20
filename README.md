@@ -6,6 +6,8 @@
   <strong>Маршрутизация по доменам, а не по адресам.</strong>
   <br/>
   <sub>Entware / Keenetic · aarch64, mipsel, mips</sub>
+  <br/>
+  <a href="https://firc.hoaxisr.ru"><strong>Документация: firc.hoaxisr.ru</strong></a>
 </p>
 
 <p align="center">
