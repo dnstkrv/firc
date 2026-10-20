@@ -2,6 +2,7 @@
 #include "firc/log.h"
 #include "firc/logrep.h"
 #include "firc/mark.h"
+#include "firc/tunvless_name.h"
 
 #include <linux/rtnetlink.h>
 #include <netinet/in.h>
@@ -915,7 +916,8 @@ static firc_err_t add_fallback(firc_ipset_to_link_t *l, int family, family_state
 
 static bool say_missing(firc_ipset_to_link_t *l, bool found, const firc_link_info_t *li) {
     if (!found) {
-        firc_logrep_fail(&l->link_missing, FIRC_LOG_WARN, NULL, "interface %s not found, it can be caught later",
+        firc_log_level_t level = firc_tunvless_index(active_name(l)) >= 0 ? FIRC_LOG_INFO : FIRC_LOG_WARN;
+        firc_logrep_fail(&l->link_missing, level, NULL, "interface %s not found, it can be caught later",
                          active_name(l));
         return true;
     }
