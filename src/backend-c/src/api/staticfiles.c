@@ -1,6 +1,7 @@
 #include "firc/staticfiles.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,14 @@ static const char *content_type_for_ext(const char *path) {
     return "text/plain";
 }
 
+static bool is_tab_path(const char *path) {
+    static const char *const tabs[] = {"/groups", "/tunnels", "/journal", "/settings"};
+    for (size_t i = 0; i < sizeof(tabs) / sizeof(tabs[0]); i++) {
+        if (strcmp(path, tabs[i]) == 0) { return true; }
+    }
+    return false;
+}
+
 void firc_static_handler(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     firc_static_ctx_t *ctx = ud;
     if (strcmp(firc_http_req_method(req), "GET") != 0) {
@@ -32,6 +41,7 @@ void firc_static_handler(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     }
 
     const char *original = firc_http_req_path(req);
+    if (is_tab_path(original)) { original = "/"; }
 
     char file_path[1024];
     if (snprintf(file_path, sizeof(file_path), "%s%s", ctx->root, original) >=

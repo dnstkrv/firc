@@ -8,7 +8,6 @@
   import JournalView from "../../modules/logs/JournalView.svelte";
   import SettingsView from "../../modules/settings/SettingsView.svelte";
   import TunnelsView from "../../modules/tunnels/TunnelsView.svelte";
-  import { persistedState } from "../../utils/persisted-state.svelte";
   import ConfirmDialog from "../feedback/ConfirmDialog.svelte";
   import Overlay from "../feedback/Overlay.svelte";
   import ScrollToTop from "../feedback/ScrollToTop.svelte";
@@ -16,23 +15,30 @@
   import Toast from "../feedback/Toast.svelte";
   import HeaderSettings from "./HeaderSettings.svelte";
 
+  import { pathOfTab, tabFromPath } from "../../utils/tab-path";
   import { Cable, LayoutList, Logs, Menu, Settings } from "../ui/icons";
 
-  const TABS = ["groups", "tunnels", "logs", "settings"];
   const TAB_TITLES: Record<string, string> = {
     groups: "Groups",
     tunnels: "Tunnels",
     logs: "Journal",
     settings: "Settings",
   };
-  const lastActiveTab = persistedState("active_tab", "groups");
-  let active_tab = $state(TABS.includes(lastActiveTab.current) ? lastActiveTab.current : "groups");
+  let active_tab = $state(tabFromPath(location.pathname));
   let isMenuOpen = $state(false);
   let isRenderCompleteGroups = $state(false);
   let isRenderComplete = $derived(isRenderCompleteGroups);
 
   $effect(() => {
-    lastActiveTab.current = active_tab;
+    if (tabFromPath(location.pathname) !== active_tab) {
+      history.pushState(null, "", pathOfTab(active_tab));
+    }
+  });
+
+  $effect(() => {
+    const onPop = () => (active_tab = tabFromPath(location.pathname));
+    addEventListener("popstate", onPop);
+    return () => removeEventListener("popstate", onPop);
   });
 
   let seenFocus = untrack(() => journalFocus.request?.seq ?? 0);

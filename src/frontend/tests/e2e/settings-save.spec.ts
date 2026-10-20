@@ -431,7 +431,7 @@ test("the banner will not restart over unsaved edits", async ({ page }) => {
   await expect(upstream).toHaveValue("1.1.1.1");
 });
 
-// Catches the page waiting on the old port for a daemon that will never answer there.
+// Catches the page waiting on the old port, or landing there off the Settings tab.
 test("a moved web port sends the page to the new port", async ({ page }) => {
   await page.route("http://localhost:8081/**", (route) =>
     route.fulfill({ contentType: "text/html", body: "<html><title>moved</title></html>" }),
@@ -454,5 +454,5 @@ test("a moved web port sends the page to the new port", async ({ page }) => {
     dialog.getByText("After the restart the page will open on port 8081."),
   ).toBeVisible();
   await dialog.getByRole("button", { name: "Save and restart" }).click();
-  await page.waitForURL("http://localhost:8081/", { timeout: 10_000 });
+  await page.waitForURL("http://localhost:8081/settings", { timeout: 10_000 });
 });

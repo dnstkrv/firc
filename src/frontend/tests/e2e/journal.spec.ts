@@ -152,10 +152,7 @@ test("clicking a tunnel's badge shows that tunnel's lines", async ({ page }) => 
 test("a phone-wide journal scrolls only down", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await shell(page, MIXED);
-  await page.addInitScript(() => {
-    localStorage.setItem("active_tab", JSON.stringify({ value: "logs" }));
-  });
-  await page.goto("/");
+  await page.goto("/journal");
   await expect(page.locator(".pane .row")).toHaveCount(5);
   const wide = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -356,15 +353,20 @@ test("the Bypass tab is gone", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Bypass", exact: true })).toHaveCount(0);
 });
 
-// Catches a stored, removed tab opening a tab that renders nothing.
-test("a stored bypass tab opens a tab that exists", async ({ page }) => {
+// Catches a tab not opened by its address, a click not changing the address, or Back not returning.
+test("each tab has an address of its own", async ({ page }) => {
   await shell(page, []);
-  await page.addInitScript(() => {
-    localStorage.setItem("active_tab", JSON.stringify({ value: "bypass" }));
-  });
+  const active = page.locator('[data-tabs-trigger][data-state="active"]');
+  await page.goto("/journal");
+  await expect(active).toContainText("Journal");
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/journal$/);
+  await expect(active).toContainText("Journal");
   await page.goto("/");
-  await expect(page.locator('[data-tabs-trigger][data-state="active"]')).toContainText("Groups");
-  await expect(page.locator('[data-tabs-content][data-state="active"]')).toBeVisible();
+  await expect(active).toContainText("Groups");
+  await expect(page).toHaveURL(/\/$/);
 });
 
 // Catches the next page waiting a full poll interval after a full page; both requests are timed.

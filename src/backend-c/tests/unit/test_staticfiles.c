@@ -198,6 +198,25 @@ TEST serves_index_for_subdirectory(void) {
     PASS();
 }
 
+/* Catches: a tab's address answered 404, or any unknown path taken for a tab. */
+TEST serves_index_at_each_tab_path(void) {
+    char *dir = make_skin_fixture();
+    ASSERT(dir != NULL);
+    harness_t *h = harness_start(dir);
+    ASSERT(h != NULL);
+    char resp[4096];
+    const char *tabs[] = {"/groups", "/tunnels", "/journal", "/settings"};
+    for (size_t i = 0; i < sizeof(tabs) / sizeof(tabs[0]); i++) {
+        ASSERT_EQm(tabs[i], 200, do_get(tabs[i], resp, sizeof(resp)));
+        ASSERT_STR_EQm(tabs[i], "<html>index</html>", body_of(resp));
+    }
+    ASSERT_EQ(404, do_get("/logs", resp, sizeof(resp)));
+    ASSERT_EQ(404, do_get("/groups/x", resp, sizeof(resp)));
+    harness_stop(h);
+    free(dir);
+    PASS();
+}
+
 TEST missing_file_is_404_json(void) {
     char *dir = make_skin_fixture();
     ASSERT(dir != NULL);
@@ -262,6 +281,7 @@ int main(int argc, char **argv) {
     RUN_TEST(serves_index_at_root);
     RUN_TEST(serves_file_by_extension_content_type);
     RUN_TEST(serves_index_for_subdirectory);
+    RUN_TEST(serves_index_at_each_tab_path);
     RUN_TEST(missing_file_is_404_json);
     RUN_TEST(missing_skin_at_root_is_html_placeholder);
     RUN_TEST(path_traversal_is_contained_under_skin_root);
