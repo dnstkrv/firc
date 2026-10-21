@@ -139,8 +139,6 @@
     </button>
   </div>
 
-  <span class="bulk-separator" aria-hidden="true"></span>
-
   <div class="bulk-row bulk-actions">
     <DropdownMenu.Root
       onOpenChange={(open) => {
@@ -295,8 +293,9 @@
     transform: translateX(-50%);
     z-index: 6;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.5rem 1rem;
     width: max-content;
     max-width: calc(100vw - 2rem);
     box-sizing: border-box;
@@ -312,22 +311,22 @@
 
   .bulk-row {
     display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     min-width: 0;
   }
 
-  .bulk-count {
+  .bulk-row > :global(*) {
+    flex: 1 1 auto;
+  }
+
+  .bulk-row > .bulk-count {
+    flex: 1 0 auto;
     padding: 0 0.6rem 0 0.5rem;
     font-weight: 600;
     white-space: nowrap;
-  }
-
-  .bulk-separator {
-    align-self: stretch;
-    width: 1px;
-    margin: 0.3rem 0.4rem;
-    background: var(--bg-light-extra);
   }
 
   .bulk-bar :global(.bulk-button) {
@@ -461,29 +460,6 @@
     transform: rotate(180deg);
   }
 
-  @media (max-width: 960px) {
-    .bulk-bar {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
-    .bulk-separator {
-      display: none;
-    }
-
-    .bulk-count {
-      margin-right: auto;
-    }
-
-    .bulk-actions {
-      flex-wrap: wrap;
-    }
-
-    .bulk-actions > :global(*) {
-      flex: 1 1 auto;
-    }
-  }
-
   @media (max-width: 600px) {
     .bulk-bar {
       left: 0.5rem;
@@ -497,10 +473,6 @@
 
     .bulk-actions {
       gap: 0.4rem;
-    }
-
-    .bulk-actions > :global(*) {
-      flex: 1 1 auto;
     }
 
     .bulk-bar :global(.bulk-button) {

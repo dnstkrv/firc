@@ -127,6 +127,63 @@ test.describe("Group bulk actions", () => {
     await expect(region.getByRole("status")).toHaveText("5 выбрано");
   });
 
+  // Catches a bar whose buttons overlap, leave the bar or the window, or cut their labels at some width.
+  for (const locale of ["en", "ru"]) {
+    test(`the bar fits at every width (${locale})`, async ({ page }) => {
+      test.setTimeout(60_000);
+      await page.addInitScript(
+        (value) => localStorage.setItem("locale", JSON.stringify({ value })),
+        locale,
+      );
+      await setup(page);
+      await page.locator(".group .place-number").nth(1).click();
+      await page.locator(".group .place-number").nth(2).click();
+      await expect(page.locator(".bulk-bar")).toBeVisible();
+      const widths = [
+        320, 360, 375, 390, 414, 480, 540, 600, 601, 640, 700, 768, 800, 834, 900, 960, 961, 963,
+        1000, 1024, 1100, 1150, 1180, 1280, 1366, 1440, 1600, 1920,
+      ];
+      const faults: string[] = [];
+      for (const width of widths) {
+        await page.setViewportSize({ width, height: 800 });
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(null))));
+        const found = await page.evaluate(() => {
+          const out: string[] = [];
+          const bar = document.querySelector(".bulk-bar")!.getBoundingClientRect();
+          if (bar.left < 0 || bar.right > window.innerWidth) out.push("bar leaves the window");
+          const parts = [
+            ...document.querySelectorAll(".bulk-bar .bulk-count, .bulk-bar .bulk-button"),
+          ];
+          const boxes = parts.map((el) => ({ el, r: el.getBoundingClientRect() }));
+          for (const { el, r } of boxes) {
+            const name = el.textContent!.trim() || el.getAttribute("aria-label");
+            if (r.left < bar.left - 0.5 || r.right > bar.right + 0.5 || r.bottom > bar.bottom + 0.5)
+              out.push(`${name} leaves the bar`);
+            for (const label of el.querySelectorAll<HTMLElement>(".bulk-label")) {
+              if (label.offsetWidth > 0 && label.scrollWidth > label.clientWidth + 1)
+                out.push(`${name} is cut`);
+            }
+          }
+          for (let i = 0; i < boxes.length; i++) {
+            for (let j = i + 1; j < boxes.length; j++) {
+              const a = boxes[i].r;
+              const b = boxes[j].r;
+              const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+              const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+              if (w > 0.5 && h > 0.5)
+                out.push(
+                  `${boxes[i].el.textContent!.trim()} overlaps ${boxes[j].el.textContent!.trim()}`,
+                );
+            }
+          }
+          return out;
+        });
+        faults.push(...found.map((f) => `${width}px: ${f}`));
+      }
+      expect(faults).toEqual([]);
+    });
+  }
+
   // Catches Select all ignoring the search, or selecting fewer than all without one.
   test("select all takes every group, or only the ones a search shows", async ({ page }) => {
     await setup(page);
