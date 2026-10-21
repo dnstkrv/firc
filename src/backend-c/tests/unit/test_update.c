@@ -645,7 +645,7 @@ static bool build_big(void) {
 #define IPK_NAME "firc_0.3.0-1_entware_mipsel-3.4_kn.ipk"
 #define PAYLOAD_SHA "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
 #define INTERRUPTED                                                                                                    \
-    "the last install did not finish: its installer is gone and left no result; see logread and opkg status firc"
+    "the last install did not finish: its installer is gone and left no result; see the system log and opkg status firc"
 #define FAKE "tests/unit/fixtures/fake_opkg.sh"
 #define FAKE_BIN "tests/unit/fixtures/bin"
 

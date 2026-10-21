@@ -12,8 +12,11 @@
 
 static const char handoff_sh[] =
     "cd \"$1\" || exit 1\n"
+    ": > opkg.log\n"
     "printf '%s %s\\n' \"$$\" \"$(sed -e 's/.*) //' /proc/$$/stat | cut -d' ' -f20)\" >> installing\n"
-    "rc=$({ { \"$2\" install \"$3\" 2>&1 3>&-; echo $? >&3; } | { logger -t firc-update || cat; } > /dev/null; } 3>&1)\n"
+    "rc=$({ { \"$2\" install \"$3\" 2>&1 3>&-; echo $? >&3; } |\n"
+    "  { while IFS= read -r l || [ -n \"$l\" ]; do printf '%s\\n' \"$l\" >> opkg.log; printf '%s\\n' \"$l\"; done 3>&-; } |\n"
+    "  { logger -t firc-update || cat; } > /dev/null; } 3>&1)\n"
     "printf '%s %s %s\\n' \"$4\" \"${rc:-255}\" \"$(date +%s)\" > result.part && mv -f result.part result\n"
     "rm -f -- \"$3\" installing\n";
 
@@ -138,6 +141,35 @@ bool firc_update_result_read(const char *dir, firc_update_result_t *out)
     r.finished_at = (int64_t)at;
     *out = r;
     return true;
+}
+
+size_t firc_update_log_read(const char *dir, char *buf, size_t cap)
+{
+    buf[0] = '\0';
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/opkg.log", dir) >= (int)sizeof(path)) { return 0; }
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { return 0; }
+    off_t size = lseek(fd, 0, SEEK_END);
+    off_t from = size > (off_t)(cap - 1) ? size - (off_t)(cap - 1) : 0;
+    size_t n = 0;
+    char before = '\n';
+    if (from > 0 && pread(fd, &before, 1, from - 1) != 1) { before = '\0'; }
+    if (size > 0 && lseek(fd, from, SEEK_SET) == from) {
+        while (n + 1 < cap) {
+            ssize_t r = read(fd, buf + n, cap - 1 - n);
+            if (r < 0 && errno == EINTR) { continue; }
+            if (r <= 0) { break; }
+            n += (size_t)r;
+        }
+    }
+    close(fd);
+    buf[n] = '\0';
+    if (before == '\n') { return n; }
+    char *nl = memchr(buf, '\n', n);
+    size_t skip = nl == NULL ? n : (size_t)(nl + 1 - buf);
+    memmove(buf, buf + skip, n - skip + 1);
+    return n - skip;
 }
 
 firc_err_t firc_update_handoff(const char *dir, const char *sh, const char *opkg, const char *ipk, const char *tag,

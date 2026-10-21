@@ -12,6 +12,10 @@ if [ -n "${FAKE_OPKG_HOLD:-}" ]; then
     done
 fi
 [ -n "${FAKE_OPKG_KILL_PARENT:-}" ] && kill -9 "$PPID"
-echo "Installing firc (0.3.0-1) to root..."
-echo "opkg: an error on stderr" >&2
+if [ -n "${FAKE_OPKG_SAY:-}" ]; then
+    printf '%s' "$FAKE_OPKG_SAY"
+else
+    echo "Installing firc (0.3.0-1) to root..."
+    echo "opkg: an error on stderr" >&2
+fi
 exit "${FAKE_OPKG_RC:-0}"

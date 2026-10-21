@@ -31,11 +31,8 @@
   let text = $derived(
     settings.restartFailure === "not-installed"
       ? settings.updateExit !== null
-        ? t("Not installed, opkg exit {code}, see logread").replace(
-            "{code}",
-            String(settings.updateExit),
-          )
-        : t("Not installed, see logread")
+        ? t("Not installed, opkg exit {code}").replace("{code}", String(settings.updateExit))
+        : t("Not installed")
       : settings.restartFailure === "not-started"
         ? t("The restart did not start")
         : settings.restartFailure === "not-restarted"

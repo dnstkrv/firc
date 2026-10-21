@@ -3,6 +3,7 @@
 
   import { t } from "../../data/locale.svelte";
   import { checkUpdate, installUpdate, update } from "./update.svelte";
+  import UpdateLogDialog from "./UpdateLogDialog.svelte";
 
   import { Refresh } from "../../components/ui/icons";
   import {
@@ -28,9 +29,12 @@
   const busy = $derived(update.checking || update.installing || running(res));
   const action = $derived(status?.kind === "newer" && status.offered);
   const look = $derived(busy ? "busy" : action ? "action" : failed ? "failed" : "idle");
+  const explained = $derived(status?.kind === "not-installed");
+  let logOpen = $state(false);
+  let popOpen = $state(false);
 </script>
 
-<Popover.Root>
+<Popover.Root bind:open={popOpen}>
   <Popover.Trigger class="version-button" aria-label={`${t("Updates")}: ${version}`}>
     <span class="version-text" title={`${t("build")}: ${version}`}>{version}</span>
     {#if dot}
@@ -53,8 +57,8 @@
           data-testid="update-status"
           data-state={look}
           aria-busy={busy}
-          disabled={look !== "action"}
-          onclick={() => void installUpdate()}
+          disabled={look !== "action" && !explained}
+          onclick={() => (explained ? ((popOpen = false), (logOpen = true)) : void installUpdate())}
         >
           {#if status.kind === "running"}
             <span class="title">{runningText(status.state, status.version, t)}</span>
@@ -81,10 +85,11 @@
           {:else if status.kind === "not-installed"}
             <span class="title">{t("The install failed")}</span>
             <span class="sub">
-              {t("{version} not installed, opkg exit {code}, see logread")
+              {t("{version} not installed, opkg exit {code}")
                 .replace("{version}", () => status.version)
                 .replace("{code}", String(status.code))}
             </span>
+            <span class="more">{t("What opkg printed")}</span>
           {:else if status.kind === "check-failed"}
             <span class="title">{t("Check failed")}</span>
             <span class="sub">{status.error}</span>
@@ -122,6 +127,8 @@
     </Popover.Content>
   </Popover.Portal>
 </Popover.Root>
+
+{#if res}<UpdateLogDialog bind:open={logOpen} {res} />{/if}
 
 <style>
   :global(.version-button) {
@@ -237,6 +244,19 @@
   }
   .status.failed .title {
     color: var(--danger);
+  }
+  .status.failed:enabled {
+    cursor: pointer;
+  }
+  .status.failed:enabled:hover,
+  .status.failed:enabled:focus-visible {
+    border-color: var(--text-2);
+  }
+  .more {
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-decoration: underline;
   }
   .title {
     font-size: 1.05rem;

@@ -262,9 +262,32 @@ describe("resultCurrent", () => {
     assert.strictEqual(resultCurrent(at("0.3.0", 1, "v0.3.0")), true);
   });
 
-  // Catches a dev build or an unreadable tag hiding what opkg said.
+  // Catches a dev build installed by hand still showing the last release's result as a failure.
+  it("hides a result older than a dev build's release", () => {
+    assert.strictEqual(resultCurrent(at("0.2.1~git20261013152446.24cf8cc", 1, "0.2.0")), false);
+    assert.strictEqual(resultCurrent(at("0.4.3-dev1", 1, "v0.4.2")), false);
+  });
+
+  // Catches a dev build hiding a failed install of the release it leads to, or a newer one.
+  it("keeps a result for a dev build's release or a newer one", () => {
+    assert.strictEqual(resultCurrent(at("0.4.3~git20261020190816.90fdf77", 1, "v0.4.3")), true);
+    assert.strictEqual(resultCurrent(at("0.4.3-dev1", 1, "v0.5.0")), true);
+  });
+
+  // Catches opkg's success shown as a failure: exit 0 means the package's postinst started the new daemon.
+  it("hides a success that is not the running release", () => {
+    const ok = (version: string, tag: string): UpdateRes => {
+      const r = at(version, 1, tag);
+      return { ...r, result: { ...r.result!, opkgExit: 0 } };
+    };
+    assert.strictEqual(resultCurrent(ok("0.3.0", "0.4.0")), false);
+    assert.strictEqual(resultCurrent(ok("0.4.3-dev1", "v0.4.3")), false);
+    assert.strictEqual(resultCurrent(ok("0.3.0", "v0.3.0")), true);
+  });
+
+  // Catches an unreadable version or tag hiding what opkg said.
   it("keeps a result it cannot compare", () => {
-    assert.strictEqual(resultCurrent(at("0.2.1~git20261013152446.24cf8cc", 1, "0.2.0")), true);
+    assert.strictEqual(resultCurrent(at("unattached", 1, "0.2.0")), true);
     assert.strictEqual(resultCurrent(at("0.3.0", 1, "latest")), true);
   });
 });

@@ -266,7 +266,7 @@ const installed030 = {
   ...upToDate,
   installed: { ...upToDate.installed, version: "0.3.0" },
   check: { ...newer.check, newer: false },
-  result: { version: "0.3.0", opkgExit: 0, finishedAt: 1791832000 },
+  result: { version: "0.3.0", opkgExit: 0, finishedAt: 1791832000, log: "" },
 };
 
 const answers: Record<Answered, unknown> = {
@@ -277,12 +277,17 @@ const answers: Record<Answered, unknown> = {
   "not-landed": {
     ...newer,
     state: "idle",
-    result: { version: "0.3.0", opkgExit: 255, finishedAt: 1791832000 },
+    result: {
+      version: "0.3.0",
+      opkgExit: 255,
+      finishedAt: 1791832000,
+      log: "opkg: cannot install firc",
+    },
   },
   stale: {
     ...newer,
     state: "idle",
-    result: { version: "0.2.5", opkgExit: 0, finishedAt: 1791800000 },
+    result: { version: "0.2.5", opkgExit: 0, finishedAt: 1791800000, log: "" },
   },
   failed: {
     ...newer,
@@ -502,7 +507,7 @@ test("an_older_result_is_not_this_installs_exit", async ({ page }) => {
   const overlay = page.getByTestId("restart-overlay");
   await expect(overlay).toBeVisible({ timeout: 5000 });
   mode.value = "stale";
-  await expect(overlay.getByRole("status")).toHaveText("Not installed, see logread", {
+  await expect(overlay.getByRole("status")).toHaveText("Not installed", {
     timeout: 5000,
   });
 });
@@ -536,7 +541,7 @@ for (const [installed, tag] of [
           json: {
             ...installed030,
             installed: { ...installed030.installed, ...installed },
-            result: { version: tag, opkgExit: 0, finishedAt: 1791832000 },
+            result: { version: tag, opkgExit: 0, finishedAt: 1791832000, log: "" },
           },
         }),
     });
@@ -552,8 +557,11 @@ test("the_result_line_says_an_install_did_not_land", async ({ page }) => {
     onUpdate: (r) => r.fulfill({ json: answers["not-landed"] }),
   });
   const line = page.getByTestId("update-result");
-  await expect(line).toHaveText("0.3.0 not installed, opkg exit 255, see logread");
+  await expect(line).toHaveText("0.3.0 not installed, opkg exit 255 What opkg printed");
   await expect(line).toHaveClass(/error/);
+  await line.getByRole("button", { name: "What opkg printed" }).click();
+  const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
+  await expect(dialog.getByTestId("update-log")).toHaveText("opkg: cannot install firc");
 });
 
 // Catches a failed install of an older release kept on screen after a newer one was installed by hand.
@@ -563,7 +571,7 @@ test("an_older_releases_result_is_not_shown", async ({ page }) => {
       r.fulfill({
         json: {
           ...installed030,
-          result: { version: "0.2.0", opkgExit: 255, finishedAt: 1791800000 },
+          result: { version: "0.2.0", opkgExit: 255, finishedAt: 1791800000, log: "" },
         },
       }),
   });

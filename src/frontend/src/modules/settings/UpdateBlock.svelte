@@ -2,6 +2,7 @@
   import Button from "../../components/ui/Button.svelte";
   import { t } from "../../data/locale.svelte";
   import { checkUpdate, installUpdate, update } from "./update.svelte";
+  import UpdateLogDialog from "./UpdateLogDialog.svelte";
 
   import { CloudDownload, Refresh } from "../../components/ui/icons";
   import {
@@ -23,6 +24,7 @@
   const stateText = $derived(runningText(res?.state ?? "installing", latest?.version ?? "", t));
   const result = $derived(res !== null && resultCurrent(res) ? res.result : null);
   const done = $derived(res !== null && landed(res));
+  let logOpen = $state(false);
 
   const date = (iso: string) => {
     const d = new Date(iso);
@@ -100,10 +102,15 @@
       <div class="line" class:muted={done} class:error={!done} data-testid="update-result">
         {(done
           ? t("{version} installed, opkg exit {code}")
-          : t("{version} not installed, opkg exit {code}, see logread")
+          : t("{version} not installed, opkg exit {code}")
         )
           .replace("{version}", () => result.version)
           .replace("{code}", String(result.opkgExit))}
+        {#if !done}
+          <button type="button" class="log-link" onclick={() => (logOpen = true)}
+            >{t("What opkg printed")}</button
+          >
+        {/if}
       </div>
     {/if}
 
@@ -111,9 +118,23 @@
       <div class="line muted">{reasonText(res.reason, t)}</div>
     {/if}
   </section>
+  <UpdateLogDialog bind:open={logOpen} {res} />
 {/if}
 
 <style>
+  .log-link {
+    all: unset;
+    margin-left: 0.4rem;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .log-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .panel {
     display: flex;
     flex-direction: column;

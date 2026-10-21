@@ -95,7 +95,8 @@ static cJSON *result_json(const firc_update_view_t *v) {
     cJSON *r = cJSON_CreateObject();
     if (r == NULL || !put(r, "version", cJSON_CreateString(v->result.version)) ||
         !put(r, "opkgExit", cJSON_CreateNumber(v->result.opkg_exit)) ||
-        !put(r, "finishedAt", cJSON_CreateNumber((double)v->result.finished_at))) {
+        !put(r, "finishedAt", cJSON_CreateNumber((double)v->result.finished_at)) ||
+        !put(r, "log", cJSON_CreateString(v->log))) {
         cJSON_Delete(r);
         return NULL;
     }

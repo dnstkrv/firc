@@ -32,7 +32,7 @@
 #define IPK_NAME "firc_0.3.0-1_entware_mipsel-3.4_kn.ipk"
 #define PAYLOAD_SHA "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
 #define INTERRUPTED \
-    "the last install did not finish: its installer is gone and left no result; see logread and opkg status firc"
+    "the last install did not finish: its installer is gone and left no result; see the system log and opkg status firc"
 #define FAKE "tests/unit/fixtures/fake_opkg.sh"
 #define FAKE_BIN "tests/unit/fixtures/bin"
 
@@ -840,9 +840,10 @@ TEST an_install_answers_202_and_the_status_moves_to_installing(void) {
     b = NULL;
     ASSERT(idle_with_result(&d, &b));
     const cJSON *r = at(b, "result");
-    ASSERT_EQ(3, cJSON_GetArraySize(r));
+    ASSERT_EQ(4, cJSON_GetArraySize(r));
     ASSERT_STR_EQ("0.3.0", str_at(r, "version"));
     ASSERT_EQ(0, (int)num_at(r, "opkgExit"));
+    ASSERT_STR_EQ("Installing firc (0.3.0-1) to root...\nopkg: an error on stderr\n", str_at(r, "log"));
     double now = (double)time(NULL);
     ASSERT(num_at(r, "finishedAt") >= now - 10 && num_at(r, "finishedAt") <= now);
     ASSERT(cJSON_IsNull(at(b, "error")));
@@ -1041,6 +1042,7 @@ TEST a_new_daemon_reports_an_install_it_did_not_start(void) {
     ASSERT_STR_EQ("0.3.0", str_at(r, "version"));
     ASSERT_EQ(0, (int)num_at(r, "opkgExit"));
     ASSERT_EQ((double)finished, num_at(r, "finishedAt"));
+    ASSERT_STR_EQ("", str_at(r, "log"));
     cJSON_Delete(b);
     PASS();
 }

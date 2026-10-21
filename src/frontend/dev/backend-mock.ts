@@ -1176,7 +1176,8 @@ let UPDATE_STARTED = 0;
 let UPDATE_CHECKING = false;
 const updateBusy = () =>
   UPDATE_STATE === "downloading" || UPDATE_STATE === "verifying" || UPDATE_STATE === "installing";
-let UPDATE_RESULT: { version: string; opkgExit: number; finishedAt: number } | null = null;
+let UPDATE_RESULT: { version: string; opkgExit: number; finishedAt: number; log: string } | null =
+  null;
 
 function updateProgress() {
   if (UPDATE_STATE !== "downloading") return null;
@@ -1248,6 +1249,7 @@ app.post(`${API_BASE}/system/update/install`, async (c) => {
       version: UPDATE_LATEST.version,
       opkgExit: 0,
       finishedAt: Math.floor(Date.now() / 1000) + 3,
+      log: `Upgrading firc on root from ${UPDATE_INSTALLED.version} to ${UPDATE_LATEST.version}...\n`,
     };
   }, 3500);
   return c.json(

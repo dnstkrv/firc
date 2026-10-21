@@ -19,6 +19,8 @@ typedef enum {
  * unfinished, ALIVE when its pid has that /proc start time, STALE otherwise. tag/epoch out may be NULL. */
 firc_update_marker_t firc_update_marker_read(const char *dir, char *tag, size_t cap, int64_t *epoch);
 
+#define FIRC_UPDATE_LOG_MAX 4096
+
 typedef struct firc_update_result {
     char version[64];
     int opkg_exit;
@@ -27,6 +29,9 @@ typedef struct firc_update_result {
 
 /* Reads <dir>/result, exactly "<tag> <int> <epoch>\n"; false when absent or malformed. */
 bool firc_update_result_read(const char *dir, firc_update_result_t *out);
+
+/* Reads the tail of <dir>/opkg.log that fits cap, from a line start; "" and 0 when absent. */
+size_t firc_update_log_read(const char *dir, char *buf, size_t cap);
 
 /* /proc/<pid>/stat field 22 (after the last ")"). */
 bool firc_proc_starttime(pid_t pid, uint64_t *out);

@@ -259,7 +259,7 @@ migrate_groups "$GROUPS" || {
 
 # A failed start must fail the configure step so opkg leaves the package unpacked.
 /opt/etc/init.d/S99firc restart || {
-    echo "firc: the daemon did not start; see logread and /opt/etc/firc/firc.conf" >&2
+    echo "firc: the daemon did not start; see the system log and /opt/etc/firc/firc.conf" >&2
     exit 1
 }
 

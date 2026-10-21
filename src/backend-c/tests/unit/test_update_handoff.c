@@ -22,6 +22,7 @@
 #define RECORDING_SH "tests/unit/fixtures/recording_sh.sh"
 #define IPK "firc_0.3.0-1_entware_mipsel-3.4_kn.ipk"
 #define EPOCH ((int64_t)1791831000)
+#define OPKG_SAID "Installing firc (0.3.0-1) to root...\nopkg: an error on stderr\n"
 
 static char g_path[4096];
 
@@ -108,12 +109,13 @@ static bool env_setup(env_t *e) {
     unsetenv("FAKE_OPKG_DAEMON");
     unsetenv("FAKE_OPKG_KILL_PARENT");
     unsetenv("FAKE_DATE_HOLD");
+    unsetenv("FAKE_OPKG_SAY");
     return setenv("FAKE_OPKG_LOG", e->log, 1) == 0 && setenv("FAKE_LOGGER_LOG", e->logger_log, 1) == 0;
 }
 
 static void env_teardown(const env_t *e) {
     char path[160];
-    const char *names[] = {"result", "result.part", "installing", IPK};
+    const char *names[] = {"result", "result.part", "installing", "opkg.log", IPK};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         snprintf(path, sizeof(path), "%s/%s", e->dir, names[i]);
         unlink(path);
@@ -462,7 +464,7 @@ TEST a_daemon_the_package_starts_does_not_hold_the_result(void) {
 }
 
 TEST opkgs_output_reaches_logger_under_its_tag(void) {
-    /* Catches opkg's output or errors kept out of logread: logger dropped, stderr not joined, or another tag. */
+    /* Catches opkg's output or errors kept out of the system log: logger dropped, stderr not joined, or another tag. */
     env_t e;
     ASSERT(env_setup(&e));
     ASSERT(fake_bin_first(&e));
@@ -565,6 +567,91 @@ TEST result_lines_are_read_strictly(void) {
     PASS();
 }
 
+TEST opkgs_output_is_kept_beside_the_result(void) {
+    /* Catches opkg's output not kept, or stderr left out of it. */
+    env_t e;
+    ASSERT(env_setup(&e));
+    ASSERT(fake_bin_first(&e));
+    ASSERT_EQ(FIRC_OK, firc_update_handoff(e.dir, "/bin/sh", e.opkg, e.ipk, "0.3.0", EPOCH));
+    ASSERT(wait_for(e.result, true, 5000));
+    char got[256];
+    ASSERT_EQ(strlen(OPKG_SAID), firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ(OPKG_SAID, got);
+    env_teardown(&e);
+    PASS();
+}
+
+TEST without_logger_opkgs_output_is_still_kept(void) {
+    /* Catches the kept output lost when logger is missing. */
+    env_t e;
+    ASSERT(env_setup(&e));
+    ASSERT(bin_without_logger(&e));
+    ASSERT_EQ(FIRC_OK, firc_update_handoff(e.dir, "/bin/sh", e.opkg, e.ipk, "0.3.0", EPOCH));
+    ASSERT(wait_for(e.result, true, 5000));
+    char got[256];
+    firc_update_log_read(e.dir, got, sizeof(got));
+    ASSERT_STR_EQ(OPKG_SAID, got);
+    env_teardown(&e);
+    PASS();
+}
+
+TEST opkgs_output_is_kept_byte_for_byte(void) {
+    /* Catches read without -r, printf with the line as its format, or a last line without a newline dropped. */
+    env_t e;
+    ASSERT(env_setup(&e));
+    ASSERT(fake_bin_first(&e));
+    ASSERT_EQ(0, setenv("FAKE_OPKG_SAY", "-n 100%s \\x\n  indented\nlast", 1));
+    ASSERT_EQ(FIRC_OK, firc_update_handoff(e.dir, "/bin/sh", e.opkg, e.ipk, "0.3.0", EPOCH));
+    ASSERT(wait_for(e.result, true, 5000));
+    char got[256];
+    firc_update_log_read(e.dir, got, sizeof(got));
+    ASSERT_STR_EQ("-n 100%s \\x\n  indented\nlast\n", got);
+    env_teardown(&e);
+    PASS();
+}
+
+TEST a_new_hand_off_starts_a_new_log(void) {
+    /* Catches the last install's output shown as this one's. */
+    env_t e;
+    ASSERT(env_setup(&e));
+    ASSERT(fake_bin_first(&e));
+    char path[160];
+    snprintf(path, sizeof(path), "%s/opkg.log", e.dir);
+    write_text(path, "the last install said this\n");
+    ASSERT_EQ(FIRC_OK, firc_update_handoff(e.dir, "/bin/sh", e.opkg, e.ipk, "0.3.0", EPOCH));
+    ASSERT(wait_for(e.result, true, 5000));
+    char got[256];
+    firc_update_log_read(e.dir, got, sizeof(got));
+    ASSERT_STR_EQ(OPKG_SAID, got);
+    env_teardown(&e);
+    PASS();
+}
+
+TEST the_log_is_read_from_its_tail_at_a_line_start(void) {
+    /* Catches the head kept instead of the tail, a line served cut in half, or a whole first line dropped. */
+    env_t e;
+    ASSERT(env_setup(&e));
+    char got[16];
+    ASSERT_EQ(0, firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ("", got);
+    char path[160];
+    snprintf(path, sizeof(path), "%s/opkg.log", e.dir);
+    write_text(path, "first line\nsecond\nthird\n");
+    ASSERT_EQ(13, firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ("second\nthird\n", got);
+    write_text(path, "short\nlast");
+    ASSERT_EQ(10, firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ("short\nlast", got);
+    write_text(path, "0123456789\nabcdefghijklmn\n");
+    ASSERT_EQ(15, firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ("abcdefghijklmn\n", got);
+    write_text(path, "one line much longer than the buffer");
+    ASSERT_EQ(0, firc_update_log_read(e.dir, got, sizeof(got)));
+    ASSERT_STR_EQ("", got);
+    env_teardown(&e);
+    PASS();
+}
+
 TEST proc_starttime_reads_field_22(void) {
     /* Catches a wrong field, or a split at the first ")" of a name that holds one. */
     uint64_t want = 0, got = 0;
@@ -606,6 +693,11 @@ int main(int argc, char **argv) {
     RUN_TEST(an_installer_cut_off_before_its_status_records_255);
     RUN_TEST(the_marker_stays_until_the_result_is_written);
     RUN_TEST(result_lines_are_read_strictly);
+    RUN_TEST(opkgs_output_is_kept_beside_the_result);
+    RUN_TEST(without_logger_opkgs_output_is_still_kept);
+    RUN_TEST(opkgs_output_is_kept_byte_for_byte);
+    RUN_TEST(a_new_hand_off_starts_a_new_log);
+    RUN_TEST(the_log_is_read_from_its_tail_at_a_line_start);
     RUN_TEST(proc_starttime_reads_field_22);
     GREATEST_MAIN_END();
 }

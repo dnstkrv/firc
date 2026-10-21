@@ -27,7 +27,7 @@
 #define GRACE_MS 10000
 #define SPACE_SLACK ((uint64_t)8 * 1024 * 1024)
 #define INTERRUPTED                                                                                                    \
-    "the last install did not finish: its installer is gone and left no result; see logread and opkg status firc"
+    "the last install did not finish: its installer is gone and left no result; see the system log and opkg status firc"
 
 typedef enum { JOB_CHECK, JOB_INSTALL } job_kind_t;
 
@@ -855,6 +855,7 @@ void firc_update_view(firc_update_t *u, firc_update_view_t *out) {
             out->state = u->state;
         }
         if (s == FIRC_UPDATE_SETTLED_FAILED && u->state == FIRC_UPDATE_IDLE) { out->error = INTERRUPTED; }
+        if (out->has_result) { firc_update_log_read(u->dir, out->log, sizeof(out->log)); }
     }
     if (out->state == FIRC_UPDATE_FAILED && out->error == NULL) { out->error = u->error; }
     out->bytes = atomic_load(&u->bytes);

@@ -159,3 +159,35 @@ test("a development build links all releases", async ({ page }) => {
     "https://github.com/hoaxisr/firc/releases",
   );
 });
+
+const OPKG_SAID =
+  "Collected errors:\n * pkg_hash_check_unresolved: cannot find dependency libcurl for firc\n";
+const notLanded = (log: string) => ({
+  ...upToDate,
+  result: { version: "0.3.0", opkgExit: 255, finishedAt: 1791832000, log },
+});
+
+// Catches a failed install that cannot be opened, the popover left over the dialog, or a dialog that does not show what opkg printed.
+test("a failed install opens what opkg printed", async ({ page }) => {
+  await shell(page, notLanded(OPKG_SAID));
+  await expect(page.getByTestId("update-dot")).toHaveAttribute("data-tone", "failed");
+  const status = await openPopover(page);
+  await expect(status).toContainText("0.3.0 not installed, opkg exit 255");
+  await expect(status).not.toContainText("logread");
+  await status.click();
+  const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".update-popover")).toHaveCount(0);
+  await expect(dialog).toContainText("opkg exit 255; firc 0.2.0 is still running.");
+  expect(await dialog.getByTestId("update-log").textContent()).toBe(OPKG_SAID);
+});
+
+// Catches an empty log shown as a blank box instead of saying opkg printed nothing.
+test("a failed install whose opkg printed nothing says so", async ({ page }) => {
+  await shell(page, notLanded(""));
+  const status = await openPopover(page);
+  await status.click();
+  const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
+  await expect(dialog).toContainText("opkg printed nothing.");
+  await expect(dialog.getByTestId("update-log")).toHaveCount(0);
+});

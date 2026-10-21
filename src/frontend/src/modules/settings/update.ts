@@ -35,7 +35,7 @@ export type UpdateRes = {
   state: UpdateState;
   progress: { bytes: number; total: number } | null;
   error: string | null;
-  result: { version: string; opkgExit: number; finishedAt: number } | null;
+  result: { version: string; opkgExit: number; finishedAt: number; log: string } | null;
 };
 
 export type RateLimited = { error?: string; resetAt?: number | null };
@@ -107,9 +107,12 @@ export function landed(res: UpdateRes): boolean {
 
 const RELEASE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/;
 
+const LEADING = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})/;
+
 export function resultCurrent(res: UpdateRes): boolean {
+  if (res.result?.opkgExit === 0) return landed(res);
   const target = res.result === null ? null : tagRelease(res.result.version);
-  const installed = RELEASE.exec(res.installed.version);
+  const installed = LEADING.exec(res.installed.version);
   if (target === null || installed === null) return true;
   const have = [...installed.slice(1).map(Number), res.installed.revision];
   const want = [...target.version.split(".").map(Number), target.revision];

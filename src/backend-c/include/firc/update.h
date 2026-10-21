@@ -64,6 +64,7 @@ typedef struct firc_update_view {
     const char *error;
     bool has_result;
     firc_update_result_t result;
+    char log[FIRC_UPDATE_LOG_MAX];
 } firc_update_view_t;
 
 typedef struct firc_update firc_update_t;

@@ -45,6 +45,10 @@ ansi_std="\033[m";
 ansi_rev="\033[7m";
 ansi_ul="\033[4m";
 
+version() {
+  fircd --version 2>/dev/null | cut -d" " -f1
+}
+
 # Uptime, not wall clock: NTP steps the clock after boot.
 now_s() {
     cut -d. -f1 /proc/uptime
@@ -214,7 +218,7 @@ startup_loop() {
     logger "Starting $DESC (attempt #$ATTEMPT)."
     launch
     if wait_ready $START_BUDGET; then
-      logger "Started $DESC (attempt #$ATTEMPT)."
+      logger "Started $DESC `version` (attempt #$ATTEMPT)."
     else
       logger "Failed to start $DESC (attempt #$ATTEMPT); next in $BACKOFF s."
       SLEPT=0
@@ -298,7 +302,7 @@ start() {
     return 255
   else
     echo -e "            $ansi_green done. $ansi_std"
-    logger "Started $DESC."
+    logger "Started $DESC `version`."
     return 0
   fi
 }

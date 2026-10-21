@@ -319,13 +319,19 @@ definitions:
             example: 0.3.0
             type: string
           opkgExit:
-            description: 'opkg install exit status; 0 is installed, anything else see logread'
+            description: 'opkg install exit status; 0 is installed'
             example: 0
             type: integer
           finishedAt:
             description: 'Unix time opkg ended, seconds'
             example: 1791831900
             type: integer
+          log:
+            description: >-
+              The last lines opkg printed during that install, up to 4 KiB,
+              starting at a line; empty when it printed nothing
+            example: "Installing firc (0.3.0-1) to root...\n"
+            type: string
         type: object
         x-nullable: true
     type: object
