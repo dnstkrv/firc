@@ -886,6 +886,223 @@ TEST kernel_tcp_is_argv_affecting(void) {
     PASS();
 }
 
+#define INB_HEAD "tunnels:\n  - id: a1\n    device: tunvless0\n    sources:\n" LINK "    inbounds:\n"
+#define INB_P0 "tunnels[0].inbounds[0].port"
+
+static int inb_refused(const char *items, const char *where, const char *why)
+{
+    char doc[4096];
+    snprintf(doc, sizeof doc, INB_HEAD "%s", items);
+    return refused(doc, where, why);
+}
+
+/* catches: an inbound field read into the wrong member, dropped by save, or emitted in another order */
+TEST inbounds_load_and_save_back(void) {
+    static const char doc[] = INB_HEAD
+        "      - { port: 1081, listen: br0, node: \"0000000c:NL 1\", user: alice, password: \"s3cr:et\" }\n"
+        "      - { port: 1082, listen: br1, node: \"0000000c:DE\" }\n";
+    firc_tunnels_t b = {0};
+    char file[4096];
+    ASSERT(save_and_reload(doc, &b, file, sizeof file));
+    ASSERT_EQ_FMT((size_t)2, b.t[0].n_inb, "%zu");
+    ASSERT_EQ(1081, b.t[0].inb[0].port);
+    ASSERT_STR_EQ("br0", b.t[0].inb[0].listen);
+    ASSERT_STR_EQ("0000000c:NL 1", b.t[0].inb[0].node);
+    ASSERT_STR_EQ("alice", b.t[0].inb[0].user);
+    ASSERT_STR_EQ("s3cr:et", b.t[0].inb[0].password);
+    ASSERT_EQ(1082, b.t[0].inb[1].port);
+    ASSERT_STR_EQ("br1", b.t[0].inb[1].listen);
+    ASSERT_STR_EQ("0000000c:DE", b.t[0].inb[1].node);
+    ASSERT_STR_EQ("", b.t[0].inb[1].user);
+    ASSERT_STR_EQ("", b.t[0].inb[1].password);
+    const char *adv = strstr(file, "  advanced:");
+    const char *inb = strstr(file, "  inbounds:");
+    ASSERT(adv != NULL && inb != NULL && adv < inb);
+    ASSERT(strstr(file, "  inbounds:\n  - port: 1081\n") != NULL);
+    ASSERT(strstr(file, "    listen: \"br0\"\n    node: \"0000000c:NL 1\"\n    user: \"alice\"\n    password: \"s3cr:et\"\n  - port: 1082\n    listen: \"br1\"\n    node: \"0000000c:DE\"\n") != NULL);
+    firc_tunnels_free(&b);
+    PASS();
+}
+
+/* catches: a tunnel without inbounds written back with an empty inbounds key */
+TEST no_inbounds_are_not_written(void) {
+    firc_tunnels_t b = {0};
+    char file[4096];
+    ASSERT(save_and_reload(ONE, &b, file, sizeof file));
+    ASSERT_EQ_FMT((size_t)0, b.t[0].n_inb, "%zu");
+    ASSERT(strstr(file, "inbounds") == NULL);
+    firc_tunnels_free(&b);
+    PASS();
+}
+
+/* catches: a port bound check off by one, or a zero or non-number port accepted */
+TEST inbound_port_out_of_range(void) {
+    ASSERT(inb_refused("      - { port: 0, listen: br0, node: n }\n", INB_P0, "1..65535"));
+    ASSERT(inb_refused("      - { port: 65536, listen: br0, node: n }\n", INB_P0, "1..65535"));
+    ASSERT(inb_refused("      - { port: -1, listen: br0, node: n }\n", INB_P0, "1..65535"));
+    ASSERT(inb_refused("      - { port: x, listen: br0, node: n }\n", INB_P0, "1..65535"));
+    ASSERT(inb_refused("      - { listen: br0, node: n }\n", INB_P0, "1..65535"));
+    firc_tunnels_t t = {0};
+    static const char ok[] = INB_HEAD "      - { port: 65535, listen: br0, node: n }\n      - { port: 1, listen: br0, node: n }\n";
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, ok, strlen(ok), NULL));
+    firc_tunnels_free(&t);
+    PASS();
+}
+
+/* catches: listen taking 0.0.0.0, an IP literal or a missing key, which would bind off the LAN */
+TEST inbound_listen_any_refused(void) {
+    const char *w = "tunnels[0].inbounds[0].listen";
+    ASSERT(inb_refused("      - { port: 1081, listen: 0.0.0.0, node: n }\n", w, "an interface name"));
+    ASSERT(inb_refused("      - { port: 1081, listen: 192.168.1.1, node: n }\n", w, "an interface name"));
+    ASSERT(inb_refused("      - { port: 1081, listen: \"::1\", node: n }\n", w, "an interface name"));
+    ASSERT(inb_refused("      - { port: 1081, listen: \"a b\", node: n }\n", w, "an interface name"));
+    ASSERT(inb_refused("      - { port: 1081, node: n }\n", w, "an interface name"));
+    PASS();
+}
+
+/* catches: a user without a password (or the reverse) accepted */
+TEST inbound_user_without_password(void) {
+    const char *w = "tunnels[0].inbounds[0].user";
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: a }\n", w, "both or neither"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, password: a }\n", w, "both or neither"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: a, password: \"\" }\n", w, "both or neither"));
+    PASS();
+}
+
+/* catches: the 255-byte RFC 1929 limit off by one, or a longer field truncated silently */
+TEST inbound_user_over_255(void) {
+    char items[1200];
+    char u255[256], u256[257];
+    memset(u255, 'u', 255); u255[255] = '\0';
+    memset(u256, 'u', 256); u256[256] = '\0';
+    snprintf(items, sizeof items, "      - { port: 1081, listen: br0, node: n, user: %s, password: p }\n", u256);
+    ASSERT(inb_refused(items, "tunnels[0].inbounds[0].user", "1..255"));
+    snprintf(items, sizeof items, "      - { port: 1081, listen: br0, node: n, user: u, password: %s }\n", u256);
+    ASSERT(inb_refused(items, "tunnels[0].inbounds[0].password", "1..255"));
+    snprintf(items, sizeof items, INB_HEAD "      - { port: 1081, listen: br0, node: n, user: %s, password: %s }\n", u255, u255);
+    firc_tunnels_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, items, strlen(items), NULL));
+    ASSERT_EQ_FMT((size_t)255, strlen(t.t[0].inb[0].password), "%zu");
+    firc_tunnels_free(&t);
+    PASS();
+}
+
+/* catches: a control byte in a credential reaching the protocol line */
+TEST inbound_password_with_newline(void) {
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: a, password: \"x\\ny\" }\n",
+                       "tunnels[0].inbounds[0].password", "control"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: \"a\\x01\", password: p }\n",
+                       "tunnels[0].inbounds[0].user", "control"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: a, password: \"x\\x7fy\" }\n",
+                       "tunnels[0].inbounds[0].password", "control"));
+    PASS();
+}
+
+/* catches: an inbound with no node or an empty or over-long one accepted */
+TEST inbound_node_required(void) {
+    const char *w = "tunnels[0].inbounds[0].node";
+    ASSERT(inb_refused("      - { port: 1081, listen: br0 }\n", w, "required"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: \"\" }\n", w, "required"));
+    char items[400], key[200];
+    memset(key, 'k', 192); key[192] = '\0';
+    snprintf(items, sizeof items, "      - { port: 1081, listen: br0, node: %s }\n", key);
+    ASSERT(inb_refused(items, w, "1..191"));
+    PASS();
+}
+
+/* catches: a ':' in the user, which Basic auth cannot carry */
+TEST inbound_user_with_colon(void) {
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n, user: \"a:b\", password: p }\n",
+                       "tunnels[0].inbounds[0].user", "':'"));
+    PASS();
+}
+
+/* catches: the same port twice on one listen accepted, in one tunnel or across tunnels, or refused on another listen */
+TEST inbound_port_twice_on_one_listen(void) {
+    static const char two[] =
+        "tunnels:\n"
+        "  - id: a1\n    device: tunvless0\n    sources:\n" LINK
+        "    inbounds:\n      - { port: 1081, listen: br0, node: n }\n"
+        "  - id: b1\n    device: tunvless1\n    sources:\n" LINK
+        "    inbounds:\n      - { port: 1081, listen: br0, node: n }\n";
+    ASSERT(refused(two, "tunnels[1].inbounds[0].port", "used twice"));
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n }\n      - { port: 1082, listen: br0, node: n }\n"
+                       "      - { port: 1081, listen: br0, node: n }\n",
+                       "tunnels[0].inbounds[2].port", "used twice"));
+    static const char other[] =
+        "tunnels:\n"
+        "  - id: a1\n    device: tunvless0\n    sources:\n" LINK
+        "    inbounds:\n      - { port: 1081, listen: br0, node: n }\n"
+        "  - id: b1\n    device: tunvless1\n    sources:\n" LINK
+        "    inbounds:\n      - { port: 1081, listen: br1, node: n }\n";
+    firc_tunnels_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, other, strlen(other), NULL));
+    firc_tunnels_free(&t);
+    PASS();
+}
+
+/* catches: one port on two listens of one tunnel accepted, whose events tunvless names by port alone */
+TEST inbound_port_twice_in_one_tunnel(void) {
+    ASSERT(inb_refused("      - { port: 1081, listen: br0, node: n }\n      - { port: 1082, listen: br0, node: n }\n"
+                       "      - { port: 1081, listen: br1, node: n }\n",
+                       "tunnels[0].inbounds[2].port", "used twice in this tunnel"));
+    PASS();
+}
+
+/* catches: a port in 3600..3699 taken from the kernel TCP redirect, or the range edges off by one */
+TEST inbound_port_in_kernel_range(void) {
+    ASSERT(inb_refused("      - { port: 3600, listen: br0, node: n }\n", INB_P0, "firc's own"));
+    ASSERT(inb_refused("      - { port: 3699, listen: br0, node: n }\n", INB_P0, "firc's own"));
+    firc_tunnels_t t = {0};
+    static const char ok[] = INB_HEAD "      - { port: 3599, listen: br0, node: n }\n      - { port: 3700, listen: br0, node: n }\n";
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, ok, strlen(ok), NULL));
+    firc_tunnels_free(&t);
+    PASS();
+}
+
+/* catches: the per-tunnel cap missing, which would overflow the fixed array, or off by one */
+TEST seventeen_inbounds_refused(void) {
+    char items[2048] = "";
+    for (int i = 0; i < 17; i++) {
+        size_t n = strlen(items);
+        snprintf(items + n, sizeof items - n, "      - { port: %d, listen: br0, node: n }\n", 2000 + i);
+    }
+    ASSERT(inb_refused(items, "tunnels[0].inbounds", "at most 16"));
+    char doc[4096];
+    *strrchr(items, '\n') = '\0';
+    *(strrchr(items, '\n') + 1) = '\0';
+    snprintf(doc, sizeof doc, INB_HEAD "%s", items);
+    firc_tunnels_t t = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, doc, strlen(doc), NULL));
+    ASSERT_EQ_FMT((size_t)16, t.t[0].n_inb, "%zu");
+    firc_tunnels_free(&t);
+    PASS();
+}
+
+/* catches: a non-list inbounds, or an unknown key in an item, silently ignored */
+TEST inbounds_shape_is_checked(void) {
+    ASSERT(with_extra("    inbounds: 5\n", "tunnels[0].inbounds", "must be a list"));
+    ASSERT(with_extra("    inbounds:\n      - 5\n", "tunnels[0].inbounds[0]", "must be a mapping"));
+    ASSERT(with_extra("    inbounds:\n      - { port: 1081, listen: br0, node: n, color: red }\n",
+                      "tunnels[0].inbounds[0].color", "unknown key"));
+    ASSERT(with_extra("    inbounds:\n      - { port: 1081, port: 1082, listen: br0, node: n }\n",
+                      "tunnels[0].inbounds[0].port", "given twice"));
+    ASSERT(loads_extra("    inbounds: []\n"));
+    PASS();
+}
+
+/* catches: an inbound change restarting the child or resending nodes */
+TEST inbounds_change_nothing_sent_and_no_restart(void) {
+    static const char base[] =
+        "tunnels:\n  - id: x1\n    device: tunvless0\n    active: 1\n    sources:\n      - link: \"vless://u@h:443#a\"\n"
+        "    inbounds:\n      - { port: 1081, listen: br0, node: n }\n";
+    ASSERT_EQ(3, same_after_in(base, "port: 1081", "port: 1090"));
+    ASSERT_EQ(3, same_after_in(base, "listen: br0", "listen: br1"));
+    ASSERT_EQ(3, same_after_in(base, "node: n", "node: m, user: a, password: b"));
+    ASSERT_EQ(3, same_after_in(base, "    inbounds:\n      - { port: 1081, listen: br0, node: n }\n", ""));
+    PASS();
+}
+
 static uint16_t port_of(const char *device, bool enable, bool kernel_tcp)
 {
     firc_tunnel_t t = {0};
@@ -999,5 +1216,20 @@ int main(int argc, char **argv) {
     RUN_TEST(kernel_tcp_loads_saves_and_refuses_a_non_bool);
     RUN_TEST(kernel_tcp_is_argv_affecting);
     RUN_TEST(the_tcp_port_is_3600_plus_the_device_number);
+    RUN_TEST(inbounds_load_and_save_back);
+    RUN_TEST(no_inbounds_are_not_written);
+    RUN_TEST(inbound_port_out_of_range);
+    RUN_TEST(inbound_listen_any_refused);
+    RUN_TEST(inbound_user_without_password);
+    RUN_TEST(inbound_user_over_255);
+    RUN_TEST(inbound_password_with_newline);
+    RUN_TEST(inbound_node_required);
+    RUN_TEST(inbound_user_with_colon);
+    RUN_TEST(inbound_port_twice_on_one_listen);
+    RUN_TEST(inbound_port_twice_in_one_tunnel);
+    RUN_TEST(inbound_port_in_kernel_range);
+    RUN_TEST(seventeen_inbounds_refused);
+    RUN_TEST(inbounds_shape_is_checked);
+    RUN_TEST(inbounds_change_nothing_sent_and_no_restart);
     GREATEST_MAIN_END();
 }

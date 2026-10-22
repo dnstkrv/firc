@@ -15,6 +15,7 @@
   } from "../../../components/ui/icons";
   import type { Tunnel, TunnelPreview, TunnelProbeRow } from "../../../types";
   import { HttpError } from "../../../utils/fetcher";
+  import { inboundPortsByNode } from "../inbounds";
   import {
     keepHidden,
     orderAfterDrop,
@@ -41,6 +42,7 @@
   const fetched = $derived(
     (live?.subscriptions ?? []).map((s) => `${s.name}:${s.lastOk}`).join("|"),
   );
+  const ports = $derived(inboundPortsByNode(tunnel));
   const rows = $derived(uniqueByKey(preview?.nodes ?? []));
   const visible = $derived(rows.map((r) => r.key));
   const measured = $derived(Object.keys(probes).length > 0);
@@ -80,6 +82,7 @@
       const answer = await store.preview(body, mine.signal);
       if (inflight !== mine) return;
       preview = answer;
+      store.nodeRows[tunnel.key] = answer.nodes;
       previewError = "";
       filterRefused = false;
     } catch (error) {
@@ -218,6 +221,7 @@
           live={live?.nodes.find((n) => n.key === row.key)}
           probe={probes[row.key]}
           {now}
+          ports={ports.get(row.key) ?? []}
           onToggle={() => (tunnel.exclude = toggleExclude(tunnel.exclude, row.key))}
           onDrop={drop}
         />

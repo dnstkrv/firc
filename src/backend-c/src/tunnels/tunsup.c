@@ -31,6 +31,8 @@ extern char **environ;
 #define ACK_S 10
 #define INDEX_MAX 4096
 
+static const char k_inb_verb[] = "inbounds\n";
+
 typedef struct slot {
     firc_tunsup_t *s;
     firc_tunnel_t cfg;
@@ -42,6 +44,8 @@ typedef struct slot {
     int err_fd;
     char *in_buf;
     size_t in_len;
+    int inb_sent;
+    bool inb_warned;
     size_t in_off;
     firc_tun_lines_t out_lines;
     firc_tun_lines_t err_lines;
@@ -211,6 +215,8 @@ static void release_io(slot_t *sl)
     sl->acks = 0;
     sl->n_want = 0;
     sl->n_map_want = 0;
+    sl->inb_sent = -1;
+    sl->inb_warned = false;
     sl->ready = false;
     memset(&sl->out_lines, 0, sizeof sl->out_lines);
     memset(&sl->err_lines, 0, sizeof sl->err_lines);
@@ -364,41 +370,67 @@ static void warn_bad_once(slot_t *sl)
     }
 }
 
-static uint64_t link_hash(const char *link)
+static uint64_t link_hash_n(const char *link, size_t n)
 {
     uint64_t h = 1469598103934665603ULL;
-    for (const unsigned char *p = (const unsigned char *)link; *p != 0; p++) {
-        h ^= *p;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)link[i];
         h *= 1099511628211ULL;
     }
     return h;
 }
 
+static uint64_t link_hash(const char *link)
+{
+    return link_hash_n(link, strlen(link));
+}
+
+static bool ix_add(slot_t *sl, uint64_t h)
+{
+    for (size_t k = 0; k < sl->n_ix; k++) {
+        if (sl->ix[k] == h) {
+            return true;
+        }
+    }
+    if (sl->n_ix >= INDEX_MAX) {
+        return false;
+    }
+    uint64_t *grown = realloc(sl->ix, (sl->n_ix + 1) * sizeof *grown);
+    if (grown == NULL) {
+        return false;
+    }
+    sl->ix = grown;
+    sl->ix[sl->n_ix++] = h;
+    return true;
+}
+
 static bool index_add(slot_t *sl)
 {
     for (size_t i = 0; i < sl->cfg.n_src; i++) {
-        if (sl->cfg.src[i].kind != FIRC_TUN_SRC_LINK) {
-            continue;
-        }
-        uint64_t h = link_hash(sl->cfg.src[i].link);
-        bool known = false;
-        for (size_t k = 0; k < sl->n_ix && !known; k++) {
-            known = sl->ix[k] == h;
-        }
-        if (known) {
-            continue;
-        }
-        if (sl->n_ix >= INDEX_MAX) {
+        if (sl->cfg.src[i].kind == FIRC_TUN_SRC_LINK && !ix_add(sl, link_hash(sl->cfg.src[i].link))) {
             return false;
         }
-        uint64_t *grown = realloc(sl->ix, (sl->n_ix + 1) * sizeof *grown);
-        if (grown == NULL) {
-            return false;
-        }
-        sl->ix = grown;
-        sl->ix[sl->n_ix++] = h;
     }
     return true;
+}
+
+static void index_inbound_links(slot_t *sl, const char *text, size_t len)
+{
+    for (size_t at = 0; at < len;) {
+        const char *end = memchr(text + at, '\n', len - at);
+        size_t stop = end != NULL ? (size_t)(end - text) : len;
+        size_t from = at;
+        for (int f = 0; f < 3 && from < stop; f++) {
+            const char *sp = memchr(text + from, ' ', stop - from);
+            from = sp != NULL ? (size_t)(sp - text) + 1 : stop;
+        }
+        bool dash = stop - from == 1 && text[from] == '-';
+        if (from < stop && !dash && !ix_add(sl, link_hash_n(text + from, stop - from)) && !sl->drift) {
+            sl->drift = true;
+            firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "node index full, node states go by name until it restarts");
+        }
+        at = stop + 1;
+    }
 }
 
 static size_t distinct_links(const slot_t *sl)
@@ -510,6 +542,18 @@ static void on_out_line(const char *line, size_t len, void *ud)
     case FIRC_TEV_CLOSE:
     case FIRC_TEV_MISS:
     case FIRC_TEV_BYTES:
+    case FIRC_TEV_INBOUND:
+    case FIRC_TEV_IBYTES:
+        break;
+    case FIRC_TEV_INBOUNDS:
+        if (sl->inb_sent >= 0 && ev.count != sl->inb_sent) {
+            sl->drift = true;
+            if (!sl->inb_warned) {
+                sl->inb_warned = true;
+                firc_log_from(FIRC_LOG_WARN, sl->cfg.device, "tunvless took %d inbound lines of %d sent", ev.count,
+                              sl->inb_sent);
+            }
+        }
         break;
     case FIRC_TEV_PINS_FULL:
         if (!sl->terminating) {
@@ -981,6 +1025,7 @@ static slot_t *slot_new(firc_tunsup_t *s, const firc_tunnel_t *t, uint32_t mark)
     sl->in_fd = -1;
     sl->out_fd = -1;
     sl->err_fd = -1;
+    sl->inb_sent = -1;
     sl->next_backoff_s = BACKOFF_BASE_S;
     snprintf(sl->st.id, sizeof sl->st.id, "%s", t->id);
     snprintf(sl->st.device, sizeof sl->st.device, "%s", t->device);
@@ -1456,11 +1501,34 @@ firc_err_t firc_tunsup_command(firc_tunsup_t *s, const char *id, firc_tun_cmd_t 
         }
         sl->map_want = grown;
     }
+    char *framed = NULL;
+    if (kind == FIRC_TUN_CMD_INBOUNDS) {
+        framed = malloc(sizeof k_inb_verb - 1 + len + 1);
+        if (framed == NULL) {
+            return FIRC_ERR_NOMEM;
+        }
+        memcpy(framed, k_inb_verb, sizeof k_inb_verb - 1);
+        if (len > 0) {
+            memcpy(framed + sizeof k_inb_verb - 1, text, len);
+        }
+        framed[sizeof k_inb_verb - 1 + len] = '\n';
+        text = framed;
+        len += sizeof k_inb_verb;
+        sl->inb_sent = 0;
+        for (size_t i = 0; i < len; i++) {
+            sl->inb_sent += text[i] == '\n';
+        }
+        sl->inb_sent -= 2;
+    }
     size_t done = 0;
     firc_err_t err = write_out(sl, text, len, &done);
     if (err == FIRC_OK && done < len) {
         err = keep_tail(sl, text + done, len - done);
     }
+    if (err == FIRC_OK && kind == FIRC_TUN_CMD_INBOUNDS) {
+        index_inbound_links(sl, framed + sizeof k_inb_verb - 1, len - sizeof k_inb_verb);
+    }
+    free(framed);
     if (err != FIRC_OK) {
         if (err != FIRC_ERR_IO && done > 0) {
             restart_child(sl);

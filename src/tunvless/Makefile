@@ -24,7 +24,7 @@ PREFIXMAP := -ffile-prefix-map=$(CURDIR)/=
 ALL_CFLAGS = $(CFLAGS) $(WARN) $(INC) $(PREFIXMAP) -ffunction-sections -fdata-sections
 DEFS     := -DTUNVLESS_VERSION='"$(VERSION)"'
 
-TUNNEL_SRC    := src/tunnel/tun.c src/tunnel/stack.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/tunnel/pool.c src/tunnel/nodes.c src/control.c src/ctlmap.c
+TUNNEL_SRC    := src/tunnel/tun.c src/tunnel/stack.c src/tunnel/ibhs.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/tunnel/pool.c src/tunnel/nodes.c src/control.c src/ctlmap.c
 VLESS_SRC     := src/proto/vless/vldial.c src/proto/vless/client.c src/proto/vless/vless_proto.c src/proto/vless/vlink.c \
                  src/proto/vless/vision.c src/proto/vless/sublink.c src/proto/vless/sub.c
 TRANSPORT_SRC := src/proto/transport/transport.c src/proto/transport/trdial.c \
@@ -36,7 +36,7 @@ TLS_SRC       := src/proto/tls/tls13.c src/proto/tls/certverify.c src/proto/tls/
 LIB_SRC       := src/lib/osrand.c
 # The one file that sees wolfSSL headers: built with the library's own flags.
 CRYPTO_SRC    := src/lib/scrypto.c
-SRC           := src/main.c src/ctlnodes.c $(TUNNEL_SRC) $(VLESS_SRC) $(TRANSPORT_SRC) $(TLS_SRC) $(LIB_SRC)
+SRC           := src/main.c src/ctlnodes.c src/ctlinb.c $(TUNNEL_SRC) $(VLESS_SRC) $(TRANSPORT_SRC) $(TLS_SRC) $(LIB_SRC)
 HDR           := $(wildcard src/*/*.h src/proto/*/*.h)
 
 WOLFSSL_LIB   := $(O)/wolfssl/libwolfssl.a
@@ -80,7 +80,7 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch dialmatch ratelogmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch
 CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch
 
 test: unit-test crypto-test
@@ -171,18 +171,28 @@ $(T)/dialmatch: tests/dialmatch.c src/proto/transport/trdial.c $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/dialmatch.c -lpthread
 
-CTLN_SRC := src/ctlnodes.c src/ctlmap.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
+CTLN_SRC := src/ctlnodes.c src/ctlmap.c src/ctlinb.c src/control.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
             src/proto/vless/vless_proto.c $(SUB_SRC)
 $(T)/ctlnodesmatch: tests/ctlnodesmatch.c src/proto/transport/trdial.c $(CTLN_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/ctlnodesmatch.c $(CTLN_SRC) -lpthread
+
+$(T)/ctlinbmatch: tests/ctlinbmatch.c src/proto/transport/trdial.c $(CTLN_SRC) $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/ctlinbmatch.c $(CTLN_SRC) -lpthread
+
+$(T)/ibhsmatch: tests/ibhsmatch.c src/tunnel/ibhs.c src/tunnel/ibhs.h src/ctlinb.h
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/ibhsmatch.c src/tunnel/ibhs.c
 
 $(T)/rtxmatch: tests/rtxmatch.c src/tunnel/rtx.c src/tunnel/rtx.h
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/rtxmatch.c src/tunnel/rtx.c
 
 TUNNEL_TEST_SRC := src/control.c src/ctlmap.c src/tunnel/tun.c src/tunnel/rtx.c src/tunnel/ifcfg.c src/proto/vless/vless_proto.c \
-                   src/proto/vless/vision.c src/proto/vless/vldial.c src/lib/osrand.c
+                   src/proto/vless/vision.c src/proto/vless/vldial.c src/lib/osrand.c src/tunnel/ibhs.c src/tunnel/nodes.c \
+                   src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/vless/sub.c src/proto/transport/trdial.c \
+                   $(SUB_SRC)
 $(T)/tunnelmatch: tests/tunnelmatch.c src/tunnel/stack.c src/tunnel/pool.c $(TUNNEL_TEST_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/tunnelmatch.c $(TUNNEL_TEST_SRC) -lpthread -ldl
@@ -227,7 +237,7 @@ $(T)/vlessmatch: tests/vlessmatch.c $(CLIENT_SRC) src/proto/transport/trdial.c s
 
 $(T)/takematch: tests/takematch.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(HDR)
 	$(CC) $(T_CFLAGS) -o $@ tests/takematch.c src/proto/vless/vldial.c $(TUNNEL_SRC) $(CLIENT_SRC) \
-		src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CRYPTO)
+		src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CRYPTO)
 
 # -- probes for the interop scripts (a real server on the other side) --
 

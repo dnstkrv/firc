@@ -1,0 +1,46 @@
+tunnels:
+- id: "ib"
+  device: "tunvless4"
+  enable: true
+  uplink: "auto"
+  sources:
+  - id: "0000000c"
+    link: "vless://u@h.example.invalid:443?security=none#nl"
+  active: 1
+  by: "connection"
+  interval: 60s
+  silence: 20s
+  advanced:
+    timeout: 8s
+    insecure: false
+    ca: ""
+    kernelTcp: false
+  inbounds:
+  - port: 1081
+    listen: "br0"
+    node: "0000000c:nl"
+    user: "alice"
+    password: "p:w d"
+  - port: 1082
+    listen: "br1"
+    node: "0000000c:nl"
+- id: "ib2"
+  device: "tunvless5"
+  enable: true
+  uplink: "auto"
+  sources:
+  - id: "0000000d"
+    link: "vless://u@h.example.invalid:443?security=none#de"
+  active: 1
+  by: "connection"
+  interval: 60s
+  silence: 20s
+  advanced:
+    timeout: 8s
+    insecure: false
+    ca: ""
+    kernelTcp: false
+  inbounds:
+  - port: 1081
+    listen: "br1"
+    node: "0000000d:de"

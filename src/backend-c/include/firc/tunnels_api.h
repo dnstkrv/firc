@@ -14,7 +14,7 @@
 typedef struct tun_probe_call tun_probe_call_t;
 
 typedef struct {
-    char dev[16];
+    char dev[32];
     uint64_t rx, tx;
     int64_t at_ms;
 } firc_tun_rate_t;
@@ -27,7 +27,7 @@ typedef struct firc_tunnels_ctx {
     const char *binary;
     const char *sysfs_net;
     tun_probe_call_t *probe;
-    firc_tun_rate_t rates[FIRC_TUN_MAX * 2];
+    firc_tun_rate_t rates[FIRC_TUN_MAX * (2 + FIRC_TUN_MAX_INBOUNDS)];
 } firc_tunnels_ctx_t;
 
 /* Registers /api/v1/tunnels and its sub-routes, run on the loop thread that owns ctx->run. A NULL subs holds

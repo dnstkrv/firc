@@ -1,17 +1,20 @@
 import { fetchInterfaces } from "../../data/interfaces.svelte";
 import { t } from "../../data/locale.svelte";
+import { settings } from "../settings/settings.svelte";
 
 import type {
   Tunnel,
   TunnelHeader,
   TunnelHeadersRes,
   TunnelPreview,
+  TunnelPreviewRow,
   TunnelProbeRow,
   TunnelsRes,
   TunnelState,
 } from "../../types";
 import { overlay, toast } from "../../utils/events";
 import { fetcher, HttpError } from "../../utils/fetcher";
+import { inboundRefusal } from "./inbounds";
 import { restartingDevices } from "./tunnel-editor";
 import {
   defaultTunnel,
@@ -39,6 +42,7 @@ export class TunnelsStore {
   states = $state<TunnelState[]>([]);
   headerDefaults = $state<TunnelHeader[]>([]);
   polling = $state(false);
+  nodeRows = $state<Record<string, TunnelPreviewRow[]>>({});
 
   #dispose: (() => void) | null = null;
   #active = false;
@@ -60,6 +64,11 @@ export class TunnelsStore {
 
   get dirty() {
     return JSON.stringify(plain($state.snapshot(this.data) as Tunnel[])) !== this.#baseline;
+  }
+
+  get link(): string[] {
+    const link = settings.saved["app.link"];
+    return Array.isArray(link) ? (link as string[]) : [];
   }
 
   get canSave() {
@@ -134,6 +143,19 @@ export class TunnelsStore {
     if (!this.canSave) return;
     this.saving = true;
     this.fieldError = null;
+    for (const tn of this.data) {
+      const refusal = inboundRefusal(
+        tn.inbounds,
+        this.data.filter((o) => o.key !== tn.key),
+        this.link,
+        t,
+      );
+      if (refusal) {
+        this.fieldError = { tunnel: tn.id, field: refusal.field, error: refusal.text };
+        this.saving = false;
+        return;
+      }
+    }
     overlay.show(t("saving changes..."));
     try {
       const body = { tunnels: plain($state.snapshot(this.data) as Tunnel[]) };

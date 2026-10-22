@@ -762,6 +762,10 @@ let TUNNELS: any[] = [
     ],
     uplink: { kind: "auto", ref: "" },
     advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+    inbounds: [
+      { port: 1080, listen: "br0", node: "0000000a:A", user: "", password: "" },
+      { port: 1081, listen: "br0", node: "0000000a:A", user: "bob", password: "s3cret" },
+    ],
   },
 ];
 
@@ -883,6 +887,13 @@ const tunnelState = (tn: any) => {
       })),
     rxBps: status === "up" ? 1200 : 0,
     txBps: status === "up" ? 300 : 0,
+    inbounds: (tn.inbounds ?? []).map((ib: any) => ({
+      port: ib.port,
+      state: !tn.enable ? "off" : status === "up" ? "up" : "starting",
+      why: "",
+      rxBps: status === "up" ? 600 : 0,
+      txBps: status === "up" ? 150 : 0,
+    })),
   };
 };
 
@@ -909,6 +920,13 @@ app.put(`${API_BASE}/tunnels`, async (c) => {
     ...tn,
     description: tn.description ?? "",
     advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, ...tn.advanced },
+    inbounds: (tn.inbounds ?? []).map((ib: any) => ({
+      port: ib.port,
+      listen: ib.listen,
+      node: ib.node,
+      user: ib.user ?? "",
+      password: ib.password ?? "",
+    })),
     sources: (tn.sources ?? []).map((src: any) => ({
       ...src,
       id: src.id || derivedId(src.link ?? src.url ?? ""),

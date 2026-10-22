@@ -1,6 +1,5 @@
 #include <arpa/inet.h>
 #include <errno.h>
-#include <ifaddrs.h>
 #include <inttypes.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -15,6 +14,7 @@
 
 #include "firc/duration.h"
 #include "firc/events.h"
+#include "firc/ifaddr.h"
 #include "firc/json.h"
 #include "firc/listen.h"
 #include "firc/log.h"
@@ -281,19 +281,6 @@ firc_err_t firc_settings_probe_listeners(const firc_app_config_t *next,
     return err == FIRC_OK ? probe_one(&dns, field, why, why_cap) : err;
 }
 
-static void link_ipv4(const char *name, char *out, size_t cap) {
-    struct ifaddrs *list = NULL;
-    if (name == NULL || getifaddrs(&list) != 0) { return; }
-    for (const struct ifaddrs *a = list; a != NULL; a = a->ifa_next) {
-        if (a->ifa_addr != NULL && a->ifa_addr->sa_family == AF_INET && strcmp(a->ifa_name, name) == 0) {
-            inet_ntop(AF_INET, &((const struct sockaddr_in *)(const void *)a->ifa_addr)->sin_addr, out,
-                      (socklen_t)cap);
-            break;
-        }
-    }
-    freeifaddrs(list);
-}
-
 static void lan_address(const firc_app_config_t *running, char *out, size_t cap) {
     out[0] = '\0';
     struct sockaddr_storage sa;
@@ -314,7 +301,7 @@ static void lan_address(const firc_app_config_t *running, char *out, size_t cap)
             return;
         }
     }
-    link_ipv4(running->n_link > 0 ? running->link[0] : NULL, out, cap);
+    (void)firc_iface_ipv4(running->n_link > 0 ? running->link[0] : NULL, out, cap);
 }
 
 static cJSON *web_ui_json(const firc_system_ctx_t *ctx) {

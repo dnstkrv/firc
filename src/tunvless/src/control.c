@@ -154,6 +154,27 @@ void ctl_emit_active(const char *const *names, const int *index, size_t cnt) {
 
 void ctl_emit_nodes(int count) { emit_count("nodes", count); }
 
+void ctl_emit_inbound(unsigned port, const char *state, const char *why) {
+    char a[300], b[300], l[1024];
+    ctl_json_str_trunc(a, sizeof a, state);
+    ctl_json_str_trunc(b, sizeof b, why);
+    int n = snprintf(l, sizeof l, "{\"type\":\"inbound\",\"port\":%u,\"state\":%s,\"why\":%s}\n", port, a, b);
+    if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
+}
+
+void ctl_emit_ibytes(unsigned port, uint32_t rx, uint32_t tx) {
+    char l[128];
+    int n = snprintf(l, sizeof l, "{\"type\":\"ibytes\",\"port\":%u,\"rx\":%" PRIu32 ",\"tx\":%" PRIu32 "}\n",
+                     port, rx, tx);
+    if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
+}
+
+void ctl_emit_inbounds(long count) {
+    char l[64];
+    int n = snprintf(l, sizeof l, "{\"type\":\"inbounds\",\"count\":%ld}\n", count);
+    emit(l, (size_t)n);
+}
+
 void ctl_emit_pins_full(void) {
     static const char l[] = "{\"type\":\"pins_full\"}\n";
     emit(l, sizeof l - 1);

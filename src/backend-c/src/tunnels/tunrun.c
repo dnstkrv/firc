@@ -1,5 +1,6 @@
 #include "firc/tunrun.h"
 
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,16 @@ typedef struct {
     size_t n;
 } keys_t;
 
+typedef enum { IB_OK, IB_GONE, IB_NOT_LAN, IB_NO_ADDR } ib_verdict_t;
+
+typedef struct {
+    char state[16];
+    char why[96];
+    uint64_t rx, tx;
+    ib_verdict_t verdict;
+    bool lined;
+} ib_t;
+
 typedef struct {
     firc_tun_status_t syn;
     int64_t syn_since;
@@ -48,6 +59,8 @@ typedef struct {
     keys_t acts;
     firc_tunwatch_t watch;
     firc_logrep_t no_node;
+    ib_t ib[FIRC_TUN_MAX_INBOUNDS];
+    char *sent_in;
 } ext_t;
 
 struct firc_tunrun {
@@ -66,6 +79,11 @@ struct firc_tunrun {
     firc_tunsubs_t *subs;
     size_t list_max;
     bool stopped;
+    bool stopping;
+    bool pushing;
+    char **link;
+    bool *wan;
+    size_t n_link;
     bool has_k;
     firc_tunrun_ktcp_t k;
     uint16_t ports[FIRC_KTCP_DEVICES];
@@ -424,6 +442,215 @@ static void on_watch(firc_loop_t *loop, void *ud)
     watch(ud);
 }
 
+static void set_ib(ib_t *s, const char *state, const char *why)
+{
+    snprintf(s->state, sizeof s->state, "%.15s", state);
+    snprintf(s->why, sizeof s->why, "%.95s", why);
+}
+
+static void judge(const firc_tunnel_t *tun, const firc_tun_inbound_t *b, ib_t *s, ib_verdict_t v)
+{
+    if (v == s->verdict) {
+        return;
+    }
+    unsigned port = b->port;
+    switch (v) {
+    case IB_GONE:
+        firc_log_from(FIRC_LOG_WARN, tun->device, "inbound :%u: node %s is gone", port, b->node);
+        break;
+    case IB_NOT_LAN:
+        firc_log_from(FIRC_LOG_WARN, tun->device, "inbound :%u: %s is not a LAN interface of app.link", port, b->listen);
+        break;
+    case IB_NO_ADDR:
+        firc_log_from(FIRC_LOG_WARN, tun->device, "inbound :%u: %s has no IPv4 address", port, b->listen);
+        break;
+    case IB_OK:
+        if (s->verdict == IB_GONE) {
+            firc_log_from(FIRC_LOG_INFO, tun->device, "inbound :%u: node %s is back", port, b->node);
+        }
+        break;
+    }
+    s->verdict = v;
+}
+
+static bool lan_ok(const firc_tunrun_t *t, const char *name)
+{
+    for (size_t i = 0; i < t->n_link; i++) {
+        if (strcmp(t->link[i], name) == 0) {
+            return !t->wan[i];
+        }
+    }
+    return false;
+}
+
+bool firc_tunrun_lan_ok(const firc_tunrun_t *t, const char *name)
+{
+    return lan_ok(t, name);
+}
+
+static void put_field(FILE *fp, const char *s)
+{
+    if (s[0] == 0) {
+        fputc('-', fp);
+        return;
+    }
+    if (strcmp(s, "-") == 0) {
+        fputs("%2D", fp);
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p != 0; p++) {
+        if (*p <= 0x20 || *p == '%' || *p == 0x7f) {
+            fprintf(fp, "%%%02X", *p);
+        } else {
+            fputc(*p, fp);
+        }
+    }
+}
+
+static bool put_line(firc_tunrun_t *t, size_t i, size_t k, const char *link, FILE *fp)
+{
+    const firc_tunnel_t *tun = &t->cur.t[i];
+    const firc_tun_inbound_t *b = &tun->inb[k];
+    ib_t *s = &t->ext[i].ib[k];
+    char addr[INET_ADDRSTRLEN];
+    if (!lan_ok(t, b->listen)) {
+        judge(tun, b, s, IB_NOT_LAN);
+        set_ib(s, "not-lan", "");
+        return false;
+    }
+    if (firc_iface_ipv4(b->listen, addr, sizeof addr) != 0) {
+        judge(tun, b, s, IB_NO_ADDR);
+        set_ib(s, "no-address", "");
+        return false;
+    }
+    judge(tun, b, s, link != NULL ? IB_OK : IB_GONE);
+    fprintf(fp, "%s:%u ", addr, (unsigned)b->port);
+    put_field(fp, b->user);
+    fputc(' ', fp);
+    put_field(fp, b->password);
+    fprintf(fp, " %s\n", link != NULL ? link : "-");
+    if (link == NULL) {
+        set_ib(s, "no-node", "");
+        return false;
+    }
+    return true;
+}
+
+static void refresh_inbounds(firc_tunrun_t *t, size_t i)
+{
+    const firc_tunnel_t *tun = &t->cur.t[i];
+    ext_t *x = &t->ext[i];
+    if (t->stopping) {
+        return;
+    }
+    if (!tun->enable) {
+        for (size_t k = 0; k < tun->n_inb; k++) {
+            set_ib(&x->ib[k], "off", "");
+        }
+        return;
+    }
+    if (tun->n_inb == 0 && x->sent_in == NULL) {
+        return;
+    }
+    const char *keys[FIRC_TUN_MAX_INBOUNDS];
+    char *links[FIRC_TUN_MAX_INBOUNDS] = {NULL};
+    for (size_t k = 0; k < tun->n_inb; k++) {
+        keys[k] = tun->inb[k].node;
+    }
+    size_t n_bodies = 0;
+    const firc_tun_body_t *bodies = firc_tunsubs_bodies(t->subs, &n_bodies);
+    if (tun->n_inb > 0 &&
+        firc_tun_nodes_links_of(tun, t->up[i].mark, bodies, n_bodies, keys, tun->n_inb, links) != FIRC_OK) {
+        return;
+    }
+    char *text = NULL;
+    size_t len = 0;
+    FILE *fp = open_memstream(&text, &len);
+    bool live[FIRC_TUN_MAX_INBOUNDS] = {false};
+    for (size_t k = 0; fp != NULL && k < tun->n_inb; k++) {
+        live[k] = put_line(t, i, k, links[k], fp);
+    }
+    for (size_t k = 0; k < tun->n_inb; k++) {
+        free(links[k]);
+    }
+    if (fp == NULL || fclose(fp) != 0 || text == NULL) {
+        free(text);
+        firc_log_from(FIRC_LOG_WARN, tun->device, "out of memory, inbounds not sent");
+        return;
+    }
+    bool ready = firc_tunsup_ready(t->sup, tun->id);
+    bool changed = x->sent_in == NULL ? len > 0 : strcmp(x->sent_in, text) != 0;
+    bool due = changed;
+    for (size_t k = 0; k < tun->n_inb && !due; k++) {
+        due = x->ib[k].lined && strcmp(x->ib[k].state, "busy") == 0;
+    }
+    bool sent = false;
+    if (ready && due) {
+        firc_err_t err = firc_tunsup_command(t->sup, tun->id, FIRC_TUN_CMD_INBOUNDS, text, len, NULL, 0);
+        if (err == FIRC_OK) {
+            free(x->sent_in);
+            x->sent_in = text;
+            text = NULL;
+            sent = true;
+            for (size_t k = 0; k < tun->n_inb; k++) {
+                x->ib[k].lined = live[k];
+            }
+        } else {
+            firc_log_from(FIRC_LOG_WARN, tun->device, "inbounds not sent: %s", firc_err_str(err));
+        }
+    }
+    free(text);
+    for (size_t k = 0; k < tun->n_inb; k++) {
+        if (live[k] && (sent || !ready) && (changed || strcmp(x->ib[k].state, "busy") != 0)) {
+            set_ib(&x->ib[k], "starting", "");
+        }
+    }
+}
+
+static ssize_t ib_at(const firc_tunnel_t *tun, const ext_t *x, uint16_t port)
+{
+    for (size_t k = 0; k < tun->n_inb; k++) {
+        if (x->ib[k].lined && tun->inb[k].port == port) {
+            return (ssize_t)k;
+        }
+    }
+    return -1;
+}
+
+static void inbound_event(firc_tunrun_t *t, const firc_tun_state_t *st, const firc_tev_t *ev)
+{
+    ssize_t i = find(&t->cur, st->id);
+    if (i < 0 || t->ext == NULL) {
+        return;
+    }
+    ext_t *x = &t->ext[i];
+    const firc_tunnel_t *tun = &t->cur.t[i];
+    if (ev == NULL) {
+        if (!t->pushing) {
+            refresh_inbounds(t, (size_t)i);
+        }
+        return;
+    }
+    if (ev->kind != FIRC_TEV_INBOUND && ev->kind != FIRC_TEV_IBYTES) {
+        return;
+    }
+    ssize_t k = ib_at(tun, x, ev->ib_port);
+    if (k < 0) {
+        return;
+    }
+    ib_t *s = &x->ib[k];
+    if (ev->kind == FIRC_TEV_IBYTES) {
+        s->rx += ev->rx;
+        s->tx += ev->tx;
+        return;
+    }
+    if (strcmp(ev->istate, "busy") == 0 && strcmp(s->state, "busy") != 0) {
+        firc_log_from(FIRC_LOG_ERROR, tun->device, "inbound :%u on %s: port is busy", (unsigned)ev->ib_port,
+                      tun->inb[k].listen);
+    }
+    set_ib(s, ev->istate, ev->why);
+}
+
 static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
 {
     firc_tunrun_t *t = ud;
@@ -444,6 +671,7 @@ static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
         (void)firc_logrep_ok(no_node, st->device, "nodes");
     }
     watch(t);
+    inbound_event(t, st, ev);
     if (ev == NULL || ev->kind != FIRC_TEV_READY) {
         return;
     }
@@ -451,6 +679,11 @@ static void on_event(const firc_tun_state_t *st, const firc_tev_t *ev, void *ud)
         if (t->cur.t[i].uplink == FIRC_UPLINK_TUNNEL && strcmp(t->cur.t[i].uplink_ref, st->id) == 0) {
             refresh(t, i);
         }
+    }
+    if (at >= 0 && t->ext != NULL) {
+        free(t->ext[at].sent_in);
+        t->ext[at].sent_in = NULL;
+        refresh_inbounds(t, (size_t)at);
     }
 }
 
@@ -524,10 +757,56 @@ static void on_reap(const char *id, pid_t pid, void *ud)
     }
 }
 
-firc_tunrun_t *firc_tunrun_new(firc_loop_t *loop, firc_rtnl_t *r, uint32_t start_table, const char *binary)
+void firc_tunrun_refresh_inbounds(firc_tunrun_t *t)
+{
+    if (t == NULL || t->stopped) {
+        return;
+    }
+    for (size_t i = 0; i < t->cur.n; i++) {
+        refresh_inbounds(t, i);
+    }
+}
+
+static bool copy_lan(firc_tunrun_t *t, const firc_tunrun_lan_t *lan)
+{
+    if (lan == NULL) {
+        return true;
+    }
+    t->link = calloc(lan->n_link + 1, sizeof *t->link);
+    t->wan = calloc(lan->n_link + 1, sizeof *t->wan);
+    if (t->link == NULL || t->wan == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < lan->n_link; i++) {
+        t->link[i] = strdup(lan->link[i]);
+        if (t->link[i] == NULL) {
+            return false;
+        }
+        t->wan[i] = lan->wan != NULL && lan->wan[i];
+        t->n_link++;
+    }
+    return true;
+}
+
+static void free_lan(firc_tunrun_t *t)
+{
+    for (size_t i = 0; i < t->n_link; i++) {
+        free(t->link[i]);
+    }
+    free(t->link);
+    free(t->wan);
+}
+
+firc_tunrun_t *firc_tunrun_new(firc_loop_t *loop, firc_rtnl_t *r, uint32_t start_table, const char *binary,
+                               const firc_tunrun_lan_t *lan)
 {
     firc_tunrun_t *t = calloc(1, sizeof *t);
     if (t == NULL) {
+        return NULL;
+    }
+    if (!copy_lan(t, lan)) {
+        free_lan(t);
+        free(t);
         return NULL;
     }
     t->loop = loop;
@@ -537,6 +816,7 @@ firc_tunrun_t *firc_tunrun_new(firc_loop_t *loop, firc_rtnl_t *r, uint32_t start
     t->now = mono_ms;
     t->sup = firc_tunsup_new(loop, binary, on_event, t);
     if (t->sup == NULL) {
+        free_lan(t);
         free(t);
         return NULL;
     }
@@ -764,13 +1044,18 @@ static firc_err_t push(firc_tunrun_t *t, bool want)
         k++;
     }
     firc_tunnels_t sel = {.t = run, .n = k};
+    t->pushing = true;
     firc_err_t rc = firc_tunsup_apply(t->sup, &sel, marks);
+    t->pushing = false;
     if (rc != FIRC_OK) {
         FIRC_ERROR("tunnels: not every tunnel could be started: %s", firc_err_str(rc));
     }
     free(run);
     free(marks);
     mark_syn(t);
+    for (size_t i = 0; i < n; i++) {
+        refresh_inbounds(t, i);
+    }
     return rc;
 }
 
@@ -787,6 +1072,7 @@ static void free_ext(ext_t *v, size_t n)
     for (size_t i = 0; v != NULL && i < n; i++) {
         free(v[i].downs.v);
         free(v[i].acts.v);
+        free(v[i].sent_in);
     }
     free(v);
 }
@@ -807,6 +1093,26 @@ static void drop_ports(firc_tunrun_t *t)
     }
     if (changed) {
         publish(t);
+    }
+}
+
+static void remap_ib(ext_t *x, const firc_tunnel_t *was, const firc_tunnel_t *now)
+{
+    ib_t old[FIRC_TUN_MAX_INBOUNDS];
+    memcpy(old, x->ib, sizeof old);
+    memset(x->ib, 0, sizeof x->ib);
+    for (size_t k = 0; k < now->n_inb; k++) {
+        for (size_t j = 0; j < was->n_inb; j++) {
+            const firc_tun_inbound_t *a = &was->inb[j];
+            const firc_tun_inbound_t *b = &now->inb[k];
+            if (a->port == b->port && strcmp(a->listen, b->listen) == 0) {
+                x->ib[k] = old[j];
+                if (strcmp(a->node, b->node) != 0) {
+                    x->ib[k].verdict = IB_OK;
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -842,6 +1148,7 @@ firc_err_t firc_tunrun_apply(firc_tunrun_t *t, firc_tunnels_t *want)
             waiting[i] = t->waiting[j];
             ext[i] = t->ext[j];
             memset(&t->ext[j], 0, sizeof t->ext[j]);
+            remap_ib(&ext[i], &t->cur.t[j], nt);
             if (t->up[j].mark != 0) {
                 if (need) {
                     up[i] = t->up[j];
@@ -944,16 +1251,24 @@ size_t firc_tunrun_states(const firc_tunrun_t *t, firc_tun_state_t *out, size_t 
         int dev = ktcp_dev(tun);
         uint16_t port = dev < 0 || t->ktcp_unusable ? 0 : t->ports[dev];
         st->tcp_port = port;
-        if (t->ext[i].syn == FIRC_TUN_ST_UPLINK_DOWN || t->ext[i].syn == FIRC_TUN_ST_WAITING) {
-            continue;
-        }
-        st->status = FIRC_TUN_ST_OFF;
-        for (size_t k = 0; k < n_run; k++) {
-            if (strcmp(run[k].id, tun->id) == 0) {
-                *st = run[k];
-                st->tcp_port = port;
-                break;
+        if (t->ext[i].syn != FIRC_TUN_ST_UPLINK_DOWN && t->ext[i].syn != FIRC_TUN_ST_WAITING) {
+            st->status = FIRC_TUN_ST_OFF;
+            for (size_t k = 0; k < n_run; k++) {
+                if (strcmp(run[k].id, tun->id) == 0) {
+                    *st = run[k];
+                    st->tcp_port = port;
+                    break;
+                }
             }
+        }
+        st->n_ib = tun->n_inb;
+        for (size_t k = 0; k < tun->n_inb; k++) {
+            const ib_t *s = &t->ext[i].ib[k];
+            st->ib[k].port = tun->inb[k].port;
+            memcpy(st->ib[k].state, s->state, sizeof st->ib[k].state);
+            memcpy(st->ib[k].why, s->why, sizeof st->ib[k].why);
+            st->ib[k].rx = s->rx;
+            st->ib[k].tx = s->tx;
         }
     }
     return t->cur.n;
@@ -1080,6 +1395,7 @@ void firc_tunrun_stop(firc_tunrun_t *t, int grace_ms)
     if (t == NULL || t->stopped) {
         return;
     }
+    t->stopping = true;
     if (t->watch_timer != 0) {
         (void)firc_loop_del_timer(t->loop, t->watch_timer);
         t->watch_timer = 0;
@@ -1108,6 +1424,7 @@ void firc_tunrun_free(firc_tunrun_t *t)
     free(t->ok);
     free(t->waiting);
     free(t->drains);
+    free_lan(t);
     free(t);
 }
 

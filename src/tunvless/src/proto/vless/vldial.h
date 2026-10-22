@@ -43,6 +43,7 @@ struct vl_sess {
      * buffer is dg. */
     uint8_t xs, xdiscard;
     uint16_t xneed;
+    char host[256];
     /* ---- link to the node ---- */
     struct transport t;
     unsigned char dg[UDP_DGRAM_MAX];

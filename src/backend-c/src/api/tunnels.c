@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "firc/inbound_check.h"
 #include "firc/json.h"
 #include "firc/log.h"
 #include "firc/ruleset.h"
@@ -115,6 +116,26 @@ static cJSON *source_json(const firc_tun_src_t *src)
     return o;
 }
 
+static cJSON *inbounds_json(const firc_tunnel_t *t)
+{
+    cJSON *a = cJSON_CreateArray();
+    for (size_t i = 0; a != NULL && i < t->n_inb; i++) {
+        const firc_tun_inbound_t *b = &t->inb[i];
+        cJSON *o = cJSON_CreateObject();
+        bool ok = o != NULL && cJSON_AddNumberToObject(o, "port", b->port) != NULL &&
+                  cJSON_AddStringToObject(o, "listen", b->listen) != NULL &&
+                  cJSON_AddStringToObject(o, "node", b->node) != NULL &&
+                  cJSON_AddStringToObject(o, "user", b->user) != NULL &&
+                  cJSON_AddStringToObject(o, "password", b->password) != NULL && cJSON_AddItemToArray(a, o);
+        if (!ok) {
+            cJSON_Delete(o);
+            cJSON_Delete(a);
+            return NULL;
+        }
+    }
+    return a;
+}
+
 static cJSON *tunnel_json(const firc_tunnel_t *t)
 {
     cJSON *o = cJSON_CreateObject();
@@ -150,7 +171,7 @@ static cJSON *tunnel_json(const firc_tunnel_t *t)
     ok = ok && cJSON_AddStringToObject(o, "filter", t->filter != NULL ? t->filter : "") != NULL &&
          put_item(o, "order", strings_json(t->order, t->n_order)) &&
          put_item(o, "exclude", strings_json(t->exclude, t->n_exclude)) &&
-         cJSON_AddNumberToObject(o, "active", t->active) != NULL &&
+         put_item(o, "inbounds", inbounds_json(t)) && cJSON_AddNumberToObject(o, "active", t->active) != NULL &&
          cJSON_AddStringToObject(o, "by", t->by) != NULL &&
          cJSON_AddNumberToObject(o, "interval", t->interval_s) != NULL &&
          cJSON_AddNumberToObject(o, "silence", t->silence_s) != NULL;
@@ -316,6 +337,47 @@ static cJSON *shape_advanced(const cJSON *v)
     return o;
 }
 
+static cJSON *shape_inbound(const cJSON *v)
+{
+    if (!cJSON_IsObject(v)) {
+        return cJSON_Duplicate(v, true);
+    }
+    cJSON *o = cJSON_CreateObject();
+    const cJSON *it;
+    cJSON_ArrayForEach(it, v)
+    {
+        bool empty_auth = cJSON_IsString(it) && it->valuestring[0] == 0 &&
+                          (strcmp(it->string, "user") == 0 || strcmp(it->string, "password") == 0);
+        if (o == NULL || cJSON_IsNull(it) || empty_auth) {
+            continue;
+        }
+        if (!add_shaped(o, it->string, cJSON_Duplicate(it, true))) {
+            cJSON_Delete(o);
+            return NULL;
+        }
+    }
+    return o;
+}
+
+static cJSON *shape_inbounds(const cJSON *v)
+{
+    if (!cJSON_IsArray(v)) {
+        return cJSON_Duplicate(v, true);
+    }
+    cJSON *a = cJSON_CreateArray();
+    const cJSON *it;
+    cJSON_ArrayForEach(it, v)
+    {
+        cJSON *x = a != NULL ? shape_inbound(it) : NULL;
+        if (x == NULL || !cJSON_AddItemToArray(a, x)) {
+            cJSON_Delete(x);
+            cJSON_Delete(a);
+            return NULL;
+        }
+    }
+    return a;
+}
+
 static cJSON *shape_tunnel(const cJSON *v)
 {
     if (!cJSON_IsObject(v)) {
@@ -338,6 +400,8 @@ static cJSON *shape_tunnel(const cJSON *v)
             x = secs_value(it);
         } else if (strcmp(k, "advanced") == 0) {
             x = shape_advanced(it);
+        } else if (strcmp(k, "inbounds") == 0) {
+            x = shape_inbounds(it);
         } else {
             x = cJSON_Duplicate(it, true);
         }
@@ -400,8 +464,10 @@ static const jkey_t TUNNEL_KEYS[] = {
     {"id", T_STR},     {"device", T_STR},  {"enable", T_BOOL},  {"uplink", T_OBJ},
     {"sources", T_ARR}, {"filter", T_STR},  {"order", T_ARR},    {"exclude", T_ARR},
     {"active", T_NUM}, {"by", T_STR},      {"interval", T_NUM}, {"silence", T_NUM},
-    {"advanced", T_OBJ}, {"description", T_STR},
+    {"advanced", T_OBJ}, {"description", T_STR}, {"inbounds", T_ARR},
 };
+static const jkey_t INBOUND_KEYS[] = {
+    {"port", T_NUM}, {"listen", T_STR}, {"node", T_STR}, {"user", T_STR}, {"password", T_STR}};
 static const jkey_t UPLINK_KEYS[] = {{"kind", T_STR}, {"ref", T_STR}};
 static const jkey_t ADVANCED_KEYS[] = {
     {"timeout", T_NUM}, {"insecure", T_BOOL}, {"ca", T_STR}, {"kernelTcp", T_BOOL}};
@@ -500,6 +566,20 @@ static bool tunnel_typed(const cJSON *t, load_err_t *le)
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "order"), "order", le) ||
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "exclude"), "exclude", le)) {
         return false;
+    }
+    int ib = 0;
+    const cJSON *inb;
+    cJSON_ArrayForEach(inb, cJSON_GetObjectItemCaseSensitive(t, "inbounds"))
+    {
+        char prefix[40];
+        snprintf(prefix, sizeof prefix, "inbounds[%d]", ib);
+        if (!cJSON_IsObject(inb)) {
+            return refuse_type(le, "must be an object", prefix);
+        }
+        snprintf(prefix, sizeof prefix, "inbounds[%d].", ib++);
+        if (!keys_typed(inb, INBOUND_KEYS, sizeof INBOUND_KEYS / sizeof INBOUND_KEYS[0], prefix, le)) {
+            return false;
+        }
     }
     int i = 0;
     const cJSON *src;
@@ -629,8 +709,18 @@ static void handle_put(firc_http_req_t *req, firc_http_res_t *res, void *ud)
     firc_tunnels_t set;
     load_err_t le;
     firc_err_t err = load_json(arr, &set, &le);
+    bool checked = err == FIRC_OK && ctx->app != NULL;
+    if (checked) {
+        err = firc_inbounds_check(&set, ctx->run, firc_app_running_settings(ctx->app), &le.err);
+        if (err == FIRC_ERR_INVAL) {
+            map_where(arr, &le);
+        }
+    }
     cJSON_Delete(body);
     if (err != FIRC_OK) {
+        if (checked) {
+            firc_tunnels_free(&set);
+        }
         write_load_error(res, err, &le);
         return;
     }
@@ -735,19 +825,9 @@ static bool read_counter(const char *root, const char *dev, const char *which, u
     return true;
 }
 
-static void rates_of(firc_tunnels_ctx_t *ctx, const char *dev, uint64_t *rx_bps, uint64_t *tx_bps)
+static void rate_of_key(firc_tunnels_ctx_t *ctx, const char *dev, uint64_t rx, uint64_t tx, uint64_t *rx_bps,
+                        uint64_t *tx_bps)
 {
-    *rx_bps = 0;
-    *tx_bps = 0;
-    const char *root = ctx->sysfs_net != NULL ? ctx->sysfs_net : "/sys/class/net";
-    uint64_t rx = 0, tx = 0;
-    if (!read_counter(root, dev, "rx_bytes", &rx) || !read_counter(root, dev, "tx_bytes", &tx)) {
-        return;
-    }
-    uint64_t krx = 0, ktx = 0;
-    (void)firc_tunrun_ktcp_bytes(ctx->run, dev, &krx, &ktx);
-    rx += krx;
-    tx += ktx;
     int64_t now = mono_ms();
     size_t n = sizeof ctx->rates / sizeof ctx->rates[0];
     firc_tun_rate_t *slot = NULL;
@@ -780,6 +860,20 @@ static void rates_of(firc_tunnels_ctx_t *ctx, const char *dev, uint64_t *rx_bps,
     slot->rx = rx;
     slot->tx = tx;
     slot->at_ms = now;
+}
+
+static void rates_of(firc_tunnels_ctx_t *ctx, const char *dev, uint64_t *rx_bps, uint64_t *tx_bps)
+{
+    *rx_bps = 0;
+    *tx_bps = 0;
+    const char *root = ctx->sysfs_net != NULL ? ctx->sysfs_net : "/sys/class/net";
+    uint64_t rx = 0, tx = 0;
+    if (!read_counter(root, dev, "rx_bytes", &rx) || !read_counter(root, dev, "tx_bytes", &tx)) {
+        return;
+    }
+    uint64_t krx = 0, ktx = 0;
+    (void)firc_tunrun_ktcp_bytes(ctx->run, dev, &krx, &ktx);
+    rate_of_key(ctx, dev, rx + krx, tx + ktx, rx_bps, tx_bps);
 }
 
 static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *st, const firc_tun_node_t *row)
@@ -889,6 +983,30 @@ static const char *off_word(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t)
     return "";
 }
 
+static cJSON *inbounds_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t, const firc_tun_state_t *st)
+{
+    cJSON *a = cJSON_CreateArray();
+    for (size_t i = 0; a != NULL && i < st->n_ib && i < FIRC_TUN_MAX_INBOUNDS; i++) {
+        const firc_tun_ib_state_t *ib = &st->ib[i];
+        char key[sizeof ctx->rates[0].dev];
+        snprintf(key, sizeof key, "%s:%u", t->device, (unsigned)ib->port);
+        uint64_t rx_bps = 0, tx_bps = 0;
+        rate_of_key(ctx, key, ib->rx, ib->tx, &rx_bps, &tx_bps);
+        cJSON *o = cJSON_CreateObject();
+        bool ok = o != NULL && cJSON_AddNumberToObject(o, "port", ib->port) != NULL &&
+                  cJSON_AddStringToObject(o, "state", ib->state) != NULL &&
+                  cJSON_AddStringToObject(o, "why", ib->why) != NULL &&
+                  cJSON_AddNumberToObject(o, "rxBps", (double)rx_bps) != NULL &&
+                  cJSON_AddNumberToObject(o, "txBps", (double)tx_bps) != NULL && cJSON_AddItemToArray(a, o);
+        if (!ok) {
+            cJSON_Delete(o);
+            cJSON_Delete(a);
+            return NULL;
+        }
+    }
+    return a;
+}
+
 static cJSON *tunnel_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t, const firc_tun_state_t *st)
 {
     cJSON *o = cJSON_CreateObject();
@@ -946,7 +1064,7 @@ static cJSON *tunnel_state_json(firc_tunnels_ctx_t *ctx, const firc_tunnel_t *t,
          cJSON_AddStringToObject(o, "tcpOff", off_word(ctx, t)) != NULL &&
          cJSON_AddNumberToObject(o, "rxBps", (double)rx) != NULL &&
          cJSON_AddNumberToObject(o, "txBps", (double)tx) != NULL &&
-         put_item(o, "groups", groups_of(ctx, t->device));
+         put_item(o, "groups", groups_of(ctx, t->device)) && put_item(o, "inbounds", inbounds_state_json(ctx, t, st));
     if (ok) {
         ok = put_item(o, "subscriptions", subs);
         subs = NULL;

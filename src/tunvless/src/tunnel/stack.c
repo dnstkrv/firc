@@ -48,6 +48,9 @@
 #include "../control.h"
 #include "../ctlmap.h"
 #include "ratelog.h"
+#include "../ctlinb.h"
+#include "ibhs.h"
+#include "nodes.h"
 
 #ifndef SO_ORIGINAL_DST
 #define SO_ORIGINAL_DST 80
@@ -235,6 +238,9 @@ struct conn {
      * gets RST from the common pass, not FIN. A FIN would say "the response is complete", and a
      * truncated download would look whole. Set together with srv_closed. */
     uint8_t aborted;
+    uint8_t ib;
+    uint8_t ib_reply;
+    uint8_t ib_udp;
 };
 
 /* The hot record must stay small: that is the whole point of the split. A build check rather
@@ -652,9 +658,52 @@ static __thread time_t g_now_s;
 #define KB_PERIOD_NS 1000000000ull
 #define KB_EARLY 0x80000000ull
 
-static __thread struct {
+struct kbc {
     uint64_t rx, tx, sent_rx, sent_tx, at;
-} g_kb;
+};
+
+static __thread struct kbc g_kb;
+
+#define IB_ORPHAN 255
+
+static struct ib_lst {
+    int fd, lerr;
+    uint8_t used;
+    struct ib_cfg cfg;
+    struct kbc kb;
+} g_ib[IB_MAX];
+
+#define IB_ASSOC_MAX 32
+#define IB_UDP_DST 16
+#define IB_UDP_IDLE_MS 60000
+
+static struct ib_assoc {
+    int tcp_fd, ufd;
+    uint8_t ib;
+    uint32_t client_ip;
+    struct sockaddr_in client;
+    int dst_conn[IB_UDP_DST];
+    uint64_t last_ms[IB_UDP_DST];
+} g_assoc[IB_ASSOC_MAX];
+
+static void kb_add(const struct conn *c, uint64_t rx, uint64_t tx) {
+    struct kbc *k = !c->ib ? &g_kb : c->ib <= IB_MAX ? &g_ib[c->ib - 1].kb : NULL;
+    if (!k) return;
+    k->rx += rx;
+    k->tx += tx;
+}
+
+static int kb_take(struct kbc *k, uint64_t now, uint32_t *rx, uint32_t *tx) {
+    uint64_t drx = k->rx - k->sent_rx, dtx = k->tx - k->sent_tx;
+    if (drx < KB_EARLY && dtx < KB_EARLY && now - k->at < KB_PERIOD_NS) return 0;
+    k->at = now;
+    if (!drx && !dtx) return 0;
+    k->sent_rx = k->rx;
+    k->sent_tx = k->tx;
+    *rx = (uint32_t)drx;
+    *tx = (uint32_t)dtx;
+    return 1;
+}
 
 /* ---- loop counters ----------------------------------------------------------------------
  *
@@ -1316,8 +1365,23 @@ static void sock_rst(int fd) {
     close(fd);
 }
 
+static void sock_soft_close(int fd) {
+    unsigned char sink[4096];
+    sock_linger(fd, 0);
+    shutdown(fd, SHUT_WR);
+    for (int i = 0; i < 16 && recv(fd, sink, sizeof sink, MSG_DONTWAIT) > 0; i++) {}
+    close(fd);
+}
+
+static void ib_udp_forget(const struct conn *c) {
+    struct ib_assoc *a = &g_assoc[c->ib_udp - 1];
+    for (int k = 0; k < IB_UDP_DST; k++)
+        if (a->dst_conn[k] == c - g_conns) a->dst_conn[k] = -1;
+}
+
 static void conn_drop(struct conn *c) {
     TR("closing conn#%ld fd=%d\n", (long)(c - g_conns), c->fd);
+    if (c->ib_udp) ib_udp_forget(c);
     if (g_up.c == c) g_up.c = NULL;                 /* gathered bytes: never acknowledged */
     if (c->sock && c->cfd >= 0) sock_rst(c->cfd);
     if (c->used) {
@@ -1505,6 +1569,31 @@ static int emit_dgram(void *arg, const unsigned char *p, size_t n) {
     return 0;
 }
 
+static void ib_udp_touch(struct ib_assoc *a, const struct conn *c) {
+    for (int k = 0; k < IB_UDP_DST; k++)
+        if (a->dst_conn[k] == c - g_conns) a->last_ms[k] = g_now_ns / 1000000;
+}
+
+static int emit_ib_dgram(void *arg, const unsigned char *p, size_t n) {
+    static unsigned char b[10 + 65535];
+    struct emit_ctx *e = arg;
+    struct conn *c = e->c;
+    struct ib_assoc *a = &g_assoc[c->ib_udp - 1];
+    c->last = g_now_s;
+    ib_udp_touch(a, c);
+    if (n > sizeof b - 10 || !a->client.sin_family) return 0;
+    b[0] = b[1] = b[2] = 0;
+    b[3] = 1;
+    memcpy(b + 4, &c->key.dst, 4);
+    b[8] = (unsigned char)(c->key.dport >> 8);
+    b[9] = (unsigned char)c->key.dport;
+    memcpy(b + 10, p, n);
+    if (sendto(a->ufd, b, 10 + n, MSG_DONTWAIT, (const struct sockaddr *)&a->client, sizeof a->client) ==
+        (ssize_t)(10 + n))
+        kb_add(c, n, 0);
+    return 0;
+}
+
 /* Send a piece of the stream to the client as TCP.
  *
  * One call per piece and no intermediate buffer: the data goes to the device straight from where
@@ -1612,7 +1701,7 @@ static int emit_sock(void *arg, const unsigned char *p, size_t n) {
             return -1;
         }
         if (w > 0) {
-            g_kb.rx += (uint64_t)w;
+            kb_add(c, (uint64_t)w, 0);
             p += w;
             n -= (size_t)w;
             c->last = g_now_s;
@@ -1642,7 +1731,7 @@ static void sock_flush(struct conn *c) {
             return;
         }
         rtx_drop(&c->rtx, (uint32_t)w);
-        g_kb.rx += (uint64_t)w;
+        kb_add(c, (uint64_t)w, 0);
         c->last = g_now_s;
         if ((uint32_t)w < n) return;
     }
@@ -1681,7 +1770,8 @@ static int downstream_pump(struct conn *c, const struct tun_dev *tun) {
      * traffic and a "did not fit" limit. */
     struct emit_ctx e = { .c = c, .tun = tun, .total = 0 };
     if (g_dl->ops->deliver(g_dl->ctx, s, c->is_udp, rx, got,
-                           c->is_udp ? emit_dgram : c->sock ? emit_sock : emit_stream, &e) != 0)
+                           c->is_udp ? (c->ib_udp ? emit_ib_dgram : emit_dgram) : c->sock ? emit_sock : emit_stream,
+                           &e) != 0)
         return -1;
     if (c->is_udp) return 0;
 
@@ -1806,6 +1896,8 @@ static size_t udp_defrag(const unsigned char *pkt, size_t n, unsigned char *out,
  * "A session per flow" is the stack's rule, not only VLESS's: the dialer gets one whole flow, so
  * a multiplexing protocol would need a different model in the stack, not just another dialer
  * table (see dialer.h). */
+static int udp_out(struct conn *c, const unsigned char *p, size_t dn);
+
 static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct flow_key *k,
                        const unsigned char *pkt, size_t n, size_t off) {
     size_t dn = n - off;
@@ -1859,7 +1951,10 @@ static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct f
     }
 
     c->last = g_now_s;
+    udp_out(c, pkt + off, dn);
+}
 
+static int udp_out(struct conn *c, const unsigned char *p, size_t dn) {
     /* The tail of early datagrams that did not fit the HTTP/2 window when the flow became ready
      * must go FIRST. A fresh datagram ahead of it is not "reordered datagrams", which QUIC
      * survives, but a frame cut in half: towards the node the datagrams travel as one byte
@@ -1868,18 +1963,18 @@ static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct f
      * window does close. */
     if (!c->pending && c->early) {
         int fr = early_flush(c);
-        if (fr < 0) { conn_drop(c); return; }
+        if (fr < 0) { conn_drop(c); return 0; }
         if (fr > 0) {
             if (g_stats) g_st.udp_drops++;
             TR("early datagram tail not sent — dropping the fresh one\n");
-            return;
+            return 0;
         }
     }
 
-    int sr = udp_send_dgram(c, pkt + off, dn);
+    int sr = udp_send_dgram(c, p, dn);
     if (sr == SEND_OK) {
         TR("client datagram %zu bytes -> server\n", dn);
-        return;
+        return 1;
     }
     if (sr == SEND_AGAIN) {
         /* The HTTP/2 window is closed or the early data buffer is full. For TCP the packet would
@@ -1888,10 +1983,11 @@ static void udp_packet(const struct tun_dev *tun, struct conn *c, const struct f
          * lost datagram, while sending OUT OF ORDER would break QUIC, for one. */
         if (g_stats) g_st.udp_drops++;
         TR("datagram dropped: cannot send now\n");
-        return;
+        return 0;
     }
     TR("UDP flow broken, closing\n");
     conn_drop(c);
+    return 0;
 }
 
 /* ---- flows we closed with our own FIN --------------------------------------------------
@@ -2489,7 +2585,7 @@ static int sock_read(struct conn *c, const struct tun_dev *tun) {
             c->client_fin = 1;
             return 0;
         }
-        g_kb.tx += (uint64_t)n;
+        kb_add(c, 0, (uint64_t)n);
         int sr = upstream_send(c, buf, (size_t)n);
         if (sr == SEND_AGAIN) {
             if (early_hold(c, buf, (size_t)n) == 0) return 0;
@@ -2504,6 +2600,18 @@ static int sock_read(struct conn *c, const struct tun_dev *tun) {
         total += (size_t)n;
     }
     return 0;
+}
+
+static int ib_send(int fd, const unsigned char *p, size_t n) {
+    return n && send(fd, p, n, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)n ? -1 : 0;
+}
+
+static void ib_refuse(struct conn *c, enum ibhs_end end) {
+    unsigned char r[IBHS_OUT];
+    ib_send(c->cfd, r, ibhs_done(c->ib_reply == 2, end, r, sizeof r));
+    sock_soft_close(c->cfd);
+    c->cfd = -1;
+    conn_drop(c);
 }
 
 /* A connector reported on connection c (done): the link is ready or failed. Called by the loop's
@@ -2530,6 +2638,10 @@ static int conn_ready(struct conn *c, const struct tun_dev *tun) {
             fprintf(stderr, LOG_W "flow to %s did not open: %s%s\n",
                     d->peer_of ? d->peer_of(g_dl->ctx, SESS(c)) : d->peer(g_dl->ctx),
                     d->strerror(c->rc), ratelog_more(more, sizeof more, held));
+        if (c->ib_reply) {
+            ib_refuse(c, IBHS_END_DIAL);
+            return 1;
+        }
         /* RST, not silence: otherwise the client waits for its timeout. With silence a video
          * page stopped opening at all: a browser handles a fast refusal better than a wait. */
         conn_reset(c, tun);
@@ -2540,6 +2652,15 @@ static int conn_ready(struct conn *c, const struct tun_dev *tun) {
     if (d->stale && d->stale(g_dl->ctx, SESS(c))) {
         conn_reset(c, tun);
         return 1;
+    }
+    if (c->ib_reply) {
+        unsigned char r[IBHS_OUT];
+        size_t n = ibhs_done(c->ib_reply == 2, IBHS_END_OK, r, sizeof r);
+        c->ib_reply = 0;
+        if (ib_send(c->cfd, r, n) != 0) {
+            conn_reset(c, tun);
+            return 1;
+        }
     }
     /* Early data the client sent during the handshake goes to the server first, before any
      * fresh packets. */
@@ -2635,11 +2756,7 @@ static int conn_deadlines(struct conn *c, const struct tun_dev *tun, uint64_t no
             conn_reset(c, tun);
             return 1;
         }
-        sock_linger(c->cfd, 0);
-        shutdown(c->cfd, SHUT_WR);
-        unsigned char sink[4096];
-        for (int i = 0; i < 16 && recv(c->cfd, sink, sizeof sink, MSG_DONTWAIT) > 0; i++) {}
-        close(c->cfd);
+        sock_soft_close(c->cfd);
         c->cfd = -1;
         conn_drop(c);
         return 1;
@@ -2710,9 +2827,24 @@ struct worker {
 #define LST_TOKEN ((uint32_t)MAX_CONNS + 2)
 #define CTL_TOKEN ((uint32_t)MAX_CONNS + 3)
 #define STOP_TOKEN ((uint32_t)MAX_CONNS + 4)
-#define CFD_BASE ((uint32_t)MAX_CONNS + 5)
-#define EVS_MAX (2 * MAX_CONNS + 5)
-_Static_assert(CFD_BASE > STOP_TOKEN, "socket slots start after the fixed tokens");
+#define IBW_TOKEN ((uint32_t)MAX_CONNS + 5)
+#define CFD_BASE ((uint32_t)MAX_CONNS + 6)
+#define IB_HS_MAX 64
+#define IB_HS_MS 5000
+#define IB_CONNS_MAX 128
+#define IB_RESERVE 64
+#define IB_LST_BASE (CFD_BASE + (uint32_t)MAX_CONNS)
+#define IB_HS_BASE (IB_LST_BASE + (uint32_t)IB_MAX)
+#define IB_CTL_BASE (IB_HS_BASE + (uint32_t)IB_HS_MAX)
+#define IB_UDP_BASE (IB_CTL_BASE + (uint32_t)IB_ASSOC_MAX)
+#define IB_TOKEN_END (IB_UDP_BASE + (uint32_t)IB_ASSOC_MAX)
+#define EVS_MAX (2 * MAX_CONNS + 6 + 144)
+_Static_assert(CFD_BASE > IBW_TOKEN && IBW_TOKEN > STOP_TOKEN, "socket slots start after the fixed tokens");
+_Static_assert(IB_LST_BASE >= CFD_BASE + MAX_CONNS && IB_HS_BASE >= IB_LST_BASE + IB_MAX &&
+                   IB_CTL_BASE >= IB_HS_BASE + IB_HS_MAX && IB_UDP_BASE >= IB_CTL_BASE + IB_ASSOC_MAX &&
+                   IB_TOKEN_END > IB_UDP_BASE && IB_TOKEN_END < UINT32_MAX &&
+                   IB_TOKEN_END - IB_LST_BASE == 144,
+               "inbound token ranges are disjoint, above the socket slots");
 #define ACCEPT_MAX 64
 #define PARK_MAX 256
 #define PARK_MS 300
@@ -2721,8 +2853,8 @@ _Static_assert(CFD_BASE > STOP_TOKEN, "socket slots start after the fixed tokens
 
 struct loop {
     struct tun_dev tun;
-    int ep, efd, ctl;
-    uint8_t lst_off, own, stop_in;
+    int ep, efd, ctl, ibw;
+    uint8_t lst_off, own, stop_in, ib_off;
     uint64_t stats_at, loop_at, spare_at;
     unsigned nodes_seen;
     struct epoll_event evs[EVS_MAX];
@@ -2762,11 +2894,424 @@ static int stop_fd(void) {
     return none;
 }
 
+static struct ib_hs {
+    int fd;
+    uint8_t ib;
+    uint16_t pport;
+    uint32_t peer;
+    uint64_t at;
+    struct ibhs h;
+} g_hs[IB_HS_MAX];
+
+static int ib_live(void) {
+    int n = 0;
+    for (int li = 0; li < g_live_n; li++) n += g_conns[g_live[li]].ib != 0;
+    return n;
+}
+
+static void ib_hs_free(struct ib_hs *s, int rst) {
+    if (rst) sock_rst(s->fd);
+    else sock_soft_close(s->fd);
+    s->fd = -1;
+    s->ib = 0;
+}
+
+static void ib_hs_end(struct ib_hs *s, enum ibhs_end end) {
+    unsigned char r[IBHS_OUT];
+    ib_send(s->fd, r, ibhs_done(s->h.http, end, r, sizeof r));
+    ib_hs_free(s, 0);
+}
+
+static int ib_node_of(uint8_t ib) {
+    int node = ib && ib <= IB_MAX ? g_ib[ib - 1].cfg.node : -1;
+    return node < 0 || node >= nodes_count() || !g_dl->ops->flow_open_on ? -1 : node;
+}
+
+static void ib_connect(struct loop *L, struct ib_hs *s) {
+    int node = ib_node_of(s->ib);
+    if (node < 0) {
+        ib_hs_end(s, IBHS_END_GONE);
+        return;
+    }
+    if (ib_live() >= IB_CONNS_MAX || g_free_n < IB_RESERVE) {
+        ib_hs_end(s, IBHS_END_FULL);
+        return;
+    }
+    epoll_ctl(L->ep, EPOLL_CTL_DEL, s->fd, NULL);
+    struct conn *c = conn_new(&L->tun);
+    if (!c) {
+        ib_hs_end(s, IBHS_END_FULL);
+        return;
+    }
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->sock = 1;
+    c->cfd = s->fd;
+    c->fd = -1;
+    c->hnext = -1;
+    c->born_turn = g_turn;
+    c->room_seen = UINT32_MAX;
+    c->key.src = s->peer;
+    c->key.dst = htonl(s->h.ip);
+    c->key.sport = s->pport;
+    c->key.dport = s->h.port;
+    c->key.proto = 6;
+    c->ib = s->ib;
+    c->ib_reply = s->h.http ? 2 : 1;
+    c->livepos = (int16_t)g_live_n;
+    g_live[g_live_n++] = (uint16_t)(c - g_conns);
+    c->last = g_now_s;
+    c->estab_ns = g_now_ns ? g_now_ns : 1;
+    s->fd = -1;
+    s->ib = 0;
+    int one = 1;
+    setsockopt(c->cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    const unsigned char *rest;
+    size_t rn = ibhs_rest(&s->h, &rest);
+    if (rn && early_hold(c, rest, rn) != 0) {
+        ib_refuse(c, IBHS_END_FULL);
+        return;
+    }
+    if (g_dl->ops->flow_open_on(SESS(c), node, &c->key, 0, s->h.host) != 0) {
+        ib_refuse(c, IBHS_END_DIAL);
+        return;
+    }
+    if (conn_submit(c) != 0) {
+        ib_refuse(c, IBHS_END_FULL);
+        return;
+    }
+    c->pending = 1;
+}
+
+static void ib_associate(struct loop *L, struct ib_hs *s) {
+    if (ib_node_of(s->ib) < 0) {
+        ib_hs_end(s, IBHS_END_GONE);
+        return;
+    }
+    int i = 0;
+    while (i < IB_ASSOC_MAX && g_assoc[i].ib) i++;
+    if (i == IB_ASSOC_MAX) {
+        ib_hs_end(s, IBHS_END_FULL);
+        return;
+    }
+    struct sockaddr_in me = { .sin_family = AF_INET, .sin_addr = { .s_addr = g_ib[s->ib - 1].cfg.addr } };
+    socklen_t ml = sizeof me;
+    struct epoll_event eu = { .events = EPOLLIN, .data = { .u32 = IB_UDP_BASE + (uint32_t)i } };
+    int u = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (u < 0 || bind(u, (struct sockaddr *)&me, sizeof me) != 0 ||
+        getsockname(u, (struct sockaddr *)&me, &ml) != 0 || epoll_ctl(L->ep, EPOLL_CTL_ADD, u, &eu) != 0) {
+        if (u >= 0) close(u);
+        ib_hs_end(s, IBHS_END_FULL);
+        return;
+    }
+    unsigned char r[10] = { 5, 0, 0, 1 };
+    memcpy(r + 4, &me.sin_addr.s_addr, 4);
+    memcpy(r + 8, &me.sin_port, 2);
+    struct epoll_event ec = { .events = EPOLLIN, .data = { .u32 = IB_CTL_BASE + (uint32_t)i } };
+    if (ib_send(s->fd, r, sizeof r) != 0 || epoll_ctl(L->ep, EPOLL_CTL_MOD, s->fd, &ec) != 0) {
+        close(u);
+        ib_hs_free(s, 1);
+        return;
+    }
+    struct ib_assoc *a = &g_assoc[i];
+    memset(a, 0, sizeof *a);
+    a->ib = s->ib;
+    a->tcp_fd = s->fd;
+    a->ufd = u;
+    a->client_ip = s->peer;
+    for (int k = 0; k < IB_UDP_DST; k++) a->dst_conn[k] = -1;
+    s->fd = -1;
+    s->ib = 0;
+}
+
+static void ib_assoc_end(struct ib_assoc *a, int rst) {
+    if (!a->ib) return;
+    for (int k = 0; k < IB_UDP_DST; k++) {
+        int idx = a->dst_conn[k];
+        if (idx < 0) continue;
+        struct conn *c = &g_conns[idx];
+        a->dst_conn[k] = -1;
+        c->ib_udp = 0;
+        if (c->pending) c->client_gone = 1;
+        else conn_drop(c);
+    }
+    close(a->ufd);
+    if (rst) sock_rst(a->tcp_fd);
+    else close(a->tcp_fd);
+    memset(a, 0, sizeof *a);
+    a->tcp_fd = a->ufd = -1;
+}
+
+static void ib_ctl_event(struct ib_assoc *a) {
+    unsigned char sink[512];
+    ssize_t n = a->ib ? recv(a->tcp_fd, sink, sizeof sink, MSG_DONTWAIT) : 1;
+    if (n > 0 || (n < 0 && sock_again())) return;
+    ib_assoc_end(a, n < 0);
+}
+
+static int ib_udp_slot(struct ib_assoc *a, uint32_t dst, uint16_t port, struct conn **found) {
+    int free_k = -1, idle_k = -1;
+    uint64_t now = g_now_ns / 1000000;
+    *found = NULL;
+    for (int k = 0; k < IB_UDP_DST; k++) {
+        int idx = a->dst_conn[k];
+        if (idx < 0) {
+            if (free_k < 0) free_k = k;
+            continue;
+        }
+        struct conn *c = &g_conns[idx];
+        if (c->key.dst == dst && c->key.dport == port) {
+            *found = c;
+            return k;
+        }
+        if (!c->pending && now - a->last_ms[k] >= IB_UDP_IDLE_MS &&
+            (idle_k < 0 || a->last_ms[k] < a->last_ms[idle_k]))
+            idle_k = k;
+    }
+    if (free_k >= 0 || idle_k < 0) return free_k;
+    conn_drop(&g_conns[a->dst_conn[idle_k]]);
+    return idle_k;
+}
+
+static void ib_udp_out(struct loop *L, struct ib_assoc *a, uint32_t dst, uint16_t port, const unsigned char *p,
+                       size_t n) {
+    struct conn *c;
+    int k = ib_udp_slot(a, dst, port, &c);
+    if (k < 0) return;
+    if (!c) {
+        int node = ib_node_of(a->ib);
+        if (node < 0 || ib_live() >= IB_CONNS_MAX || g_free_n < IB_RESERVE || !(c = conn_new(&L->tun))) return;
+        memset(c, 0, sizeof(*c));
+        c->used = 1;
+        c->is_udp = 1;
+        c->fd = c->cfd = -1;
+        c->hnext = -1;
+        c->born_turn = g_turn;
+        c->key.src = a->client_ip;
+        c->key.dst = dst;
+        c->key.sport = ntohs(a->client.sin_port);
+        c->key.dport = port;
+        c->key.proto = 17;
+        c->ib = a->ib;
+        c->ib_udp = (uint8_t)(a - g_assoc + 1);
+        c->livepos = (int16_t)g_live_n;
+        g_live[g_live_n++] = (uint16_t)(c - g_conns);
+        a->dst_conn[k] = (int)(c - g_conns);
+        if (g_dl->ops->flow_open_on(SESS(c), node, &c->key, 1, NULL) != 0 || conn_submit(c) != 0) {
+            conn_drop(c);
+            return;
+        }
+        c->pending = 1;
+    }
+    a->last_ms[k] = g_now_ns / 1000000;
+    c->last = g_now_s;
+    if (udp_out(c, p, n)) kb_add(c, 0, n);
+}
+
+static void ib_udp_event(struct loop *L, struct ib_assoc *a) {
+    static unsigned char b[10 + UDP_DGRAM_MAX + 1];
+    for (int k = 0; a->ib && k < ACCEPT_MAX; k++) {
+        struct sockaddr_in from;
+        socklen_t fl = sizeof from;
+        ssize_t n = recvfrom(a->ufd, b, sizeof b, MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+        if (n < 0) return;
+        if (from.sin_addr.s_addr != a->client_ip || n <= 10 || (size_t)n > 10 + UDP_DGRAM_MAX || b[0] || b[1] ||
+            b[2] || b[3] != 1)
+            continue;
+        if (a->client.sin_family && a->client.sin_port != from.sin_port) continue;
+        a->client = from;
+        uint32_t dst;
+        memcpy(&dst, b + 4, 4);
+        ib_udp_out(L, a, dst, (uint16_t)(b[8] << 8 | b[9]), b + 10, (size_t)n - 10);
+    }
+}
+
+static void ib_hs_event(struct loop *L, struct ib_hs *s) {
+    if (!s->ib) return;
+    unsigned char in[sizeof s->h.buf], out[IBHS_OUT];
+    size_t room = sizeof s->h.buf - s->h.len, on = 0;
+    ssize_t n = room ? recv(s->fd, in, room, MSG_DONTWAIT) : 0;
+    if (n < 0 && sock_again()) return;
+    if (n <= 0) {
+        ib_hs_free(s, 1);
+        return;
+    }
+    enum ibhs_rc rc = ibhs_feed(&s->h, &g_ib[s->ib - 1].cfg, in, (size_t)n, out, &on);
+    if (rc == IBHS_MORE) return;
+    if (ib_send(s->fd, out, on) != 0) {
+        ib_hs_free(s, 1);
+        return;
+    }
+    if (rc == IBHS_REPLY) return;
+    if (rc == IBHS_CONNECT) {
+        ib_connect(L, s);
+        return;
+    }
+    if (rc == IBHS_UDP) {
+        ib_associate(L, s);
+        return;
+    }
+    ib_hs_free(s, 0);
+}
+
+static void ib_arm(struct loop *L) {
+    L->ib_off = 0;
+    for (int i = 0; i < IB_MAX; i++) {
+        struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = IB_LST_BASE + (uint32_t)i } };
+        if (g_ib[i].used && g_ib[i].fd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, g_ib[i].fd, &e) != 0 &&
+            errno != EEXIST)
+            L->ib_off = 1;
+    }
+}
+
+static void ib_accept(struct loop *L, int i) {
+    struct ib_lst *ib = &g_ib[i];
+    for (int k = 0; ib->used && ib->fd >= 0 && k < ACCEPT_MAX; k++) {
+        struct sockaddr_in pa;
+        socklen_t pl = sizeof pa;
+        int fd = accept4(ib->fd, (struct sockaddr *)&pa, &pl, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            if (errno == EMFILE || errno == ENFILE) {
+                epoll_ctl(L->ep, EPOLL_CTL_DEL, ib->fd, NULL);
+                L->ib_off = 1;
+            }
+            return;
+        }
+        struct ib_hs *s = NULL;
+        for (int j = 0; j < IB_HS_MAX && !s; j++)
+            if (!g_hs[j].ib) s = &g_hs[j];
+        if (!s) {
+            sock_rst(fd);
+            continue;
+        }
+        memset(s, 0, offsetof(struct ib_hs, h));
+        ibhs_init(&s->h, &ib->cfg);
+        s->fd = fd;
+        s->ib = (uint8_t)(i + 1);
+        s->peer = pa.sin_addr.s_addr;
+        s->pport = ntohs(pa.sin_port);
+        s->at = g_now_ns;
+        struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = IB_HS_BASE + (uint32_t)(s - g_hs) } };
+        if (epoll_ctl(L->ep, EPOLL_CTL_ADD, fd, &e) != 0) ib_hs_free(s, 1);
+    }
+}
+
+static int ib_bind(const struct ib_cfg *c, int *err) {
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int one = 1;
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(c->port), .sin_addr = { .s_addr = c->addr } };
+    if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+        bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 128) != 0) {
+        *err = errno;
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void ib_drop(int i) {
+    struct ib_lst *ib = &g_ib[i];
+    if (ib->fd >= 0) close(ib->fd);
+    for (int j = 0; j < IB_HS_MAX; j++)
+        if (g_hs[j].ib == i + 1) ib_hs_free(&g_hs[j], 1);
+    for (int a = 0; a < IB_ASSOC_MAX; a++)
+        if (g_assoc[a].ib == i + 1) ib_assoc_end(&g_assoc[a], 0);
+    for (int li = 0; li < g_live_n; li++)
+        if (g_conns[g_live[li]].ib == i + 1) g_conns[g_live[li]].ib = IB_ORPHAN;
+    memset(ib, 0, sizeof(*ib));
+    ib->fd = -1;
+}
+
+static void ib_listen(struct loop *L, int i, const struct ib_cfg *c) {
+    struct ib_lst *ib = &g_ib[i];
+    if (!ib->used) {
+        memset(ib, 0, sizeof(*ib));
+        ib->used = 1;
+        ib->fd = -1;
+        ib->kb.at = g_now_ns;
+    }
+    if (ib->fd >= 0 && ib->cfg.addr != c->addr) {
+        for (int j = 0; j < IB_ASSOC_MAX; j++)
+            if (g_assoc[j].ib == i + 1) ib_assoc_end(&g_assoc[j], 1);
+        close(ib->fd);
+        ib->fd = -1;
+    }
+    if (strcmp(ib->cfg.user, c->user) || strcmp(ib->cfg.pass, c->pass))
+        for (int j = 0; j < IB_HS_MAX; j++)
+            if (g_hs[j].ib == i + 1) ib_hs_free(&g_hs[j], 0);
+    ib->cfg = *c;
+    int err = 0;
+    if (ib->fd < 0) {
+        ib->fd = ib_bind(c, &err);
+        struct epoll_event e = { .events = EPOLLIN, .data = { .u32 = IB_LST_BASE + (uint32_t)i } };
+        if (ib->fd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, ib->fd, &e) != 0) {
+            err = errno;
+            close(ib->fd);
+            ib->fd = -1;
+        }
+    }
+    if (ib->fd < 0) {
+        if (err != ib->lerr) fprintf(stderr, LOG_E "inbound :%u cannot listen: %s\n", c->port, strerror(err));
+        ib->lerr = err;
+        ctl_emit_inbound(c->port, "busy", strerror(err));
+        return;
+    }
+    ib->lerr = 0;
+    ctl_emit_inbound(c->port, c->node < 0 ? "no-node" : "up", "");
+}
+
+static void ib_apply(struct loop *L) {
+    uint64_t v;
+    ssize_t rd = read(L->ibw, &v, sizeof v);
+    (void)rd;
+    struct ib_cfg set[IB_MAX];
+    size_t n = ctlinb_take(set, IB_MAX, NULL);
+    int at[IB_MAX];
+    uint8_t taken[IB_MAX] = { 0 };
+    for (size_t e = 0; e < n; e++) at[e] = -1;
+    for (int loose = 0; loose < 2; loose++)
+        for (size_t e = 0; e < n; e++)
+            for (int i = 0; at[e] < 0 && i < IB_MAX; i++)
+                if (g_ib[i].used && !taken[i] && g_ib[i].cfg.port == set[e].port &&
+                    (loose || g_ib[i].cfg.addr == set[e].addr)) {
+                    at[e] = i;
+                    taken[i] = 1;
+                }
+    for (int i = 0; i < IB_MAX; i++)
+        if (g_ib[i].used && !taken[i]) ib_drop(i);
+    for (size_t e = 0; e < n; e++)
+        for (int i = 0; at[e] < 0 && i < IB_MAX; i++)
+            if (!g_ib[i].used && !taken[i]) {
+                at[e] = i;
+                taken[i] = 1;
+            }
+    for (size_t e = 0; e < n; e++)
+        if (at[e] >= 0) ib_listen(L, at[e], &set[e]);
+}
+
+static void ib_deadlines(uint64_t now) {
+    for (int j = 0; j < IB_HS_MAX; j++)
+        if (g_hs[j].ib && now - g_hs[j].at >= (uint64_t)IB_HS_MS * 1000000ull) ib_hs_free(&g_hs[j], 1);
+}
+
+static void ib_stop(void) {
+    for (int i = 0; i < IB_MAX; i++)
+        if (g_ib[i].used && g_ib[i].fd >= 0) {
+            close(g_ib[i].fd);
+            g_ib[i].fd = -1;
+        }
+    for (int j = 0; j < IB_HS_MAX; j++)
+        if (g_hs[j].ib) ib_hs_free(&g_hs[j], 1);
+    for (int a = 0; a < IB_ASSOC_MAX; a++) ib_assoc_end(&g_assoc[a], 1);
+}
+
 static void stop_reset(const struct tun_dev *tun, int own) {
     if (own && g_lst_fd >= 0) {
         close(g_lst_fd);
         g_lst_fd = -1;
     }
+    if (own) ib_stop();
     for (int li = 0; li < g_live_n; li++) {
         const struct conn *c = &g_conns[g_live[li]];
         if (c->sock) {
@@ -2931,13 +3476,10 @@ static void miss_report(uint64_t now) {
 }
 
 static void bytes_report(uint64_t now) {
-    uint64_t drx = g_kb.rx - g_kb.sent_rx, dtx = g_kb.tx - g_kb.sent_tx;
-    if (drx < KB_EARLY && dtx < KB_EARLY && now - g_kb.at < KB_PERIOD_NS) return;
-    g_kb.at = now;
-    if (!drx && !dtx) return;
-    g_kb.sent_rx = g_kb.rx;
-    g_kb.sent_tx = g_kb.tx;
-    ctl_emit_bytes((uint32_t)drx, (uint32_t)dtx);
+    uint32_t rx, tx;
+    if (kb_take(&g_kb, now, &rx, &tx)) ctl_emit_bytes(rx, tx);
+    for (int i = 0; i < IB_MAX; i++)
+        if (g_ib[i].used && kb_take(&g_ib[i].kb, now, &rx, &tx)) ctl_emit_ibytes(g_ib[i].cfg.port, rx, tx);
 }
 
 static void sock_take(const struct tun_dev *tun, int fd, const struct sockaddr_in *pa) {
@@ -3001,7 +3543,7 @@ static void ctl_pass(struct loop *L) {
     while ((k = ctlmap_take_closes(base, len, 64, &ends)) > 0 || ends > 0) {
         for (int li = 0; li < g_live_n;) {
             struct conn *c = &g_conns[g_live[li]];
-            if (!c->sock || !in_prefixes(c->odst, base, len, k)) {
+            if (!c->sock || c->ib || !in_prefixes(c->odst, base, len, k)) {
                 li++;
                 continue;
             }
@@ -3061,7 +3603,7 @@ static void sock_event(struct conn *c, uint32_t events, const struct tun_dev *tu
 static int loop_open(struct loop *L, const struct tun_dev *tun, int own) {
     memset(L, 0, offsetof(struct loop, evs));
     L->tun = *tun;
-    L->efd = L->ctl = -1;
+    L->efd = L->ctl = L->ibw = -1;
     L->own = (uint8_t)(own != 0);
     L->stats_at = g_stats ? now_ns() : 0;
     L->nodes_seen = __atomic_load_n(&g_nodes_epoch, __ATOMIC_ACQUIRE);
@@ -3092,6 +3634,9 @@ static int loop_open(struct loop *L, const struct tun_dev *tun, int own) {
         int cfd = ctlmap_wake_fd();
         e.data.u32 = CTL_TOKEN;
         if (cfd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, cfd, &e) == 0) L->ctl = cfd;
+        int ifd = ctlinb_wake_fd();
+        e.data.u32 = IBW_TOKEN;
+        if (ifd >= 0 && epoll_ctl(L->ep, EPOLL_CTL_ADD, ifd, &e) == 0) L->ibw = ifd;
     }
     return 0;
 }
@@ -3191,7 +3736,7 @@ static int loop_turn(struct loop *L, int max_ms) {
      * handshake. */
     if (pend && L->efd < 0 && wait_ms > 20) wait_ms = 20;
     if (L->own) wait_ms = park_wait_ms(wait_ms);
-    if (L->lst_off && wait_ms > 10) wait_ms = 10;
+    if ((L->lst_off || L->ib_off) && wait_ms > 10) wait_ms = 10;
     if (forced) wait_ms = 0;
 
     /* Up to two more events per turn than connections: TUN and the wakeup are descriptors
@@ -3231,11 +3776,12 @@ static int loop_turn(struct loop *L, int max_ms) {
      * servers: client ACKs open the window, and handled earlier they let us take the
      * server's next portion in this same turn. The wakeup counter is just drained: the event
      * has done its job by waking epoll_wait. */
-    int tun_ready = 0, lst = 0, ctl = 0, stop = 0;
+    int tun_ready = 0, lst = 0, ctl = 0, stop = 0, ibw = 0;
     if (L->lst_off) {
         lst_arm(L);
         lst = 1;
     }
+    if (L->ib_off) ib_arm(L);
     for (int i = 0; i < r; i++) {
         if (L->evs[i].data.u32 == TUN_TOKEN) tun_ready = 1;
         else if (L->evs[i].data.u32 == EFD_TOKEN && L->efd >= 0) {
@@ -3245,6 +3791,7 @@ static int loop_turn(struct loop *L, int max_ms) {
         } else if (L->evs[i].data.u32 == LST_TOKEN) lst = 1;
         else if (L->evs[i].data.u32 == CTL_TOKEN) ctl = 1;
         else if (L->evs[i].data.u32 == STOP_TOKEN) stop = 1;
+        else if (L->evs[i].data.u32 == IBW_TOKEN) ibw = 1;
     }
     if (stop && L->stop_in) {
         stop_reset(tun, L->own);
@@ -3276,6 +3823,7 @@ static int loop_turn(struct loop *L, int max_ms) {
     }
     if (lst && g_lst_fd >= 0 && !L->lst_off) lst_accept(L);
     if (ctl) ctl_pass(L);
+    if (ibw && L->ibw >= 0) ib_apply(L);
     int out_woke = 0;
     for (int i = 0; i < r; i++) {
         uint32_t t = L->evs[i].data.u32;
@@ -3283,6 +3831,22 @@ static int loop_turn(struct loop *L, int max_ms) {
             struct conn *c = &g_conns[t - CFD_BASE];
             if (c->used && c->sock && !c->pending && c->born_turn != g_turn)
                 sock_event(c, L->evs[i].events, tun);
+            continue;
+        }
+        if (t >= IB_LST_BASE && t < IB_LST_BASE + IB_MAX) {
+            ib_accept(L, (int)(t - IB_LST_BASE));
+            continue;
+        }
+        if (t >= IB_HS_BASE && t < IB_HS_BASE + IB_HS_MAX) {
+            ib_hs_event(L, &g_hs[t - IB_HS_BASE]);
+            continue;
+        }
+        if (t >= IB_CTL_BASE && t < IB_CTL_BASE + IB_ASSOC_MAX) {
+            ib_ctl_event(&g_assoc[t - IB_CTL_BASE]);
+            continue;
+        }
+        if (t >= IB_UDP_BASE && t < IB_UDP_BASE + IB_ASSOC_MAX) {
+            ib_udp_event(L, &g_assoc[t - IB_UDP_BASE]);
             continue;
         }
         if (t >= (uint32_t)MAX_CONNS) continue;  /* TUN and eventfd */
@@ -3347,6 +3911,7 @@ static int loop_turn(struct loop *L, int max_ms) {
         park_pass(tun);
         miss_report(now);
         bytes_report(now);
+        ib_deadlines(now);
     }
     for (int li = 0; li < g_live_n; ) {
         struct conn *c = &g_conns[g_live[li]];

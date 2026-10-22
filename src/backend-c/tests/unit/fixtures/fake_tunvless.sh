@@ -31,8 +31,9 @@ while IFS= read -r l; do
 done
 answer() {
     first=1
+    ib=0
     while IFS= read -r l; do
-        case "$l" in nodes | map | mapall | close) ;; *) continue ;; esac
+        case "$l" in nodes | map | mapall | close | inbounds) ;; *) continue ;; esac
         printf '%s\n' "$l" >> "$IN"
         n=0
         while IFS= read -r x; do
@@ -43,11 +44,17 @@ answer() {
         if [ -z "${FAKE_NOACK:-}" ]; then
             case "$l" in
             nodes) printf '{"type":"nodes","count":%d}\n' "${FAKE_ACK_COUNT:-$n}" ;;
+            inbounds) printf '{"type":"inbounds","count":%d}\n' "${FAKE_INBOUNDS_COUNT:-$n}" ;;
             close) printf '{"type":"close","count":%d}\n' "${FAKE_CLOSED:-$n}" ;;
             *) printf '{"type":"map","count":%d}\n' "${FAKE_MAPCOUNT:-$n}" ;;
             esac
         fi
-        [ -z "${FAKE_AFTER:-}" ] || printf '%s\n' "$FAKE_AFTER"
+        [ "$l" != inbounds ] || ib=$((ib + 1))
+        if [ "$ib" -ge 2 ] && [ "$l" = inbounds ] && [ -n "${FAKE_IB_AGAIN:-}" ]; then
+            printf '%s\n' "$FAKE_IB_AGAIN"
+        elif [ -n "${FAKE_AFTER:-}" ]; then
+            printf '%s\n' "$FAKE_AFTER"
+        fi
         [ -z "$first" ] || [ -z "${FAKE_MISS:-}" ] || printf '%s\n' "$FAKE_MISS"
         first=
     done

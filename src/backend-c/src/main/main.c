@@ -30,6 +30,7 @@
 #include "firc/resolve_check.h"
 #include "firc/devices.h"
 #include "firc/keenetic_policy.h"
+#include "firc/inbound_check.h"
 #include "firc/keenetic_rci.h"
 #include "firc/keenetic_resolvers.h"
 #include "firc/resolveroute.h"
@@ -713,6 +714,15 @@ static firc_dns_verdict_t on_response(firc_dns_msg_t *msg, const firc_ip_t *clie
     return v;
 }
 
+static bool *lan_wan_snapshot(const firc_app_config_t *running)
+{
+    bool *wan = calloc(running->n_link + 1, sizeof *wan);
+    if (wan != NULL && !firc_inbounds_wan_table(running, wan)) {
+        FIRC_INFO("tunnels: interface roles unknown, inbounds skip the WAN check");
+    }
+    return wan;
+}
+
 static void resync(struct daemon *d, const char *iface_name)
 {
     for (size_t i = 0; i < firc_app_user_group_count(d->app); i++) {
@@ -750,6 +760,7 @@ static void on_refresh_due(firc_loop_t *loop, void *ud)
     } else {
         for (size_t i = 0; i < n; i++) { resync(d, names[i]); }
     }
+    firc_tunrun_refresh_inbounds(d->tunrun);
     /* After every interface: a retry's own republish may predate a later interface's refresh. */
     firc_app_republish_resolve_routes(d->app);
 }
@@ -1514,7 +1525,11 @@ int main(int argc, char **argv)
     const char *tunvless_bin = getenv("FIRC_TUNVLESS_BIN");
     if (tunvless_bin == NULL || tunvless_bin[0] == 0) { tunvless_bin = FIRC_TUNVLESS_BIN; }
     {
-        d.tunrun = firc_tunrun_new(d.loop, d.rtnl, cfg.app.netfilter.start_mark_table_index, tunvless_bin);
+        const firc_app_config_t *running = firc_app_running_settings(d.app);
+        bool *wan = lan_wan_snapshot(running);
+        const firc_tunrun_lan_t lan = {(const char *const *)running->link, wan, running->n_link};
+        d.tunrun = firc_tunrun_new(d.loop, d.rtnl, cfg.app.netfilter.start_mark_table_index, tunvless_bin, &lan);
+        free(wan);
         if (d.tunrun == NULL) {
             FIRC_ERROR("failed to create the tunnel supervisor");
             daemon_teardown(&d);

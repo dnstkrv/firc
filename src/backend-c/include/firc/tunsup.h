@@ -23,6 +23,13 @@ typedef enum {
 } firc_tun_status_t;
 
 typedef struct {
+    uint16_t port;
+    char state[16];
+    char why[96];
+    uint64_t rx, tx;
+} firc_tun_ib_state_t;
+
+typedef struct {
     size_t n_active;
     int64_t since_ms;
     firc_tun_status_t status;
@@ -33,6 +40,8 @@ typedef struct {
     char id[16];
     char device[16];
     char active[8][128];
+    firc_tun_ib_state_t ib[FIRC_TUN_MAX_INBOUNDS];
+    size_t n_ib;
 } firc_tun_state_t;
 
 typedef struct firc_tunsup firc_tunsup_t;
@@ -62,10 +71,11 @@ void firc_tunsup_set_on_reap(firc_tunsup_t *s, firc_tun_reap_fn fn, void *ud);
 /* Sets the pool base and prefix length passed as --tcp-pool to kernel-TCP tunnels; len 0 passes none. */
 void firc_tunsup_set_tcp_pool(firc_tunsup_t *s, const uint8_t base[4], uint8_t len);
 
-typedef enum { FIRC_TUN_CMD_MAP, FIRC_TUN_CMD_CLOSE } firc_tun_cmd_t;
+typedef enum { FIRC_TUN_CMD_MAP, FIRC_TUN_CMD_CLOSE, FIRC_TUN_CMD_INBOUNDS } firc_tun_cmd_t;
 
 /* Queues text for tunnel id's ready child, written at once when nothing is pending; expect holds the ack
-   count of each MAP command (checked), ignored for CLOSE. FIRC_ERR_STATE when no ready child holds stdin. */
+   count of each MAP command (checked), ignored for CLOSE. INBOUNDS takes the lines only: the verb and the
+   closing empty line are added. FIRC_ERR_STATE when no ready child holds stdin. */
 firc_err_t firc_tunsup_command(firc_tunsup_t *s, const char *id, firc_tun_cmd_t kind, const char *text, size_t len,
                                const size_t *expect, size_t n_expect);
 

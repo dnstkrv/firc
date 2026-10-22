@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include "ctlinb.h"
 #include "ctlmap.h"
 #include "ctlnodes.h"
 #include "nodes.h"
@@ -23,6 +24,8 @@ static struct {
     int *idx;
     size_t n;
     int told_full;
+    char **xh;
+    size_t xn;
 } g_cn = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
 
 struct ctln_job { unsigned seq; const int *idx; size_t n; char *ok; int published; };
@@ -96,11 +99,52 @@ static void apply(struct ctln_job *j) {
     free(hosts);
 }
 
+static void pinned_extra(void *ud, const char *host, int ok) {
+    (void)ud;
+    if (ok <= 0) fprintf(stderr, LOG_W "inbound node host %s: not pinned\n", host);
+}
+
+static void pin_extra(char **hosts, size_t n) {
+    transport_pin_hosts((const char *const *)hosts, n, g_cn.h.resolve_ms, pinned_extra, NULL, NULL);
+    for (size_t i = 0; i < n; i++) free(hosts[i]);
+    free(hosts);
+}
+
+void ctln_pin_extra(char **hosts, size_t n) {
+    char **mine = malloc(n * sizeof(*mine));
+    if (!mine) {
+        for (size_t i = 0; i < n; i++) free(hosts[i]);
+        return;
+    }
+    memcpy(mine, hosts, n * sizeof(*mine));
+    pthread_mutex_lock(&g_cn.mu);
+    char **all = realloc(g_cn.xh, (g_cn.xn + n) * sizeof(*all));
+    if (all) {
+        memcpy(all + g_cn.xn, mine, n * sizeof(*all));
+        g_cn.xh = all;
+        g_cn.xn += n;
+        pthread_cond_signal(&g_cn.cv);
+    } else {
+        for (size_t i = 0; i < n; i++) free(mine[i]);
+    }
+    pthread_mutex_unlock(&g_cn.mu);
+    free(mine);
+}
+
 static void *resolver(void *arg) {
     (void)arg;
     for (;;) {
         pthread_mutex_lock(&g_cn.mu);
-        while (g_cn.taken == g_cn.posted) pthread_cond_wait(&g_cn.cv, &g_cn.mu);
+        while (g_cn.taken == g_cn.posted && !g_cn.xh) pthread_cond_wait(&g_cn.cv, &g_cn.mu);
+        if (g_cn.xh) {
+            char **xh = g_cn.xh;
+            size_t xn = g_cn.xn;
+            g_cn.xh = NULL;
+            g_cn.xn = 0;
+            pthread_mutex_unlock(&g_cn.mu);
+            pin_extra(xh, xn);
+            continue;
+        }
         struct ctln_job j = { g_cn.posted, g_cn.idx, g_cn.n, NULL, 0 };
         g_cn.taken = g_cn.posted;
         g_cn.idx = NULL;
@@ -204,6 +248,8 @@ void ctln_read(FILE *in) {
         } else if (!strcmp(line, "map") || !strcmp(line, "mapall")) {
             r = ctlmap_read_cmd(in, &line, &cap, line[3] == 'a');
             if (r >= 0 && g_cn.h.map_ack) g_cn.h.map_ack(r);
+        } else if (!strcmp(line, "inbounds")) {
+            r = ctlinb_read_cmd(in, &line, &cap);
         } else if (!strcmp(line, "close")) {
             r = ctlmap_read_close(in, &line, &cap);
         } else {

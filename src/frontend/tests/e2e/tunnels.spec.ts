@@ -108,6 +108,7 @@ test.describe("Tunnels page", () => {
             ],
             uplink: { kind: "auto", ref: "" },
             advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+            inbounds: [],
           },
         ],
       },

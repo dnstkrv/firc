@@ -128,6 +128,13 @@ def wait_tunnel_ready(conn, tunnel_id, tries=400):
     raise RuntimeError("tunnel %s not ready in %.0f s: %r" % (tunnel_id, tries * 0.05, last))
 
 
+def _inbound_state_shape(obj):
+    return {
+        rec["id"]: [{k: type(v).__name__ for k, v in sorted(ib.items())} for ib in rec["inbounds"]]
+        for rec in obj["tunnels"]
+    }
+
+
 def run_tunnel_sequence(t, conn):
     t.step("GET", "/api/v1/tunnels")
     t.step("PUT", "/api/v1/tunnels", "{}")
@@ -171,6 +178,17 @@ def run_tunnel_sequence(t, conn):
     t.step("POST", "/api/v1/tunnels/t2/restart")
     t.step("POST", "/api/v1/tunnels/zz/restart")
     t.step("POST", "/api/v1/tunnels/t1/restart")
+    with_inbound = json.loads(json.dumps(tunnels))
+    with_inbound["tunnels"][0]["inbounds"] = [
+        {"port": 18096, "listen": "lo", "node": "0000000a:A", "user": "u", "password": "p"},
+        {"port": 18097, "listen": "lo", "node": "0000000b:NL-2"},
+    ]
+    t.step("PUT", "/api/v1/tunnels", json.dumps(with_inbound))
+    t.step("GET", "/api/v1/tunnels")
+    t.step("GET", "/api/v1/tunnels/state", normalize=_inbound_state_shape)
+    refused = json.loads(json.dumps(with_inbound))
+    refused["tunnels"][0]["inbounds"][1]["listen"] = "eth9"
+    t.step("PUT", "/api/v1/tunnels", json.dumps(refused))
     t.step("PUT", "/api/v1/tunnels", json.dumps({"tunnels": []}))
     t.step("GET", "/api/v1/tunnels/state")
     t.step("GET", "/api/v1/tunnels/headers")

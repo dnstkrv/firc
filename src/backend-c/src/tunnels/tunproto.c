@@ -141,6 +141,26 @@ static bool u32_of(const cJSON *v, uint32_t *out)
     return true;
 }
 
+static bool req_port(const cJSON *root, uint16_t *out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "port");
+    if (!cJSON_IsNumber(v) || !(v->valuedouble >= 1) || v->valuedouble > 65535 ||
+        v->valuedouble != (double)(long)v->valuedouble)
+        return false;
+    *out = (uint16_t)v->valuedouble;
+    return true;
+}
+
+static bool parse_inbound(const cJSON *root, firc_tev_t *out)
+{
+    if (!req_port(root, &out->ib_port) || !copy_str(root, "state", out->istate, sizeof(out->istate)))
+        return false;
+    if (strcmp(out->istate, "up") != 0 && strcmp(out->istate, "busy") != 0 && strcmp(out->istate, "no-node") != 0)
+        return false;
+    const cJSON *w = cJSON_GetObjectItemCaseSensitive(root, "why");
+    return w == NULL || copy_str(root, "why", out->why, sizeof(out->why));
+}
+
 static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
 {
     if (strcmp(type, "ready") == 0) {
@@ -176,6 +196,20 @@ static bool parse_fields(const cJSON *root, const char *type, firc_tev_t *out)
         out->kind = FIRC_TEV_BYTES;
         return u32_of(cJSON_GetObjectItemCaseSensitive(root, "rx"), &out->rx) &&
                u32_of(cJSON_GetObjectItemCaseSensitive(root, "tx"), &out->tx);
+    }
+    if (strcmp(type, "inbound") == 0) {
+        out->kind = FIRC_TEV_INBOUND;
+        return parse_inbound(root, out);
+    }
+    if (strcmp(type, "ibytes") == 0) {
+        out->kind = FIRC_TEV_IBYTES;
+        return req_port(root, &out->ib_port) &&
+               u32_of(cJSON_GetObjectItemCaseSensitive(root, "rx"), &out->rx) &&
+               u32_of(cJSON_GetObjectItemCaseSensitive(root, "tx"), &out->tx);
+    }
+    if (strcmp(type, "inbounds") == 0) {
+        out->kind = FIRC_TEV_INBOUNDS;
+        return count_of(cJSON_GetObjectItemCaseSensitive(root, "count"), &out->count);
     }
     if (strcmp(type, "pins_full") == 0) {
         out->kind = FIRC_TEV_PINS_FULL;

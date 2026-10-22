@@ -48,4 +48,6 @@ int pool_run(const struct tun_cfg *tc, const struct pool_cfg *pc, stack_ready_fn
 
 int pool_select(const int *sel, size_t n);
 
+int pool_flow_open_on(void *sess, int node, const struct flow_key *k, int udp, const char *host);
+
 #endif

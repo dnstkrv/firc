@@ -20,6 +20,7 @@ export const tunnel = (id: string, device: string, extra: Json = {}): Json => ({
   sources: [],
   uplink: { kind: "auto", ref: "" },
   advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+  inbounds: [],
   ...extra,
 });
 
@@ -40,6 +41,7 @@ export const state = (id: string, device: string, extra: Json = {}): Json => ({
   tcpPort: 0,
   tcpSkipped: [],
   tcpOff: "",
+  inbounds: [],
   ...extra,
 });
 
@@ -61,6 +63,7 @@ export type Daemon = {
   tunnels: Json[];
   states: Json[];
   interfaces: string[];
+  link: string[];
   names: Record<string, string>;
   ndms: Record<string, string>;
   roles: Record<string, string>;
@@ -82,6 +85,7 @@ export async function stubDaemon(page: Page, init: Partial<Daemon> = {}): Promis
     tunnels: [],
     states: [],
     interfaces: ["wg0"],
+    link: ["br0"],
     names: {},
     ndms: {},
     roles: {},
@@ -118,6 +122,17 @@ export async function stubDaemon(page: Page, init: Partial<Daemon> = {}): Promis
   });
   await page.route("**/groups?with_rules=true", (route) =>
     route.fulfill({ json: { groups: daemon.groups } }),
+  );
+  await page.route("**/system/settings", (route) =>
+    route.fulfill({
+      json: {
+        settings: { "app.link": daemon.link },
+        classes: {},
+        boot: "b",
+        pendingRestart: [],
+        restarting: false,
+      },
+    }),
   );
   await page.route("**/system/netfilter", (route) => route.fulfill({ json: { ok: true } }));
   await page.route("**/system/resolvers", (route) => route.fulfill({ json: { resolvers: [] } }));
@@ -201,6 +216,12 @@ export class TunnelsPage {
     await this.tab("Tunnels").click();
   }
 
+  async openOnPhone() {
+    await this.page.goto("/");
+    await this.page.getByRole("button", { name: "Open menu" }).click();
+    await this.tab("Tunnels").click();
+  }
+
   async addTunnel() {
     await expect(this.add).not.toHaveClass(/inactive/);
     await this.add.click();
@@ -226,6 +247,10 @@ export class TunnelsPage {
 
   nodeRows(id: string): Locator {
     return this.card(id).locator(".node[data-key]");
+  }
+
+  inboundRows(id: string): Locator {
+    return this.card(id).locator("[data-inbound]");
   }
 
   nodeNames(id: string): Locator {

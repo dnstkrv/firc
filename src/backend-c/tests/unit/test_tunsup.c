@@ -99,6 +99,7 @@ static void env_setup(const char *mode)
     setenv("FAKE_STARTS_OUT", g_starts, 1);
     setenv("FAKE_MODE", mode, 1);
     unsetenv("FAKE_SLEEP");
+    unsetenv("FAKE_INBOUNDS_COUNT");
     unsetenv("FAKE_NOACK");
     unsetenv("FAKE_EVENTS");
     unsetenv("FAKE_AFTER");
@@ -2042,6 +2043,299 @@ TEST an_unanswered_map_restarts_the_child_after_10_s(void)
     PASS();
 }
 
+static const char k_inb_line[] = "127.0.0.1:1081 - - -\n";
+
+static void inbounds_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, k_inb_line, sizeof k_inb_line - 1, NULL, 0);
+}
+
+TEST inbounds_command_reaches_the_child(void)
+{
+    /* catches: the verb or the closing empty line left off, the text altered, or the command not written */
+    env_setup("ktcp");
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 300);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    char buf[512];
+    read_file(g_stdin, buf, sizeof buf);
+    ASSERT(strstr(buf, "inbounds\n127.0.0.1:1081 - - -\n\n") != NULL);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void inbounds_empty_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, "", 0, NULL, 0);
+}
+
+TEST an_empty_inbounds_command_is_the_verb_and_the_empty_line(void)
+{
+    /* catches: an empty list written as nothing, so tunvless keeps the old inbounds, and a count mismatch warned for it */
+    env_setup("ktcp");
+    log_to_file();
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_empty_cb, &r, NULL);
+    run_ms(&r, 300);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    char buf[512];
+    read_file(g_stdin, buf, sizeof buf);
+    ASSERT(strstr(buf, "inbounds\n\n") != NULL);
+    rec_close(&r);
+    log_done();
+    char log[4096];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(0, count_of(log, "inbound lines"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+TEST an_inbounds_ack_count_mismatch_is_warned_once(void)
+{
+    /* catches: a short ack unnoticed, or the warning repeated on every ack */
+    env_setup("ktcp");
+    setenv("FAKE_INBOUNDS_COUNT", "0", 1);
+    log_to_file();
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    firc_loop_add_timer(r.loop, 150, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 500);
+    rec_close(&r);
+    log_done();
+    char log[4096];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: tunvless took 0 inbound lines of 1 sent\n"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void restart_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc2 = firc_tunsup_restart(r->s, "a");
+}
+
+TEST a_restarted_child_s_inbounds_mismatch_is_warned_again(void)
+{
+    /* catches: the warned flag or the sent count kept across a child restart */
+    env_setup("ktcp");
+    setenv("FAKE_INBOUNDS_COUNT", "0", 1);
+    log_to_file();
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 300);
+    firc_loop_add_timer(r.loop, 10, 0, restart_cb, &r, NULL);
+    run_ms(&r, 100);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc2);
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 300);
+    rec_close(&r);
+    log_done();
+    char log[8192];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(2, count_of(log, "WRN tunvless0: tunvless took 0 inbound lines of 1 sent\n"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+TEST an_inbounds_ack_count_mismatch_stops_trusting_node_numbers(void)
+{
+    /* catches: node numbers still mapped to list positions after tunvless refused an inbound line */
+    env_setup("nodes");
+    setenv("FAKE_AFTER", "{\"type\":\"node_down\",\"node\":\"x\",\"index\":0,\"why\":\"t\"}", 1);
+    char *l1[] = {"vless://u@h0:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 200);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    setenv("FAKE_INBOUNDS_COUNT", "0", 1);
+    firc_loop_add_timer(r.loop, 10, 0, restart_cb, &r, NULL);
+    run_ms(&r, 100);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc2);
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_cb, &r, NULL);
+    run_ms(&r, 200);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    ASSERT_EQ(2, r.n_down);
+    ASSERT_EQ(0, r.down_pos[0]);
+    ASSERT_EQ(-1, r.down_pos[1]);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static const char k_inb_extra[] =
+    "127.0.0.1:1081 - - vless://u@h9:1#e\n127.0.0.1:1083 a%20b - vless://u@h0:1#x\n127.0.0.1:1082 - - -\n";
+
+static void inbounds_extra_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, k_inb_extra, sizeof k_inb_extra - 1, NULL, 0);
+}
+
+TEST an_inbound_link_takes_a_node_number(void)
+{
+    /* catches: a link tunvless adds for an inbound left out of the index map, shifting every later node's position */
+    env_setup("nodes");
+    setenv("FAKE_AFTER", "{\"type\":\"node_down\",\"node\":\"z\",\"index\":2,\"why\":\"t\"}", 1);
+    char *l1[] = {"vless://u@h0:1#x"};
+    char *l2[] = {"vless://u@h0:1#x", "vless://u@h2:1#z"};
+    two_lists(l1, 1, l2, 2);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_extra_cb, &r, NULL);
+    run_ms(&r, 200);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    r.next = &g_set2;
+    firc_loop_add_timer(r.loop, 10, 0, apply_cb, &r, NULL);
+    run_ms(&r, 300);
+    ASSERT_EQ(2, r.n_down);
+    ASSERT_EQ(-1, r.down_pos[0]);
+    ASSERT_EQ(1, r.down_pos[1]);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static char *g_many;
+static size_t g_many_len;
+
+static void inbounds_many_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, g_many, g_many_len, NULL, 0);
+}
+
+TEST a_full_node_index_from_inbounds_is_warned_once(void)
+{
+    /* catches: inbound links past the index cap dropped silently, so later node numbers are trusted although shifted */
+    env_setup("nodes");
+    log_to_file();
+    g_many = malloc(4200 * 64);
+    ASSERT(g_many != NULL);
+    g_many_len = 0;
+    for (int i = 0; i < 4200; i++) {
+        g_many_len += (size_t)snprintf(g_many + g_many_len, 64, "127.0.0.1:1081 - - vless://u@h%d:1#n\n", i);
+    }
+    char *l1[] = {"vless://u@h0:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_many_cb, &r, NULL);
+    firc_loop_add_timer(r.loop, 300, 0, inbounds_many_cb, &r, NULL);
+    run_ms(&r, 1500);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    rec_close(&r);
+    log_done();
+    free(g_many);
+    g_many = NULL;
+    char log[8192];
+    read_file(g_log, log, sizeof log);
+    ASSERT_EQ(1, count_of(log, "WRN tunvless0: node index full, node states go by name until it restarts\n"));
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void inbounds_null_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, NULL, 0, NULL, 0);
+}
+
+TEST a_null_inbounds_text_is_the_empty_command(void)
+{
+    /* catches: a NULL text with no lines handed to memcpy instead of written as the empty command */
+    env_setup("ktcp");
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    ASSERT(run_until_ready(&r, 2000));
+    firc_loop_add_timer(r.loop, 10, 0, inbounds_null_cb, &r, NULL);
+    run_ms(&r, 300);
+    ASSERT_EQ(FIRC_OK, r.cmd_rc);
+    char buf[512];
+    read_file(g_stdin, buf, sizeof buf);
+    ASSERT(strstr(buf, "inbounds\n\n") != NULL);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
+static void inbounds_early_cb(firc_loop_t *loop, void *ud)
+{
+    (void)loop;
+    rec_t *r = ud;
+    r->cmd_rc = firc_tunsup_command(r->s, "a", FIRC_TUN_CMD_INBOUNDS, k_inb_line, sizeof k_inb_line - 1, NULL, 0);
+}
+
+TEST inbounds_before_ready_is_refused(void)
+{
+    /* catches: an inbounds command queued to a child still starting */
+    env_setup("ktcp");
+    setenv("FAKE_SLEEP", "0.6", 1);
+    char *l1[] = {"vless://u@h1:1#x"};
+    two_lists(l1, 1, l1, 1);
+    static rec_t r;
+    rec_open(&r);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
+    firc_loop_add_timer(r.loop, 100, 0, inbounds_early_cb, &r, NULL);
+    run_ms(&r, 200);
+    ASSERT_EQ(FIRC_ERR_STATE, r.cmd_rc);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
 static void early_cb(firc_loop_t *loop, void *ud)
 {
     (void)loop;
@@ -2129,5 +2423,14 @@ int main(int argc, char **argv)
     RUN_TEST(a_short_map_ack_is_flagged_as_drift);
     RUN_TEST(an_unanswered_map_restarts_the_child_after_10_s);
     RUN_TEST(a_command_before_ready_is_refused);
+    RUN_TEST(inbounds_command_reaches_the_child);
+    RUN_TEST(an_empty_inbounds_command_is_the_verb_and_the_empty_line);
+    RUN_TEST(an_inbounds_ack_count_mismatch_is_warned_once);
+    RUN_TEST(an_inbounds_ack_count_mismatch_stops_trusting_node_numbers);
+    RUN_TEST(inbounds_before_ready_is_refused);
+    RUN_TEST(a_restarted_child_s_inbounds_mismatch_is_warned_again);
+    RUN_TEST(a_null_inbounds_text_is_the_empty_command);
+    RUN_TEST(an_inbound_link_takes_a_node_number);
+    RUN_TEST(a_full_node_index_from_inbounds_is_warned_once);
     GREATEST_MAIN_END();
 }

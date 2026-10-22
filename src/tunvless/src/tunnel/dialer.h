@@ -174,6 +174,8 @@ struct dialer_ops {
      * (silence_s below) or the node reset it. A reason for the health check to probe the node
      * now. */
     void (*lost)(const void *ctx, const void *sess);
+    int (*set_host)(void *sess, const char *host);
+    int (*flow_open_on)(void *sess, int node, const struct flow_key *k, int udp, const char *host);
 };
 
 /* An instance: the table and its ctx (for the VLESS dialer a node, for the node pool the pool).

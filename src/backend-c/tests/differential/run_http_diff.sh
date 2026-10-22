@@ -54,7 +54,7 @@ app:
     disableIPv4: false
     disableIPv6: false
     startMarkTableIndex: 1718186595
-  link: []
+  link: [lo]
 groups: []
 EOF
 

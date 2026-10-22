@@ -80,6 +80,7 @@ typedef struct {
 } hx_t;
 
 static hx_t *g_hx;
+static const char *g_wan_name;
 
 static const char *state_dir(void *ud)
 {
@@ -131,7 +132,10 @@ static void apply_text(hx_t *h, const char *doc)
 
 static void bring_up(hx_t *h)
 {
-    h->run = firc_tunrun_new(h->loop, h->rtnl, 4300u, FAKE);
+    static const char *const link[] = {"lo"};
+    const bool wan[] = {g_wan_name != NULL};
+    const firc_tunrun_lan_t lan = {link, wan, 1};
+    h->run = firc_tunrun_new(h->loop, h->rtnl, 4300u, FAKE, &lan);
     h->subs = firc_tunsubs_new(h->loop, h->cache, firc_tunrun_bodies_changed, h->run);
     firc_subhdr_set_t defaults;
     firc_subhdr_defaults("6e58d9776d738a31", "5.01.C.6.0-1", "Ultra (KN-1810)", &defaults);
@@ -231,6 +235,8 @@ static hx_t *hx_start(const char *initial, unsigned link_flags)
     }
     fake_rtnl_set_link_flags(h->kernel, link_flags);
     firc_config_init_defaults(&h->cfg);
+    free(h->cfg.app.link[0]);
+    h->cfg.app.link[0] = strdup("lo");
     firc_app_deps_t deps = {.cfg = &h->cfg, .loop = h->loop};
     h->app = firc_app_create(&deps);
     if (h->app == NULL) {
@@ -305,6 +311,8 @@ static void teardown(void *ud)
 {
     (void)ud;
     hx_stop(g_hx);
+    g_wan_name = NULL;
+    unsetenv("FAKE_AFTER");
     setenv("FAKE_MODE", "ok", 1);
 }
 
@@ -504,12 +512,12 @@ TEST get_answers_every_tunnel_in_the_agreed_shape(void)
                      "\"sources\":[{\"id\":\"0000000a\",\"kind\":\"link\",\"link\":\"" LINK_A "\"},"
                      "{\"id\":\"0000000b\",\"kind\":\"subscription\",\"name\":\"P\",\"url\":\"" SUB_URL "\","
                      "\"interval\":3600}],"
-                     "\"filter\":\"^(A|B)$\",\"order\":[\"0000000b:B\"],\"exclude\":[\"0000000b:C\"],"
+                     "\"filter\":\"^(A|B)$\",\"order\":[\"0000000b:B\"],\"exclude\":[\"0000000b:C\"],\"inbounds\":[],"
                      "\"active\":2,\"by\":\"site\",\"interval\":30,\"silence\":10,"
                      "\"advanced\":{\"timeout\":5,\"insecure\":true,\"ca\":\"/etc/ca.pem\",\"kernelTcp\":false}},"
                      "{\"id\":\"b\",\"device\":\"tunvless1\",\"description\":\"\",\"enable\":false,"
                      "\"uplink\":{\"kind\":\"iface\",\"ref\":\"eth9\"},\"sources\":[],"
-                     "\"filter\":\"\",\"order\":[],\"exclude\":[],"
+                     "\"filter\":\"\",\"order\":[],\"exclude\":[],\"inbounds\":[],"
                      "\"active\":1,\"by\":\"connection\",\"interval\":60,\"silence\":20,"
                      "\"advanced\":{\"timeout\":8,\"insecure\":false,\"ca\":\"\",\"kernelTcp\":false}}]}"));
     cJSON_Delete(ans);
@@ -1408,6 +1416,295 @@ TEST a_subscription_with_own_headers_reads_its_state_and_cache_under_its_signatu
     PASS();
 }
 
+
+#define IB_PORT 18160
+
+static int hold_port(unsigned port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 || listen(fd, 4) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+#define IB_A(listen, port, extra)                                                                   \
+    "{\"port\":" #port ",\"listen\":\"" listen "\",\"node\":\"0000000a:A\"" extra "}"
+
+#define PUT_A(inb)                                                                                  \
+    "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"sources\":[{\"id\":\"0000000a\",\"kind\":\"link\",\"link\":\"" \
+    LINK_A "\"}],\"inbounds\":[" inb "]}]}"
+
+/* catches: user or password dropped, renamed or made write-only on the way through PUT and GET */
+TEST put_inbound_round_trips(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
+                            PUT_A(IB_A("lo", 18160, ",\"user\":\"u1\",\"password\":\"p w\"") ","
+                                  IB_A("lo", 18161, "")),
+                            &ans));
+    cJSON_Delete(ans);
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &ans));
+    ASSERT(same_json(at(tunnel_named(ans, "a"), "inbounds"),
+                     "[{\"port\":18160,\"listen\":\"lo\",\"node\":\"0000000a:A\",\"user\":\"u1\",\"password\":\"p w\"},"
+                     "{\"port\":18161,\"listen\":\"lo\",\"node\":\"0000000a:A\",\"user\":\"\",\"password\":\"\"}]"));
+    char *body = cJSON_PrintUnformatted(ans);
+    cJSON_Delete(ans);
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", body, &ans));
+    free(body);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a listen outside app.link saved, or the error naming no inbound field */
+TEST put_inbound_not_in_link_refused(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("eth5", 18160, "")), &ans));
+    ASSERT(same_json(ans, "{\"error\":\"eth5 is not a LAN interface of the running app.link (a saved change needs a restart)\","
+                          "\"field\":\"inbounds[0].listen\",\"tunnel\":\"a\"}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a WAN interface of app.link accepted for an inbound */
+TEST put_inbound_on_wan_refused(void)
+{
+    g_wan_name = "lo";
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, "")), &ans));
+    ASSERT(same_json(ans, "{\"error\":\"lo is not a LAN interface of the running app.link (a saved change needs a restart)\","
+                          "\"field\":\"inbounds[0].listen\",\"tunnel\":\"a\"}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: the save judging a listen by something other than the table the runtime reads */
+TEST save_and_runtime_agree_on_a_wan_listen(void)
+{
+    g_wan_name = "lo";
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n      - id: 0000000a\n"
+                    "        link: \"" LINK_A "\"\n    inbounds:\n      - { port: 18160, listen: lo, node: \"0000000a:A\" }\n",
+                    0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT_STR_EQ("not-lan", at(cJSON_GetArrayItem(at(tunnel_named(ans, "a"), "inbounds"), 0), "state")->valuestring);
+    cJSON_Delete(ans);
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18161, "")), &ans));
+    ASSERT_STR_EQ("inbounds[0].listen", at(ans, "field")->valuestring);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: an inbound of a disabled running tunnel exempting its port from the probe when it moves to an enabled one */
+TEST put_inbound_moved_from_a_disabled_tunnel_is_probed(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
+                            "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,\"inbounds\":["
+                            IB_A("lo", 18160, "") "]},{\"id\":\"b\",\"device\":\"tunvless1\",\"sources\":[{\"kind\":"
+                            "\"link\",\"link\":\"" LINK_B "\"}]}]}",
+                            &ans));
+    cJSON_Delete(ans);
+    int fd = hold_port(IB_PORT);
+    ASSERT(fd >= 0);
+    int st = call_api("PUT", "/api/v1/tunnels",
+                      "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false},{\"id\":\"b\","
+                      "\"device\":\"tunvless1\",\"sources\":[{\"kind\":\"link\",\"link\":\"" LINK_B "\"}],"
+                      "\"inbounds\":[" IB_A("lo", 18160, "") "]}]}",
+                      &ans);
+    close(fd);
+    ASSERT_EQ(400, st);
+    ASSERT_STR_EQ("inbounds[0].port", at(ans, "field")->valuestring);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: an inbound allowed on the WebUI's port */
+TEST put_inbound_on_web_port_refused(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    char body[512];
+    snprintf(body, sizeof body,
+             "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"sources\":[{\"kind\":\"link\",\"link\":\"" LINK_A "\"}],"
+             "\"inbounds\":[{\"port\":%u,\"listen\":\"lo\",\"node\":\"x:y\"}]}]}",
+             (unsigned)g_hx->cfg.app.http_web.host.port);
+    cJSON *ans = NULL;
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", body, &ans));
+    ASSERT(same_json(ans, "{\"error\":\"the WebUI's port\",\"field\":\"inbounds[0].port\",\"tunnel\":\"a\"}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: port 53 or the DNS proxy's port allowed for an inbound */
+TEST put_inbound_on_dns_ports_refused(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 53, "")), &ans));
+    ASSERT_STR_EQ("inbounds[0].port", at(ans, "field")->valuestring);
+    cJSON_Delete(ans);
+    char body[512];
+    snprintf(body, sizeof body,
+             "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"sources\":[{\"kind\":\"link\",\"link\":\"" LINK_A "\"}],"
+             "\"inbounds\":[{\"port\":%u,\"listen\":\"lo\",\"node\":\"x:y\"}]}]}",
+             (unsigned)g_hx->cfg.app.dns_proxy.host.port);
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels", body, &ans));
+    ASSERT_STR_EQ("inbounds[0].port", at(ans, "field")->valuestring);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a user with ':' reaching the client as another error or another field */
+TEST put_inbound_user_with_colon_refused(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(400, call_api("PUT", "/api/v1/tunnels",
+                            PUT_A(IB_A("lo", 18160, ",\"user\":\"a:b\",\"password\":\"p\"")), &ans));
+    ASSERT(same_json(ans, "{\"error\":\"no ':' in a user\",\"field\":\"inbounds[0].user\",\"tunnel\":\"a\"}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a port some other process listens on saved, or the refusal naming the wrong field or text */
+TEST put_inbound_on_busy_port_refused(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    int fd = hold_port(IB_PORT);
+    ASSERT(fd >= 0);
+    cJSON *ans = NULL;
+    int st = call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, "")), &ans);
+    close(fd);
+    ASSERT_EQ(400, st);
+    ASSERT(same_json(ans, "{\"error\":\"port 18160 on lo is busy\",\"field\":\"inbounds[0].port\",\"tunnel\":\"a\"}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: saving a tunnel again refused because tunvless already holds its inbound's port */
+TEST put_same_inbound_again_is_not_busy(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, "")), &ans));
+    cJSON_Delete(ans);
+    int fd = hold_port(IB_PORT);
+    ASSERT(fd >= 0);
+    int st = call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, ",\"user\":\"u\",\"password\":\"p\"")), &ans);
+    close(fd);
+    ASSERT_EQ(200, st);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: moving an inbound to another tunnel refused because the first still holds the port */
+TEST put_inbound_moved_to_another_tunnel_is_not_busy(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, "")), &ans));
+    cJSON_Delete(ans);
+    int fd = hold_port(IB_PORT);
+    ASSERT(fd >= 0);
+    int st = call_api("PUT", "/api/v1/tunnels",
+                      "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"sources\":[{\"kind\":\"link\",\"link\":\"" LINK_A "\"}]},"
+                      "{\"id\":\"b\",\"device\":\"tunvless1\",\"sources\":[{\"kind\":\"link\",\"link\":\"" LINK_B "\"}],"
+                      "\"inbounds\":[" IB_A("lo", 18160, "") "]}]}",
+                      &ans);
+    close(fd);
+    ASSERT_EQ(200, st);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a disabled tunnel's inbound probed for a bind it will never make */
+TEST put_inbound_of_a_disabled_tunnel_is_not_probed(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    int fd = hold_port(IB_PORT);
+    ASSERT(fd >= 0);
+    cJSON *ans = NULL;
+    int st = call_api("PUT", "/api/v1/tunnels",
+                      "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,\"inbounds\":["
+                      IB_A("lo", 18160, "") "]}]}",
+                      &ans);
+    close(fd);
+    ASSERT_EQ(200, st);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: state without an inbounds list per tunnel, or a disabled tunnel's inbound not reading off */
+TEST state_has_inbounds(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
+                            "{\"tunnels\":[{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,\"inbounds\":["
+                            IB_A("lo", 18160, "") "]},{\"id\":\"b\",\"device\":\"tunvless1\",\"enable\":false}]}",
+                            &ans));
+    cJSON_Delete(ans);
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT(same_json(at(tunnel_named(ans, "a"), "inbounds"),
+                     "[{\"port\":18160,\"state\":\"off\",\"why\":\"\",\"rxBps\":0,\"txBps\":0}]"));
+    ASSERT(same_json(at(tunnel_named(ans, "b"), "inbounds"), "[]"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
+static int ib_rate_poll(const char *field, double *out, int64_t *start, int64_t *end)
+{
+    *start = now_ms();
+    cJSON *ans = NULL;
+    int st = call_api("GET", "/api/v1/tunnels/state", NULL, &ans);
+    *end = now_ms();
+    const cJSON *ib = cJSON_GetArrayItem(at(tunnel_named(ans, "a"), "inbounds"), 0);
+    *out = ib != NULL && cJSON_IsNumber(at(ib, field)) ? at(ib, field)->valuedouble : -1;
+    cJSON_Delete(ans);
+    return st;
+}
+
+/* catches: inbound rates taken from the tunnel's device counters, or not the byte difference over the poll gap */
+TEST inbound_rates_are_the_byte_difference_over_the_time_between_polls(void)
+{
+    setenv("FAKE_AFTER", "{\"type\":\"ibytes\",\"port\":18160,\"rx\":400000,\"tx\":40000}", 1);
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, "")), &ans));
+    cJSON_Delete(ans);
+    sleep_ms(300);
+    double rx = 0;
+    int64_t s_prev, e_prev, s, e;
+    ASSERT_EQ(200, ib_rate_poll("rxBps", &rx, &s_prev, &e_prev));
+    ASSERT_EQ(0, (int)rx);
+    s = s_prev;
+    e = e_prev;
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels", PUT_A(IB_A("lo", 18160, ",\"user\":\"u\",\"password\":\"p\"")), &ans));
+    cJSON_Delete(ans);
+    for (int i = 0; i < 100 && rx <= 0; i++) {
+        sleep_ms(30);
+        s_prev = s;
+        e_prev = e;
+        ASSERT_EQ(200, ib_rate_poll("rxBps", &rx, &s, &e));
+    }
+    ASSERT(rx > 0);
+    double lo_ms = (double)(s - e_prev), hi_ms = (double)(e - s_prev);
+    ASSERT(rx >= 400000.0 * 1000.0 / hi_ms - 1 && rx <= 400000.0 * 1000.0 / lo_ms + 1);
+    PASS();
+}
+
 SUITE(tunnels_api)
 {
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
@@ -1441,6 +1738,20 @@ SUITE(tunnels_api)
     RUN_TEST(a_subscriptions_headers_go_through_get_and_put);
     RUN_TEST(a_bad_header_is_refused_with_its_field);
     RUN_TEST(a_subscription_with_own_headers_reads_its_state_and_cache_under_its_signature);
+    RUN_TEST(put_inbound_round_trips);
+    RUN_TEST(put_inbound_not_in_link_refused);
+    RUN_TEST(put_inbound_on_wan_refused);
+    RUN_TEST(save_and_runtime_agree_on_a_wan_listen);
+    RUN_TEST(put_inbound_moved_from_a_disabled_tunnel_is_probed);
+    RUN_TEST(put_inbound_on_web_port_refused);
+    RUN_TEST(put_inbound_on_dns_ports_refused);
+    RUN_TEST(put_inbound_user_with_colon_refused);
+    RUN_TEST(put_inbound_on_busy_port_refused);
+    RUN_TEST(put_same_inbound_again_is_not_busy);
+    RUN_TEST(put_inbound_moved_to_another_tunnel_is_not_busy);
+    RUN_TEST(put_inbound_of_a_disabled_tunnel_is_not_probed);
+    RUN_TEST(state_has_inbounds);
+    RUN_TEST(inbound_rates_are_the_byte_difference_over_the_time_between_polls);
 }
 
 GREATEST_MAIN_DEFS();

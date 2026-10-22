@@ -1,5 +1,6 @@
 #include "firc/tunnels.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <regex.h>
 #include <stdarg.h>
@@ -532,6 +533,76 @@ static firc_err_t parse_keys(ctx_t *c, node_t *seq, size_t ti, const char *name,
     return FIRC_OK;
 }
 
+static firc_err_t parse_inbound(ctx_t *c, node_t *m, size_t ti, size_t i, firc_tun_inbound_t *b)
+{
+    char section[40];
+    snprintf(section, sizeof section, ".inbounds[%zu]", i);
+    if (m->type != YAML_MAPPING_NODE) {
+        return fail(c, "must be a mapping", "tunnels[%zu]%s", ti, section);
+    }
+    bool have_port = false;
+    for (yaml_node_pair_t *p = m->data.mapping.pairs.start; p < m->data.mapping.pairs.top; p++) {
+        node_t *k = at(c, p->key);
+        node_t *v = at(c, p->value);
+        if (!is_scalar(k)) {
+            return bad_key(c, k, ti, section, "unknown key");
+        }
+        if (key_seen(c, m, p)) {
+            return bad_key(c, k, ti, section, "key given twice");
+        }
+        const char *key = text(k);
+        if (strcmp(key, "port") == 0) {
+            int port;
+            if (!parse_int(v, &port) || port < 1 || port > 65535) {
+                return fail(c, "a port 1..65535", "tunnels[%zu]%s.port", ti, section);
+            }
+            b->port = (uint16_t)port;
+            have_port = true;
+        } else if (strcmp(key, "listen") == 0) {
+            if (!copy_str(v, b->listen, sizeof b->listen)) {
+                return fail(c, "an interface name", "tunnels[%zu]%s.listen", ti, section);
+            }
+        } else if (strcmp(key, "node") == 0) {
+            if (!copy_str(v, b->node, sizeof b->node)) {
+                return fail(c, "a node key of 1..191 bytes", "tunnels[%zu]%s.node", ti, section);
+            }
+        } else if (strcmp(key, "user") == 0) {
+            if (!copy_str(v, b->user, sizeof b->user)) {
+                return fail(c, "1..255 bytes", "tunnels[%zu]%s.user", ti, section);
+            }
+        } else if (strcmp(key, "password") == 0) {
+            if (!copy_str(v, b->password, sizeof b->password)) {
+                return fail(c, "1..255 bytes", "tunnels[%zu]%s.password", ti, section);
+            }
+        } else {
+            return bad_key(c, k, ti, section, "unknown key");
+        }
+    }
+    if (!have_port) {
+        return fail(c, "a port 1..65535", "tunnels[%zu]%s.port", ti, section);
+    }
+    return FIRC_OK;
+}
+
+static firc_err_t parse_inbounds(ctx_t *c, node_t *seq, size_t ti, firc_tunnel_t *t)
+{
+    if (seq->type != YAML_SEQUENCE_NODE) {
+        return fail(c, "must be a list", "tunnels[%zu].inbounds", ti);
+    }
+    size_t n = seq_len(seq);
+    if (n > FIRC_TUN_MAX_INBOUNDS) {
+        return fail(c, "at most 16 inbounds", "tunnels[%zu].inbounds", ti);
+    }
+    for (size_t i = 0; i < n; i++) {
+        t->n_inb = i + 1;
+        firc_err_t r = parse_inbound(c, at(c, seq->data.sequence.items.start[i]), ti, i, &t->inb[i]);
+        if (r != FIRC_OK) {
+            return r;
+        }
+    }
+    return FIRC_OK;
+}
+
 static firc_err_t parse_advanced(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
 {
     if (m->type != YAML_MAPPING_NODE) {
@@ -662,6 +733,8 @@ static firc_err_t parse_tunnel(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
             }
         } else if (strcmp(key, "advanced") == 0) {
             r = parse_advanced(c, v, ti, t);
+        } else if (strcmp(key, "inbounds") == 0) {
+            r = parse_inbounds(c, v, ti, t);
         } else if (strcmp(key, "filter") == 0) {
             r = parse_filter(c, v, ti, t);
         } else if (strcmp(key, "order") == 0) {
@@ -698,6 +771,55 @@ static const firc_tunnel_t *find_id(const firc_tunnels_t *ts, const char *id)
         }
     }
     return NULL;
+}
+
+static firc_err_t validate_inbounds(ctx_t *c, const firc_tunnels_t *ts, size_t ti)
+{
+    const firc_tunnel_t *t = &ts->t[ti];
+    for (size_t i = 0; i < t->n_inb; i++) {
+        const firc_tun_inbound_t *b = &t->inb[i];
+        unsigned char ip[sizeof(struct in6_addr)];
+        if (!firc_is_interface_name(b->listen) || inet_pton(AF_INET, b->listen, ip) == 1 ||
+            inet_pton(AF_INET6, b->listen, ip) == 1) {
+            return fail(c, "an interface name", "tunnels[%zu].inbounds[%zu].listen", ti, i);
+        }
+        if (b->port >= FIRC_TUNNEL_TCP_PORT_BASE && b->port < FIRC_TUNNEL_TCP_PORT_BASE + 100) {
+            return fail(c, "3600..3699 is firc's own", "tunnels[%zu].inbounds[%zu].port", ti, i);
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (t->inb[j].port == b->port && strcmp(t->inb[j].listen, b->listen) != 0) {
+                return fail(c, "used twice in this tunnel", "tunnels[%zu].inbounds[%zu].port", ti, i);
+            }
+        }
+        for (size_t tj = 0; tj <= ti; tj++) {
+            const firc_tunnel_t *o = &ts->t[tj];
+            size_t lim = tj == ti ? i : o->n_inb;
+            for (size_t j = 0; j < lim; j++) {
+                if (o->inb[j].port == b->port && strcmp(o->inb[j].listen, b->listen) == 0) {
+                    return fail(c, "port used twice on this interface", "tunnels[%zu].inbounds[%zu].port", ti, i);
+                }
+            }
+        }
+        if (b->node[0] == '\0') {
+            return fail(c, "required", "tunnels[%zu].inbounds[%zu].node", ti, i);
+        }
+        if (!node_key_ok(b->node)) {
+            return fail(c, "a node key of 1..191 bytes", "tunnels[%zu].inbounds[%zu].node", ti, i);
+        }
+        if ((b->user[0] == '\0') != (b->password[0] == '\0')) {
+            return fail(c, "user and password: both or neither", "tunnels[%zu].inbounds[%zu].user", ti, i);
+        }
+        if (firc_text_has_control(b->user)) {
+            return fail(c, "no control characters", "tunnels[%zu].inbounds[%zu].user", ti, i);
+        }
+        if (firc_text_has_control(b->password)) {
+            return fail(c, "no control characters", "tunnels[%zu].inbounds[%zu].password", ti, i);
+        }
+        if (strchr(b->user, ':') != NULL) {
+            return fail(c, "no ':' in a user", "tunnels[%zu].inbounds[%zu].user", ti, i);
+        }
+    }
+    return FIRC_OK;
 }
 
 static firc_err_t validate(ctx_t *c, const firc_tunnels_t *ts)
@@ -749,6 +871,10 @@ static firc_err_t validate(ctx_t *c, const firc_tunnels_t *ts)
         }
         if (strcmp(t->by, "connection") != 0 && strcmp(t->by, "site") != 0 && strcmp(t->by, "site-client") != 0) {
             return fail(c, "must be connection, site or site-client", "tunnels[%zu].by", i);
+        }
+        firc_err_t r = validate_inbounds(c, ts, i);
+        if (r != FIRC_OK) {
+            return r;
         }
     }
     return FIRC_OK;
@@ -978,6 +1104,7 @@ static void emit_keys(em_t *e, const char *name, char *const *v, size_t n)
 static void emit_tunnel(em_t *e, const firc_tunnel_t *t)
 {
     char b[48];
+    char pbuf[8];
     map_start(e);
     kv(e, "id", t->id, true);
     kv(e, "device", t->device, true);
@@ -1036,6 +1163,24 @@ static void emit_tunnel(em_t *e, const firc_tunnel_t *t)
     kv(e, "ca", t->ca, true);
     kv(e, "kernelTcp", t->kernel_tcp ? "true" : "false", false);
     map_end(e);
+    if (t->n_inb > 0) {
+        str(e, "inbounds", false);
+        seq_start(e, false);
+        for (size_t i = 0; i < t->n_inb; i++) {
+            const firc_tun_inbound_t *ib = &t->inb[i];
+            map_start(e);
+            snprintf(pbuf, sizeof pbuf, "%u", (unsigned)ib->port);
+            kv(e, "port", pbuf, false);
+            kv(e, "listen", ib->listen, true);
+            kv(e, "node", ib->node, true);
+            if (ib->user[0] != '\0') {
+                kv(e, "user", ib->user, true);
+                kv(e, "password", ib->password, true);
+            }
+            map_end(e);
+        }
+        seq_end(e);
+    }
     map_end(e);
 }
 

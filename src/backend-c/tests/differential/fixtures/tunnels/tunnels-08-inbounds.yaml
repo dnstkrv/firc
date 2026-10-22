@@ -1,0 +1,18 @@
+tunnels:
+  - id: ib
+    device: tunvless4
+    sources:
+      - id: 0000000c
+        link: "vless://u@h.example.invalid:443?security=none#nl"
+    inbounds:
+      - { port: 1081, listen: br0, node: "0000000c:nl", user: alice, password: "p:w d" }
+      - { port: 1082, listen: br1, node: "0000000c:nl" }
+  - id: ib2
+    device: tunvless5
+    sources:
+      - id: 0000000d
+        link: "vless://u@h.example.invalid:443?security=none#de"
+    inbounds:
+      - port: 1081
+        listen: br1
+        node: "0000000d:de"

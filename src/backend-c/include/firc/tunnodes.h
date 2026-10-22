@@ -48,4 +48,13 @@ firc_err_t firc_tun_nodes_build(const firc_tunnel_t *t, uint32_t mark, const fir
 
 void firc_tun_nodes_free(firc_tun_nodes_t *n);
 
+/* links[i] is the malloc'd link of the node keyed keys[i] among every node t's sources and bodies give, before
+   filter, exclude and the node cap, NULL when no such node can be sent; one parse for all keys. On an error every
+   links[i] is NULL. */
+firc_err_t firc_tun_nodes_links_of(const firc_tunnel_t *t, uint32_t mark, const firc_tun_body_t *bodies,
+                                   size_t n_bodies, const char *const *keys, size_t n_keys, char **links);
+
+size_t firc_tun_nodes_parses_for_test(void);        /* test seam: how many times sources were parsed */
+void firc_tun_nodes_set_fail_for_test(bool fail); /* test seam: links_of fails as out of memory */
+
 #endif

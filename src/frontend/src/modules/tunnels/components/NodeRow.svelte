@@ -15,11 +15,12 @@
     live: TunnelNodeState | undefined;
     probe: TunnelProbeRow | undefined;
     now: number;
+    ports: number[];
     onToggle: () => void;
     onDrop: (source: NodeDnD, target: NodeDnD) => void;
   };
 
-  let { row, scope, excluded, live, probe, now, onToggle, onDrop }: Props = $props();
+  let { row, scope, excluded, live, probe, now, ports, onToggle, onDrop }: Props = $props();
 
   const latency = $derived(latencyOf(probe));
 
@@ -69,6 +70,7 @@
   <div class="nm">
     <span class="name">{row.name}</span>
     {#if row.isNew && !row.missing}<span class="badge blue">{t("new")}</span>{/if}
+    {#each ports as port (port)}<span class="badge port">:{port}</span>{/each}
   </div>
   <div class="src"><span class="badge">{row.source === "link" ? t("link") : row.source}</span></div>
   <div class="state">
@@ -206,6 +208,9 @@
     background: var(--bg-light-extra);
     color: var(--text-2);
     white-space: nowrap;
+  }
+  .badge.port {
+    font-family: Monaco, monospace;
   }
   .badge.blue {
     background: color-mix(in oklab, var(--accent) 22%, transparent);

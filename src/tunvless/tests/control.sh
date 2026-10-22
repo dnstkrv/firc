@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 BIN="${TUNVLESS:-./out/tunvless}"
 [ -x "$BIN" ] || { echo "control: no binary $BIN (make)"; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "control: needs root — skipped"; exit 0; }
-for t in ip python3 wget; do
+for t in ip python3 wget curl; do
     command -v $t >/dev/null 2>&1 || { echo "control: no $t — skipped"; exit 0; }
 done
 
@@ -19,12 +19,13 @@ check() {
     fi
 }
 cleanup() {
-    for p in ${TP:-} ${TK:-} ${TB:-} ${HOLD:-} ${TS:-} ${SRV_A:-} ${SRV_B:-} ${S2A:-} ${S2B:-} ${S2C:-} ${LONG:-}; do kill "$p" 2>/dev/null; done
+    for p in ${TP:-} ${TK:-} ${TB:-} ${HOLD:-} ${TS:-} ${SRV_A:-} ${SRV_B:-} ${S2A:-} ${S2B:-} ${S2C:-} ${LONG:-} ${TI:-} ${SRV_IA:-} ${SRV_IB:-} ${UECHO:-} ${HOLD2:-}; do kill "$p" 2>/dev/null; done
     ip netns pids $H 2>/dev/null | xargs -r kill 2>/dev/null
     ip netns pids $N 2>/dev/null | xargs -r kill 2>/dev/null
     ip netns del $H 2>/dev/null; ip netns del $N 2>/dev/null
     rm -rf /etc/netns/$H
     if [ "$fail" != 0 ]; then echo "--- tunnel log (tail)"; tail -n 30 "$W/tun.log" 2>/dev/null; echo "--- events"; cat "$W/ev" 2>/dev/null
+        echo "--- inbound log (tail)"; tail -n 30 "$W/tuni.log" 2>/dev/null; echo "--- inbound events"; cat "$W/evi" 2>/dev/null
         echo "--- swap log (tail)"; tail -n 30 "$W/tun2.log" 2>/dev/null; echo "--- swap events"; cat "$W/ev2" 2>/dev/null; fi
     rm -rf "$W"
 }
@@ -257,5 +258,101 @@ check "swap: no link in stdout" 0 "$(grep -c "vless://\|$UUID" "$W/ev2")"
 exec 8>&-
 sleep 1
 check "swap: stdin closed, the tunnel keeps running" yes "$(kill -0 "$TS" 2>/dev/null && echo yes || echo no)"
+PI=10810 IP=$HOSTIP
+: > "$W/dst-A"; : > "$W/dst-B"
+ip netns exec $N python3 tests/fake-vless.py --port $PI --uuid $UUID --mb 1 --bind $A --log-req "$W/dst-A" > "$W/srv-ia.log" 2>&1 & SRV_IA=$!
+ip netns exec $N python3 tests/fake-vless.py --port $PI --uuid $UUID --mb 1 --bind $B --udp-relay --log-req "$W/dst-B" > "$W/srv-ib.log" 2>&1 & SRV_IB=$!
+ip netns exec $N python3 -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("10.74.0.1", 5353))
+while True:
+    d, a = s.recvfrom(2048)
+    s.sendto(b"echo:" + d, a)
+' & UECHO=$!
+ip netns exec $H python3 -c '
+import socket, time
+s = socket.socket()
+s.bind(("10.74.0.2", 1083))
+s.listen(1)
+time.sleep(60)
+' & HOLD2=$!
+sleep 1
+ilnk() { printf 'vless://%s@%s:%s?security=none&type=tcp#%s' "$UUID" "$1" "$PI" "$2"; }
+LA=$(ilnk $A A) LB=$(ilnk $B B)
+mkfifo "$W/ini"
+HX "$BIN" --control -d tvi0 -A 1 --interval 5 < "$W/ini" > "$W/evi" 2> "$W/tuni.log" & TI=$!
+exec 6> "$W/ini"
+printf '%s\n%s\n\n' "$LA" "$LB" >&6
+wait_in "$W/evi" '"ready"'
+printf 'inbounds\n%s:1081 - - %s\n%s:1082 alice pw %s\n%s:1083 - - %s\n\n' "$IP" "$LB" "$IP" "$LB" "$IP" "$LB" >&6
+wait_in "$W/evi" '"type":"inbounds"'
+check "inbounds: acknowledged with the line count" '{"type":"inbounds","count":3}' "$(grep '"type":"inbounds"' "$W/evi" | head -1)"
+check "inbounds: the free port is up" 1 "$(grep -c '"type":"inbound","port":1081,"state":"up"' "$W/evi")"
+# catches: a port someone else holds reported as up, or not reported at all
+check "inbounds: the held port is busy" 1 "$(grep -c '"type":"inbound","port":1083,"state":"busy"' "$W/evi")"
+check "inbounds: the busy port is logged without the line" 0 "$(grep -c "pw\|$UUID" "$W/tuni.log")"
+sc() { HX curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2> /dev/null; }
+# catches: a pinned inbound that dials the active node, or sends the name as an address
+check "socks5h: the request is answered" 200 "$(sc --socks5-hostname $IP:1081 http://socks.example.test/)"
+check "socks5h: node B got the domain" 1 "$(grep -cxF 'domain socks.example.test:80' "$W/dst-B")"
+check "socks5h: node A got no request for the name" 0 "$(grep -c "example.test\|:5353" "$W/dst-A")"
+# catches: an HTTP CONNECT that resolves the name locally or dials the active node
+check "http connect: the request is answered" 200 "$(sc -p -x http://$IP:1081 http://http.example.test/)"
+check "http connect: node B got the domain" 1 "$(grep -cxF 'domain http.example.test:80' "$W/dst-B")"
+check "http connect: node A still got no request for the name" 0 "$(grep -c "example.test\|:5353" "$W/dst-A")"
+# catches: SOCKS credentials not checked, or checked but never accepted
+check "socks5 auth: right credentials pass" 200 "$(sc --proxy-user alice:pw --socks5-hostname $IP:1082 http://auth.example.test/)"
+check "socks5 auth: no credentials fail" 000 "$(sc --socks5-hostname $IP:1082 http://noauth.example.test/)"
+check "socks5 auth: wrong password fails" 000 "$(sc --proxy-user alice:no --socks5-hostname $IP:1082 http://bad.example.test/)"
+cat > "$W/socksref.py" <<'PY'
+import socket, sys
+t = socket.create_connection(("10.74.0.2", 1082), 5)
+t.settimeout(5)
+if sys.argv[1] == "method":
+    t.sendall(b"\x05\x01\x00")
+    print(t.recv(2).hex())
+else:
+    t.sendall(b"\x05\x01\x02")
+    assert t.recv(2) == b"\x05\x02"
+    t.sendall(b"\x01\x05alice\x02no")
+    print(t.recv(2).hex())
+PY
+# catches: a client offering only no-auth let through, or a wrong password answered with anything but status 01
+check "socks5 auth: only method 00 offered gets 05 ff" 05ff "$(HX python3 "$W/socksref.py" method 2> /dev/null)"
+check "socks5 auth: a wrong password gets 01 01" 0101 "$(HX python3 "$W/socksref.py" pass 2> /dev/null)"
+# catches: HTTP Basic credentials not checked, or a 407 without the challenge
+check "http auth: right credentials pass" 200 "$(sc --proxy-user alice:pw -p -x http://$IP:1082 http://hauth.example.test/)"
+check "http auth: no credentials get 407" 407 "$(HX curl -s -o /dev/null -w '%{http_connect}' --max-time 10 -p -x http://$IP:1082 http://hnoauth.example.test/ 2> /dev/null)"
+check "http auth: the 407 carries the Basic challenge" 1 "$(HX curl -s -D - -o /dev/null --max-time 10 -p -x http://$IP:1082 http://hnoauth.example.test/ 2> /dev/null | grep -ci '^Proxy-Authenticate: Basic')"
+check "auth: only the authorised requests reached B" "domain auth.example.test:80 domain hauth.example.test:80" \
+    "$(grep -v 'socks.example\|http.example' "$W/dst-B" | tr '\n' ' ' | sed 's/ $//')"
+cat > "$W/udpcli.py" <<'PY'
+import socket, struct
+t = socket.create_connection(("10.74.0.2", 1081), 5)
+t.sendall(b"\x05\x01\x00")
+assert t.recv(2) == b"\x05\x00"
+t.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+r = t.recv(10)
+assert r[:2] == b"\x05\x00", r
+relay = struct.unpack(">H", r[8:10])[0]
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+u.bind(("10.74.0.2", 0))
+u.settimeout(5)
+u.sendto(b"\x00\x00\x00\x01" + socket.inet_aton("10.74.0.1") + struct.pack(">H", 5353) + b"ping", ("10.74.0.2", relay))
+d, _ = u.recvfrom(2048)
+print(d[:10] == b"\x00\x00\x00\x01" + socket.inet_aton("10.74.0.1") + struct.pack(">H", 5353) and d[10:].decode())
+PY
+# catches: UDP ASSOCIATE answered but the datagram never relayed through the pinned node, or the answer returned unframed
+check "udp associate: the datagram round-trips through B" "echo:ping" "$(HX python3 "$W/udpcli.py" 2> /dev/null)"
+check "udp associate: node B logged the destination" 1 "$(grep -cxF 'ipv4 10.74.0.1:5353' "$W/dst-B")"
+wait_in "$W/evi" '"type":"ibytes","port":1081'
+# catches: inbound traffic never counted per port
+check "ibytes: reported for the used port" 1 "$(grep -q '"type":"ibytes","port":1081,"rx":[0-9]*[1-9][0-9]*,"tx":[0-9]*[1-9][0-9]*' "$W/evi" && echo 1 || echo 0)"
+check "ibytes: not for the idle port" 0 "$(grep -c '"type":"ibytes","port":1083' "$W/evi")"
+check "inbounds: node A got no inbound request at all" 0 "$(grep -c "example.test\|:5353" "$W/dst-A")"
+check "inbounds: no password or link in stderr" 0 "$(grep -c "pw\|$UUID\|vless://" "$W/tuni.log")"
+check "inbounds: no password or link in stdout" 0 "$(grep -c "pw\|$UUID\|vless://" "$W/evi")"
+exec 6>&-
 echo "control: $pass ok, $fail fail"
 [ "$fail" = 0 ]

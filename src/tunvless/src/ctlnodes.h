@@ -13,5 +13,6 @@ struct ctln_hooks {
 
 int ctln_start(const struct ctln_hooks *h);
 void ctln_read(FILE *in);
+void ctln_pin_extra(char **hosts, size_t n);
 
 #endif

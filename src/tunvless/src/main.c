@@ -35,6 +35,7 @@
 #include "roots.h"
 #include "control.h"
 #include "nodes.h"
+#include "ctlinb.h"
 #include "ctlnodes.h"
 #include "ctlmap.h"
 
@@ -736,6 +737,8 @@ int main(int argc, char **argv) {
         if (getppid() == 1) _exit(1);
     }
     ctlmap_init(g.tc.tcp_pool_be, g.tc.tcp_pool_len);
+    if (ctlinb_init() != 0)
+        fprintf(stderr, LOG_E "no eventfd for inbounds (%s) — inbound ports stay closed\n", strerror(errno));
 
     /* Before the nodes are parsed: whether allowInsecure nodes are usable depends on it. */
     vless_set_insecure(g.insecure);

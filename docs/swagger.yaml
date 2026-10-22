@@ -1209,6 +1209,58 @@ definitions:
         example: 8
         type: integer
     type: object
+  types.TunnelInbound:
+    properties:
+      listen:
+        description: 'A name from app.link that is not a WAN interface; its IPv4 address is bound'
+        example: br0
+        type: string
+      node:
+        description: 'Node key, <source id>:<name>; an excluded or filtered node still serves it'
+        example: 0000000a:NL-1
+        type: string
+      password:
+        description: 'With user: 1..255 bytes, no control characters; empty for no authentication'
+        example: ""
+        type: string
+      port:
+        description: '1..65535; not the WebUI port, the DNS proxy port, 53 or 3600..3699'
+        example: 1081
+        type: integer
+      user:
+        description: 'With password: 1..255 bytes, no control characters, no colon; empty for no authentication'
+        example: ""
+        type: string
+    type: object
+  types.TunnelInboundState:
+    properties:
+      port:
+        example: 1081
+        type: integer
+      rxBps:
+        description: 'Bytes per second sent to the client since the previous poll'
+        example: 0
+        type: integer
+      state:
+        enum:
+        - up
+        - busy
+        - no-node
+        - no-address
+        - not-lan
+        - starting
+        - "off"
+        example: up
+        type: string
+      txBps:
+        description: 'Bytes per second read from the client since the previous poll'
+        example: 0
+        type: integer
+      why:
+        description: 'Detail for busy and a failed bind; empty otherwise'
+        example: ""
+        type: string
+    type: object
   types.Tunnel:
     properties:
       active:
@@ -1249,6 +1301,11 @@ definitions:
         description: 'Letters, digits, - and _, under 16 bytes, unique'
         example: main
         type: string
+      inbounds:
+        description: 'Local SOCKS5 and HTTP CONNECT listeners bound to one node each, at most 16; always present'
+        items:
+          $ref: '#/definitions/types.TunnelInbound'
+        type: array
       interval:
         description: 'Seconds between checks of the active nodes, 5..86400'
         example: 60
@@ -1388,6 +1445,11 @@ definitions:
       id:
         example: main
         type: string
+      inbounds:
+        description: 'One row per inbound of the tunnel, in its order'
+        items:
+          $ref: '#/definitions/types.TunnelInboundState'
+        type: array
       lastExit:
         description: 'Exit code of the last tunvless, 128+signal when killed'
         example: 0

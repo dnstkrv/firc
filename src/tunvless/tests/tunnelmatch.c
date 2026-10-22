@@ -744,20 +744,25 @@ static void t_release_last_sleep(void) {
 }
 
 /* Run f with stderr going to a file; return whether needle appears in what was written. */
-static int stderr_has(void (*f)(void *), void *arg, const char *needle) {
+static void stderr_of(void (*f)(void *), void *arg, char *buf, size_t cap) {
     char path[] = "/tmp/tunnelmatch-err.XXXXXX";
+    buf[0] = 0;
     int fd = mkstemp(path);
-    if (fd < 0) return 0;
+    if (fd < 0) return;
     fflush(stderr);
     int save = dup(2);
     dup2(fd, 2);
     f(arg);
     fflush(stderr);
     dup2(save, 2); close(save);
-    char buf[4096];
-    ssize_t r = pread(fd, buf, sizeof(buf) - 1, 0);
+    ssize_t r = pread(fd, buf, cap - 1, 0);
     close(fd); unlink(path);
     buf[r > 0 ? r : 0] = 0;
+}
+
+static int stderr_has(void (*f)(void *), void *arg, const char *needle) {
+    char buf[4096];
+    stderr_of(f, arg, buf, sizeof buf);
     return strstr(buf, needle) != NULL;
 }
 
@@ -979,7 +984,7 @@ static void t_spare_slot(void) {
 struct fnode { char name[16]; char host[16]; int alive; };
 static struct fnode g_fn[5];
 
-struct fsess { int fd; const struct fnode *node; int flow_opens; };
+struct fsess { int fd; const struct fnode *node; int flow_opens; int udp; char host[256]; };
 
 static int g_lfd = -1;
 static uint16_t g_lport;
@@ -1029,10 +1034,16 @@ static void f_clear(void *sess) {
 static int f_fd(const void *sess) { return ((const struct fsess *)sess)->fd; }
 static int f_has_data(const void *sess) { (void)sess; return 0; }
 static int f_flow_open(const void *ctx, void *sess, const struct flow_key *k, int udp) {
-    (void)k; (void)udp;
+    (void)k;
     struct fsess *s = sess;
     s->node = ctx;
+    s->udp = udp;
     s->flow_opens++;
+    s->host[0] = 0;
+    return 0;
+}
+static int f_set_host(void *sess, const char *host) {
+    snprintf(((struct fsess *)sess)->host, sizeof ((struct fsess *)sess)->host, "%s", host);
     return 0;
 }
 static int f_send(const void *ctx, void *sess, const struct flow_key *k, int udp,
@@ -1068,7 +1079,7 @@ static const struct dialer_ops f_ops = {
     .peer = f_peer, .describe = f_describe, .strerror = f_strerror, .connect = f_connect,
     .take = f_take, .close = f_close, .clear = f_clear, .fd = f_fd, .has_data = f_has_data,
     .flow_open = f_flow_open, .send = f_send, .dgram_frame = f_dgram_frame, .read = f_read,
-    .deliver = f_deliver, .lost = f_lost,
+    .deliver = f_deliver, .lost = f_lost, .set_host = f_set_host,
 };
 
 /* A fresh stack with the fake dialer to one node and a 20 s silence threshold. */
@@ -2014,6 +2025,83 @@ static void t_pool_threads(void) {
     check(done && !dup, "swaps, checks and connections on three threads keep the slots sound");
 }
 
+static _Alignas(64) unsigned char g_pin[PL_HDR + sizeof(struct fsess)];
+
+static const struct fnode *pin_dial(void) {
+    int n0 = g_srv_n;
+    if (g_pl_ops.connect(&g_pl, g_pin, 1) != 0 || g_srv_n != n0 + 1) return NULL;
+    pthread_mutex_lock(&g_srv_mu);
+    const struct fnode *n = g_srv_node[--g_srv_n];
+    close(g_srv[g_srv_n]);
+    pthread_mutex_unlock(&g_srv_mu);
+    g_pl_ops.close(g_pin);
+    return n;
+}
+
+/* Catches a pinned session that picks a slot instead of dialling the node it was given. */
+static void t_pin_dials_the_named_node(void) {
+    all_alive();
+    pool_new(3, POOL_BY_CONNECTION, 3);
+    pl_check(1);
+    pl_check(2);
+    struct flow_key k = pm_key(52000, 0x0b0b0b0bu);
+    int hits = 0;
+    for (int i = 0; i < 20; i++) {
+        g_pl_ops.clear(g_pin);
+        if (pool_flow_open_on(g_pin, 2, &k, 0, NULL) == 0 && pin_dial() == &g_fn[2]) hits++;
+        k.sport++;
+    }
+    check(hits == 20, "a pinned session dials its node, 20 times out of 20");
+    g_pl_ops.clear(g_pin);
+}
+
+/* Catches a pinned session refused or moved because its node holds no live slot. */
+static void t_pin_survives_a_dead_slot(void) {
+    all_alive();
+    pool_new(2, POOL_BY_CONNECTION, 3);
+    pl_check(1);
+    struct flow_key k = pm_key(52100, 0x0b0b0b0bu);
+    g_pl_ops.clear(g_pin);
+    check(g_pl.slot[0].node == 0 && g_pl.slot[1].node == 1 && pool_flow_open_on(g_pin, 2, &k, 0, NULL) == 0 &&
+              pin_dial() == &g_fn[2],
+          "a pinned node outside the active slots is still dialled");
+    g_pl.slot[1].up = 0;
+    g_pl_ops.clear(g_pin);
+    check(pool_flow_open_on(g_pin, 1, &k, 0, NULL) == 0 && pin_dial() == &g_fn[1],
+          "a pinned node whose slot is down is still dialled");
+    g_pl.slot[1].up = 1;
+    g_pl_ops.clear(g_pin);
+}
+
+/* Catches a spare handed to a pinned session, which would move it off its node. */
+static void t_pin_never_takes_a_spare(void) {
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 3);
+    static _Alignas(64) unsigned char spare[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *ps = (struct pl_sess *)spare;
+    struct spare *sp = &g_spares[0];
+    struct spare save = *sp;
+    struct flow_key k = pm_key(52200, 0x0b0b0b0bu);
+    int took[2];
+    const void *pinned_node = NULL;
+    for (int pin = 1; pin >= 0; pin--) {
+        g_pl_ops.clear(spare);
+        pl_bind(ps, 0);
+        sp->sess = spare;
+        sp->state = SPARE_READY;
+        sp->born_ns = now_ns();
+        g_pl_ops.clear(g_pin);
+        if (pin) pool_flow_open_on(g_pin, 2, &k, 0, NULL);
+        else g_pl_ops.flow_open(&g_pl, g_pin, &k, 0);
+        took[pin] = spare_checkout(g_pin);
+        if (pin) pinned_node = ((struct pl_sess *)g_pin)->node;
+    }
+    check(took[1] == -1 && pinned_node == &g_fn[2], "a pinned session never takes a spare and keeps its node");
+    check(took[0] == 0, "a session cleared after a pin takes a spare again");
+    *sp = save;
+    g_pl_ops.clear(g_pin);
+}
+
 static void pool_part(void) {
     t_pool_setup();
     t_pool_stale();
@@ -2033,6 +2121,9 @@ static void pool_part(void) {
     t_pool_swap_races();
     t_pool_swap_events();
     t_pool_threads();
+    t_pin_dials_the_named_node();
+    t_pin_survives_a_dead_slot();
+    t_pin_never_takes_a_spare();
 }
 
 static struct conn *side_conn(uint16_t sport, int udp, int sock) {
@@ -2771,6 +2862,211 @@ static int count_of(const char *hay, const char *needle) {
     int n = 0;
     for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle)) n++;
     return n;
+}
+
+static const unsigned char g_uuid_b[16] = { 0x8f, 0x7d, 0x3b, 0x1a, 0x2c, 0x4e, 0x4f, 0x60,
+                                            0x9a, 0x81, 0xb5, 0xd7, 0xe6, 0xc3, 0x01, 0x24 };
+
+static size_t host_header(struct vl_sess *s, const char *host, int reopen, unsigned char *w, size_t cap) {
+    char flow[sizeof g_node.flow];
+    memcpy(flow, g_node.flow, sizeof flow);
+    g_node.flow[0] = 0;
+    struct flow_key k = cli_key();
+    k.dst = ip4(93, 184, 216, 34);
+    k.dport = 8443;
+    memset(s, 0, offsetof(struct vl_sess, dg));
+    s->t.link.fd = -1;
+    vless_dialer.clear(s);
+    vless_dialer.flow_open(&g_node, s, &k, 0);
+    vless_dialer.set_host(s, host);
+    if (reopen) {
+        vless_dialer.clear(s);
+        vless_dialer.flow_open(&g_node, s, &k, 0);
+    }
+    g_send_rc = 0;
+    g_send_hold = 0;
+    g_send_again_n = 0;
+    g_wire_on = 1;
+    g_wire_n = 0;
+    g_wlog_n = 0;
+    size_t n = 0;
+    if (vless_dialer.send(&g_node, s, &k, 0, NULL, 0) == SEND_OK)
+        for (int i = 0; i < g_wlog_n; i++)
+            if (g_wlog[i].t == &s->t && n + g_wlog[i].n <= cap) {
+                memcpy(w + n, g_wire + g_wlog[i].off, g_wlog[i].n);
+                n += g_wlog[i].n;
+            }
+    g_wire_on = 0;
+    memcpy(g_node.flow, flow, sizeof flow);
+    return n;
+}
+
+/* Catches a host dropped from the request or sent with the wrong address type, length or port. */
+static void t_host_is_atyp_domain(void) {
+    static struct vl_sess s;
+    unsigned char w[512], want[34] = { 0 };
+    memcpy(want + 1, g_uuid_b, 16);
+    want[17] = 0;
+    want[18] = 1;
+    want[19] = 0x20;
+    want[20] = 0xfb;
+    want[21] = 2;
+    want[22] = 11;
+    memcpy(want + 23, "example.com", 11);
+    size_t n = host_header(&s, "example.com", 0, w, sizeof w);
+    check(n == sizeof want && !memcmp(w, want, sizeof want),
+          "a host goes as ATYP 2: length 11, example.com, port 8443");
+}
+
+static int ipv4_header(const unsigned char *w, size_t n) {
+    static const unsigned char tail[9] = { 0, 1, 0x20, 0xfb, 1, 93, 184, 216, 34 };
+    return n == 26 && w[0] == 0 && !memcmp(w + 1, g_uuid_b, 16) && !memcmp(w + 17, tail, 9);
+}
+
+/* Catches a NULL host taken as a name instead of keeping the IPv4 destination. */
+static void t_no_host_stays_ipv4(void) {
+    static struct vl_sess s;
+    unsigned char w[512];
+    size_t n = host_header(&s, NULL, 0, w, sizeof w);
+    check(ipv4_header(w, n), "no host: the request carries the IPv4 93.184.216.34:8443 (ATYP 1)");
+}
+
+/* Catches a host left from a session's previous flow leaking into the next one. */
+static void t_host_is_cleared_on_reuse(void) {
+    static struct vl_sess s;
+    unsigned char w[512];
+    size_t n = host_header(&s, "example.com", 1, w, sizeof w);
+    check(ipv4_header(w, n), "a reused session without a host dials the IPv4 again (ATYP 1)");
+}
+
+static const void *vl_at(int i) { return i == 3 ? &g_node : NULL; }
+
+/* Catches the pool dropping the host, or setting it before flow_open clears it. */
+static void t_pin_carries_the_host(void) {
+    static const struct pool_proto vp = { .ops = &vless_dialer, .probe = f_probe, .name = f_name };
+    struct pool_cfg pc = { .proto = &vp, .node = vl_at, .sel = g_cand, .sel_n = 1, .first = 3, .checked = 1,
+                           .active = 1, .by = POOL_BY_CONNECTION, .interval_s = 60 };
+    free(g_pl.slot);
+    g_pl.slot = NULL;
+    const struct dialer *d = pool_setup(&pc);
+    static _Alignas(64) unsigned char buf[PL_HDR + sizeof(struct vl_sess)];
+    struct vl_sess *s = (struct vl_sess *)(buf + PL_HDR);
+    char flow[sizeof g_node.flow];
+    memcpy(flow, g_node.flow, sizeof flow);
+    g_node.flow[0] = 0;
+    memset(buf, 0, sizeof buf);
+    s->t.link.fd = -1;
+    d->ops->clear(buf);
+    struct flow_key k = cli_key();
+    k.dport = 8443;
+    g_send_rc = 0;
+    g_send_hold = 0;
+    g_send_again_n = 0;
+    g_wire_on = 1;
+    g_wire_n = 0;
+    g_wlog_n = 0;
+    int rc = pool_flow_open_on(buf, 3, &k, 0, "example.com");
+    int sent = rc == 0 && d->ops->send(d->ctx, buf, &k, 0, NULL, 0) == SEND_OK;
+    g_wire_on = 0;
+    memcpy(g_node.flow, flow, sizeof flow);
+    check(sent && g_wlog_n == 1 && g_wlog[0].t == &s->t && g_wlog[0].n == 34 && g_wire[21] == 2 &&
+              g_wire[22] == 11 && !memcmp(g_wire + 23, "example.com", 11) && g_wire[19] == 0x20 &&
+              g_wire[20] == 0xfb,
+          "pool_flow_open_on: the pinned session's request carries the host (ATYP 2)");
+    d->ops->clear(buf);
+}
+
+static void long_host(char *h, size_t n) {
+    memset(h, 'a', n);
+    h[n] = 0;
+}
+
+static int room_send(int vision, long *bare) {
+    static struct vl_sess s;
+    static unsigned char d[TUNNEL_BUF];
+    char host[256], flow[sizeof g_node.flow];
+    long_host(host, 255);
+    memcpy(flow, g_node.flow, sizeof flow);
+    if (!vision) g_node.flow[0] = 0;
+    struct flow_key k = cli_key();
+    memset(&s, 0, offsetof(struct vl_sess, dg));
+    s.t.link.fd = -1;
+    vless_dialer.clear(&s);
+    vless_dialer.flow_open(&g_node, &s, &k, 0);
+    g_room = TUNNEL_BUF;
+    if (bare) *bare = vless_dialer.room(&g_node, &s);
+    vless_dialer.set_host(&s, host);
+    long r = vless_dialer.room(&g_node, &s);
+    g_send_rc = 0;
+    g_send_hold = 0;
+    g_send_again_n = 0;
+    g_wire_on = 0;
+    int sr = r > 0 ? vless_dialer.send(&g_node, &s, &k, 0, d, (size_t)r) : SEND_FATAL;
+    g_room = -1;
+    memcpy(g_node.flow, flow, sizeof flow);
+    return sr;
+}
+
+/* Catches a room that reserves 64 bytes for a request header that carries a 255-byte host. */
+static void t_room_covers_a_long_host(void) {
+    long bare = 0;
+    check(room_send(0, &bare) == SEND_OK && bare == TUNNEL_BUF - 64,
+          "a first write of the whole room with a 255-byte host is sent; no host keeps 64");
+    check(room_send(1, NULL) == SEND_OK, "  and with Vision too");
+}
+
+/* Catches a host over 255 bytes cut to fit instead of refused, at the dialer and the pool. */
+static void t_long_host_refused(void) {
+    static struct vl_sess s;
+    char h255[256], h256[257];
+    long_host(h255, 255);
+    long_host(h256, 256);
+    memset(&s, 0, offsetof(struct vl_sess, dg));
+    s.t.link.fd = -1;
+    vless_dialer.clear(&s);
+    check(vless_dialer.set_host(&s, h256) == -1 && vless_dialer.set_host(&s, h255) == 0 &&
+              strlen(s.host) == 255,
+          "set_host: 256 bytes refused, 255 kept whole");
+    static const struct pool_proto vp = { .ops = &vless_dialer, .probe = f_probe, .name = f_name };
+    struct pool_cfg pc = { .proto = &vp, .node = vl_at, .sel = g_cand, .sel_n = 1, .first = 3, .checked = 1,
+                           .active = 1, .by = POOL_BY_CONNECTION, .interval_s = 60 };
+    free(g_pl.slot);
+    g_pl.slot = NULL;
+    const struct dialer *d = pool_setup(&pc);
+    static _Alignas(64) unsigned char buf[PL_HDR + sizeof(struct vl_sess)];
+    memset(buf, 0, sizeof buf);
+    ((struct vl_sess *)(buf + PL_HDR))->t.link.fd = -1;
+    d->ops->clear(buf);
+    struct flow_key k = cli_key();
+    int over = pool_flow_open_on(buf, 3, &k, 0, h256);
+    d->ops->clear(buf);
+    int fits = pool_flow_open_on(buf, 3, &k, 0, h255);
+    d->ops->clear(buf);
+    check(over == -1 && fits == 0, "pool_flow_open_on: a 256-byte host fails the open, 255 opens");
+}
+
+/* Catches a host dropped in silence when the inner dialer cannot carry one. */
+static void t_host_needs_set_host(void) {
+    static struct dialer_ops bare;
+    bare = f_ops;
+    bare.set_host = NULL;
+    static const struct pool_proto bp = { .ops = &bare, .probe = f_probe, .name = f_name };
+    struct pool_cfg pc = { .proto = &bp, .node = f_at, .sel = g_cand, .sel_n = 3, .first = 0, .checked = 1,
+                           .active = 1, .by = POOL_BY_CONNECTION, .interval_s = 60 };
+    free(g_pl.slot);
+    g_pl.slot = NULL;
+    const struct dialer *d = pool_setup(&pc);
+    static _Alignas(64) unsigned char buf[PL_HDR + sizeof(struct fsess)];
+    struct flow_key k = cli_key();
+    d->ops->clear(buf);
+    int named = pool_flow_open_on(buf, 1, &k, 0, "example.com");
+    d->ops->clear(buf);
+    int none = pool_flow_open_on(buf, 1, &k, 0, NULL);
+    d->ops->clear(buf);
+    int empty = pool_flow_open_on(buf, 1, &k, 0, "");
+    d->ops->clear(buf);
+    check(named == -1 && none == 0 && empty == 0,
+          "a dialer without set_host: a named open fails, an address-only open goes");
 }
 
 static size_t wire_of(const struct conn *c, unsigned char *out, size_t cap) {
@@ -3659,6 +3955,1151 @@ static void t_k_stop_resets_sockets(void) {
     close(pfd);
 }
 
+#define IB_UUID "b831381d-6324-4d53-ad4f-8cda48b30811"
+#define IB_L0 "vless://" IB_UUID "@ha:443?security=none&type=tcp#n0"
+#define IB_L1 "vless://" IB_UUID "@hb:443?security=none&type=tcp#n1"
+#define LO htonl(INADDR_LOOPBACK)
+
+static void ib_nodes(void) {
+    const char *l[2] = { IB_L0, IB_L1 };
+    nodes_init(sizeof(struct vless_node));
+    sl_set_interner(nodes_intern);
+    for (int i = 0; i < 2; i++) {
+        struct vless_node nd;
+        memset(&nd, 0, sizeof nd);
+        if (vless_parse_url(l[i], &nd) != 0 || nodes_add(&nd, l[i]) != i) check(0, "fixture: node store");
+    }
+    sl_set_interner(NULL);
+}
+
+static void ib_cmd(const char *body) {
+    FILE *f = fmemopen((void *)body, strlen(body), "r");
+    char *line = NULL;
+    size_t cap = 0;
+    if (!f) return;
+    sl_set_interner(nodes_intern);
+    ctlinb_read_cmd(f, &line, &cap);
+    sl_set_interner(NULL);
+    free(line);
+    fclose(f);
+}
+
+static void ib_cmd_spin(void *arg) {
+    ib_cmd(arg);
+    spin(2);
+}
+
+static void ib_events(const char *body, char *out, size_t cap) {
+    out_start();
+    ib_cmd_spin((void *)body);
+    out_end(out, cap);
+}
+
+static void srv_reset(void) {
+    pthread_mutex_lock(&g_srv_mu);
+    for (int i = 0; i < g_srv_n; i++)
+        if (g_srv[i] >= 0) close(g_srv[i]);
+    g_srv_n = 0;
+    pthread_mutex_unlock(&g_srv_mu);
+}
+
+static int srv_count(void) {
+    pthread_mutex_lock(&g_srv_mu);
+    int n = g_srv_n;
+    pthread_mutex_unlock(&g_srv_mu);
+    return n;
+}
+
+static void ib_fixture(void) {
+    k_reset();
+    ib_cmd_spin("\n");
+    srv_reset();
+    all_alive();
+    pool_new(1, POOL_BY_CONNECTION, 3);
+}
+
+static uint16_t free_port(uint32_t addr) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET };
+    a.sin_addr.s_addr = addr;
+    socklen_t l = sizeof a;
+    uint16_t p = 0;
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof a) == 0 && getsockname(fd, (struct sockaddr *)&a, &l) == 0)
+        p = ntohs(a.sin_port);
+    if (fd >= 0) close(fd);
+    return p;
+}
+
+static int ib_dial(uint32_t addr, uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port) };
+    a.sin_addr.s_addr = addr;
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int ib_send_all(int fd, const void *p, size_t n) {
+    return fd >= 0 && send(fd, p, n, MSG_NOSIGNAL) == (ssize_t)n ? 0 : -1;
+}
+
+static int ib_socks_at(uint32_t addr, uint16_t port, uint32_t dst, uint16_t dport) {
+    int fd = ib_dial(addr, port);
+    unsigned char m[13] = { 5, 1, 0, 5, 1, 0, 1 };
+    memcpy(m + 7, &dst, 4);
+    m[11] = (unsigned char)(dport >> 8);
+    m[12] = (unsigned char)dport;
+    if (fd >= 0 && ib_send_all(fd, m, sizeof m) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int ib_socks(uint16_t port, uint32_t dst) { return ib_socks_at(LO, port, dst, 443); }
+
+static size_t ib_read(int fd, unsigned char *b, size_t want, int turns) {
+    size_t got = 0;
+    for (int i = 0; fd >= 0 && i < turns && got < want; i++) {
+        loop_turn(&g_L, 10);
+        ssize_t r = recv(fd, b + got, want - got, MSG_DONTWAIT);
+        if (r > 0) got += (size_t)r;
+        else if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) break;
+    }
+    return got;
+}
+
+static const unsigned char IB_OK[12] = { 5, 0, 5, 0, 0, 1 };
+
+static int ib_reply_is(int fd, unsigned char rep) {
+    unsigned char r[12], want[12] = { 5, 0, 5, rep, 0, 1 };
+    return ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, want, sizeof r);
+}
+
+static int ib_reply_is_rest(int fd, unsigned char rep) {
+    unsigned char r[10], want[10] = { 5, rep, 0, 1 };
+    return ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, want, sizeof r);
+}
+
+static int ib_open(uint16_t port, uint32_t dst, struct conn **cc, int *srv) {
+    int fd = ib_socks(port, dst);
+    int ok = ib_reply_is(fd, 0);
+    struct conn *c = ok ? k_conn_of(fd) : NULL;
+    *cc = c;
+    *srv = c ? pm_srv_of(c) : -1;
+    return fd;
+}
+
+static int ib_echo(int fd, int srv) {
+    unsigned char b[4];
+    if (srv < 0 || ib_send_all(fd, "ping", 4) != 0) return 0;
+    size_t got = 0;
+    for (int i = 0; i < 300 && got < 4; i++) {
+        loop_turn(&g_L, 10);
+        ssize_t r = recv(srv, b + got, 4 - got, MSG_DONTWAIT);
+        if (r > 0) got += (size_t)r;
+    }
+    if (got != 4 || memcmp(b, "ping", 4) || ib_send_all(srv, "pong", 4) != 0) return 0;
+    return ib_read(fd, b, 4, 300) == 4 && !memcmp(b, "pong", 4);
+}
+
+static void ib_line(char *cmd, size_t cap, uint32_t addr, uint16_t port, const char *creds, const char *link) {
+    char a[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr, a, sizeof a);
+    snprintf(cmd, cap, "%s:%u %s %s\n\n", a, port, creds, link);
+}
+
+static int ib_event(const char *out, uint16_t port, const char *state, const char *why_part) {
+    char k[96];
+    snprintf(k, sizeof k, "{\"type\":\"inbound\",\"port\":%u,\"state\":\"%s\",\"why\":\"", port, state);
+    const char *p = strstr(out, k);
+    if (!p) return 0;
+    const char *e = strchr(p, '\n');
+    const char *w = strstr(p + strlen(k), why_part);
+    return *why_part ? w && (!e || w < e) : p[strlen(k)] == '"';
+}
+
+/* Catches an inbound that dials the pool's pick, or replies after the node's bytes instead of first. */
+static void t_ib_listens_on_its_address(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512], out[4096];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_events(cmd, out, sizeof out);
+    check(ib_event(out, p, "up", ""), "an inbound line: its port listens, the event says up");
+    int n0 = srv_count();
+    int fd = ib_socks(p, ip4(10, 9, 8, 7));
+    for (int i = 0; i < 300 && srv_count() == n0; i++) spin(1);
+    int s = srv_count() > n0 ? g_srv[n0] : -1;
+    if (s >= 0) ib_send_all(s, "pong", 4);
+    unsigned char r[16], want[16];
+    memcpy(want, IB_OK, 12);
+    memcpy(want + 12, "pong", 4);
+    size_t n = ib_read(fd, r, sizeof r, 300);
+    struct conn *c = k_conn_of(fd);
+    check(srv_count() == n0 + 1 && g_srv_node[n0] == &g_fn[1] && n == 16 && !memcmp(r, want, 16) && c &&
+              c->key.dst == ip4(10, 9, 8, 7) && c->key.dport == 443 && c->ib == 1,
+          "a SOCKS CONNECT dials node 1; the client reads 05 00, the success reply, then the node's bytes");
+    unsigned char b[4];
+    size_t got = 0;
+    if (fd >= 0 && ib_send_all(fd, "ping", 4) == 0)
+        for (int i = 0; s >= 0 && i < 300 && got < 4; i++) {
+            loop_turn(&g_L, 10);
+            ssize_t k = recv(s, b + got, 4 - got, MSG_DONTWAIT);
+            if (k > 0) got += (size_t)k;
+        }
+    check(got == 4 && !memcmp(b, "ping", 4), "  and the client's bytes reach the node");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a gone node (a dash, or an index past the node store) dialled instead of refused with 03. */
+static void t_ib_gone_replies_03(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512], out[4096];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", "-");
+    ib_events(cmd, out, sizeof out);
+    int n0 = srv_count();
+    int fd = ib_socks(p, ip4(10, 9, 8, 7));
+    int rep = ib_reply_is(fd, 3);
+    check(ib_event(out, p, "no-node", "") && rep && k_wait(fd, 50) == 'F' && srv_count() == n0 && g_live_n == 0,
+          "a dash: the port listens, a CONNECT reads 03 then EOF, no dial");
+    if (fd >= 0) close(fd);
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    nodes_init(sizeof(struct vless_node));
+    fd = ib_socks(p, ip4(10, 9, 8, 7));
+    rep = ib_reply_is(fd, 3);
+    ib_nodes();
+    check(rep && srv_count() == n0 && g_live_n == 0, "a node index past the store: 03, no dial");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a failed dial answered with a reset instead of 04 and a clean close. */
+static void t_ib_dial_fail_replies_04(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    g_fn[1].alive = 0;
+    int fd = ib_socks(p, ip4(10, 9, 8, 7));
+    int rep = ib_reply_is(fd, 4);
+    int end = k_wait(fd, 50);
+    g_fn[1].alive = 1;
+    check(rep && end == 'F' && g_live_n == 0, "node 1 refuses: the client reads 04, then EOF, not a reset");
+    if (fd >= 0) close(fd);
+}
+
+static int ib_http(uint16_t port, const char *want) {
+    int fd = ib_dial(LO, port);
+    const char *req = "CONNECT 10.9.8.7:443 HTTP/1.1\r\nHost: 10.9.8.7:443\r\n\r\n";
+    char r[128];
+    size_t n = strlen(want);
+    int ok = ib_send_all(fd, req, strlen(req)) == 0 && ib_read(fd, (unsigned char *)r, n, 300) == n &&
+             !memcmp(r, want, n);
+    if (fd >= 0) close(fd);
+    return ok;
+}
+
+/* Catches an HTTP client answered in SOCKS bytes, after a dial or a gone node. */
+static void t_ib_http_replies(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    int ok = ib_http(p, "HTTP/1.1 200 Connection established\r\n\r\n");
+    g_fn[1].alive = 0;
+    int bad = ib_http(p, "HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    g_fn[1].alive = 1;
+    ib_line(cmd, sizeof cmd, LO, p, "- -", "-");
+    ib_cmd_spin(cmd);
+    int gone = ib_http(p, "HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    check(ok && bad && gone, "HTTP CONNECT: 200 dialled, 502 dial failed, 503 node gone");
+}
+
+/* Catches the line's credentials not reaching the handshake. */
+static void t_ib_auth_from_the_line(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "alice pw", IB_L1);
+    ib_cmd_spin(cmd);
+    int fd = ib_dial(LO, p);
+    unsigned char m[] = { 5, 1, 2, 1, 5, 'a', 'l', 'i', 'c', 'e', 2, 'p', 'w', 5, 1, 0, 1, 10, 9, 8, 7, 1, 187 };
+    unsigned char r[14], want[14] = { 5, 2, 1, 0, 5, 0, 0, 1 };
+    int ok = ib_send_all(fd, m, sizeof m) == 0 && ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, want, 14);
+    if (fd >= 0) close(fd);
+    fd = ib_dial(LO, p);
+    unsigned char g[3] = { 5, 1, 0 }, ff[2];
+    int refused = ib_send_all(fd, g, 3) == 0 && ib_read(fd, ff, 2, 300) == 2 && ff[0] == 5 && ff[1] == 0xff;
+    check(ok && refused, "user and password from the line: 02 with them succeeds, a client without them gets FF");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a handshake begun without auth finishing a CONNECT after the line gained credentials, or one cut by a command that kept them. */
+static void t_ib_creds_change_ends_handshakes(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    unsigned char g[3] = { 5, 1, 0 }, ok2[2], req[10] = { 5, 1, 0, 1, 10, 9, 8, 7, 1, 187 };
+    int a = ib_dial(LO, p);
+    int greeted = ib_send_all(a, g, 3) == 0 && ib_read(a, ok2, 2, 300) == 2 && ok2[0] == 5 && ok2[1] == 0;
+    ib_cmd_spin(cmd);
+    int kept = ib_send_all(a, req, sizeof req) == 0 && ib_reply_is_rest(a, 0);
+    int n0 = srv_count(), live0 = g_live_n;
+    int b = ib_dial(LO, p);
+    int greeted_b = ib_send_all(b, g, 3) == 0 && ib_read(b, ok2, 2, 300) == 2 && ok2[0] == 5 && ok2[1] == 0;
+    ib_line(cmd, sizeof cmd, LO, p, "alice pw", IB_L1);
+    ib_cmd_spin(cmd);
+    int ended = k_wait(b, 50) == 'F';
+    ib_send_all(b, req, sizeof req);
+    spin(5);
+    check(greeted && kept && greeted_b && ended && srv_count() == n0 && g_live_n == live0,
+          "a line gains a password: a handshake begun without it is closed and never dials; the same line keeps one");
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+}
+
+/* Catches a domain resolved, dropped, or put into the destination address instead of carried as the host. */
+static void t_ib_domain_is_the_host(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    int fd = ib_dial(LO, p);
+    unsigned char m[] = { 5, 1, 0, 5, 1, 0, 3, 11, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 1, 187 };
+    int ok = ib_send_all(fd, m, sizeof m) == 0 && ib_reply_is(fd, 0);
+    struct conn *c = ok ? k_conn_of(fd) : NULL;
+    const struct fsess *fs = c ? CINNER(SESS(c)) : NULL;
+    check(fs && !strcmp(fs->host, "example.com") && c->key.dst == 0 && c->key.dport == 443,
+          "a SOCKS domain goes to the dialer as the host, the address left 0");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches early bytes past the handshake buffer failing a good request, or reaching the node out of order. */
+static void t_ib_early_data(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    static unsigned char m[13 + 900], got[900];
+    unsigned char h[13] = { 5, 1, 0, 5, 1, 0, 1, 10, 9, 8, 7, 1, 187 };
+    memcpy(m, h, 13);
+    for (size_t i = 0; i < 900; i++) m[13 + i] = pat(i);
+    int n0 = srv_count();
+    int fd = ib_dial(LO, p);
+    int ok = ib_send_all(fd, m, sizeof m) == 0 && ib_reply_is(fd, 0);
+    int s = srv_count() > n0 ? g_srv[n0] : -1;
+    size_t n = 0;
+    for (int i = 0; s >= 0 && i < 300 && n < sizeof got; i++) {
+        loop_turn(&g_L, 10);
+        ssize_t r = recv(s, got + n, sizeof got - n, MSG_DONTWAIT);
+        if (r > 0) n += (size_t)r;
+    }
+    check(ok && n == sizeof got && !memcmp(got, m + 13, sizeof got),
+          "900 bytes pipelined after the request: success, and the node gets all of them in order");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches one busy port taking down the other inbound, a busy port without its reason, a password logged, or every retry logged. */
+static void t_ib_busy_one_of_two(void) {
+    ib_fixture();
+    int hold = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ha = { .sin_family = AF_INET };
+    ha.sin_addr.s_addr = LO;
+    socklen_t hl = sizeof ha;
+    uint16_t a = 0, b = free_port(LO);
+    if (hold >= 0 && bind(hold, (struct sockaddr *)&ha, sizeof ha) == 0 && listen(hold, 1) == 0 &&
+        getsockname(hold, (struct sockaddr *)&ha, &hl) == 0)
+        a = ntohs(ha.sin_port);
+    char cmd[1024], out[4096], said[96];
+    snprintf(cmd, sizeof cmd, "127.0.0.1:%u alice s3cret " IB_L1 "\n127.0.0.1:%u - - " IB_L1 "\n\n", a, b);
+    snprintf(said, sizeof said, "tunvless[error] tunnel: inbound :%u cannot listen: ", a);
+    char err1[4096], err2[4096];
+    out_start();
+    stderr_of(ib_cmd_spin, cmd, err1, sizeof err1);
+    int leaked = strstr(err1, "s3cret") || strstr(err1, "alice");
+    out_end(out, sizeof out);
+    check(a && ib_event(out, a, "busy", "in use") && strstr(err1, said) && !leaked,
+          "a taken port: event busy with the kernel's reason, one error line, no credentials in it");
+    out_start();
+    stderr_of(ib_cmd_spin, cmd, err2, sizeof err2);
+    out_end(out, sizeof out);
+    check(ib_event(out, a, "busy", "in use") && !strstr(err2, said),
+          "  the same command again: busy again, the same error not logged twice");
+    struct conn *c;
+    int s;
+    int fd = ib_open(b, ip4(10, 9, 8, 7), &c, &s);
+    check(ib_event(out, b, "up", "") && c && ib_echo(fd, s), "  the other inbound is up and serves");
+    if (fd >= 0) close(fd);
+    if (hold >= 0) close(hold);
+}
+
+/* Catches a port that came up and was lost again staying silent in the log. */
+static void t_ib_busy_again_after_up(void) {
+    ib_fixture();
+    uint32_t two = htonl(0x7f000002);
+    int hold = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ha = { .sin_family = AF_INET };
+    ha.sin_addr.s_addr = two;
+    socklen_t hl = sizeof ha;
+    uint16_t a = 0;
+    if (hold >= 0 && bind(hold, (struct sockaddr *)&ha, sizeof ha) == 0 && listen(hold, 1) == 0 &&
+        getsockname(hold, (struct sockaddr *)&ha, &hl) == 0)
+        a = ntohs(ha.sin_port);
+    char on2[256], on1[256], out[4096], said[96], e1[4096], e2[4096], e3[4096];
+    snprintf(on2, sizeof on2, "127.0.0.2:%u - - " IB_L1 "\n\n", a);
+    snprintf(on1, sizeof on1, "127.0.0.1:%u - - " IB_L1 "\n\n", a);
+    snprintf(said, sizeof said, "tunvless[error] tunnel: inbound :%u cannot listen: ", a);
+    out_start();
+    stderr_of(ib_cmd_spin, on2, e1, sizeof e1);
+    stderr_of(ib_cmd_spin, on1, e2, sizeof e2);
+    stderr_of(ib_cmd_spin, on2, e3, sizeof e3);
+    out_end(out, sizeof out);
+    check(a && strstr(e1, said) && !strstr(e2, said) && ib_event(out, a, "up", "") && strstr(e3, said),
+          "busy, up on another address, busy again: the error is logged both times");
+    if (hold >= 0) close(hold);
+}
+
+static uint32_t kb_of(const char *out, uint16_t port, const char *field) {
+    char k[64];
+    snprintf(k, sizeof k, "{\"type\":\"ibytes\",\"port\":%u,", port);
+    const char *p = strstr(out, k);
+    const char *f = p ? strstr(p, field) : NULL;
+    return f ? (uint32_t)strtoul(f + strlen(field), NULL, 10) : UINT32_MAX;
+}
+
+static void ib_flush_counts(char *out, size_t cap) {
+    g_kb.at = 0;
+    for (int i = 0; i < IB_MAX; i++) g_ib[i].kb.at = 0;
+    out_start();
+    loop_turn(&g_L, 0);
+    out_end(out, cap);
+}
+
+/* Catches a rebind that cuts live flows, a closed listener left open, or an old flow counted to a new port. */
+static void t_ib_rebind_keeps_live_conns(void) {
+    ib_fixture();
+    uint32_t two = ip4(127, 0, 0, 2);
+    uint16_t p = free_port(LO), q = free_port(LO);
+    char cmd[512], out[4096];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    ib_line(cmd, sizeof cmd, two, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    int old = ib_dial(LO, p);
+    int fresh = ib_socks_at(two, p, ip4(10, 9, 8, 6), 443);
+    check(c && old < 0 && ib_reply_is(fresh, 0) && ib_echo(fd, s),
+          "a new address: the old one refuses, the new one serves, the live flow still echoes");
+    if (fresh >= 0) close(fresh);
+    ib_line(cmd, sizeof cmd, LO, q, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    ib_flush_counts(out, sizeof out);
+    int gone = ib_dial(two, p);
+    check(gone < 0 && ib_echo(fd, s), "another port: the old port refuses, the live flow still echoes");
+    ib_flush_counts(out, sizeof out);
+    check(c->ib == IB_ORPHAN && kb_of(out, q, "\"rx\":") == UINT32_MAX && !strstr(out, "\"bytes\""),
+          "  and its bytes are counted to neither the new port nor the kernel");
+    if (gone >= 0) close(gone);
+    if (old >= 0) close(old);
+    if (fd >= 0) close(fd);
+}
+
+/* Catches an empty command that leaves the old listeners open. */
+static void t_ib_cleared_closes_listeners(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO), q = free_port(LO);
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "127.0.0.1:%u - - " IB_L1 "\n127.0.0.1:%u - - -\n\n", p, q);
+    ib_cmd_spin(cmd);
+    int before = ib_dial(LO, p);
+    ib_cmd_spin("\n");
+    int a = ib_dial(LO, p), b = ib_dial(LO, q);
+    check(before >= 0 && a < 0 && b < 0, "an empty command: both ports refuse connections");
+    if (before >= 0) close(before);
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+}
+
+/* Catches an inbound flow that takes a spare session instead of dialling its node. */
+static void t_ib_no_spare(void) {
+    ib_fixture();
+    void *old = g_spares[0].sess;
+    g_spare_want = 1;
+    stack_setup(g_dl);
+    free(old);
+    g_spare_syn_ns = 0;
+    spare_refill();
+    spare_refill();
+    int ready = 0;
+    for (int i = 0; i < 500 && !ready; i++) {
+        pthread_mutex_lock(&g_spare_mu);
+        ready = g_spares[0].state == SPARE_READY;
+        pthread_mutex_unlock(&g_spare_mu);
+        if (!ready) usleep(2000);
+    }
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    int n0 = srv_count();
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    pthread_mutex_lock(&g_spare_mu);
+    int kept = g_spares[0].state == SPARE_READY;
+    pthread_mutex_unlock(&g_spare_mu);
+    check(ready && c && kept && srv_count() == n0 + 1 && g_srv_node[n0] == &g_fn[1] && ib_echo(fd, s),
+          "a ready spare: the inbound flow dials node 1 itself and the spare stays");
+    if (fd >= 0) close(fd);
+    k_reset();
+    pthread_mutex_lock(&g_spare_mu);
+    for (int j = 0; j < SPARE_MAX; j++)
+        if (g_spares[j].state == SPARE_READY) {
+            g_dl->ops->close(g_spares[j].sess);
+            g_spares[j].state = SPARE_EMPTY;
+        }
+    pthread_mutex_unlock(&g_spare_mu);
+    g_spare_want = 0;
+}
+
+/* Catches inbound bytes counted into the kernel bytes event, the handshake counted, or ibytes missing its port. */
+static void t_ib_not_in_kernel_bytes(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512], out[4096];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    ib_flush_counts(out, sizeof out);
+    int quiet = kb_of(out, p, "\"rx\":") == UINT32_MAX;
+    int moved = ib_echo(fd, s) && ib_echo(fd, s);
+    ib_flush_counts(out, sizeof out);
+    check(quiet && moved && kb_of(out, p, "\"rx\":") == 8 && kb_of(out, p, "\"tx\":") == 8 && !strstr(out, "\"bytes\""),
+          "inbound traffic: ibytes with its port, 8 down and 8 up, and no bytes event");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a close prefix that resets an inbound flow (its odst is 0, inside 0.0.0.0/0). */
+static void t_ib_close_prefix_skips(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512], out[4096];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    out_start();
+    k_cmd("0.0.0.0/0\n\n", 1);
+    spin(3);
+    out_end(out, sizeof out);
+    check(c && strstr(out, "{\"type\":\"close\",\"count\":0}") && k_seen(fd) == 'W' && ib_echo(fd, s),
+          "close 0.0.0.0/0: the inbound flow is not counted and still echoes");
+    if (fd >= 0) close(fd);
+}
+
+static struct conn *ib_fake(uint8_t ib) {
+    struct conn *c = &g_conns[g_freelist[--g_free_n]];
+    memset(c, 0, sizeof(*c));
+    g_dl->ops->clear(SESS(c));
+    c->used = 1;
+    c->pending = 1;
+    c->ib = ib;
+    c->fd = c->cfd = -1;
+    c->hnext = -1;
+    c->livepos = (int16_t)g_live_n;
+    g_live[g_live_n++] = (uint16_t)(c - g_conns);
+    return c;
+}
+
+/* Catches an inbound cap off by one, or a refusal that takes a slot first. */
+static void t_ib_conn_cap(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    static struct conn *fk[IB_CONNS_MAX];
+    for (int i = 0; i < IB_CONNS_MAX - 1; i++) fk[i] = ib_fake(1);
+    int free0 = g_free_n;
+    int n0 = srv_count();
+    int over = ib_socks(p, ip4(10, 9, 8, 6));
+    int refused = ib_reply_is(over, 1) && g_free_n == free0 && srv_count() == n0;
+    fk[IB_CONNS_MAX - 2]->pending = 0;
+    conn_drop(fk[IB_CONNS_MAX - 2]);
+    int under = ib_socks(p, ip4(10, 9, 8, 5));
+    int taken = ib_reply_is(under, 0);
+    check(c && refused && taken && ib_echo(fd, s),
+          "128 inbound flows: the 129th reads 01 with no slot taken; at 127 the next one opens");
+    for (int i = 0; i < IB_CONNS_MAX - 2; i++) {
+        fk[i]->pending = 0;
+        conn_drop(fk[i]);
+    }
+    if (over >= 0) close(over);
+    if (under >= 0) close(under);
+    if (fd >= 0) close(fd);
+}
+
+/* Catches an inbound that evicts a connection or eats the last free slots the TUN needs. */
+static void t_ib_reserve(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *dns = ib_fake(0);
+    dns->pending = 0;
+    dns->is_udp = 1;
+    dns->key.proto = 17;
+    dns->key.dport = 53;
+    dns->last = g_now_s - DNS_IDLE_S - 1;
+    int n0 = g_free_n;
+    g_free_n = 0;
+    int a = ib_socks(p, ip4(10, 9, 8, 6));
+    int none = ib_reply_is(a, 1) && dns->used && dns->is_udp && dns->key.dport == 53 && g_live_n == 1;
+    g_free_n = IB_RESERVE - 1;
+    int b = ib_socks(p, ip4(10, 9, 8, 5));
+    int short_ = ib_reply_is(b, 1) && g_free_n == IB_RESERVE - 1;
+    g_free_n = IB_RESERVE;
+    int d = ib_socks(p, ip4(10, 9, 8, 4));
+    int at = ib_reply_is(d, 0) && g_free_n == IB_RESERVE - 1;
+    g_freelist[IB_RESERVE - 1] = g_freelist[n0 - 1];
+    g_free_n = n0 - 1;
+    check(none && short_ && at,
+          "free slots: 0 refuses with 01 and keeps an evictable DNS flow; 63 refuses; 64 opens");
+    conn_drop(dns);
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+    if (d >= 0) close(d);
+}
+
+/* Catches a handshake that never ends, or one cut before its 5000 ms. */
+static void t_ib_handshake_deadline(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    int fd = ib_dial(LO, p);
+    ib_send_all(fd, "\x05", 1);
+    int j = -1;
+    for (int i = 0; i < 50 && j < 0; i++) {
+        spin(1);
+        for (int k = 0; k < IB_HS_MAX; k++)
+            if (g_hs[k].ib) j = k;
+    }
+    uint64_t at = j >= 0 ? g_hs[j].at : 0;
+    if (j >= 0) ib_deadlines(at + 4999ull * 1000000ull);
+    int early = j >= 0 && g_hs[j].ib && k_seen(fd) == 'W';
+    if (j >= 0) ib_deadlines(at + 5001ull * 1000000ull);
+    check(early && !g_hs[j].ib && k_seen(fd) != 'W',
+          "a client silent after 05: open at 4999 ms, closed at 5001 ms");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches a stop that leaves inbound listeners, handshakes or flows to end with a FIN. */
+static void t_ib_stop_resets(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    struct conn *c;
+    int s;
+    int fd = ib_open(p, ip4(10, 9, 8, 7), &c, &s);
+    int hs = ib_dial(LO, p);
+    ib_send_all(hs, "\x05", 1);
+    int j = -1;
+    for (int i = 0; i < 50 && j < 0; i++) {
+        spin(1);
+        for (int k = 0; k < IB_HS_MAX; k++)
+            if (g_hs[k].ib) j = k;
+    }
+    if (!c || c->cfd < 0 || j < 0) {
+        check(0, "fixture: an inbound flow and a handshake");
+        return;
+    }
+    stop_reset(&g_L.tun, 1);
+    close(c->cfd);
+    c->cfd = -1;
+    int late = ib_dial(LO, p);
+    check(k_seen(fd) == 'R' && k_seen(hs) == 'R' && late < 0,
+          "stop: the inbound flow and the handshake are reset, the port refuses");
+    if (late >= 0) close(late);
+    close(hs);
+    close(fd);
+}
+
+static int ib_assoc_open(uint16_t port, uint16_t *relay) {
+    int fd = ib_dial(LO, port);
+    unsigned char m[13] = { 5, 1, 0, 5, 3, 0, 1 }, r[12], want[10] = { 5, 0, 5, 0, 0, 1, 127, 0, 0, 1 };
+    *relay = 0;
+    if (ib_send_all(fd, m, sizeof m) == 0 && ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, want, 10))
+        *relay = (uint16_t)(r[10] << 8 | r[11]);
+    return fd;
+}
+
+static int ib_ucli(uint32_t addr) {
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET };
+    a.sin_addr.s_addr = addr;
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void ib_dgram(int u, uint16_t relay, const unsigned char *h, size_t hn, const char *d) {
+    unsigned char b[512];
+    size_t n = strlen(d);
+    memcpy(b, h, hn);
+    memcpy(b + hn, d, n);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(relay) };
+    a.sin_addr.s_addr = LO;
+    if (u >= 0) sendto(u, b, hn + n, 0, (struct sockaddr *)&a, sizeof a);
+}
+
+static void ib_to(int u, uint16_t relay, uint32_t dst, uint16_t dport, const char *d) {
+    unsigned char h[10] = { 0, 0, 0, 1 };
+    memcpy(h + 4, &dst, 4);
+    h[8] = (unsigned char)(dport >> 8);
+    h[9] = (unsigned char)dport;
+    ib_dgram(u, relay, h, sizeof h, d);
+}
+
+static struct conn *ib_ucon(uint32_t dst, uint16_t dport) {
+    for (int li = 0; li < g_live_n; li++) {
+        struct conn *c = &g_conns[g_live[li]];
+        if (c->ib_udp && c->key.dst == dst && c->key.dport == dport) return c;
+    }
+    return NULL;
+}
+
+static int ib_ucount(void) {
+    int n = 0;
+    for (int li = 0; li < g_live_n; li++) n += g_conns[g_live[li]].ib_udp != 0;
+    return n;
+}
+
+static int ib_slots_used(void) {
+    int n = 0;
+    for (int a = 0; a < IB_ASSOC_MAX; a++)
+        for (int k = 0; g_assoc[a].ib && k < IB_UDP_DST; k++) n += g_assoc[a].dst_conn[k] >= 0;
+    return n;
+}
+
+static struct conn *ib_uready(uint32_t dst, uint16_t dport) {
+    for (int i = 0; i < 300; i++) {
+        struct conn *c = ib_ucon(dst, dport);
+        if (c && !c->pending && c->fd >= 0) return c;
+        loop_turn(&g_L, 10);
+    }
+    return NULL;
+}
+
+static int ib_srv_got(int srv, const void *want, size_t n) {
+    unsigned char b[512];
+    size_t got = 0;
+    for (int i = 0; srv >= 0 && i < 300 && got < n; i++) {
+        loop_turn(&g_L, 10);
+        ssize_t r = recv(srv, b + got, sizeof b - got, MSG_DONTWAIT);
+        if (r > 0) got += (size_t)r;
+    }
+    return got == n && !memcmp(b, want, n);
+}
+
+static int ib_cli_got(int u, uint16_t relay, const void *want, size_t n) {
+    unsigned char b[512];
+    for (int i = 0; u >= 0 && i < 300; i++) {
+        loop_turn(&g_L, 10);
+        struct sockaddr_in a;
+        socklen_t al = sizeof a;
+        ssize_t r = recvfrom(u, b, sizeof b, MSG_DONTWAIT, (struct sockaddr *)&a, &al);
+        if (r >= 0)
+            return (size_t)r == n && !memcmp(b, want, n) && a.sin_addr.s_addr == LO && ntohs(a.sin_port) == relay;
+    }
+    return 0;
+}
+
+static uint16_t ib_udp_fixture(char *cmd, size_t cap, int *tcp, uint16_t *relay, int *u) {
+    ib_fixture();
+    uint16_t p = free_port(LO);
+    ib_line(cmd, cap, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    *tcp = ib_assoc_open(p, relay);
+    *u = ib_ucli(LO);
+    return p;
+}
+
+static void ib_udp_done(int tcp, int u) {
+    if (tcp >= 0) close(tcp);
+    if (u >= 0) close(u);
+    spin(2);
+}
+
+/* Catches a relay that dials the pool's pick, drops the destination, or answers without the SOCKS header. */
+static void t_ib_udp_relay(void) {
+    char cmd[512], out[4096];
+    int tcp, u;
+    uint16_t relay;
+    uint16_t p = ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int n0 = srv_count();
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "ping");
+    struct conn *c = ib_uready(ip4(10, 9, 8, 7), 443);
+    int s = c ? pm_srv_of(c) : -1;
+    static const unsigned char framed[6] = { 0, 4, 'p', 'i', 'n', 'g' };
+    const struct fsess *fs = c ? CINNER(SESS(c)) : NULL;
+    check(relay && c && fs && fs->udp == 1 && c->is_udp && c->key.proto == 17 && c->cfd == -1 && c->ib == 1 &&
+              srv_count() == n0 + 1 &&
+              g_srv_node[n0] == &g_fn[1] && ib_srv_got(s, framed, sizeof framed),
+          "UDP ASSOCIATE: 05 00 with the listen address and a relay port; a datagram opens a UDP flow on node 1");
+    static const unsigned char back[14] = { 0, 0, 0, 1, 10, 9, 8, 7, 1, 187, 'p', 'o', 'n', 'g' };
+    ib_send_all(s, "pong", 4);
+    check(ib_cli_got(u, relay, back, sizeof back), "  the answer reaches the client from the relay port behind 00 00 00 01 10.9.8.7:443");
+    ib_flush_counts(out, sizeof out);
+    /* catches: UDP payloads counted into the kernel bytes event, or not counted to the inbound */
+    check(kb_of(out, p, "\"rx\":") == 4 && kb_of(out, p, "\"tx\":") == 4 && !strstr(out, "\"bytes\""),
+          "  ibytes counts the payloads: 4 down, 4 up, no bytes event");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches one session shared by two destinations, a session per datagram, or an answer framed with another session's address. */
+static void t_ib_udp_two_destinations(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int n0 = srv_count();
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a1");
+    ib_to(u, relay, ip4(10, 9, 8, 6), 53, "b1");
+    struct conn *a = ib_uready(ip4(10, 9, 8, 7), 443), *b = ib_uready(ip4(10, 9, 8, 6), 53);
+    int sa = a ? pm_srv_of(a) : -1, sb = b ? pm_srv_of(b) : -1;
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a2");
+    static const unsigned char wa[8] = { 0, 2, 'a', '1', 0, 2, 'a', '2' }, wb[4] = { 0, 2, 'b', '1' };
+    int got = ib_srv_got(sa, wa, sizeof wa) && ib_srv_got(sb, wb, sizeof wb);
+    check(a && b && a != b && ib_ucount() == 2 && srv_count() == n0 + 2 && g_srv_node[n0] == &g_fn[1] &&
+              g_srv_node[n0 + 1] == &g_fn[1] && got,
+          "two destinations: two UDP sessions on node 1, each gets its own datagrams");
+    static const unsigned char back[12] = { 0, 0, 0, 1, 10, 9, 8, 6, 0, 53, 'o', 'k' };
+    ib_send_all(sb, "ok", 2);
+    check(ib_cli_got(u, relay, back, sizeof back), "  the answer of the second carries 10.9.8.6:53");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a relay that takes datagrams from any source instead of the control connection's address. */
+static void t_ib_udp_foreign_source_dropped(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int f = ib_ucli(ip4(127, 0, 0, 2));
+    ib_to(f, relay, ip4(10, 9, 8, 7), 443, "x");
+    ib_to(u, relay, ip4(10, 9, 8, 6), 443, "y");
+    struct conn *b = ib_uready(ip4(10, 9, 8, 6), 443);
+    spin(5);
+    check(f >= 0 && b && ib_ucount() == 1 && !ib_ucon(ip4(10, 9, 8, 7), 443),
+          "a datagram from 127.0.0.2: no flow; the client's own opens one");
+    if (f >= 0) close(f);
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a fragment sent on as a whole datagram. */
+static void t_ib_udp_frag_dropped(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    static const unsigned char h[10] = { 0, 0, 1, 1, 10, 9, 8, 7, 1, 187 };
+    ib_dgram(u, relay, h, sizeof h, "x");
+    ib_to(u, relay, ip4(10, 9, 8, 6), 443, "y");
+    struct conn *b = ib_uready(ip4(10, 9, 8, 6), 443);
+    spin(5);
+    check(b && ib_ucount() == 1 && !ib_ucon(ip4(10, 9, 8, 7), 443), "FRAG 1: dropped; a whole datagram opens a flow");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a datagram to a domain opened as a session (stage 1 carries IPv4 only). */
+static void t_ib_udp_domain_dropped(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int n0 = srv_count();
+    static const unsigned char h[19] = { 0, 0, 0, 3, 11, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 1, 187 };
+    ib_dgram(u, relay, h, 18, "x");
+    ib_to(u, relay, ip4(10, 9, 8, 6), 443, "y");
+    struct conn *b = ib_uready(ip4(10, 9, 8, 6), 443);
+    spin(5);
+    check(b && ib_ucount() == 1 && srv_count() == n0 + 1, "ATYP 3: dropped, no session; an IPv4 datagram opens one");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a destination drop that closes the relay socket or leaves its slot taken. */
+static void t_ib_udp_drop_keeps_relay(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int n0 = srv_count();
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a1");
+    struct conn *a = ib_uready(ip4(10, 9, 8, 7), 443);
+    int cfd = a ? a->cfd : 0;
+    int sa = a ? pm_srv_of(a) : -1;
+    if (sa >= 0) close(sa);
+    for (int i = 0; i < 300 && ib_ucon(ip4(10, 9, 8, 7), 443); i++) loop_turn(&g_L, 10);
+    int gone = !ib_ucon(ip4(10, 9, 8, 7), 443);
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a2");
+    struct conn *b = ib_uready(ip4(10, 9, 8, 7), 443);
+    int sb = b ? pm_srv_of(b) : -1;
+    static const unsigned char w[4] = { 0, 2, 'a', '2' };
+    check(a && cfd == -1 && gone && b && srv_count() == n0 + 2 && ib_srv_got(sb, w, sizeof w) && k_seen(tcp) == 'W' &&
+              ib_slots_used() == 1,
+          "the node ends a destination: the relay stays, the next datagram opens a new session");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a relay that follows the client to whichever port of its address sends next. */
+static void t_ib_udp_client_port_pinned(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int v = ib_ucli(LO);
+    ib_to(u, relay, ip4(10, 9, 8, 6), 443, "y");
+    struct conn *b = ib_uready(ip4(10, 9, 8, 6), 443);
+    ib_to(v, relay, ip4(10, 9, 8, 7), 443, "x");
+    spin(5);
+    check(v >= 0 && b && ib_ucount() == 1 && !ib_ucon(ip4(10, 9, 8, 7), 443),
+          "a second port of the client's address after the first: dropped, no flow");
+    if (v >= 0) close(v);
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a listen-address change that leaves associations bound to the old address. */
+static void t_ib_udp_ends_on_address_change(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    uint16_t p = ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a1");
+    struct conn *a = ib_uready(ip4(10, 9, 8, 7), 443);
+    int before = a && ib_ucount() == 1;
+    ib_line(cmd, sizeof cmd, ip4(127, 0, 0, 2), p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    spin(5);
+    unsigned char b;
+    int live = 0;
+    for (int i = 0; i < IB_ASSOC_MAX; i++) live += g_assoc[i].ib != 0;
+    check(before && live == 0 && ib_ucount() == 0 && recv(tcp, &b, 1, MSG_DONTWAIT) <= 0,
+          "the listen address changes: the association and its UDP session end");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches an association that outlives its TCP connection. */
+static void t_ib_udp_ends_with_tcp(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    ib_to(u, relay, ip4(10, 9, 8, 7), 443, "a1");
+    struct conn *a = ib_uready(ip4(10, 9, 8, 7), 443);
+    int sa = a ? pm_srv_of(a) : -1;
+    static const unsigned char w[4] = { 0, 2, 'a', '1' };
+    int sent = ib_srv_got(sa, w, sizeof w);
+    close(tcp);
+    spin(10);
+    unsigned char b;
+    ssize_t eof = sa >= 0 ? recv(sa, &b, 1, MSG_DONTWAIT) : -1;
+    int again = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in ra = { .sin_family = AF_INET, .sin_port = htons(relay) };
+    ra.sin_addr.s_addr = LO;
+    int bound = again >= 0 && bind(again, (struct sockaddr *)&ra, sizeof ra) == 0;
+    check(relay && sent && ib_ucount() == 0 && eof == 0 && bound,
+          "the TCP connection closes: the relay port is free again and the session to the node is closed");
+    if (again >= 0) close(again);
+    ib_udp_done(-1, u);
+}
+
+static uint64_t *ib_last_of(uint32_t dst) {
+    for (int a = 0; a < IB_ASSOC_MAX; a++)
+        for (int k = 0; g_assoc[a].ib && k < IB_UDP_DST; k++) {
+            int i = g_assoc[a].dst_conn[k];
+            if (i >= 0 && g_conns[i].used && g_conns[i].key.dst == dst) return &g_assoc[a].last_ms[k];
+        }
+    return NULL;
+}
+
+/* Catches a 17th destination that grows the association, evicts a busy session, or evicts not the oldest idle one. */
+static void t_ib_udp_17th_destination(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    int n0 = srv_count();
+    for (int i = 1; i <= 16; i++) ib_to(u, relay, ip4(10, 9, 8, i), 443, "x");
+    int ready = 1;
+    for (int i = 1; i <= 16; i++) ready &= ib_uready(ip4(10, 9, 8, i), 443) != NULL;
+    uint64_t *l3 = ib_last_of(ip4(10, 9, 8, 3)), *l7 = ib_last_of(ip4(10, 9, 8, 7));
+    if (!ready || !l3 || !l7 || srv_count() != n0 + 16) {
+        check(0, "fixture: sixteen ready destinations");
+        ib_udp_done(tcp, u);
+        return;
+    }
+    *l3 = g_now_ns / 1000000 - 59500;
+    ib_to(u, relay, ip4(10, 9, 8, 17), 443, "x");
+    spin(10);
+    int dropped = ib_ucount() == 16 && !ib_ucon(ip4(10, 9, 8, 17), 443) && srv_count() == n0 + 16;
+    l3 = ib_last_of(ip4(10, 9, 8, 3));
+    l7 = ib_last_of(ip4(10, 9, 8, 7));
+    if (l3) *l3 = g_now_ns / 1000000 - 60300;
+    if (l7) *l7 = g_now_ns / 1000000 - 60600;
+    ib_to(u, relay, ip4(10, 9, 8, 17), 443, "x");
+    struct conn *n = ib_uready(ip4(10, 9, 8, 17), 443);
+    check(dropped && n && ib_ucount() == 16 && !ib_ucon(ip4(10, 9, 8, 7), 443) && ib_ucon(ip4(10, 9, 8, 3), 443),
+          "a 17th destination: dropped while none is idle 60 s, else the oldest idle one makes room");
+    ib_udp_done(tcp, u);
+}
+
+/* Catches UDP destination sessions left out of the inbound cap and the reserve. */
+static void t_ib_udp_counts_in_cap(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    static struct conn *fk[IB_CONNS_MAX];
+    for (int i = 0; i < IB_CONNS_MAX - 1; i++) fk[i] = ib_fake(1);
+    ib_to(u, relay, ip4(10, 9, 8, 1), 443, "x");
+    struct conn *a = ib_uready(ip4(10, 9, 8, 1), 443);
+    ib_to(u, relay, ip4(10, 9, 8, 2), 443, "x");
+    spin(5);
+    int capped = a && !ib_ucon(ip4(10, 9, 8, 2), 443);
+    fk[0]->pending = 0;
+    conn_drop(fk[0]);
+    int free0 = g_free_n;
+    g_free_n = IB_RESERVE - 1;
+    ib_to(u, relay, ip4(10, 9, 8, 3), 443, "x");
+    spin(5);
+    int reserved = !ib_ucon(ip4(10, 9, 8, 3), 443) && g_free_n == IB_RESERVE - 1;
+    g_free_n = free0;
+    ib_to(u, relay, ip4(10, 9, 8, 4), 443, "x");
+    struct conn *d = ib_uready(ip4(10, 9, 8, 4), 443);
+    check(capped && reserved && d, "UDP sessions count: the 129th inbound conn and a short reserve drop the datagram; 127 opens");
+    for (int i = 1; i < IB_CONNS_MAX - 1; i++) {
+        fk[i]->pending = 0;
+        conn_drop(fk[i]);
+    }
+    ib_udp_done(tcp, u);
+}
+
+/* Catches a 33rd association taken past the table, or a gone node given a relay. */
+static void t_ib_udp_assoc_limits(void) {
+    ib_fixture();
+    uint16_t p = free_port(LO), relay;
+    char cmd[512];
+    ib_line(cmd, sizeof cmd, LO, p, "- -", IB_L1);
+    ib_cmd_spin(cmd);
+    static int t[IB_ASSOC_MAX];
+    int all = 1;
+    for (int i = 0; i < IB_ASSOC_MAX; i++) {
+        t[i] = ib_assoc_open(p, &relay);
+        all &= relay != 0;
+    }
+    int fd = ib_dial(LO, p);
+    unsigned char m[13] = { 5, 1, 0, 5, 3, 0, 1 }, r[12], full[12] = { 5, 0, 5, 1, 0, 1 };
+    int refused = ib_send_all(fd, m, sizeof m) == 0 && ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, full, 12);
+    if (fd >= 0) close(fd);
+    close(t[0]);
+    spin(3);
+    t[0] = ib_assoc_open(p, &relay);
+    check(all && refused && relay, "32 associations: the 33rd reads 01; one closes and the next gets a relay");
+    for (int i = 0; i < IB_ASSOC_MAX; i++)
+        if (t[i] >= 0) close(t[i]);
+    spin(3);
+    ib_line(cmd, sizeof cmd, LO, p, "- -", "-");
+    ib_cmd_spin(cmd);
+    fd = ib_dial(LO, p);
+    unsigned char gone[12] = { 5, 0, 5, 3, 0, 1 };
+    int g = ib_send_all(fd, m, sizeof m) == 0 && ib_read(fd, r, sizeof r, 300) == sizeof r && !memcmp(r, gone, 12);
+    check(g && k_wait(fd, 50) == 'F', "a dash: UDP ASSOCIATE reads 03, then EOF");
+    if (fd >= 0) close(fd);
+}
+
+/* Catches an association left open after its inbound is removed, or ended with a FIN at a stop. */
+static void t_ib_udp_removed_and_stop(void) {
+    char cmd[512];
+    int tcp, u;
+    uint16_t relay;
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    ib_cmd_spin("\n");
+    int end = k_wait(tcp, 50);
+    int again = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in ra = { .sin_family = AF_INET, .sin_port = htons(relay) };
+    ra.sin_addr.s_addr = LO;
+    int bound = again >= 0 && bind(again, (struct sockaddr *)&ra, sizeof ra) == 0;
+    if (again >= 0) close(again);
+    check(relay && end == 'F' && bound, "an inbound removed: its association ends, the relay port is free");
+    ib_udp_done(tcp, u);
+    ib_udp_fixture(cmd, sizeof cmd, &tcp, &relay, &u);
+    stop_reset(&g_L.tun, 1);
+    check(relay && k_seen(tcp) == 'R', "stop: the association's TCP connection is reset");
+    ib_udp_done(tcp, u);
+}
+
+static void ib_part(void) {
+    ib_nodes();
+    t_ib_listens_on_its_address();
+    t_ib_gone_replies_03();
+    t_ib_dial_fail_replies_04();
+    t_ib_http_replies();
+    t_ib_auth_from_the_line();
+    t_ib_creds_change_ends_handshakes();
+    t_ib_domain_is_the_host();
+    t_ib_early_data();
+    t_ib_busy_one_of_two();
+    t_ib_busy_again_after_up();
+    t_ib_rebind_keeps_live_conns();
+    t_ib_cleared_closes_listeners();
+    t_ib_no_spare();
+    t_ib_not_in_kernel_bytes();
+    t_ib_close_prefix_skips();
+    t_ib_conn_cap();
+    t_ib_reserve();
+    t_ib_handshake_deadline();
+    t_ib_stop_resets();
+    t_ib_udp_relay();
+    t_ib_udp_two_destinations();
+    t_ib_udp_foreign_source_dropped();
+    t_ib_udp_frag_dropped();
+    t_ib_udp_domain_dropped();
+    t_ib_udp_drop_keeps_relay();
+    t_ib_udp_client_port_pinned();
+    t_ib_udp_ends_on_address_change();
+    t_ib_udp_ends_with_tcp();
+    t_ib_udp_17th_destination();
+    t_ib_udp_counts_in_cap();
+    t_ib_udp_assoc_limits();
+    t_ib_udp_removed_and_stop();
+    ib_fixture();
+}
+
 static void sock_part(void) {
     int fl = fcntl(g_tun.fd, F_GETFL, 0);
     fcntl(g_tun.fd, F_SETFL, fl | O_NONBLOCK);
@@ -3686,13 +5127,13 @@ static void sock_part(void) {
     check(!stderr_has(quiet_minute, NULL, "misses"), "  and none for a minute without misses");
 
     ctlmap_init(ip4(198, 18, 0, 0), 15);
-    if (lst_open(0) != 0 || loop_open(&g_L, &g_tun, 1) != 0) {
+    if (ctlinb_init() != 0 || lst_open(0) != 0 || loop_open(&g_L, &g_tun, 1) != 0) {
         check(0, "fixture: listener and loop");
         return;
     }
     g_kport = stack_tcp_port();
     park_cap_init();
-    check(g_kport > 0 && g_L.ctl >= 0, "fixture: the listener and the map wake are in the loop");
+    check(g_kport > 0 && g_L.ctl >= 0 && g_L.ibw >= 0, "fixture: the listener, the map and the inbounds wakes are in the loop");
 
     int a = -1, b = -1;
     t_k_direct();
@@ -3725,6 +5166,7 @@ static void sock_part(void) {
     t_k_prefixes();
     t_k_slot0_not_stop();
     t_k_stop_resets_sockets();
+    ib_part();
     k_reset();
 }
 
@@ -3758,6 +5200,13 @@ int main(void) {
     t_dns_evict();
     t_spare_slot();
     t_spare_churn();
+    t_host_is_atyp_domain();
+    t_no_host_stays_ipv4();
+    t_host_is_cleared_on_reuse();
+    t_pin_carries_the_host();
+    t_room_covers_a_long_host();
+    t_long_host_refused();
+    t_host_needs_set_host();
     t_udp_early_bounds();
     t_server_first();
     t_room_window();

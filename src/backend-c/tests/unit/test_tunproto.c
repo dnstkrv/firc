@@ -350,6 +350,80 @@ TEST bytes_carry_two_u32_counts(void)
     PASS();
 }
 
+TEST inbound_event_parses(void)
+{
+    /* catches: the inbound event unrecognised, port or state or why dropped, a missing why not read as empty, or an unknown state accepted */
+    firc_tev_t e = parse("{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"Address in use\"}");
+    ASSERT_EQ(FIRC_TEV_INBOUND, e.kind);
+    ASSERT_EQ(1081, e.ib_port);
+    ASSERT_STR_EQ("busy", e.istate);
+    ASSERT_STR_EQ("Address in use", e.why);
+    e = parse("{\"type\":\"inbound\",\"port\":65535,\"state\":\"no-node\"}");
+    ASSERT_EQ(FIRC_TEV_INBOUND, e.kind);
+    ASSERT_EQ(65535, e.ib_port);
+    ASSERT_STR_EQ("no-node", e.istate);
+    ASSERT_STR_EQ("", e.why);
+    ASSERT_EQ(FIRC_TEV_INBOUND, parse("{\"type\":\"inbound\",\"port\":1,\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":1,\"state\":\"x\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":1,\"state\":\"UP\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":1,\"state\":\"up\",\"why\":5}").kind);
+    PASS();
+}
+
+TEST inbound_port_must_be_1_to_65535(void)
+{
+    /* catches: port 0, 65536, a fraction, a negative or a string accepted, or a missing port left as 0 */
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":0,\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":65536,\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":1.5,\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":-1,\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"port\":\"80\",\"state\":\"up\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbound\",\"state\":\"up\"}").kind);
+    PASS();
+}
+
+TEST inbound_why_is_cut_to_its_field(void)
+{
+    /* catches: an overlong why overrunning the field or the event refused instead of truncated */
+    char line[512];
+    char why[300];
+    memset(why, 'w', sizeof why);
+    why[sizeof why - 1] = 0;
+    snprintf(line, sizeof line, "{\"type\":\"inbound\",\"port\":9,\"state\":\"up\",\"why\":\"%s\"}", why);
+    firc_tev_t e = parse(line);
+    ASSERT_EQ(FIRC_TEV_INBOUND, e.kind);
+    ASSERT_EQ(159u, strlen(e.why));
+    PASS();
+}
+
+TEST ibytes_parse_like_bytes(void)
+{
+    /* catches: the ibytes event unrecognised, rx and tx swapped, port lost, the u32 top refused, or a bad count or port accepted */
+    firc_tev_t e = parse("{\"type\":\"ibytes\",\"port\":3128,\"rx\":4294967295,\"tx\":7}");
+    ASSERT_EQ(FIRC_TEV_IBYTES, e.kind);
+    ASSERT_EQ(3128, e.ib_port);
+    ASSERT_EQ(4294967295u, e.rx);
+    ASSERT_EQ(7u, e.tx);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ibytes\",\"port\":1,\"rx\":4294967296,\"tx\":0}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ibytes\",\"port\":1,\"rx\":-1,\"tx\":0}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ibytes\",\"port\":1,\"rx\":1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ibytes\",\"port\":0,\"rx\":1,\"tx\":1}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"ibytes\",\"rx\":1,\"tx\":1}").kind);
+    PASS();
+}
+
+TEST inbounds_ack_has_count(void)
+{
+    /* catches: the inbounds ack unrecognised, its count not read, or a missing or negative count accepted */
+    firc_tev_t e = parse("{\"type\":\"inbounds\",\"count\":3}");
+    ASSERT_EQ(FIRC_TEV_INBOUNDS, e.kind);
+    ASSERT_EQ(3, e.count);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbounds\"}").kind);
+    ASSERT_EQ(FIRC_TEV_BAD, parse("{\"type\":\"inbounds\",\"count\":-1}").kind);
+    PASS();
+}
+
 TEST miss_needs_a_dotted_quad_fake(void)
 {
     /* catches: the fake key misspelt, its bytes reversed, or an IPv6, short or garbage fake accepted */
@@ -465,6 +539,11 @@ int main(int argc, char **argv)
     RUN_TEST(a_bad_tcp_port_is_bad);
     RUN_TEST(map_and_close_carry_counts);
     RUN_TEST(bytes_carry_two_u32_counts);
+    RUN_TEST(inbound_event_parses);
+    RUN_TEST(inbound_port_must_be_1_to_65535);
+    RUN_TEST(inbound_why_is_cut_to_its_field);
+    RUN_TEST(ibytes_parse_like_bytes);
+    RUN_TEST(inbounds_ack_has_count);
     RUN_TEST(miss_needs_a_dotted_quad_fake);
     RUN_TEST(each_tag_gives_its_level_and_is_cut);
     RUN_TEST(anything_but_a_whole_tag_is_info_and_kept);

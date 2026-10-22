@@ -9,6 +9,7 @@
   import { ask } from "../../../utils/confirm.svelte";
   import type { TunnelsStore } from "../tunnels.svelte";
   import FailoverSection from "./FailoverSection.svelte";
+  import InboundsSection from "./InboundsSection.svelte";
   import NodesSection from "./NodesSection.svelte";
   import SourcesSection from "./SourcesSection.svelte";
 
@@ -68,6 +69,7 @@
   );
   const subscriptions = $derived(tunnel.sources.filter((s) => s.kind === "subscription"));
   const links = $derived(tunnel.sources.filter((s) => s.kind === "link"));
+  const listening = $derived((live?.inbounds ?? []).filter((ib) => ib.state === "up"));
   const toned = $derived(Boolean(look) && look?.color !== "var(--text-2)");
 
   const sourcesText = $derived(
@@ -176,6 +178,12 @@
           {#if up && live}
             <ArrowDownUp size={15} />
             <span>↓ {formatRate(live.rxBps, t)} · ↑ {formatRate(live.txBps, t)}</span>
+            {#each listening as ib (ib.port)}
+              <span>·</span>
+              <span class="ib"
+                >:{ib.port} ↓ {formatRate(ib.rxBps, t)} · ↑ {formatRate(ib.txBps, t)}</span
+              >
+            {/each}
           {:else if sourcesText}
             {#if subscriptions.length > 0}<RSS size={15} />{:else}<Link size={15} />{/if}
             <span>{sourcesText}</span>
@@ -237,6 +245,7 @@
           <SourcesSection {store} bind:tunnel />
           <NodesSection {store} bind:tunnel />
           <FailoverSection {store} bind:tunnel />
+          <InboundsSection {store} bind:tunnel />
         </div>
       {/if}
     </Collapsible.Content>
@@ -341,6 +350,9 @@
   .badge.toned {
     background: color-mix(in oklab, var(--tone) 18%, transparent);
     color: var(--tone);
+  }
+  .ib {
+    font-family: Monaco, monospace;
   }
   .acts {
     display: flex;

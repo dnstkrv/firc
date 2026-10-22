@@ -13,6 +13,7 @@
 #define FIRC_TUN_MAX_KEYS 1024
 #define FIRC_TUN_KEY_MAX 191
 #define FIRC_TUN_DESCRIPTION_MAX 63
+#define FIRC_TUN_MAX_INBOUNDS 16
 #define FIRC_TUNNEL_TCP_PORT_BASE 3600
 
 typedef enum { FIRC_UPLINK_AUTO, FIRC_UPLINK_IFACE, FIRC_UPLINK_TUNNEL } firc_uplink_kind_t;
@@ -35,6 +36,14 @@ typedef struct {
 } firc_tun_src_t;
 
 typedef struct {
+    uint16_t port;
+    char listen[16];
+    char node[FIRC_TUN_KEY_MAX + 1];
+    char user[256];
+    char password[256];
+} firc_tun_inbound_t;
+
+typedef struct {
     char id[16];
     char device[16];
     char description[FIRC_TUN_DESCRIPTION_MAX + 1];
@@ -54,6 +63,8 @@ typedef struct {
     bool insecure;
     bool kernel_tcp;
     char ca[256];
+    firc_tun_inbound_t inb[FIRC_TUN_MAX_INBOUNDS];
+    size_t n_inb;
 } firc_tunnel_t;
 
 typedef struct {

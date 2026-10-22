@@ -42,6 +42,8 @@ typedef struct {
 } fx_t;
 
 static fx_t *g_fx;
+static bool g_link_wan[2];
+static const char *const g_link[] = {"lo", "firc-noip0"};
 static firc_tunsubs_t *g_subs;
 static pid_t g_watch_pid;
 static pid_t g_watch_pid2;
@@ -108,7 +110,9 @@ static bool fx_up(fx_t *f, unsigned link_flags)
         return false;
     }
     fake_rtnl_set_link_flags(f->kernel, link_flags);
-    f->run = firc_tunrun_new(f->loop, f->rtnl, START, FAKE);
+    const firc_tunrun_lan_t lan = {g_link, g_link_wan, 2};
+    f->run = firc_tunrun_new(f->loop, f->rtnl, START, FAKE, &lan);
+    memset(g_link_wan, 0, sizeof g_link_wan);
     g_fx = f;
     return f->run != NULL;
 }
@@ -2311,6 +2315,594 @@ TEST the_pool_set_on_the_runner_reaches_the_child(void)
     PASS();
 }
 
+#define IB_HEAD "    inbounds:\n"
+#define IB_ITEM(port, listen, node, more) "      - { port: " port ", listen: " listen ", node: \"" node "\"" more " }\n"
+#define LINK_A "vless://" U "@a.example:443?type=tcp&security=none#A"
+#define IB_A IB_HEAD IB_ITEM("1081", "lo", "0000000a:A", "")
+#define IB_SENT_A "inbounds\n127.0.0.1:1081 - - " LINK_A "\n\n"
+
+static void ib_env(fx_t *f)
+{
+    setenv("FAKE_STDIN_DIR", f->dir, 1);
+    firc_event_reset_for_test();
+}
+
+static firc_tun_ib_state_t g_ib;
+
+static const firc_tun_ib_state_t *ib_of(fx_t *f, uint16_t port)
+{
+    static firc_tun_state_t st[8];
+    size_t n = firc_tunrun_states(f->run, st, 8);
+    for (size_t i = 0; i < n && i < 8; i++) {
+        for (size_t k = 0; strcmp(st[i].id, "a") == 0 && k < st[i].n_ib; k++) {
+            if (st[i].ib[k].port == port) {
+                g_ib = st[i].ib[k];
+                return &g_ib;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const char *ib_state(fx_t *f, uint16_t port)
+{
+    const firc_tun_ib_state_t *s = ib_of(f, port);
+    return s != NULL ? s->state : "(none)";
+}
+
+static int journal_at(firc_log_level_t level, const char *source, const char *text)
+{
+    static firc_event_t ev[64];
+    uint64_t since = 0, dropped = 0;
+    int c = 0;
+    for (;;) {
+        uint64_t next = since;
+        size_t n = firc_event_read(since, ev, 64, &next, &dropped);
+        for (size_t i = 0; i < n; i++) {
+            if (ev[i].kind == FIRC_EVENT_LOG && ev[i].u.log.level == level && strcmp(ev[i].u.log.source, source) == 0 &&
+                strcmp(ev[i].u.log.text, text) == 0) {
+                c++;
+            }
+        }
+        if (n == 0 || next == since) {
+            return c;
+        }
+        since = next;
+    }
+}
+
+static void unlink_stdin(fx_t *f, const char *dev)
+{
+    char path[128];
+    snprintf(path, sizeof path, "%s/%s", f->dir, dev);
+    unlink(path);
+}
+
+/* catches: inbounds never sent after ready, sent before the node list, or written with another address or field order */
+TEST inbounds_go_out_after_ready(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("starting", ib_state(&f, 1081));
+    ASSERT_EQ(0, journal_all("inbounds not sent"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the inbounds a child got kept as sent across its restart, so the new child never gets them */
+TEST a_restarted_child_gets_them_again(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    unlink_stdin(&f, "tunvless0");
+    ASSERT_EQ(FIRC_OK, firc_tunrun_restart(f.run, "a"));
+    ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: every save, refresh or re-read resending inbounds that did not change, which makes tunvless rebind */
+TEST an_unchanged_save_sends_nothing(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    firc_tunrun_refresh_inbounds(f.run);
+    firc_tunrun_bodies_changed(f.run);
+    run_ms(&f, 300);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a changed port never sent, or sent again on the next refresh with nothing changed */
+TEST a_changed_port_sends_once(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1082", "lo", "0000000a:A", "")));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1082 - - " LINK_A "\n\n", 2000));
+    firc_tunrun_refresh_inbounds(f.run);
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A "inbounds\n127.0.0.1:1082 - - " LINK_A "\n\n", stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+#define KT_TUN_Z(extra)                                                                       \
+    "  - id: a\n    device: tunvless0\n" extra "    sources:\n"                                \
+    "      - id: 0000000a\n        link: \"vless://" U "@a.example:443?security=none#Z\"\n"
+
+/* catches: a gone node sent with a stale link or left out, its warning repeated per refresh or missing, or no line when it is back */
+TEST a_renamed_node_sends_a_dash(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN_Z(IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 - - -\n\n", 2000));
+    firc_tunrun_refresh_inbounds(f.run);
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT_STR_EQ("no-node", ib_state(&f, 1081));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1081: node 0000000a:A is gone"));
+    ASSERT_EQ(0, journal_at(FIRC_LOG_INFO, "tunvless0", "inbound :1081: node 0000000a:A is back"));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 2000));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_INFO, "tunvless0", "inbound :1081: node 0000000a:A is back"));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1081: node 0000000a:A is gone"));
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the node looked up among the sent rows only, so an excluded node's port refuses */
+TEST an_excluded_node_still_binds(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, TWO_LINKS "    exclude: [\"0000000a:a\"]\n" IB_HEAD IB_ITEM("1081", "lo", "0000000a:a", ""));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 - - vless://" U "@a.example:443?type=tcp&security=none#a\n\n", 3000));
+    ASSERT_STR_EQ(LINK_OF("b") "\ninbounds\n127.0.0.1:1081 - - " LINK_OF("a") "\n", stdin_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the node looked up after the filter, so a port bound to a filtered-out subscription node refuses */
+TEST a_filtered_out_node_still_binds(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    static sub_srv_t srv;
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@b.example:443?security=none#B\n");
+    ASSERT(sub_srv_start(&srv, 0));
+    subs_up(&f);
+    ASSERT(g_subs != NULL);
+    apply_yaml(&f, "tunnels:\n" XY_TUN("a", "0", "x", "    filter: \"^B$\"\n" IB_HEAD IB_ITEM("1081", "lo", "00000000:A", "")));
+    bool sent = run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 - - " LINK_A "\n\n", 3000);
+    sub_srv_stop(&srv);
+    ASSERT(sent);
+    ASSERT_STR_EQ("vless://" U "@b.example:443?type=tcp&security=none#B\n\n" "inbounds\n127.0.0.1:1081 - - " LINK_A "\n\n",
+                  stdin_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a listen outside the running app.link sent to tunvless, or its state and warning missing */
+TEST a_listen_outside_app_link_sends_no_line(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A IB_ITEM("1082", "br9", "0000000a:A", "")));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("not-lan", ib_state(&f, 1082));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1082: br9 is not a LAN interface of app.link"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an app.link entry the firmware called a WAN at start listened on, its role read anew instead of from the snapshot */
+TEST a_wan_listen_sends_no_line(void)
+{
+    static fx_t f;
+    g_link_wan[0] = true;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", KT_FIRST, 3000));
+    firc_tunrun_refresh_inbounds(f.run);
+    run_ms(&f, 300);
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("not-lan", ib_state(&f, 1081));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1081: lo is not a LAN interface of app.link"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an empty command sent where no line ever was, or a listen moved into app.link journalled as a node back */
+TEST a_listen_moved_into_app_link_sends_its_line_quietly(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1081", "br9", "0000000a:A", "")));
+    ASSERT(run_until_tail(&f, "tunvless0", KT_FIRST, 3000));
+    run_ms(&f, 300);
+    ASSERT_STR_EQ(KT_FIRST, stdin_of(&f, "tunvless0"));
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", KT_FIRST IB_SENT_A, 2000));
+    ASSERT_EQ(0, journal_all("is back"));
+    fx_down(&f);
+    PASS();
+}
+
+static bool ib_state_is(fx_t *f, const void *arg);
+
+/* catches: an event for a port with no line in the last command changing an inbound fircd itself decided on */
+TEST an_event_for_a_port_without_a_line_is_ignored(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER",
+           "{\"type\":\"inbound\",\"port\":1082,\"state\":\"up\",\"why\":\"\"}\n"
+           "{\"type\":\"ibytes\",\"port\":1082,\"rx\":9,\"tx\":9}\n"
+           "{\"type\":\"inbound\",\"port\":1081,\"state\":\"up\",\"why\":\"\"}",
+           1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A IB_ITEM("1082", "br9", "0000000a:A", "")));
+    static const char *const up[] = {"1081", "up"};
+    bool was_up = run_until(&f, ib_state_is, up, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(was_up);
+    ASSERT_STR_EQ("not-lan", ib_state(&f, 1082));
+    ASSERT_EQ(0u, (unsigned)ib_of(&f, 1082)->rx);
+    fx_down(&f);
+    PASS();
+}
+
+#define IB_THREE IB_A IB_ITEM("1082", "lo", "0000000a:A", "") IB_ITEM("1083", "lo", "0000000a:A", "")
+
+/* catches: the sources parsed once per inbound on the loop thread instead of once per refresh */
+TEST one_refresh_parses_once_for_three_inbounds(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_THREE));
+    ASSERT(run_until_tail(&f, "tunvless0", "127.0.0.1:1083 - - " LINK_A "\n\n", 3000));
+    size_t before = firc_tun_nodes_parses_for_test();
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT_EQ_FMT((size_t)1, firc_tun_nodes_parses_for_test() - before, "%zu");
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an apply parsing again for the inbounds from the start of the child it spawns, besides its own refresh */
+TEST an_apply_parses_once_for_the_list_and_once_for_inbounds(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    size_t before = firc_tun_nodes_parses_for_test();
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_THREE));
+    ASSERT_EQ_FMT((size_t)2, firc_tun_nodes_parses_for_test() - before, "%zu");
+    ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 1, 3000));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a failed lookup read as a gone node, sending a dash line and a gone warning */
+TEST a_failed_lookup_keeps_what_was_sent(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"up\",\"why\":\"\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const up[] = {"1081", "up"};
+    bool was_up = run_until(&f, ib_state_is, up, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(was_up);
+    firc_tun_nodes_set_fail_for_test(true);
+    firc_tunrun_refresh_inbounds(f.run);
+    firc_tun_nodes_set_fail_for_test(false);
+    run_ms(&f, 200);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("up", ib_state(&f, 1081));
+    ASSERT_EQ(0, journal_all("is gone"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an inbound edit counted as a node change, sending nodes or restarting tunvless, or a password journalled */
+TEST an_inbound_change_sends_no_nodes(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    uint64_t before = firc_tunrun_start_seq(f.run);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1081", "lo", "0000000a:A", ", user: alice, password: s3cret")));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 alice s3cret " LINK_A "\n\n", 2000));
+    ASSERT(strstr(stdin_of(&f, "tunvless0"), "nodes\n") == NULL);
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    ASSERT(firc_tunrun_updated(f.run, "a") <= before);
+    ASSERT_EQ(0, journal_all("s3cret"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an interface without an IPv4 sent with an empty or zero address instead of left out */
+TEST an_interface_without_ipv4_is_no_address(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A IB_ITEM("1082", "firc-noip0", "0000000a:A", "")));
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A, 3000));
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("no-address", ib_state(&f, 1082));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1082: firc-noip0 has no IPv4 address"));
+    fx_down(&f);
+    PASS();
+}
+
+static bool ib_state_is(fx_t *f, const void *arg)
+{
+    const char *const *w = arg;
+    return strcmp(ib_state(f, (uint16_t)atoi(w[0])), w[1]) == 0;
+}
+
+/* catches: a busy port left out of the journal, journalled at another level or as fircd's, or its state not kept */
+TEST busy_event_is_an_error_line(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER",
+           "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}\n"
+           "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}",
+           1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const want[] = {"1081", "busy"};
+    bool busy = run_until(&f, ib_state_is, want, 3000);
+    run_ms(&f, 100);
+    unsetenv("FAKE_AFTER");
+    ASSERT(busy);
+    ASSERT_STR_EQ("address in use", ib_of(&f, 1081)->why);
+    ASSERT_EQ(1, journal_at(FIRC_LOG_ERROR, "tunvless0", "inbound :1081 on lo: port is busy"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a port that lost the bind race left busy until restart because an unchanged refresh sends nothing */
+TEST a_busy_inbound_is_sent_again_on_an_unchanged_refresh(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const want[] = {"1081", "busy"};
+    bool busy = run_until(&f, ib_state_is, want, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(busy);
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A, stdin_of(&f, "tunvless0"));
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT(run_until_tail(&f, "tunvless0", IB_SENT_A IB_SENT_A, 2000));
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: every unattended retry of a still-busy port journalling the error again */
+TEST a_still_busy_inbound_is_journalled_once(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const want[] = {"1081", "busy"};
+    bool busy = run_until(&f, ib_state_is, want, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(busy);
+    for (int r = 0; r < 3; r++) {
+        firc_tunrun_refresh_inbounds(f.run);
+        ASSERT_STR_EQ("busy", ib_of(&f, 1081)->state);
+        run_ms(&f, 100);
+    }
+    ASSERT_STR_EQ(KT_FIRST IB_SENT_A IB_SENT_A IB_SENT_A IB_SENT_A, stdin_of(&f, "tunvless0"));
+    ASSERT_STR_EQ("busy", ib_of(&f, 1081)->state);
+    ASSERT_EQ(1, journal_at(FIRC_LOG_ERROR, "tunvless0", "inbound :1081 on lo: port is busy"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a changed inbound that is busy again kept silent as if it were only a retry */
+TEST a_changed_busy_inbound_is_journalled_again(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const want[] = {"1081", "busy"};
+    bool busy = run_until(&f, ib_state_is, want, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(busy);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1081", "lo", "0000000a:A", ", user: bob, password: pw")));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 bob pw " LINK_A "\n\n", 2000));
+    ASSERT(run_until(&f, ib_state_is, want, 2000));
+    run_ms(&f, 100);
+    ASSERT_EQ(2, journal_at(FIRC_LOG_ERROR, "tunvless0", "inbound :1081 on lo: port is busy"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a busy port that a retry freed kept busy */
+TEST a_busy_inbound_comes_up_on_a_retry(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"busy\",\"why\":\"address in use\"}", 1);
+    setenv("FAKE_IB_AGAIN", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"up\",\"why\":\"\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const busy_w[] = {"1081", "busy"};
+    bool busy = run_until(&f, ib_state_is, busy_w, 3000);
+    unsetenv("FAKE_AFTER");
+    unsetenv("FAKE_IB_AGAIN");
+    ASSERT(busy);
+    firc_tunrun_refresh_inbounds(f.run);
+    static const char *const up_w[] = {"1081", "up"};
+    ASSERT(run_until(&f, ib_state_is, up_w, 2000));
+    ASSERT_STR_EQ("", ib_of(&f, 1081)->why);
+    fx_down(&f);
+    PASS();
+}
+
+static bool ib_rx_is(fx_t *f, const void *arg)
+{
+    const firc_tun_ib_state_t *s = ib_of(f, 1081);
+    return s != NULL && s->rx == *(const uint64_t *)arg;
+}
+
+/* catches: bytes replacing instead of adding, added to the wrong port, or an up event ignored */
+TEST ibytes_sum_per_port(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER",
+           "{\"type\":\"ibytes\",\"port\":1081,\"rx\":100,\"tx\":5}\n"
+           "{\"type\":\"ibytes\",\"port\":1082,\"rx\":7,\"tx\":1}\n"
+           "{\"type\":\"ibytes\",\"port\":1081,\"rx\":50,\"tx\":3}\n"
+           "{\"type\":\"inbound\",\"port\":1081,\"state\":\"up\",\"why\":\"\"}",
+           1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A IB_ITEM("1082", "lo", "0000000a:A", "")));
+    static const uint64_t want = 150;
+    bool summed = run_until(&f, ib_rx_is, &want, 3000);
+    run_ms(&f, 100);
+    unsetenv("FAKE_AFTER");
+    ASSERT(summed);
+    ASSERT_EQ(150u, (unsigned)ib_of(&f, 1081)->rx);
+    ASSERT_EQ(8u, (unsigned)ib_of(&f, 1081)->tx);
+    ASSERT_EQ(7u, (unsigned)ib_of(&f, 1082)->rx);
+    ASSERT_EQ(1u, (unsigned)ib_of(&f, 1082)->tx);
+    ASSERT_STR_EQ("up", ib_state(&f, 1081));
+    ASSERT_STR_EQ("starting", ib_state(&f, 1082));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a space, a percent sign or a lone dash in user or password sent raw, which splits or empties the field */
+TEST user_with_space_is_percent_encoded(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1081", "lo", "0000000a:A", ", user: \"s t\", password: \"p%w\"")
+                                               IB_ITEM("1082", "lo", "0000000a:A", ", user: \"-\", password: \"-\"")));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 s%20t p%25w " LINK_A "\n127.0.0.1:1082 %2D %2D " LINK_A "\n\n", 3000));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a dead child's inbounds still reported up through its backoff */
+TEST a_child_that_died_shows_its_inbounds_starting(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"inbound\",\"port\":1081,\"state\":\"up\",\"why\":\"\"}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const char *const up[] = {"1081", "up"};
+    bool was_up = run_until(&f, ib_state_is, up, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(was_up);
+    pid_t pid = last_pid(&f, "tunvless0");
+    ASSERT(pid > 0 && kill(pid, SIGKILL) == 0);
+    static const char *const starting[] = {"1081", "starting"};
+    ASSERT(run_until(&f, ib_state_is, starting, 2000));
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: an inbound's bytes and state left at its old index when a save puts another inbound before it */
+TEST inbound_state_follows_its_port_across_a_save(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    setenv("FAKE_AFTER", "{\"type\":\"ibytes\",\"port\":1081,\"rx\":100,\"tx\":5}", 1);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_A));
+    static const uint64_t want = 100;
+    bool counted = run_until(&f, ib_rx_is, &want, 3000);
+    unsetenv("FAKE_AFTER");
+    ASSERT(counted);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", IB_HEAD IB_ITEM("1080", "lo", "0000000a:A", "") IB_ITEM("1081", "lo", "0000000a:A", "")));
+    ASSERT_EQ(100u, (unsigned)ib_of(&f, 1081)->rx);
+    ASSERT_EQ(0u, (unsigned)ib_of(&f, 1080)->rx);
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a port rebound to another gone node kept silent because the old node was already reported gone */
+TEST a_gone_port_rebound_to_another_gone_node_warns_again(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN_Z(IB_A));
+    ASSERT(run_until_tail(&f, "tunvless0", "inbounds\n127.0.0.1:1081 - - -\n\n", 3000));
+    apply_yaml(&f, "tunnels:\n" KT_TUN_Z(IB_HEAD IB_ITEM("1081", "lo", "0000000a:Y", "")));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1081: node 0000000a:A is gone"));
+    ASSERT_EQ(1, journal_at(FIRC_LOG_WARN, "tunvless0", "inbound :1081: node 0000000a:Y is gone"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: a disabled tunnel's inbounds reported as starting or with a stale state */
+TEST a_disabled_tunnel_s_inbounds_are_off(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    ib_env(&f);
+    apply_yaml(&f, "tunnels:\n" KT_TUN("a", "0", "    enable: false\n" IB_A));
+    firc_tunrun_refresh_inbounds(f.run);
+    ASSERT_STR_EQ("off", ib_state(&f, 1081));
+    fx_down(&f);
+    PASS();
+}
+
 SUITE(tunrun)
 {
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
@@ -2373,6 +2965,33 @@ SUITE(tunrun)
     RUN_TEST(bytes_accumulate_across_events_and_a_child_restart);
     RUN_TEST(attaching_the_hooks_publishes_the_ports_held);
     RUN_TEST(the_pool_set_on_the_runner_reaches_the_child);
+    RUN_TEST(inbounds_go_out_after_ready);
+    RUN_TEST(a_restarted_child_gets_them_again);
+    RUN_TEST(an_unchanged_save_sends_nothing);
+    RUN_TEST(a_changed_port_sends_once);
+    RUN_TEST(a_renamed_node_sends_a_dash);
+    RUN_TEST(an_excluded_node_still_binds);
+    RUN_TEST(a_filtered_out_node_still_binds);
+    RUN_TEST(a_listen_outside_app_link_sends_no_line);
+    RUN_TEST(a_wan_listen_sends_no_line);
+    RUN_TEST(a_listen_moved_into_app_link_sends_its_line_quietly);
+    RUN_TEST(an_event_for_a_port_without_a_line_is_ignored);
+    RUN_TEST(one_refresh_parses_once_for_three_inbounds);
+    RUN_TEST(an_apply_parses_once_for_the_list_and_once_for_inbounds);
+    RUN_TEST(a_failed_lookup_keeps_what_was_sent);
+    RUN_TEST(an_inbound_change_sends_no_nodes);
+    RUN_TEST(an_interface_without_ipv4_is_no_address);
+    RUN_TEST(busy_event_is_an_error_line);
+    RUN_TEST(a_busy_inbound_is_sent_again_on_an_unchanged_refresh);
+    RUN_TEST(a_still_busy_inbound_is_journalled_once);
+    RUN_TEST(a_busy_inbound_comes_up_on_a_retry);
+    RUN_TEST(a_changed_busy_inbound_is_journalled_again);
+    RUN_TEST(ibytes_sum_per_port);
+    RUN_TEST(user_with_space_is_percent_encoded);
+    RUN_TEST(a_disabled_tunnel_s_inbounds_are_off);
+    RUN_TEST(a_child_that_died_shows_its_inbounds_starting);
+    RUN_TEST(inbound_state_follows_its_port_across_a_save);
+    RUN_TEST(a_gone_port_rebound_to_another_gone_node_warns_again);
 }
 
 GREATEST_MAIN_DEFS();

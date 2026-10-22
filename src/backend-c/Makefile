@@ -61,6 +61,7 @@ CORE_SRCS := \
     src/util/listen.c \
     src/util/tunvless_name.c \
     src/util/ifacename.c \
+    src/util/ifaddr.c \
     src/util/utf8.c \
     src/core/lifecycle.c \
     src/logging/log.c \
@@ -148,6 +149,7 @@ API_SRCS := \
 # Needs libyaml.
 TUNNELS_SRCS := \
     src/tunnels/tconfig.c \
+    src/tunnels/inbound_check.c \
     src/tunnels/tunproto.c \
     src/tunnels/ktcp.c \
     src/tunnels/tunsup.c \

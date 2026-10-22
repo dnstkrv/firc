@@ -17,6 +17,8 @@
 #define ROWS_MAX ((size_t)FIRC_TUN_MAX_NODES * 8)
 
 pthread_mutex_t firc_tun_parse_mutex = PTHREAD_MUTEX_INITIALIZER;
+static size_t g_parses;
+static bool g_fail;
 
 typedef struct {
     firc_tun_node_t row;
@@ -587,6 +589,7 @@ firc_err_t firc_tun_nodes_build(const firc_tunnel_t *t, uint32_t mark, const fir
     sl_intern_reset();
     vless_set_insecure(t->insecure ? 1 : 0);
     collect(&b, mark, bodies, n_bodies);
+    g_parses++;
     vless_set_insecure(0);
     sl_intern_reset();
     pthread_mutex_unlock(&firc_tun_parse_mutex);
@@ -604,6 +607,58 @@ firc_err_t firc_tun_nodes_build(const firc_tunnel_t *t, uint32_t mark, const fir
         firc_tun_nodes_free(out);
     }
     return err;
+}
+
+firc_err_t firc_tun_nodes_links_of(const firc_tunnel_t *t, uint32_t mark, const firc_tun_body_t *bodies,
+                                   size_t n_bodies, const char *const *keys, size_t n_keys, char **links)
+{
+    for (size_t i = 0; i < n_keys; i++) {
+        links[i] = NULL;
+    }
+    if (g_fail) {
+        return FIRC_ERR_NOMEM;
+    }
+    build_t b = {.t = t, .err = FIRC_OK};
+    b.buf = malloc(LINK_BUF);
+    if (b.buf == NULL) {
+        return FIRC_ERR_NOMEM;
+    }
+    pthread_mutex_lock(&firc_tun_parse_mutex);
+    sl_intern_reset();
+    vless_set_insecure(t->insecure ? 1 : 0);
+    collect(&b, mark, bodies, n_bodies);
+    g_parses++;
+    vless_set_insecure(0);
+    sl_intern_reset();
+    pthread_mutex_unlock(&firc_tun_parse_mutex);
+    for (size_t k = 0; b.err == FIRC_OK && k < n_keys; k++) {
+        for (size_t i = 0; links[k] == NULL && i < b.n; i++) {
+            if (b.v[i].row.link != NULL && strcmp(b.v[i].row.key, keys[k]) == 0) {
+                links[k] = strdup(b.v[i].row.link);
+                b.err = links[k] == NULL ? FIRC_ERR_NOMEM : FIRC_OK;
+            }
+        }
+    }
+    firc_err_t err = b.err;
+    build_free(&b);
+    for (size_t k = 0; err != FIRC_OK && k < n_keys; k++) {
+        free(links[k]);
+        links[k] = NULL;
+    }
+    return err;
+}
+
+size_t firc_tun_nodes_parses_for_test(void)
+{
+    pthread_mutex_lock(&firc_tun_parse_mutex);
+    size_t n = g_parses;
+    pthread_mutex_unlock(&firc_tun_parse_mutex);
+    return n;
+}
+
+void firc_tun_nodes_set_fail_for_test(bool fail)
+{
+    g_fail = fail;
 }
 
 void firc_tun_nodes_free(firc_tun_nodes_t *n)

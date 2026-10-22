@@ -73,6 +73,7 @@ struct pl_sess {
     unsigned gen;               /* the slot's generation when the node was chosen */
     int slot;                   /* -1 — none */
     uint8_t udp, opened;        /* flow_open was called with k */
+    uint8_t pinned;
     struct flow_key k;
 };
 #define PL_HDR 64
@@ -527,6 +528,7 @@ static void pl_clear(void *sess) {
     s->node = NULL;
     s->slot = -1;
     s->opened = 0;
+    s->pinned = 0;
     g_pl.in->clear(INNER(s));
 }
 
@@ -545,6 +547,22 @@ static int pl_flow_open(const void *ctx, void *sess, const struct flow_key *k, i
     s->opened = 1;
     return g_pl.in->flow_open(s->node, INNER(s), k, udp);
 }
+
+int pool_flow_open_on(void *sess, int node, const struct flow_key *k, int udp, const char *host) {
+    struct pl_sess *s = sess;
+    s->node = pl_node(node);
+    s->slot = -1;
+    s->gen = 0;
+    s->pinned = 1;
+    s->k = *k;
+    s->udp = (uint8_t)udp;
+    s->opened = 1;
+    int rc = g_pl.in->flow_open(s->node, INNER(s), k, udp);
+    if (rc || !host || !host[0]) return rc;
+    return g_pl.in->set_host && g_pl.in->set_host(INNER(s), host) == 0 ? 0 : -1;
+}
+
+static int pl_set_host(void *sess, const char *host) { return g_pl.in->set_host(INNER(sess), host); }
 
 static int pl_send(const void *ctx, void *sess, const struct flow_key *k, int udp,
                    const unsigned char *d, size_t n) {
@@ -578,6 +596,7 @@ static int pl_deliver(const void *ctx, void *sess, int udp, const unsigned char 
 static int pl_match(const void *ctx, const void *dst, const void *src) {
     (void)ctx;
     const struct pl_sess *d = dst, *s = src;
+    if (d->pinned) return 0;
     if (!s->node || s->slot < 0) return -1;
     pthread_mutex_lock(&g_pl.mu);
     const struct pl_slot *sl = &g_pl.slot[s->slot];
@@ -710,6 +729,8 @@ static const struct dialer *pool_setup(const struct pool_cfg *pc) {
     g_pl_ops.match = pl_match;
     g_pl_ops.stale = pl_stale;
     g_pl_ops.lost = pl_lost;
+    g_pl_ops.set_host = g_pl.in->set_host ? pl_set_host : NULL;
+    g_pl_ops.flow_open_on = pool_flow_open_on;
 
     /* The stack keeps the pointer until the process ends. */
     static struct dialer d;

@@ -27,6 +27,7 @@ import time
 
 ADDR_IPV4, ADDR_DOMAIN, ADDR_IPV6 = 1, 2, 3
 CMD_TCP, CMD_UDP = 1, 2
+ATYPE_NAME = {ADDR_IPV4: "ipv4", ADDR_DOMAIN: "domain", ADDR_IPV6: "ipv6"}
 
 # The body of every answer: this filler over and over (with --kbps, its first chunk bytes over
 # and over). Fixed, because generating 64 KB per chunk made Python, not the tunnel, the
@@ -46,7 +47,7 @@ def recv_exactly(sock, n):
 
 
 def read_request(sock):
-    """Parse the request header. Returns (uuid, cmd, port, address) or None.
+    """Parse the request header. Returns (uuid, cmd, port, address, addr_type) or None.
 
     The address is a string (IPv4, IPv6 or a name); only the UDP relay (--udp-relay) needs it,
     the other modes drop it."""
@@ -80,7 +81,7 @@ def read_request(sock):
         addr = socket.inet_ntop(socket.AF_INET6, raw)
     else:
         addr = raw.decode("ascii", "replace")
-    return uuid, cmd, port, addr
+    return uuid, cmd, port, addr, atype
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -90,12 +91,15 @@ class Handler(socketserver.BaseRequestHandler):
         req = read_request(sock)
         if req is None:
             return
-        uuid, cmd, port, addr = req
+        uuid, cmd, port, addr, atype = req
         if uuid != self.server.uuid:
             return                          # wrong key: stay silent, like a real server
         if self.server.log_dst:
             with open(self.server.log_dst, "a") as f:
                 f.write("%s:%d\n" % (addr, port))
+        if self.server.log_req:
+            with open(self.server.log_req, "a") as f:
+                f.write("%s %s:%d\n" % (ATYPE_NAME[atype], addr, port))
 
         if cmd == CMD_UDP:
             if self.server.udp_relay:
@@ -328,6 +332,7 @@ def main():
     ap.add_argument("--udp-relay", action="store_true",
                     help="forward UDP (command 2) to the address in the request instead of echoing")
     ap.add_argument("--log-dst", help="append each requested address:port to this file")
+    ap.add_argument("--log-req", help="append each request as \"<ipv4|domain|ipv6> address:port\" to this file")
     a = ap.parse_args()
 
     srv = Server((a.bind, a.port), Handler)
@@ -336,6 +341,7 @@ def main():
     srv.udp_relay = a.udp_relay
     srv.kbps = a.kbps
     srv.log_dst = a.log_dst
+    srv.log_req = a.log_req
     srv.filler = FILLER
     print("fake-vless: %s:%d, serves %d MB" % (a.bind, a.port, a.mb), flush=True)
     try:

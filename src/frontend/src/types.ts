@@ -186,6 +186,22 @@ export type TunnelHeadersRes = { headers: TunnelHeader[] };
 
 export type TunnelAdvanced = { ca: string; insecure: boolean; timeout: number; kernelTcp: boolean };
 
+export type TunnelInbound = {
+  port: number;
+  listen: string;
+  node: string;
+  user: string;
+  password: string;
+};
+
+export type TunnelInboundState = {
+  port: number;
+  state: "up" | "busy" | "no-node" | "no-address" | "not-lan" | "starting" | "off";
+  why: string;
+  rxBps: number;
+  txBps: number;
+};
+
 export type Tunnel = {
   id: string;
   device: string;
@@ -201,6 +217,7 @@ export type Tunnel = {
   sources: TunnelSource[];
   uplink: TunnelUplink;
   advanced: TunnelAdvanced;
+  inbounds: TunnelInbound[];
 };
 
 export type TunnelsRes = { tunnels: Tunnel[]; restarted?: string[]; updated?: string[] };
@@ -252,6 +269,7 @@ export type TunnelState = {
   subscriptions: TunnelSubState[];
   rxBps: number;
   txBps: number;
+  inbounds: TunnelInboundState[];
 };
 
 export type TunnelPreviewRow = {

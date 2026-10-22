@@ -36,6 +36,9 @@ typedef enum {
     FIRC_TEV_CLOSE,
     FIRC_TEV_MISS,
     FIRC_TEV_BYTES,
+    FIRC_TEV_INBOUND,
+    FIRC_TEV_IBYTES,
+    FIRC_TEV_INBOUNDS,
     FIRC_TEV_BAD
 } firc_tev_kind_t;
 
@@ -56,6 +59,8 @@ typedef struct {
     int active_pos[8];
     size_t n_active;
     uint16_t tcp_port;
+    uint16_t ib_port;
+    char istate[16];
     uint32_t rx, tx;
     uint8_t fake[4];
     int expect;

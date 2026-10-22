@@ -50,6 +50,7 @@ export function normalizeTunnel(raw: Partial<Tunnel>): Tunnel {
       timeout: raw.advanced?.timeout ?? 8,
       kernelTcp: raw.advanced?.kernelTcp ?? false,
     },
+    inbounds: (raw.inbounds ?? []).map((ib) => ({ ...ib })),
   };
 }
 

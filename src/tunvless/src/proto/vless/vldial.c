@@ -119,12 +119,21 @@ static void node_id_refused(const struct vless_node *node, const char *what) {
                     "check the node's link\n", node->name, what);
 }
 
+static int vl_set_host(void *sess, const char *host) {
+    struct vl_sess *s = sess;
+    size_t n = host ? strlen(host) : 0;
+    if (n >= sizeof s->host) return -1;
+    memcpy(s->host, host ? host : "", n + 1);
+    return 0;
+}
+
 static int vl_flow_open(const void *ctx, void *sess, const struct flow_key *k, int udp) {
     (void)k;
     const struct vless_node *node = ctx;
     struct vl_sess *s = sess;
     s->header_sent = 0;
     s->established = 0;
+    s->host[0] = 0;
     if (vless_uuid_parse(node->uuid, s->uuid) != 0) {
         node_id_refused(node, udp ? "UDP connection" : "TCP connection");
         return -1;
@@ -355,7 +364,7 @@ static int vl_send(const void *ctx, void *sess, const struct flow_key *k, int ud
          *
          * dport is already in host order (struct flow_key in tun.h). */
         len = vless_build_request(s->uuid, udp ? VLESS_CMD_UDP : VLESS_CMD_TCP,
-                                  NULL, ip4, k->dport,
+                                  s->host[0] ? s->host : NULL, ip4, k->dport,
                                   udp ? NULL : node->flow, out, sizeof(out));
         if (!len) return SEND_FATAL;
     }
@@ -382,7 +391,7 @@ static int vl_send(const void *ctx, void *sess, const struct flow_key *k, int ud
         body = out;
     } else if (len) {
         if (len + n > sizeof(out)) return SEND_FATAL;
-        memcpy(out + len, data, n);
+        if (n) memcpy(out + len, data, n);
         len += n;
         body = out;
     } else {
@@ -631,7 +640,7 @@ static long vl_room(const void *ctx, void *sess) {
     struct vl_sess *s = sess;
     long r = transport_room(&s->t);
     if (r < 0) return -1;
-    if (!s->header_sent) r -= 64;
+    if (!s->header_sent) r -= 64 + (s->host[0] ? 1 + (long)strlen(s->host) : 0);
     if (node->flow[0] && !s->vis.sent_end) r -= 2048;
     return r > 0 ? r : 0;
 }
@@ -655,4 +664,5 @@ const struct dialer_ops vless_dialer = {
     .dgram_frame = vl_dgram_frame,
     .read = vl_read,
     .deliver = vl_deliver,
+    .set_host = vl_set_host,
 };
