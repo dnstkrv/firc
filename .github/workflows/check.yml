@@ -63,3 +63,12 @@ jobs:
       - name: Frontend e2e tests
         working-directory: ./src/frontend
         run: npm run test:e2e
+
+      - name: Keep the e2e failures
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-failures
+          path: src/frontend/node_modules/.playwright-results
+          if-no-files-found: ignore
+          retention-days: 7

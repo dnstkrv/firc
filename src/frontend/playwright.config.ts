@@ -11,7 +11,7 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:5173",
     trace: "off",
-    screenshot: "off",
+    screenshot: process.env.CI ? "only-on-failure" : "off",
     video: "off",
   },
   projects: [
