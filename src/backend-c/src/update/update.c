@@ -197,7 +197,7 @@ void firc_update_limited_text(int64_t reset_at, char *buf, size_t cap) {
 }
 
 static void describe_limit(long status, char *buf, size_t cap) {
-    if (status == 301 || status == 302) {
+    if (firc_sub_fetch_is_redirect(status)) {
         snprintf(buf, cap, "too many redirects");
     } else {
         snprintf(buf, cap, "GitHub answered %ld", status);

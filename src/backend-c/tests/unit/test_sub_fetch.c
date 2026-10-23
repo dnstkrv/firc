@@ -227,6 +227,24 @@ typedef struct harness {
     size_t n_redirects;
 } harness_t;
 
+static void h_slow_hop(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    struct timespec ts = {0, 700 * 1000000L};
+    nanosleep(&ts, NULL);
+    char loc[128];
+    snprintf(loc, sizeof(loc), "http://127.0.0.1:%d%s", TEST_PORT, (const char *)ud);
+    firc_http_res_set_header(res, "Location", loc);
+    firc_http_res_write(res, 302, "text/html", (const uint8_t *)"MOVED", 5);
+}
+
+static void h_slow_list(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    struct timespec ts = {0, 700 * 1000000L};
+    nanosleep(&ts, NULL);
+    firc_http_res_write(res, 200, "text/plain", (const uint8_t *)"slow", 4);
+}
+
 static void *loop_thread(void *ud) {
     harness_t *h = ud;
     firc_loop_run(h->loop);
@@ -295,6 +313,11 @@ static harness_t *harness_start(void) {
 
     add_redirect(h, "/redirect301", 301, "/list");
     add_redirect(h, "/redirect302", 302, "/list");
+    add_redirect(h, "/redirect303", 303, "/list");
+    add_redirect(h, "/redirect307", 307, "/list");
+    add_redirect(h, "/redirect308", 308, "/list");
+    firc_httpd_route(h->srv, "GET", "/slow_hop", h_slow_hop, "/slow_list");
+    firc_httpd_route(h->srv, "GET", "/slow_list", h_slow_list, NULL);
     add_redirect(h, "/redirect_ua", 302, "/ua");
     add_redirect(h, "/loopA", 302, "/loopB");
     add_redirect(h, "/loopB", 302, "/loopA");
@@ -393,6 +416,22 @@ TEST follows_301_and_302(void) {
     ASSERT_EQ(FIRC_OK, firc_sub_fetch_list(url_for("/redirect302"), &body, &len));
     ASSERT_STR_EQ("example.com\nexample.org", body);
     free(body);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: 303, 307 or 308 answered as a refusal instead of followed. */
+TEST follows_303_307_and_308(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    static const char *const paths[] = {"/redirect303", "/redirect307", "/redirect308"};
+    for (size_t i = 0; i < 3; i++) {
+        char *body = NULL;
+        size_t len = 0;
+        ASSERT_EQ_FMTm(paths[i], FIRC_OK, firc_sub_fetch_list(url_for(paths[i]), &body, &len), "%d");
+        ASSERT_STR_EQ("example.com\nexample.org", body);
+        free(body);
+    }
     harness_stop(h);
     PASS();
 }
@@ -814,6 +853,20 @@ TEST the_timeout_is_per_call(void) {
     PASS();
 }
 
+/* Catches: each redirect hop given the whole timeout again. */
+TEST one_timeout_covers_the_whole_redirect_chain(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_opts_t o = {.timeout_s = 1};
+    collect_t c = {0};
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to(url_for("/slow_hop"), &o, collect_sink, &c, NULL));
+    o.timeout_s = 3;
+    collect_t ok = {0};
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/slow_hop"), &o, collect_sink, &ok, NULL));
+    harness_stop(h);
+    PASS();
+}
+
 /* Catches: CURLOPT_LOW_SPEED_* never set, the 300 s timeout left the only guard. */
 TEST a_transfer_below_the_floor_is_given_up(void) {
     harness_t *h = harness_start();
@@ -966,6 +1019,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_compiled_rule_set_is_fetched_with_its_nul_bytes);
     RUN_TEST(fetches_empty_body);
     RUN_TEST(follows_301_and_302);
+    RUN_TEST(follows_303_307_and_308);
     RUN_TEST(detects_redirect_loop);
     RUN_TEST(allows_exactly_five_redirects);
     RUN_TEST(rejects_six_redirects);
@@ -991,6 +1045,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_transport_failure_carries_libcurls_words);
     RUN_TEST(the_redirect_cap_is_per_call);
     RUN_TEST(the_timeout_is_per_call);
+    RUN_TEST(one_timeout_covers_the_whole_redirect_chain);
     RUN_TEST(a_transfer_below_the_floor_is_given_up);
     RUN_TEST(the_last_progress_call_names_the_whole_body);
     RUN_TEST(a_refusal_or_redirect_body_past_the_cap_is_limit);

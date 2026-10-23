@@ -47,11 +47,15 @@ typedef struct firc_sub_fetch_opts {
 /* Streams url's 2xx body into sink; every URL must pass firc_sub_url_is_supported and url_ok (which only narrows
  * it) before it is fetched. INVAL refused/loop, LIMIT redirects or a non-2xx body over the cap, PROTO non-2xx,
  * CANCELED sink or progress said stop, IO transport (libcurl's words in errbuf), SYS mark refused.
- * no_redirects answers a 301/302 as PROTO with its status; resolve pins one host:port:addr. */
+ * no_redirects answers a redirect as PROTO with its status; resolve pins one host:port:addr; timeout_s bounds the
+ * whole call, every hop included. */
 firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, firc_sub_fetch_sink_fn sink,
                              void *sink_ud, long *out_status);
 
-/* Fetches url, following only 301/302 redirects, up to FIRC_SUB_FETCH_MAX_REDIRECTS hops; *out_body is a
+/* whether status is a redirect a fetch follows: 301, 302, 303, 307 or 308 */
+bool firc_sub_fetch_is_redirect(long status);
+
+/* Fetches url, following redirects, up to FIRC_SUB_FETCH_MAX_REDIRECTS hops; *out_body is a
  * NUL-terminated malloc'd buffer the caller frees. FIRC_ERR_INVAL/LIMIT/PROTO/IO/NOMEM/CANCELED on failure. */
 firc_err_t firc_sub_fetch_list_ex(const char *url, char **out_body, size_t *out_len,
                                   firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status);

@@ -231,6 +231,10 @@ static struct curl_slist *build_headers(const char *const *headers, bool drop_cr
     return list;
 }
 
+bool firc_sub_fetch_is_redirect(long status) {
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
 firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, firc_sub_fetch_sink_fn sink,
                              void *sink_ud, long *out_status) {
     if (out_status) { *out_status = 0; }
@@ -261,9 +265,20 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
         return alloc_ok ? oerr : FIRC_ERR_NOMEM;
     }
 
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    long budget_ms = timeout_s * 1000;
     firc_err_t result = FIRC_ERR_SYS;
     int redirects = 0;
     for (;;) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long left_ms = budget_ms - ((long)(now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000);
+        if (left_ms <= 0) {
+            set_err(o, "timed out following redirects");
+            result = FIRC_ERR_IO;
+            break;
+        }
         firc_err_t verr = visited_add(&visited, current);
         if (verr != FIRC_OK) {
             result = verr;
@@ -281,7 +296,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
         curl_easy_setopt(curl, CURLOPT_URL, current);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "firc/" FIRC_VERSION);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, left_ms);
         if (o->low_speed_bytes > 0 && o->low_speed_s > 0) {
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, o->low_speed_bytes);
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, o->low_speed_s);
@@ -325,7 +340,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
             break;
         }
 
-        if ((status == 301 || status == 302) && !o->no_redirects) {
+        if (firc_sub_fetch_is_redirect(status) && !o->no_redirects) {
             char *location = NULL;
             curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &location);
             if (!location || !url_allowed(o, location) || visited_contains(&visited, location)) {
@@ -462,7 +477,7 @@ void firc_sub_fetch_reason(firc_err_t err, long http_status, const char *errbuf,
         snprintf(out, cap, "the server answered %ld", http_status);
     } else if (err == FIRC_ERR_IO) {
         snprintf(out, cap, "%s", errbuf != NULL && errbuf[0] != '\0' ? errbuf : firc_err_str(FIRC_ERR_IO));
-    } else if (err == FIRC_ERR_LIMIT && (http_status == 301 || http_status == 302)) {
+    } else if (err == FIRC_ERR_LIMIT && firc_sub_fetch_is_redirect(http_status)) {
         snprintf(out, cap, "too many redirects");
     } else if (err == FIRC_ERR_LIMIT) {
         snprintf(out, cap, "the list is too big");
