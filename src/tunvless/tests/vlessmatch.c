@@ -156,6 +156,11 @@ struct plan {
     int ed_first;
     int compress;
     int compress_junk;
+    int compress_empty;
+    int compress_short;
+    int cert_trail;
+    int cert_twice;
+    int cv_twice;
     int firefox;
     unsigned keyshare_group;
     int hrr;
@@ -385,6 +390,35 @@ static size_t stored_stream(int alg, const unsigned char *in, size_t n, unsigned
         memcpy(out + k, in, n); k += n;
     }
     return k;
+}
+
+static pthread_mutex_t g_sec_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char g_sec[3 * HLEN + 16];
+static int g_sec_set, g_sec_wipes;
+
+static void note_secrets(const unsigned char *hs, const unsigned char *c_hs, const unsigned char *s_hs,
+                         const unsigned char *s_key) {
+    pthread_mutex_lock(&g_sec_mu);
+    memcpy(g_sec, hs, HLEN);
+    memcpy(g_sec + HLEN, c_hs, HLEN);
+    memcpy(g_sec + 2 * HLEN, s_hs, HLEN);
+    memcpy(g_sec + 3 * HLEN, s_key, 16);
+    g_sec_set = 1;
+    pthread_mutex_unlock(&g_sec_mu);
+}
+
+void __real_sc_wipe(void *p, size_t n);
+void __wrap_sc_wipe(void *p, size_t n) {
+    pthread_mutex_lock(&g_sec_mu);
+    int all = g_sec_set;
+    for (int i = 0; all && i < 4; i++)
+        all = memmem(p, n, g_sec + i * HLEN, i < 3 ? HLEN : 16) != NULL;
+    pthread_mutex_unlock(&g_sec_mu);
+    __real_sc_wipe(p, n);
+    if (!all) return;
+    size_t left = 0;
+    for (size_t i = 0; i < n; i++) left += ((const unsigned char *)p)[i] != 0;
+    if (!left) __atomic_add_fetch(&g_sec_wipes, 1, __ATOMIC_SEQ_CST);
 }
 
 static size_t compressed_msg(int alg, int junk, unsigned char *msg, size_t n, size_t cap) {
@@ -778,6 +812,7 @@ static void *server_half(void *arg) {
     memcpy(s->hs, hs, HLEN);
     if (xlabel(s->s_hs, "key", NULL, 0, s->key, sizeof(s->key)) != 0) return NULL;
     if (xlabel(s->s_hs, "iv", NULL, 0, s->iv, sizeof(s->iv)) != 0) return NULL;
+    note_secrets(s->hs, s->c_hs, s->s_hs, s->key);
 
     /* ---- EncryptedExtensions ---- */
     unsigned char ee[64];
@@ -804,10 +839,35 @@ static void *server_half(void *arg) {
         const struct leaf *l = &g_leaf[pl->chain];
         unsigned char msg[3072];
         size_t mn = cert_msg(l, pl->dc, msg, sizeof(msg));
+        if (mn && mn < sizeof msg && pl->cert_trail) {
+            msg[mn++] = 0x00;
+            msg[1] = (unsigned char)((mn - 4) >> 16); msg[2] = (unsigned char)((mn - 4) >> 8); msg[3] = (unsigned char)(mn - 4);
+        }
         if (mn && pl->compress) mn = compressed_msg(pl->compress, pl->compress_junk, msg, mn, sizeof(msg));
         if (!mn) return NULL;
+        if (pl->compress_short) {
+            static const unsigned char cut[5] = { 0x19, 0x00, 0x00, 0x01, 0x00 };
+            if (send_enc(s, cut, sizeof cut)) return NULL;
+            sc_hash_update(&s->tr, cut, sizeof cut);
+        }
+        if (pl->compress_empty) {
+            static const unsigned char none[1];
+            unsigned char e[32];
+            size_t zn = stored_stream(pl->compress_empty, none, 0, e + 12);
+            size_t body = 8 + zn;
+            e[0] = 0x19; e[1] = 0; e[2] = 0; e[3] = (unsigned char)body;
+            e[4] = 0; e[5] = (unsigned char)pl->compress_empty;
+            e[6] = 0; e[7] = 0; e[8] = 0;
+            e[9] = 0; e[10] = 0; e[11] = (unsigned char)zn;
+            if (send_enc(s, e, 12 + zn)) return NULL;
+            sc_hash_update(&s->tr, e, 12 + zn);
+        }
         if (send_enc(s, msg, mn)) return NULL;
         sc_hash_update(&s->tr, msg, mn);
+        if (pl->cert_twice) {
+            if (send_enc(s, msg, mn)) return NULL;
+            sc_hash_update(&s->tr, msg, mn);
+        }
 
         if (!pl->no_cv) {
             /* The hash is taken AFTER Certificate and BEFORE CertificateVerify: what the
@@ -820,6 +880,10 @@ static void *server_half(void *arg) {
             if (!cn) return NULL;
             if (send_enc(s, msg, cn)) return NULL;
             sc_hash_update(&s->tr, msg, cn);
+            if (pl->cv_twice) {
+                if (send_enc(s, msg, cn)) return NULL;
+                sc_hash_update(&s->tr, msg, cn);
+            }
         }
         goto finished;
     }
@@ -1131,7 +1195,7 @@ int main(void) {
     };
     static const char *text_want[] = {
         "", "", "", "", "", "",
-        "the server chose key share group 0x0017, which is not offered for completion",
+        "the server chose key share group 0x0017, which this client offers but cannot complete",
         "the server asked for a HelloRetryRequest, which is not supported",
     };
     /* The failure reason must reach the caller: without it "the node is down" and "the node is
@@ -1195,6 +1259,17 @@ int main(void) {
 
         snprintf(what, sizeof(what), "%s: nothing left on the heap", plans[i].name);
         check(what, 0, LEAK_CHECK());
+    }
+
+    /* Catches a key share group from an earlier handshake left for a later one's error text. */
+    {
+        struct plan p256 = { .name = "P-256 again", .keyshare_group = 0x0017 };
+        struct plan hrr = { .name = "HelloRetryRequest again", .hrr = 1 };
+        run_case(&p256, &node, NULL, 0, NULL);
+        unsigned seen = tls13_server_group();
+        run_case(&hrr, &node, NULL, 0, NULL);
+        check("server group: set by P-256, cleared by the next handshake", 1,
+              seen == 0x0017 && tls13_server_group() == 0);
     }
 
     /* ---- a successful Reality, and ws/httpupgrade over it ------------------------------
@@ -1300,16 +1375,29 @@ int main(void) {
             { .name = "tls: firefox zstd certificate verifies", .chain = LEAF_OK, .compress = 3, .firefox = 1 },
             /* Catches a delegated credential ignored, or refused as a bad signature instead of by name. */
             { .name = "tls: delegated credential refused",   .chain = LEAF_OK, .dc = 1, .firefox = 1 },
+            /* Catches an empty CompressedCertificate taken, leaving room for a later plain chain. */
+            { .name = "tls: empty compressed certificate refused", .chain = LEAF_OK, .compress_empty = 1, .firefox = 1 },
+            /* Catches a CompressedCertificate too short for its algorithm reported as one not asked for. */
+            { .name = "tls: one-byte compressed certificate refused", .chain = LEAF_OK, .compress_short = 1 },
+            /* Catches a Certificate taken with bytes after its list, as a chain cut at the wrong length is. */
+            { .name = "tls: a byte after the certificate list refused", .chain = LEAF_OK, .cert_trail = 1 },
+            /* Catches a second Certificate skipped in silence. */
+            { .name = "tls: the certificate sent twice refused", .chain = LEAF_OK, .cert_twice = 1 },
+            /* Catches a second CompressedCertificate skipped in silence. */
+            { .name = "tls: the compressed certificate sent twice refused", .chain = LEAF_OK, .compress = 2, .cert_twice = 1 },
+            /* Catches a second CertificateVerify skipped in silence. */
+            { .name = "tls: CertificateVerify sent twice refused", .chain = LEAF_OK, .cv_twice = 1 },
         };
         /* The ALPN case MUST NOT run on tcp. tcp asks for no ALPN at all (transport.c: tr_tcp
          * has alpn = NULL), so the "server did not choose h2" check is not made there, and on tcp
          * this case would silently pass as a success. */
-        static const char *tls_type[] = { "tcp", "grpc", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp" };
+        static const char *tls_type[] = { "tcp", "grpc", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp" };
         static const int tls_want[] = {
             0, TR_ENOH2, TLS13_ECERT, TLS13_ECERT,
             TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
             0, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
             0, 0, TLS13_ECERT,
+            TLS13_ECERT, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
         };
         /* Each needle is the END of its reason in certverify.c or tls13.c, so a reason cut short
          * (g_verify_reason in tls13.c is 96 bytes) fails the check. */
@@ -1327,6 +1415,12 @@ int main(void) {
             "cannot decompress the server certificate",
             "", "",
             "the server sent a delegated credential, which is not supported",
+            "cannot decompress the server certificate",
+            "cannot decompress the server certificate",
+            "cannot parse the server certificate",
+            "the server sent its certificate twice",
+            "the server sent its certificate twice",
+            "the server sent CertificateVerify twice",
         };
         for (size_t i = 0; i < sizeof(tls_plans) / sizeof(*tls_plans); i++) {
             struct vless_node tn;
@@ -1366,6 +1460,36 @@ int main(void) {
 
             snprintf(what, sizeof(what), "%s: nothing left on the heap", tls_plans[i].name);
             check(what, 0, LEAK_CHECK());
+        }
+        /* Catches the key schedule (handshake secret, both handshake traffic secrets, the server's handshake key) left on the stack after a handshake, whole or failed. */
+        {
+            struct plan ok = { .name = "wipe ok", .chain = LEAF_OK };
+            struct plan bad = { .name = "wipe bad", .chain = LEAF_OK, .cv_bad_sig = 1 };
+            struct vless_node tn;
+            node_tls(&tn, "tcp");
+            g_sec_set = 0;
+            g_sec_wipes = 0;
+            check("key schedule: a verified handshake", 0, run_case(&ok, &tn, NULL, 0, NULL));
+            check("key schedule: wiped once after success", 1, g_sec_wipes);
+            g_sec_set = 0;
+            g_sec_wipes = 0;
+            check("key schedule: a bad signature", TLS13_ECERT, run_case(&bad, &tn, NULL, 0, NULL));
+            check("key schedule: wiped once after the failure", 1, g_sec_wipes);
+        }
+        /* Catches traffic keys left in a freed connection, with and without a cipher context set up. */
+        {
+            struct tls13 t;
+            memset(&t, 0, sizeof t);
+            t.rd.aead = t.wr.aead = TLS13_AEAD_AES128;
+            t.rd.key_n = t.wr.key_n = 16;
+            memset(t.rd.key, 0xA5, sizeof t.rd.key); memset(t.rd.iv, 0xA5, sizeof t.rd.iv);
+            memset(t.wr.key, 0x5A, sizeof t.wr.key); memset(t.wr.iv, 0x5A, sizeof t.wr.iv);
+            check("tls13_free: read context set up", 0, tls13_keys_setup(&t.rd));
+            tls13_free(&t);
+            size_t left = 0;
+            for (size_t i = 0; i < sizeof t.rd.key; i++) left += (t.rd.key[i] != 0) + (t.wr.key[i] != 0);
+            for (size_t i = 0; i < sizeof t.rd.iv; i++) left += (t.rd.iv[i] != 0) + (t.wr.iv[i] != 0);
+            check("tls13_free: keys and IVs of both directions zero", 0, (long)left);
         }
         /* Pins and an explicit opt-out of verification (Xray pinnedPeerCertSha256 /
          * verifyPeerCertByName). The expectations match what a test against an Xray-core 26.9.9

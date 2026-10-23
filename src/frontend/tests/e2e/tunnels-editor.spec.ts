@@ -63,6 +63,7 @@ test.describe("Tunnel editor", () => {
     await tunnels.expand("a");
     const card = tunnels.card("a");
     await card.getByRole("button", { name: "More: connect timeout" }).click();
+    await expect(page.getByText("will restart on save")).toHaveCount(0);
     await card.getByRole("button", { name: "ClientHello fingerprint" }).click();
     await page.locator('[data-select-item][data-value="firefox"]').click();
     await expect(page.getByText("will restart on save")).toContainText("tunvless0");
@@ -91,6 +92,56 @@ test.describe("Tunnel editor", () => {
     await page.locator('[data-select-item][data-value="chrome"]').click();
     await expect(hint).toHaveCount(0);
   });
+
+  // Catches the AES hint cut off or pushing the page sideways at phone width.
+  test("the Firefox hint stays inside a 390 px screen", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK] })],
+      states: [state("a", "tunvless0")],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.openOnPhone();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    await card.getByRole("button", { name: "ClientHello fingerprint" }).click();
+    await page.locator('[data-select-item][data-value="firefox"]').click();
+    const hint = card.getByText("Firefox lists AES first", { exact: false });
+    await expect(hint).toBeVisible();
+    const box = await hint.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scrollW).toBeLessThanOrEqual(390);
+  });
+
+  for (const [fingerprint, note] of [
+    ["firefox", "Firefox ClientHello"],
+    ["chrome", "Chrome ClientHello"],
+    ["", ""],
+  ]) {
+    // Catches a fixed fingerprint missing from the collapsed summary, or a summary naming one when the link decides.
+    test(`the collapsed summary for fingerprint "${fingerprint}" says "${note}"`, async ({
+      page,
+    }) => {
+      const advanced = { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint };
+      await stubDaemon(page, {
+        tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK], advanced })],
+        states: [state("a", "tunvless0")],
+      });
+      const tunnels = new TunnelsPage(page);
+      await tunnels.open();
+      await tunnels.expand("a");
+      const more = tunnels.card("a").getByRole("button", { name: "More: connect timeout" });
+      if (note) {
+        await expect(more).toContainText(note);
+      } else {
+        await expect(more).toBeVisible();
+        await expect(more).not.toContainText("ClientHello");
+      }
+    });
+  }
 
   // Catches the skipped segments not shown, shown by kernel name, shown with the switch off, or joined without a separator.
   test("kernel TCP names the segments it leaves on the TUN", async ({ page }) => {

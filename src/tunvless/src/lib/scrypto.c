@@ -449,6 +449,19 @@ int sc_p256_pub(const unsigned char seed[32], unsigned char pub[65]) {
     return rc;
 }
 
+void sc_wipe(void *p, size_t n) { wc_ForceZero(p, (word32)n); }
+
+int sc_p256_on_curve(const unsigned char pub[65]) {
+    ecc_key *key = malloc(sizeof(*key));
+    if (!key) return SC_ENOMEM;
+    if (wc_ecc_init(key) != 0) { free(key); return SC_ECRYPTO; }
+    int rc = wc_ecc_import_x963_ex(pub, 65, key, ECC_SECP256R1) == 0 && wc_ecc_check_key(key) == 0
+                 ? 0 : SC_EINVAL;
+    wc_ecc_free(key);
+    free(key);
+    return rc;
+}
+
 /* ---- signatures ----------------------------------------------------------------------------- */
 
 /* Compare without early exit. Signatures and digests here are not secret, but this file should

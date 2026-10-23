@@ -20,7 +20,7 @@ static int inflate_zlib(const unsigned char *in, size_t in_n, unsigned char *out
     return ok ? 0 : -1;
 }
 
-#define BROTLI_MEM_CAP ((size_t)4 << 20)
+#define BROTLI_MEM_CAP ((size_t)512 << 10)
 #define BROTLI_MEM_HDR 16
 
 static void *brotli_alloc(void *opaque, size_t n) {

@@ -490,6 +490,33 @@ static void p256_pub_refuses_a_seed_out_of_range(void) {
     check("P-256: seed one below the order accepted", 0, sc_p256_pub(n, pub));
 }
 
+/* Catches a wipe that leaves a byte, stops short, or runs past its length. */
+static void wipe_zeroes_exactly_its_bytes(void) {
+    unsigned char b[34];
+    memset(b, 0xA5, sizeof b);
+    sc_wipe(b + 1, 32);
+    size_t left = 0;
+    for (size_t i = 1; i <= 32; i++) left += b[i] != 0;
+    check("wipe: all 32 bytes zero", 0, (long)left);
+    check("wipe: the bytes around it kept", 1, b[0] == 0xA5 && b[33] == 0xA5);
+}
+
+/* Catches a point check that passes anything with the 0x04 prefix, or refuses the known point. */
+static void p256_on_curve_tells_a_point_from_noise(void) {
+    unsigned char pub[65];
+    unhex("0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6"
+          "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", pub, 65);
+    check("P-256 on curve: the RFC 6979 A.2.5 point", 0, sc_p256_on_curve(pub));
+    pub[64] ^= 0x01;
+    check("P-256 on curve: last byte of y flipped refused", 1, sc_p256_on_curve(pub) != 0);
+    pub[64] ^= 0x01;
+    pub[0] = 0x05;
+    check("P-256 on curve: prefix 0x05 refused", 1, sc_p256_on_curve(pub) != 0);
+    memset(pub + 1, 0, 64);
+    pub[0] = 0x04;
+    check("P-256 on curve: zero point refused", 1, sc_p256_on_curve(pub) != 0);
+}
+
 /* ---- certificates --------------------------------------------------------------------------- */
 
 /* PEM → DER with our own decoder: the test must not check the library with its own function. */
@@ -661,6 +688,8 @@ int main(void) {
     test_x25519();
     p256_pub_matches_a_known_vector();
     p256_pub_refuses_a_seed_out_of_range();
+    p256_on_curve_tells_a_point_from_noise();
+    wipe_zeroes_exactly_its_bytes();
     test_mlkem();
     test_mldsa();
     test_sig();

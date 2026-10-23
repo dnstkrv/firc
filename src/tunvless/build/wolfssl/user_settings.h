@@ -12,8 +12,7 @@
  * name and validity (RSA PKCS#1 v1.5 and PSS, ECDSA P-256/P-384/P-521 signatures). The chain is
  * checked by wolfSSL's X509 store, which is why part of its TLS layer (OPENSSL_EXTRA) is built.
  *
- * WHAT IS LEFT OUT ON PURPOSE: wolfSSL's TLS 1.2 and older (tls13.c has its own minimal TLS 1.2
- * client), a TLS server, QUIC, DH, DSA, DES, RC4, MD4, PSK, PBKDF, Ed25519 (certverify.c
+ * WHAT IS LEFT OUT ON PURPOSE: wolfSSL's TLS 1.2 and older, a TLS server, QUIC, DH, DSA, DES, RC4, MD4, PSK, PBKDF, Ed25519 (certverify.c
  * reads the Ed25519 Reality certificate itself), the filesystem (certverify.c reads the roots
  * itself, into a buffer) and socket I/O.
  *

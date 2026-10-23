@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <strings.h>
+#include "certzip.h"
 
 #define REALITY_EBADKEY (-2)   /* pbk or sid does not parse */
 #define REALITY_ECRYPTO (-3)   /* a primitive or the random source failed */
@@ -21,6 +22,14 @@ static inline int reality_fp_of(const char *fp) {
     return fp && !strcasecmp(fp, "firefox") ? REALITY_FP_FIREFOX : REALITY_FP_CHROME;
 }
 
+/* The certificate compressions a Hello of this fingerprint offers, as 1u << algorithm; the Hello
+ * writes its compress_certificate list from it and the handshake accepts only these. */
+static inline unsigned reality_cert_algs(int fp) {
+    return fp == REALITY_FP_FIREFOX
+               ? (1u << CERTZIP_ZLIB) | (1u << CERTZIP_BROTLI) | (1u << CERTZIP_ZSTD)
+               : (1u << CERTZIP_BROTLI);
+}
+
 struct reality_cfg {
     const char *sni;   /* SNI: the camouflage domain (Reality) or the server name (plain);
                         * "" sends no server_name extension at all */
@@ -34,10 +43,10 @@ struct reality_cfg {
     /* PLAIN TLS, NO REALITY (security=tls).
      *
      * The same ClientHello (Chrome's or Firefox's look by fp, the post-quantum share; GREASE
-     * only in Chrome's) without the authenticator: session_id is random bytes, as a browser's, and pbk is not needed. There is
-     * no separate builder because the browser look must live in ONE place: two copies drift
-     * apart, and the symptom is not a build error but a node that stops working for no visible
-     * reason.
+     * only in Chrome's) without the authenticator: session_id is random bytes, as a browser's,
+     * and pbk is not needed. There is no separate builder because the browser look must live in
+     * ONE place: two copies drift apart, and the symptom is not a build error but a node that
+     * stops working for no visible reason.
      *
      * An explicit flag rather than "pbk is empty": a typo in the key must not silently turn
      * Reality into plain TLS, a downgrade that looks like a working node. */

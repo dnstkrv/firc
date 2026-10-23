@@ -538,7 +538,7 @@ static volatile int g_insecure;
 void vless_set_insecure(int on) { g_insecure = on ? 1 : 0; }
 int vless_insecure(void) { return g_insecure; }
 
-static const char *g_fp;
+static const char *volatile g_fp;
 void vless_set_fp(const char *fp) { g_fp = fp && fp[0] ? fp : NULL; }
 const char *vless_fp(void) { return g_fp; }
 

@@ -30,10 +30,20 @@ int tr_dial(const char *host, uint16_t port, int timeout_s) {
     return sv[0];
 }
 
+static const void *g_st_at;
+static int g_build_rc, g_st_wipes, g_other_wipes;
+void sc_wipe(void *p, size_t n) {
+    memset(p, 0, n);
+    if (p == g_st_at && n == sizeof(struct reality_state)) g_st_wipes++;
+    else if (n >= sizeof(struct ech_state)) g_other_wipes++;
+}
+
 int reality_build_hello(const struct reality_cfg *cfg, struct reality_state *st,
                         unsigned char *out, size_t out_n, size_t *out_len) {
     (void)out_n;
-    memset(st, 0, sizeof *st);
+    g_st_at = st;
+    memset(st, 0xAB, sizeof *st);
+    if (g_build_rc) return g_build_rc;
     st->pq = cfg->pq;
     g_last_pq = cfg->pq;
     *out_len = reality_fp_of(cfg->fp) == REALITY_FP_FIREFOX ? (cfg->pq ? 1890 : 600) : cfg->pq ? 1760 : 537;
@@ -261,5 +271,27 @@ int main(void) {
     check("STEER_NOPQ: a silent node times out", TLS13_ETIMEOUT, open_to("dead.invalid", "reality"));
     check("STEER_NOPQ: no retry", 1, g_d);
 
+    /* Catches the Reality state (ephemeral key, ML-KEM key, authkey) or the ECH buffers left in memory after the handshake. */
+    {
+        g_fp = "chrome";
+        g_st_wipes = 0;
+        check("wipe: a handshake that succeeds", 0, open_to("ok.invalid", "reality"));
+        check("wipe: the state wiped once after success", 1, g_st_wipes);
+        g_st_wipes = 0;
+        check("wipe: a handshake the server refuses", TLS13_ECERT, open_to("rej.invalid", "reality"));
+        check("wipe: the state wiped once after the refusal", 1, g_st_wipes);
+        g_st_wipes = 0;
+        g_build_rc = REALITY_EBADKEY;
+        check("wipe: a Hello that cannot be built", REALITY_EBADKEY, open_to("ok.invalid", "reality"));
+        check("wipe: the state wiped once after the build failure", 1, g_st_wipes);
+        g_build_rc = 0;
+        struct tr_node en = { .host = "ok.invalid", .port = 443, .type = "tcp", .security = "tls",
+                              .sni = "www.example.com", .fp = "chrome", .ech = "AAAA" };
+        struct tr_link l;
+        g_st_wipes = g_other_wipes = 0;
+        check("wipe: an ECH config that does not parse", ECH_EPARSE, tr_link_open(&l, &en, NULL, 1));
+        check("wipe: the ECH buffers wiped", 1, g_other_wipes);
+        check("wipe: the state wiped after the ECH failure", 1, g_st_wipes);
+    }
     return unit_done("pqfallbackmatch");
 }

@@ -1,5 +1,4 @@
-/* TLS 1.3 handshake and record layer for a ClientHello built by reality.c (plus a minimal TLS 1.2
- * client at the end).
+/* TLS 1.3 handshake and record layer for a ClientHello built by reality.c.
  *
  * Reality is real TLS 1.3 with one twist in authentication: the client proves itself with the
  * authenticator in session_id, and a server that recognised it sends a temporary certificate
@@ -223,6 +222,8 @@ int tls13_keys_setup(struct tls13_keys *k) {
 }
 
 void tls13_keys_free(struct tls13_keys *k) {
+    sc_wipe(k->key, sizeof k->key);
+    sc_wipe(k->iv, sizeof k->iv);
     if (!k->ctx_ready) return;
     sc_aead_free(&k->ctx);
     k->ctx_ready = 0;
@@ -331,6 +332,14 @@ static int cert_has_dc(const unsigned char *b, size_t n) {
     return 0;
 }
 
+struct hs_secrets {
+    unsigned char early[48], derived[48], hs_secret[48];
+    unsigned char ecdhe[SC_MLKEM768_SS + 32];
+    unsigned char c_hs[48], s_hs[48], fkey[48], cfkey[48];
+    unsigned char master[48], c_ap[48], s_ap[48];
+    struct tls13_keys c_hk, s_hk;
+};
+
 /* Takes the ClientHello record already sent (for the transcript) and our ephemeral private key.
  *
  * auth->host != NULL turns on the certificate check (security=tls); auth->reality_key, the
@@ -338,16 +347,17 @@ static int cert_has_dc(const unsigned char *b, size_t n) {
  * but are not parsed.
  *
  * Returns with the traffic keys ready. */
-static int handshake(struct tls13 *t, int fd,
-                     const unsigned char *client_hello, size_t hello_n,
-                     const unsigned char *our_priv,
-                     const struct tls13_auth *auth) {
+static int handshake_run(struct tls13 *t, int fd,
+                         const unsigned char *client_hello, size_t hello_n,
+                         const unsigned char *our_priv,
+                         const struct tls13_auth *auth, struct hs_secrets *k) {
     /* Computed once, so the checks in the parsing loop cannot drift apart. */
     const char *host = auth ? auth->host : NULL;
     const unsigned char *rkey = auth ? auth->reality_key : NULL;
     const int want_cert = (host != NULL) || (rkey != NULL);
     memset(t, 0, sizeof(*t));
     t->fd = fd;
+    g_server_group = 0;
     /* md and H are set after ServerHello: they depend on the cipher suite. */
     enum sc_hash md = SC_SHA256;
     size_t H = 0;
@@ -480,11 +490,11 @@ static int handshake(struct tls13 *t, int fd,
     /* Key schedule, RFC 8446 §7.1. Every step is required, in strict order:
      * early -> handshake -> master, with derive-secret between them. */
     unsigned char zeros[48] = {0};
-    unsigned char early[48], derived[48], hs_secret[48], empty_hash[48];
+    unsigned char empty_hash[48];
     if (sc_hash(md, zeros, 0, empty_hash) != 0) return TLS13_ECRYPTO;
 
-    if (sc_hkdf_extract(md, NULL, 0, zeros, H, early) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, early, H, "derived", empty_hash, H, derived, H) != 0) return TLS13_ECRYPTO;
+    if (sc_hkdf_extract(md, NULL, 0, zeros, H, k->early) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->early, H, "derived", empty_hash, H, k->derived, H) != 0) return TLS13_ECRYPTO;
 
     /* The ECDHE input of the schedule is the secret with the server's EPHEMERAL key from
      * ServerHello, not the one computed in reality.c. Mixing them up passes ServerHello and then
@@ -500,28 +510,27 @@ static int handshake(struct tls13 *t, int fd,
      *
      * The hybrid secret is mlkem_ss ‖ x25519_ss (draft-ietf-tls-ecdhe-mlkem: ML-KEM first for
      * X25519MLKEM768, the same order as Go and BoringSSL). Plain X25519 is just 32 bytes. */
-    unsigned char ecdhe[SC_MLKEM768_SS + 32];
     size_t ecdhe_n = 32;
     if (have_kem) {
         if (getenv("STEER_PQ_TRACE")) fprintf(stderr, "tunvless[debug] pq: server chose X25519MLKEM768\n");
-        if (sc_mlkem768_decaps(ecdhe, auth->mlkem_dk, kem_ct) != 0) return TLS13_ECRYPTO;
-        if (x25519_shared_ext(our_priv, server_pub, ecdhe + SC_MLKEM768_SS) != 0) return TLS13_ECRYPTO;
-        ecdhe_n = sizeof(ecdhe);
-    } else if (x25519_shared_ext(our_priv, server_pub, ecdhe) != 0) return TLS13_ECRYPTO;
-    if (sc_hkdf_extract(md, derived, H, ecdhe, ecdhe_n, hs_secret) != 0)
+        if (sc_mlkem768_decaps(k->ecdhe, auth->mlkem_dk, kem_ct) != 0) return TLS13_ECRYPTO;
+        if (x25519_shared_ext(our_priv, server_pub, k->ecdhe + SC_MLKEM768_SS) != 0) return TLS13_ECRYPTO;
+        ecdhe_n = sizeof(k->ecdhe);
+    } else if (x25519_shared_ext(our_priv, server_pub, k->ecdhe) != 0) return TLS13_ECRYPTO;
+    if (sc_hkdf_extract(md, k->derived, H, k->ecdhe, ecdhe_n, k->hs_secret) != 0)
         return TLS13_ECRYPTO;
 
     unsigned char th[48];
     tr_hash(t, th);
-    unsigned char c_hs[48], s_hs[48];
-    if (derive_secret(md, hs_secret, "c hs traffic", th, H, c_hs) != 0) return TLS13_ECRYPTO;
-    if (derive_secret(md, hs_secret, "s hs traffic", th, H, s_hs) != 0) return TLS13_ECRYPTO;
+    if (derive_secret(md, k->hs_secret, "c hs traffic", th, H, k->c_hs) != 0) return TLS13_ECRYPTO;
+    if (derive_secret(md, k->hs_secret, "s hs traffic", th, H, k->s_hs) != 0) return TLS13_ECRYPTO;
 
-    struct tls13_keys c_hk = t->wr, s_hk = t->rd;
-    if (expand_label(md, c_hs, H, "key", NULL, 0, c_hk.key, c_hk.key_n) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, c_hs, H, "iv", NULL, 0, c_hk.iv, 12) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, s_hs, H, "key", NULL, 0, s_hk.key, s_hk.key_n) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, s_hs, H, "iv", NULL, 0, s_hk.iv, 12) != 0) return TLS13_ECRYPTO;
+    k->c_hk = t->wr;
+    k->s_hk = t->rd;
+    if (expand_label(md, k->c_hs, H, "key", NULL, 0, k->c_hk.key, k->c_hk.key_n) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->c_hs, H, "iv", NULL, 0, k->c_hk.iv, 12) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->s_hs, H, "key", NULL, 0, k->s_hk.key, k->s_hk.key_n) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->s_hs, H, "iv", NULL, 0, k->s_hk.iv, 12) != 0) return TLS13_ECRYPTO;
 
     /* Encrypted server messages follow. Read up to Finished, adding each to the transcript:
      * Certificate and CertificateVerify must be in the hash even when not checked, or
@@ -561,7 +570,7 @@ static int handshake(struct tls13 *t, int fd,
 
         unsigned char aad[5] = { 0x17, 0x03, 0x03,
                                  (unsigned char)(n >> 8), (unsigned char)n };
-        rc = aead_open_once(&s_hk, s_seq++, aad, 5, rec, n);
+        rc = aead_open_once(&k->s_hk, s_seq++, aad, 5, rec, n);
         if (rc) return rc;
         size_t pt = n - 16;
         /* The last non-zero byte is the real record type (RFC 8446 §5.4). */
@@ -616,17 +625,27 @@ static int handshake(struct tls13 *t, int fd,
                          cert_verify_strerror(CERTV_ENOTREALITY));
                 return TLS13_ECERT;
             }
-            if (host && msg == 0x19 && cert_n == 0) {
+            if (want_cert && (msg == 0x0B || msg == 0x19) && cert_n != 0) {
+                snprintf(g_verify_reason, sizeof(g_verify_reason),
+                         "the server sent its certificate twice");
+                return TLS13_ECERT;
+            }
+            if (host && msg == 0x19) {
                 const unsigned char *c = hsbuf + p + 4;
-                unsigned alg = mlen >= 2 ? ((unsigned)c[0] << 8) | c[1] : 0;
+                if (mlen < 8) {
+                    snprintf(g_verify_reason, sizeof(g_verify_reason),
+                             "cannot decompress the server certificate");
+                    return TLS13_ECERT;
+                }
+                unsigned alg = ((unsigned)c[0] << 8) | c[1];
                 if (alg >= 32 || !(auth->cert_algs & (1u << alg))) {
                     snprintf(g_verify_reason, sizeof(g_verify_reason),
                              "server sent a compressed certificate without being asked");
                     return TLS13_ECERT;
                 }
-                size_t declared = mlen >= 8 ? ((size_t)c[2] << 16) | ((size_t)c[3] << 8) | c[4] : 0;
-                size_t zn = mlen >= 8 ? ((size_t)c[5] << 16) | ((size_t)c[6] << 8) | c[7] : 0;
-                if (mlen < 8 || 8 + zn != mlen ||
+                size_t declared = ((size_t)c[2] << 16) | ((size_t)c[3] << 8) | c[4];
+                size_t zn = ((size_t)c[5] << 16) | ((size_t)c[6] << 8) | c[7];
+                if (declared == 0 || 8 + zn != mlen ||
                     certzip_inflate((int)alg, c + 8, zn, declared, certbuf, sizeof(certbuf)) != 0) {
                     snprintf(g_verify_reason, sizeof(g_verify_reason),
                              "cannot decompress the server certificate");
@@ -634,12 +653,17 @@ static int handshake(struct tls13 *t, int fd,
                 }
                 cert_n = declared;
             }
-            if (want_cert && msg == 0x0B && cert_n == 0) {   /* Certificate */
+            if (want_cert && msg == 0x0B) {   /* Certificate */
                 if (mlen > sizeof(certbuf)) return TLS13_ETOOBIG;
                 memcpy(certbuf, hsbuf + p + 4, mlen);
                 cert_n = mlen;
             }
-            if (host && msg == 0x0F && cv_n == 0) {     /* CertificateVerify */
+            if (host && msg == 0x0F && cv_n != 0) {
+                snprintf(g_verify_reason, sizeof(g_verify_reason),
+                         "the server sent CertificateVerify twice");
+                return TLS13_ECERT;
+            }
+            if (host && msg == 0x0F) {     /* CertificateVerify */
                 /* The hash is taken HERE, before tr_add of this message: the server signed
                  * the transcript up to and including Certificate, and a hash cannot be
                  * rolled back later. */
@@ -652,11 +676,11 @@ static int handshake(struct tls13 *t, int fd,
             if (msg == 0x14) {                  /* Finished */
                 /* Checked BEFORE it enters the transcript: the server computed it over the
                  * hash of the preceding messages. */
-                unsigned char fkey[48], hash[48], want[48];
+                unsigned char hash[48], want[48];
                 tr_hash(t, hash);
-                if (expand_label(md, s_hs, H, "finished", NULL, 0, fkey, H) != 0)
+                if (expand_label(md, k->s_hs, H, "finished", NULL, 0, k->fkey, H) != 0)
                     return TLS13_ECRYPTO;
-                if (sc_hmac(md, fkey, H, hash, H, want) != 0) return TLS13_ECRYPTO;
+                if (sc_hmac(md, k->fkey, H, hash, H, want) != 0) return TLS13_ECRYPTO;
                 if (mlen != H || memcmp(hsbuf + p + 4, want, H) != 0) return TLS13_EFINISHED;
                 memcpy(server_finished, want, H);
                 got_finished = 1;
@@ -722,11 +746,11 @@ static int handshake(struct tls13 *t, int fd,
     }
 
     /* Our Finished covers the transcript including the server's Finished. */
-    unsigned char th2[48], cfkey[48], chash[48], cfin[48];
+    unsigned char th2[48], chash[48], cfin[48];
     tr_hash(t, th2);
-    if (expand_label(md, c_hs, H, "finished", NULL, 0, cfkey, H) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->c_hs, H, "finished", NULL, 0, k->cfkey, H) != 0) return TLS13_ECRYPTO;
     memcpy(chash, th2, H);
-    if (sc_hmac(md, cfkey, H, chash, H, cfin) != 0) return TLS13_ECRYPTO;
+    if (sc_hmac(md, k->cfkey, H, chash, H, cfin) != 0) return TLS13_ECRYPTO;
 
     /* Send ChangeCipherSpec (middlebox compatibility, as the browser does) and the encrypted
      * Finished. */
@@ -746,29 +770,38 @@ static int handshake(struct tls13 *t, int fd,
         out[0] = 0x17; out[1] = 0x03; out[2] = 0x03;
         out[3] = (unsigned char)(total >> 8); out[4] = (unsigned char)total;
         memcpy(out + 5, pt, pl);
-        if (aead_seal_once(&c_hk, 0, out, 5, out + 5, pl, out + 5 + pl) != 0) return TLS13_ECRYPTO;
+        if (aead_seal_once(&k->c_hk, 0, out, 5, out + 5, pl, out + 5 + pl) != 0) return TLS13_ECRYPTO;
         if (write(fd, out, 5 + total) != (ssize_t)(5 + total)) return TLS13_EIO;
     }
 
     /* Application traffic keys: from the master secret and the full transcript. */
-    unsigned char master[48], c_ap[48], s_ap[48];
-    if (expand_label(md, hs_secret, H, "derived", empty_hash, H, derived, H) != 0)
+    if (expand_label(md, k->hs_secret, H, "derived", empty_hash, H, k->derived, H) != 0)
         return TLS13_ECRYPTO;
-    if (sc_hkdf_extract(md, derived, H, zeros, H, master) != 0) return TLS13_ECRYPTO;
+    if (sc_hkdf_extract(md, k->derived, H, zeros, H, k->master) != 0) return TLS13_ECRYPTO;
     tr_hash(t, th2);
-    if (derive_secret(md, master, "c ap traffic", th2, H, c_ap) != 0) return TLS13_ECRYPTO;
-    if (derive_secret(md, master, "s ap traffic", th2, H, s_ap) != 0) return TLS13_ECRYPTO;
+    if (derive_secret(md, k->master, "c ap traffic", th2, H, k->c_ap) != 0) return TLS13_ECRYPTO;
+    if (derive_secret(md, k->master, "s ap traffic", th2, H, k->s_ap) != 0) return TLS13_ECRYPTO;
 
-    if (expand_label(md, c_ap, H, "key", NULL, 0, t->wr.key, t->wr.key_n) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, c_ap, H, "iv", NULL, 0, t->wr.iv, 12) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, s_ap, H, "key", NULL, 0, t->rd.key, t->rd.key_n) != 0) return TLS13_ECRYPTO;
-    if (expand_label(md, s_ap, H, "iv", NULL, 0, t->rd.iv, 12) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->c_ap, H, "key", NULL, 0, t->wr.key, t->wr.key_n) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->c_ap, H, "iv", NULL, 0, t->wr.iv, 12) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->s_ap, H, "key", NULL, 0, t->rd.key, t->rd.key_n) != 0) return TLS13_ECRYPTO;
+    if (expand_label(md, k->s_ap, H, "iv", NULL, 0, t->rd.iv, 12) != 0) return TLS13_ECRYPTO;
     /* Traffic keys never change from here, so the cipher contexts are set up once; the stream
      * then runs without a single setkey. */
     if (tls13_keys_setup(&t->wr) != 0 || tls13_keys_setup(&t->rd) != 0) return TLS13_ECRYPTO;
     t->wr_seq = t->rd_seq = 0;
     t->ready = 1;
     return 0;
+}
+
+static int handshake(struct tls13 *t, int fd,
+                     const unsigned char *client_hello, size_t hello_n,
+                     const unsigned char *our_priv,
+                     const struct tls13_auth *auth) {
+    struct hs_secrets k;
+    int rc = handshake_run(t, fd, client_hello, hello_n, our_priv, auth, &k);
+    sc_wipe(&k, sizeof k);
+    return rc;
 }
 
 int tls13_handshake(struct tls13 *t, int fd,
@@ -809,11 +842,9 @@ size_t tls13_take_pending(struct tls13 *t, unsigned char *out, size_t cap) {
 }
 
 /* ---- data ------------------------------------------------------------------ */
-static int tls12_write(struct tls13 *t, const unsigned char *data, size_t n);
 
 int tls13_write(struct tls13 *t, const unsigned char *data, size_t n) {
     if (!t->ready) return TLS13_ESTATE;
-    if (t->v12) return tls12_write(t, data, n);
     while (n) {
         size_t chunk = n > TLS13_MAX_PLAIN ? TLS13_MAX_PLAIN : n;
         unsigned char out[TLS13_MAX_REC + 5];
@@ -840,9 +871,6 @@ int tls13_write(struct tls13 *t, const unsigned char *data, size_t n) {
     return 0;
 }
 
-static int tls12_read_rec(struct tls13 *t, unsigned char type, unsigned char *rec, size_t n,
-                          const unsigned char **body, size_t *body_n);
-
 /* Read EXACTLY ONE record. It may carry no data: then zero bytes with code 0, a success.
  *
  * "Exactly one" matters. Records without data are common here (ChangeCipherSpec,
@@ -867,7 +895,6 @@ static int read_one(struct tls13 *t, const unsigned char **body, size_t *body_n)
     /* No whole record yet means "nothing for now", not a failure: the caller comes back. */
     if (rc == TLS13_EAGAIN) return 0;
     if (rc) return rc;
-    if (t->v12) return tls12_read_rec(t, type, rec, n, body, body_n);
     if (type == 0x14) return 0;                /* ChangeCipherSpec: meaningless in 1.3 */
     if (type != 0x17) return TLS13_EBADREC;
 
@@ -907,304 +934,4 @@ int tls13_read(struct tls13 *t, unsigned char *out, size_t cap, size_t *got) {
 
 int tls13_read_ref(struct tls13 *t, const unsigned char **body, size_t *body_n) {
     return read_one(t, body, body_n);
-}
-
-
-/* ==== TLS 1.2 ============================================================================
- *
- * The minimum for tls12_handshake (tls13.h): ECDHE_RSA with X25519, AES_128_GCM_SHA256 or
- * CHACHA20_POLY1305_SHA256, no resumption, no extended master secret (not offered), no
- * certificate check.
- *
- * The nonce works as in 1.3 if iv is kept right: for GCM iv = salt(4) plus eight zeros, so
- * aead_nonce(iv, n) = salt || n, exactly salt || explicit part when the explicit part equals
- * the record number (as we write it). For ChaCha iv is all twelve bytes and
- * nonce = iv XOR number, as in 1.3. When reading, the GCM explicit part is taken from the
- * record: the server may choose it freely. */
-
-#define TLS12_GCM      0xC02F   /* TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 */
-#define TLS12_CHACHA   0xCCA8   /* TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 */
-
-int xc_random(unsigned char *out, size_t n);
-int xc_x25519_keypair(unsigned char priv[32], unsigned char pub[32]);
-
-/* PRF TLS 1.2 (RFC 5246 §5): P_SHA256(secret, label || seed). */
-static int tls12_prf(const unsigned char *secret, size_t secret_n, const char *label,
-                     const unsigned char *seed, size_t seed_n, unsigned char *out, size_t out_n) {
-    unsigned char ls[128], a[32], tmp[32];
-    size_t ll = strlen(label);
-    if (ll + seed_n > sizeof(ls)) return TLS13_ECRYPTO;
-    memcpy(ls, label, ll);
-    memcpy(ls + ll, seed, seed_n);
-    size_t lsn = ll + seed_n;
-    /* A(1) = HMAC(secret, label||seed), then A(i) = HMAC(secret, A(i-1)). */
-    if (sc_hmac(SC_SHA256, secret, secret_n, ls, lsn, a)) return TLS13_ECRYPTO;
-    size_t off = 0;
-    while (off < out_n) {
-        /* HMAC(secret, A(i) || label || seed), in two pieces without concatenating them. */
-        if (sc_hmac2(SC_SHA256, secret, secret_n, a, 32, ls, lsn, tmp)) return TLS13_ECRYPTO;
-        size_t take = out_n - off < 32 ? out_n - off : 32;
-        memcpy(out + off, tmp, take);
-        off += take;
-        if (sc_hmac(SC_SHA256, secret, secret_n, a, 32, a)) return TLS13_ECRYPTO;
-    }
-    return 0;
-}
-
-static void put16(unsigned char *p, size_t v) { p[0] = (unsigned char)(v >> 8); p[1] = (unsigned char)v; }
-static void put24(unsigned char *p, size_t v) {
-    p[0] = (unsigned char)(v >> 16); p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)v;
-}
-
-static void tls12_aad(unsigned char aad[13], uint64_t seq, unsigned char type, size_t len) {
-    for (int i = 0; i < 8; i++) aad[i] = (unsigned char)(seq >> (56 - 8 * i));
-    aad[8] = type; aad[9] = 0x03; aad[10] = 0x03;
-    put16(aad + 11, len);
-}
-
-static int write_all_fd(int fd, const unsigned char *p, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        ssize_t w = write(fd, p + sent, n - sent);
-        if (w <= 0) { if (w < 0 && errno == EINTR) continue; return TLS13_EIO; }
-        sent += (size_t)w;
-    }
-    return 0;
-}
-
-/* One encrypted record of the given type, with the persistent context t->wr. */
-static int tls12_seal_rec(struct tls13 *t, unsigned char type, const unsigned char *data,
-                          size_t chunk, unsigned char *out, size_t *out_n) {
-    int gcm = t->wr.aead != TLS13_AEAD_CHACHA;
-    size_t ex = gcm ? 8 : 0;
-    size_t total = ex + chunk + 16;
-    uint64_t seq = t->wr_seq++;
-    out[0] = type; out[1] = 0x03; out[2] = 0x03;
-    put16(out + 3, total);
-    if (gcm) for (int i = 0; i < 8; i++) out[5 + i] = (unsigned char)(seq >> (56 - 8 * i));
-    memcpy(out + 5 + ex, data, chunk);
-    unsigned char aad[13];
-    tls12_aad(aad, seq, type, chunk);
-    if (tls13_aead_seal(&t->wr, seq, aad, 13, out + 5 + ex, chunk, out + 5 + ex + chunk) != 0)
-        return TLS13_ECRYPTO;
-    *out_n = 5 + total;
-    return 0;
-}
-
-static int tls12_write(struct tls13 *t, const unsigned char *data, size_t n) {
-    while (n) {
-        size_t chunk = n > TLS13_MAX_PLAIN ? TLS13_MAX_PLAIN : n;
-        unsigned char out[TLS13_MAX_REC + 5];
-        size_t on = 0;
-        int rc = tls12_seal_rec(t, 0x17, data, chunk, out, &on);
-        if (rc) return rc;
-        rc = write_all_fd(t->fd, out, on);
-        if (rc) return rc;
-        data += chunk;
-        n -= chunk;
-    }
-    return 0;
-}
-
-/* Decrypt a record in place; the plaintext is returned in pt/pt_n. */
-static int tls12_open_rec(struct tls13 *t, unsigned char type, unsigned char *rec, size_t n,
-                          unsigned char **pt, size_t *pt_n) {
-    int gcm = t->rd.aead != TLS13_AEAD_CHACHA;
-    size_t ex = gcm ? 8 : 0;
-    if (n < ex + 16) return TLS13_EBADREC;
-    uint64_t nonce_seq = t->rd_seq;
-    if (gcm) {
-        nonce_seq = 0;
-        for (int i = 0; i < 8; i++) nonce_seq = (nonce_seq << 8) | rec[i];
-    }
-    size_t len = n - ex - 16;
-    unsigned char aad[13];
-    tls12_aad(aad, t->rd_seq, type, len);
-    int rc = tls13_aead_open(&t->rd, nonce_seq, aad, 13, rec + ex, n - ex);
-    if (rc) return rc;
-    t->rd_seq++;
-    *pt = rec + ex;
-    *pt_n = len;
-    return 0;
-}
-
-static int tls12_read_rec(struct tls13 *t, unsigned char type, unsigned char *rec, size_t n,
-                          const unsigned char **body, size_t *body_n) {
-    unsigned char *pt;
-    size_t pt_n;
-    if (type != 0x17 && type != 0x15 && type != 0x16) return TLS13_EBADREC;
-    int rc = tls12_open_rec(t, type, rec, n, &pt, &pt_n);
-    if (rc) return rc;
-    if (type == 0x15) return TLS13_ECLOSED;     /* alert, close_notify included */
-    if (type == 0x16) return 0;                 /* HelloRequest and the like: ignored */
-    if (!pt_n) return 0;
-    *body = pt;
-    *body_n = pt_n;
-    return 0;
-}
-
-int tls12_handshake(struct tls13 *t, int fd, const char *sni) {
-    memset(t, 0, sizeof(*t));
-    t->fd = fd;
-    t->v12 = 1;
-    struct sc_hash_ctx tr;
-    if (sc_hash_init(&tr, SC_SHA256) != 0) return TLS13_ECRYPTO;
-    int rc = TLS13_ESTATE;
-
-    unsigned char cr[32], sr[32], priv[32], pub[32], sid[32];
-    if (xc_random(cr, 32) || xc_random(sid, 32) || xc_x25519_keypair(priv, pub))
-        { rc = TLS13_ECRYPTO; goto out; }
-
-    /* ---- ClientHello ---- */
-    static __thread unsigned char buf[16384];
-    size_t sl = strlen(sni);
-    if (sl > 200) { rc = TLS13_ETOOBIG; goto out; }
-    unsigned char *h = buf + 5, *p = h + 4;
-    *p++ = 0x03; *p++ = 0x03;
-    memcpy(p, cr, 32); p += 32;
-    *p++ = 32; memcpy(p, sid, 32); p += 32;
-    /* ChaCha first: much faster on a router without AES acceleration; the server picks by its
-     * own order anyway. */
-    put16(p, 4); p += 2;
-    put16(p, TLS12_CHACHA); p += 2;
-    put16(p, TLS12_GCM); p += 2;
-    *p++ = 1; *p++ = 0;                             /* no compression */
-    unsigned char *ext = p; p += 2;
-    /* server_name */
-    put16(p, 0x0000); put16(p + 2, sl + 5); put16(p + 4, sl + 3); p[6] = 0; put16(p + 7, sl);
-    memcpy(p + 9, sni, sl); p += 9 + sl;
-    /* supported_groups: X25519 only */
-    put16(p, 0x000a); put16(p + 2, 4); put16(p + 4, 2); put16(p + 6, 0x001d); p += 8;
-    /* ec_point_formats: uncompressed */
-    put16(p, 0x000b); put16(p + 2, 2); p[4] = 1; p[5] = 0; p += 6;
-    /* signature_algorithms: RSA-PSS and PKCS#1. The signature is not checked, but without the
-     * list the server may refuse. */
-    static const unsigned char sa[] = { 0x08,0x04, 0x08,0x05, 0x08,0x06, 0x04,0x01, 0x05,0x01, 0x06,0x01 };
-    put16(p, 0x000d); put16(p + 2, sizeof(sa) + 2); put16(p + 4, sizeof(sa));
-    memcpy(p + 6, sa, sizeof(sa)); p += 6 + sizeof(sa);
-    /* ALPN: http/1.1 only */
-    put16(p, 0x0010); put16(p + 2, 11); put16(p + 4, 9); p[6] = 8; memcpy(p + 7, "http/1.1", 8); p += 15;
-    /* renegotiation_info: empty, as every modern client sends it */
-    put16(p, 0xff01); put16(p + 2, 1); p[4] = 0; p += 5;
-    put16(ext, (size_t)(p - ext - 2));
-    size_t hl = (size_t)(p - h);
-    h[0] = 0x01; put24(h + 1, hl - 4);
-    buf[0] = 0x16; buf[1] = 0x03; buf[2] = 0x01; put16(buf + 3, hl);
-    sc_hash_update(&tr, h, hl);
-    if ((rc = write_all_fd(fd, buf, 5 + hl))) goto out;
-
-    /* ---- server reply: ServerHello ... ServerHelloDone ---- */
-    static __thread unsigned char hs[40960];
-    size_t hs_n = 0, off = 0;
-    unsigned suite = 0;
-    unsigned char spub[32];
-    int have_ske = 0, done = 0;
-    for (int guard = 0; guard < 64 && !done; guard++) {
-        unsigned char type;
-        size_t n;
-        rc = read_record_fd(fd, &type, buf, sizeof(buf), &n);
-        if (rc) goto out;
-        if (type == 0x15) { rc = TLS13_ECLOSED; goto out; }
-        if (type != 0x16) { rc = TLS13_EBADREC; goto out; }
-        if (hs_n + n > sizeof(hs)) { rc = TLS13_ETOOBIG; goto out; }
-        memcpy(hs + hs_n, buf, n);
-        hs_n += n;
-        while (off + 4 <= hs_n) {
-            unsigned char mt = hs[off];
-            size_t ml = ((size_t)hs[off + 1] << 16) | ((size_t)hs[off + 2] << 8) | hs[off + 3];
-            if (off + 4 + ml > hs_n) break;
-            const unsigned char *m = hs + off + 4;
-            if (mt == 0x02) {                               /* ServerHello */
-                if (ml < 38 || m[0] != 3 || m[1] != 3) { rc = TLS13_EBADREC; goto out; }
-                memcpy(sr, m + 2, 32);
-                size_t q = 34 + 1 + m[34];
-                if (q + 3 > ml) { rc = TLS13_EBADREC; goto out; }
-                suite = ((unsigned)m[q] << 8) | m[q + 1];
-                if (suite != TLS12_GCM && suite != TLS12_CHACHA) { rc = TLS13_EBADSUITE; goto out; }
-            } else if (mt == 0x0c) {                        /* ServerKeyExchange */
-                if (ml < 4 + 32 || m[0] != 3 || m[1] != 0x00 || m[2] != 0x1d || m[3] != 32)
-                    { rc = TLS13_ENOKEYSHARE; goto out; }
-                memcpy(spub, m + 4, 32);
-                have_ske = 1;
-            } else if (mt == 0x0d) {                        /* CertificateRequest: unsupported */
-                rc = TLS13_EBADREC; goto out;
-            } else if (mt == 0x0e) {                        /* ServerHelloDone */
-                done = 1;
-            }
-            /* Certificate (0x0b) and the rest only enter the transcript. */
-            sc_hash_update(&tr, hs + off, 4 + ml);
-            off += 4 + ml;
-            if (done) break;
-        }
-    }
-    if (!done || !suite || !have_ske) { rc = TLS13_EBADREC; goto out; }
-
-    /* ---- keys ---- */
-    unsigned char pms[32], ms[48], seed[64], kb[88];
-    if (x25519_shared_ext(priv, spub, pms)) { rc = TLS13_ECRYPTO; goto out; }
-    memcpy(seed, cr, 32); memcpy(seed + 32, sr, 32);
-    if ((rc = tls12_prf(pms, 32, "master secret", seed, 64, ms, 48))) goto out;
-    memcpy(seed, sr, 32); memcpy(seed + 32, cr, 32);
-    int chacha = suite == TLS12_CHACHA;
-    size_t kn = chacha ? 32 : 16, ivn = chacha ? 12 : 4;
-    if ((rc = tls12_prf(ms, 48, "key expansion", seed, 64, kb, 2 * kn + 2 * ivn))) goto out;
-    t->wr.aead = t->rd.aead = chacha ? TLS13_AEAD_CHACHA : TLS13_AEAD_AES128;
-    t->wr.key_n = t->rd.key_n = kn;
-    memcpy(t->wr.key, kb, kn);
-    memcpy(t->rd.key, kb + kn, kn);
-    memcpy(t->wr.iv, kb + 2 * kn, ivn);         /* for GCM the other eight are zeros (above) */
-    memcpy(t->rd.iv, kb + 2 * kn + ivn, ivn);
-    if ((rc = tls13_keys_setup(&t->wr)) || (rc = tls13_keys_setup(&t->rd))) goto out;
-
-    /* ---- ClientKeyExchange, ChangeCipherSpec, Finished ---- */
-    unsigned char cke[4 + 33];
-    cke[0] = 0x10; put24(cke + 1, 33); cke[4] = 32; memcpy(cke + 5, pub, 32);
-    sc_hash_update(&tr, cke, sizeof(cke));
-    buf[0] = 0x16; buf[1] = 0x03; buf[2] = 0x03; put16(buf + 3, sizeof(cke));
-    memcpy(buf + 5, cke, sizeof(cke));
-    size_t bn = 5 + sizeof(cke);
-    static const unsigned char ccs[6] = { 0x14, 0x03, 0x03, 0x00, 0x01, 0x01 };
-    memcpy(buf + bn, ccs, 6); bn += 6;
-
-    unsigned char th[32], fin[16];
-    struct sc_hash_ctx tc;
-    if (sc_hash_clone(&tc, &tr) != 0) { rc = TLS13_ECRYPTO; goto out; }
-    sc_hash_final(&tc, th);
-    sc_hash_free(&tc);
-    fin[0] = 0x14; put24(fin + 1, 12);
-    if ((rc = tls12_prf(ms, 48, "client finished", th, 32, fin + 4, 12))) goto out;
-    sc_hash_update(&tr, fin, 16);
-    size_t fn = 0;
-    if ((rc = tls12_seal_rec(t, 0x16, fin, 16, buf + bn, &fn))) goto out;
-    bn += fn;
-    if ((rc = write_all_fd(fd, buf, bn))) goto out;
-
-    /* ---- the server's ChangeCipherSpec and Finished ---- */
-    unsigned char want[12];
-    if (sc_hash_clone(&tc, &tr) != 0) { rc = TLS13_ECRYPTO; goto out; }
-    sc_hash_final(&tc, th);
-    sc_hash_free(&tc);
-    if ((rc = tls12_prf(ms, 48, "server finished", th, 32, want, 12))) goto out;
-    int got_ccs = 0;
-    for (int guard = 0; guard < 8; guard++) {
-        unsigned char type;
-        size_t n;
-        rc = read_record_fd(fd, &type, buf, sizeof(buf), &n);
-        if (rc) goto out;
-        if (type == 0x15) { rc = TLS13_ECLOSED; goto out; }
-        if (type == 0x14) { got_ccs = 1; continue; }
-        if (type != 0x16 || !got_ccs) { rc = TLS13_EBADREC; goto out; }
-        unsigned char *pt;
-        size_t pn;
-        if ((rc = tls12_open_rec(t, 0x16, buf, n, &pt, &pn))) goto out;
-        if (pn != 16 || pt[0] != 0x14 || memcmp(pt + 4, want, 12)) { rc = TLS13_EFINISHED; goto out; }
-        t->ready = 1;
-        rc = 0;
-        goto out;
-    }
-    rc = TLS13_EBADREC;
-out:
-    sc_hash_free(&tr);
-    if (rc) { tls13_keys_free(&t->wr); tls13_keys_free(&t->rd); t->ready = 0; }
-    return rc;
 }

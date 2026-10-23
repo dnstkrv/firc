@@ -77,7 +77,8 @@ int main(void) {
         snprintf(what, sizeof what, "%s: stream cut by one byte is refused", s->name);
         check(what, -1, inflate_to(s, s->chain, s->chain_n - 1, sizeof CHAIN, sizeof out));
 
-        unsigned char buf[4096];
+        unsigned char *buf = malloc(s->chain_n + 1);
+        if (!buf) return 1;
         memcpy(buf, s->chain, s->chain_n);
         buf[s->chain_n] = 0x00;
         /* Catches bytes after the end of the stream ignored. */
@@ -90,6 +91,7 @@ int main(void) {
         /* Catches a decoder error taken for success. */
         snprintf(what, sizeof what, "%s: corrupt stream is refused", s->name);
         check(what, -1, inflate_to(s, buf, s->chain_n, sizeof CHAIN, sizeof out));
+        free(buf);
 
         /* Catches the cap set below 40960, refusing a chain the handshake buffer holds. */
         snprintf(what, sizeof what, "%s: 40960 bytes accepted", s->name);
@@ -121,7 +123,14 @@ int main(void) {
     g_max_alloc = 0;
     /* Catches the brotli allocator cap removed: a 16 MB meta-block header makes the decoder allocate a 16 MB ring buffer. */
     check("brotli: 16 MB meta-block header is refused", -1, inflate_to(&br, huge, sizeof huge, 40960, 40960));
-    check("brotli: no allocation of 4 MB or more for it", 1, g_max_alloc < (4u << 20));
+    check("brotli: no allocation of 512 KB or more for it", 1, g_max_alloc < (512u << 10));
+
+    unsigned char mega[4 + 64] = { 0xAF, 0xFF, 0xFF, 0x0F };
+    memset(mega + 4, 'A', 64);
+    g_max_alloc = 0;
+    /* Catches the brotli cap above 512 KB: a 1 MB meta-block header makes the decoder allocate a 1 MB ring buffer. */
+    check("brotli: 1 MB meta-block header is refused", -1, inflate_to(&br, mega, sizeof mega, 40960, 40960));
+    check("brotli: no allocation of 512 KB or more for the 1 MB header", 1, g_max_alloc < (512u << 10));
 
     return unit_done("certzipmatch");
 }

@@ -48,8 +48,6 @@ static void prng_step(void) { prng = prng * 6364136223846793005ull + 14426950408
  * the frozen Hello byte for byte. If the calls in reality.c move, the test turns red, and it
  * should: such a change needs the same analysis. */
 #define MBEDTLS_BLINDING_BYTES 128
-static int g_poison_left, g_after_seed;
-static unsigned char g_p256_drawn[32];
 static ssize_t det_getrandom(void *buf, size_t n, unsigned int flags) {
     (void)flags;
     if (++g_calls == 2)
@@ -59,28 +57,50 @@ static ssize_t det_getrandom(void *buf, size_t n, unsigned int flags) {
         prng_step();
         p[i] = (unsigned char)(prng >> 33);
     }
-    if (n == 64) {
-        g_after_seed = 1;
-    } else if (g_after_seed && n == 32) {
-        if (g_poison_left > 0) {
-            g_poison_left--;
-            memset(p, 0xff, n);
-        } else {
-            memcpy(g_p256_drawn, p, n);
-            g_after_seed = 0;
-        }
-    } else {
-        g_after_seed = 0;
-    }
     return (ssize_t)n;
 }
 static time_t det_time(time_t *p) { (void)p; return (time_t)1700000000; }
 
+#include "scrypto.h"
+static int g_poison_left;
+static unsigned char g_p256_drawn[32];
+static int det_p256_pub(const unsigned char seed[32], unsigned char pub[65]) {
+    if (g_poison_left > 0) {
+        unsigned char above_n[32];
+        memset(above_n, 0xff, sizeof above_n);
+        g_poison_left--;
+        return sc_p256_pub(above_n, pub);
+    }
+    memcpy(g_p256_drawn, seed, 32);
+    return sc_p256_pub(seed, pub);
+}
+
+static const unsigned char *g_seed_at;
+static int g_seed_wiped;
+static int det_keygen(unsigned char *ek, unsigned char *dk, const unsigned char *seed) {
+    g_seed_at = seed;
+    g_seed_wiped = 0;
+    return sc_mlkem768_keygen(ek, dk, seed);
+}
+static void det_wipe(void *p, size_t n) {
+    sc_wipe(p, n);
+    if (p != g_seed_at || n != SC_MLKEM768_SEED) return;
+    size_t left = 0;
+    for (size_t i = 0; i < n; i++) left += ((const unsigned char *)p)[i] != 0;
+    g_seed_wiped = left == 0;
+}
+
 #define os_getrandom(b, n, f) det_getrandom((b), (n), (f))
 #define time(p) det_time(p)
+#define sc_p256_pub(s, p) det_p256_pub((s), (p))
+#define sc_mlkem768_keygen(e, d, s) det_keygen((e), (d), (s))
+#define sc_wipe(p, n) det_wipe((p), (n))
 #include "../src/proto/tls/reality.c"
 #undef os_getrandom
 #undef time
+#undef sc_p256_pub
+#undef sc_mlkem768_keygen
+#undef sc_wipe
 
 #include "chello-frozen.h"
 #include "chello-frozen-pq.h"
@@ -269,6 +289,37 @@ static int ff_key_share_is_hybrid_x25519_p256(void) {
     return bad;
 }
 
+/* Catches a P-256 share that is not a point on the curve, in the frozen Hello or a fresh one. */
+static int ff_p256_share_is_on_the_curve(void) {
+    const size_t at = 2 + 4 + 1216 + 4 + 32 + 4;
+    struct extv f = find_ext((const unsigned char *)FROZEN_FF, FROZEN_FF_N, 0x0033);
+    int bad = verdict(f.count == 1 && f.n == at + 65 && sc_p256_on_curve(f.p + at) == 0,
+                      "frozen Firefox Hello: P-256 share on the curve");
+    int fresh = 1;
+    for (uint64_t seed = 1; seed <= 64; seed++) {
+        unsigned char h[4096];
+        size_t n = build_seeded(&CFG_FF, "aes", seed, h, sizeof h);
+        struct extv e = n ? find_ext(h, n, 0x0033) : (struct extv){ NULL, 0, 0 };
+        fresh = fresh && e.count == 1 && e.n == at + 65 && sc_p256_on_curve(e.p + at) == 0;
+    }
+    bad += verdict(fresh, "64 Firefox Hellos: P-256 share on the curve");
+    return bad;
+}
+
+/* Catches the ML-KEM seed, the decapsulation key's d and z, left on the stack after the Hello is built. */
+static int mlkem_seed_is_wiped(void) {
+    unsigned char h[4096];
+    g_seed_at = NULL;
+    size_t cn = build_cfg(&CFG_PQ, "aes", h, sizeof h);
+    int chrome = cn && g_seed_at && g_seed_wiped;
+    g_seed_at = NULL;
+    size_t fn = build_cfg(&CFG_FF, "aes", h, sizeof h);
+    int firefox = fn && g_seed_at && g_seed_wiped;
+    int bad = verdict(chrome, "Chrome hybrid Hello: ML-KEM seed zeroed after keygen");
+    bad += verdict(firefox, "Firefox Hello: ML-KEM seed zeroed after keygen");
+    return bad;
+}
+
 /* Catches an extension body of the Firefox Hello that differs from the uTLS capture. */
 static int ff_small_extensions_match_the_capture(void) {
     unsigned char h[4096];
@@ -301,6 +352,34 @@ static int ff_offers_three_certificate_compressions(void) {
     size_t rn = build_cfg(&CFG_FF, "aes", r, sizeof r), pn = build_cfg(&plain, "aes", p, sizeof p);
     int bad = verdict(rn && body_is(find_ext(r, rn, 0x001B), "06000100020003"), "Firefox Reality Hello offers zlib, brotli, zstd");
     bad += verdict(pn && body_is(find_ext(p, pn, 0x001B), "06000100020003"), "Firefox plain-TLS Hello offers zlib, brotli, zstd");
+    return bad;
+}
+
+/* Catches a Hello whose compress_certificate list is written apart from reality_cert_algs, so the check of what was offered drifts from the offer. */
+static int every_shape_offers_reality_cert_algs(void) {
+    struct reality_cfg plain = CFG, ffplain = CFG_FF;
+    plain.plain = ffplain.plain = 1;
+    plain.pbk = plain.sid = ffplain.pbk = ffplain.sid = NULL;
+    const struct { const struct reality_cfg *cfg; const char *name; } shapes[] = {
+        { &CFG, "Chrome Reality" }, { &CFG_PQ, "Chrome Reality, hybrid" }, { &plain, "Chrome plain TLS" },
+        { &CFG_FF, "Firefox Reality" }, { &ffplain, "Firefox plain TLS" },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof shapes / sizeof shapes[0]; i++) {
+        unsigned char h[4096];
+        size_t n = build_cfg(shapes[i].cfg, "aes", h, sizeof h);
+        struct extv e = n ? find_ext(h, n, 0x001B) : (struct extv){ NULL, 0, 0 };
+        unsigned mask = 0, count = 0, want = reality_cert_algs(reality_fp_of(shapes[i].cfg->fp));
+        int good = e.count == 1 && e.n >= 3 && e.p[0] == e.n - 1 && !(e.p[0] & 1);
+        for (size_t q = 1; good && q + 1 < e.n; q += 2, count++) {
+            unsigned alg = (unsigned)e.p[q] << 8 | e.p[q + 1];
+            good = alg < 32 && !(mask & 1u << alg);
+            mask |= alg < 32 ? 1u << alg : 0;
+        }
+        char what[96];
+        snprintf(what, sizeof what, "%s: compress_certificate is reality_cert_algs", shapes[i].name);
+        bad += verdict(good && want && mask == want && count == (unsigned)__builtin_popcount(want), what);
+    }
     return bad;
 }
 
@@ -530,8 +609,11 @@ int main(int argc, char **argv) {
     fails += ff_hello_matches_the_frozen_bytes();
     fails += ff_hello_has_no_grease_and_a_fixed_order();
     fails += ff_key_share_is_hybrid_x25519_p256();
+    fails += ff_p256_share_is_on_the_curve();
+    fails += mlkem_seed_is_wiped();
     fails += ff_small_extensions_match_the_capture();
     fails += ff_offers_three_certificate_compressions();
+    fails += every_shape_offers_reality_cert_algs();
     fails += ff_ignores_pq_off();
     fails += ff_ech_grease_picks_either_aead();
     fails += fp_of_reads_firefox_in_any_case();

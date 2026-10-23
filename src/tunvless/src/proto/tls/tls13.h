@@ -70,10 +70,6 @@ struct tls13_keys {
 struct tls13 {
     int fd;
     int ready;
-    /* 1: the connection runs TLS 1.2 (tls12_handshake). Records differ then: AES-GCM carries
-     * the explicit nonce part at the start of the body, the AAD holds the record number, type
-     * and length, and there is no inner type at the end. Read and write check the flag. */
-    int v12;
     /* Read buffer: take everything the socket has in one call and assemble records from here.
      * Without it each record cost several system calls and a wait for the rest of it
      * (16,000 reads a second of 600 bytes, 80% of loop time inside reads). The price is 16 KB
@@ -102,13 +98,6 @@ struct tls13 {
     struct sc_hash_ctx tr384;
     size_t hash_n;                  /* 32 or 48, known after ServerHello */
 };
-
-/* Minimal TLS 1.2 client for a server that does not speak 1.3: ECDHE-RSA with X25519,
- * AES-128-GCM-SHA256 or ChaCha20-Poly1305, ALPN http/1.1. The certificate is NOT verified, so it
- * is fit only under a protocol that authenticates the server by itself; a man in the middle on
- * TLS then gets noise and can at most cut the connection. Nothing that relies on TLS to keep
- * its secrets may use it. */
-int tls12_handshake(struct tls13 *t, int fd, const char *sni);
 
 /* client_hello: the record ALREADY sent to the server, 5-byte record header included (for the
  * transcript).

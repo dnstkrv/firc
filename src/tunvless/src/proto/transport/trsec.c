@@ -19,10 +19,10 @@
 
 #include "transport.h"
 #include "reality.h"
+#include "scrypto.h"
 #include "roots.h"
 #include "certverify.h"
 #include "ech.h"
-#include "certzip.h"
 
 /* security=none — a bare stream, no TLS at all (for a trusted network). Without TLS there is no
  * ALPN negotiation, so an HTTP/2 transport starts HTTP/2 at once: the server either accepts bare
@@ -31,6 +31,20 @@ static int sec_none(struct tr_link *l, const struct tr_node *n, const char *alpn
     (void)n; (void)alpn;
     l->plain = 1;
     return 0;
+}
+
+struct ech_heap {
+    struct ech_cfg cfg;
+    struct ech_state st;
+    unsigned char list[1100];
+    unsigned char outer[6144];
+    size_t outer_n;
+};
+
+static void ech_heap_free(struct ech_heap *eh) {
+    if (!eh) return;
+    sc_wipe(eh, sizeof *eh);
+    free(eh);
 }
 
 /* security=tls (plain TLS) and security=reality.
@@ -46,10 +60,10 @@ static int sec_none(struct tr_link *l, const struct tr_node *n, const char *alpn
  * address, as in Xray; certificates are almost never issued to an IP, so the subscription parser
  * (sublink.c) skips such a node before it gets here.
  *
- * The Reality state (our ephemeral key and the authenticator key) lives on this function's stack,
- * not in the connection: nothing needs it after the handshake. */
-static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *alpn,
-                        int is_tls) {
+ * The Reality state (our ephemeral key and the authenticator key) lives on sec_tls_like's stack,
+ * not in the connection, and is wiped there: nothing needs it after the handshake. */
+static int sec_tls_run(struct tr_link *l, const struct tr_node *n, const char *alpn, int is_tls,
+                       struct reality_state *rst) {
     const char *verify_host = n->sni[0] ? n->sni : n->host;
     struct reality_cfg cfg = {
         .sni = is_tls ? verify_host : n->sni,
@@ -71,7 +85,6 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
     unsigned char pqv[SC_MLDSA65_PK];
     const int have_pqv = !is_tls && n->pqv && n->pqv[0];
     if (have_pqv && xc_b64url_decode(n->pqv, pqv, sizeof pqv) != SC_MLDSA65_PK) return REALITY_EBADKEY;
-    struct reality_state rst;
     unsigned char hello[2560];
     size_t hello_n = 0;
     /* ws and httpupgrade offer ONLY http/1.1 in ALPN, as Xray does (uTLS
@@ -82,21 +95,15 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
      * only for these two. */
     struct reality_carrier car = { .alpn_http11 = 1 };
     const int h11 = alpn && !strcmp(alpn, "http/1.1");
-    int rc = h11 ? reality_build_hello_carry(&cfg, &rst, &car, hello, sizeof(hello), &hello_n)
-                 : reality_build_hello(&cfg, &rst, hello, sizeof(hello), &hello_n);
+    int rc = h11 ? reality_build_hello_carry(&cfg, rst, &car, hello, sizeof(hello), &hello_n)
+                 : reality_build_hello(&cfg, rst, hello, sizeof(hello), &hello_n);
     if (rc) return rc;
 
     /* ECH (security=tls, the node's `ech=`): the Hello built above, with the real SNI, becomes the
      * inner one; the outer one with public_name from the ECHConfig goes on the wire (ech.h). The
      * buffers are on the heap: the outer Hello holds an encrypted copy of the inner one, twice the
      * usual size, and the threads that run handshakes have small stacks (connectors: 128 KB). */
-    struct ech_heap {
-        struct ech_cfg cfg;
-        struct ech_state st;
-        unsigned char list[1100];
-        unsigned char outer[6144];
-        size_t outer_n;
-    } *eh = NULL;
+    struct ech_heap *eh = NULL;
     struct tls13_ech te = { 0 };
     const unsigned char *send_hello = hello;
     size_t send_n = hello_n;
@@ -107,7 +114,7 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
         int er = ln <= 0 ? ECH_EPARSE : ech_pick(eh->list, (size_t)ln, &eh->cfg);
         if (er == 0) er = ech_wrap(&eh->cfg, hello, hello_n, eh->outer, sizeof eh->outer, &eh->outer_n, &eh->st);
         if (er != 0) {
-            free(eh);
+            ech_heap_free(eh);
             return er;                              /* an ECH_E* code (transport.c, tr_strerror) */
         }
         send_hello = eh->outer;
@@ -124,7 +131,7 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
         ssize_t w = send(l->fd, send_hello + sent, send_n - sent, MSG_NOSIGNAL);
         if (w <= 0) {
             if (w < 0 && errno == EINTR) continue;
-            free(eh);
+            ech_heap_free(eh);
             return TR_EIO;
         }
         sent += (size_t)w;
@@ -143,18 +150,24 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
     if (is_tls) {
         auth.host = verify_host;
         auth.roots = tls_cert_roots();
-        auth.cert_algs = reality_fp_of(cfg.fp) == REALITY_FP_FIREFOX
-                             ? 1u << CERTZIP_ZLIB | 1u << CERTZIP_BROTLI | 1u << CERTZIP_ZSTD
-                             : 1u << CERTZIP_BROTLI;
+        auth.cert_algs = reality_cert_algs(reality_fp_of(cfg.fp));
         if (pol.pcs || pol.pks || pol.vcn || pol.insecure) auth.policy = &pol;
-    } else auth.reality_key = rst.authkey;
-    if (rst.pq) auth.mlkem_dk = rst.mlkem_dk;
+    } else auth.reality_key = rst->authkey;
+    if (rst->pq) auth.mlkem_dk = rst->mlkem_dk;
     auth.mldsa_pk = have_pqv ? pqv : NULL;
 
     if (eh) auth.ech = &te;
-    int hrc = tls13_handshake_auth(&l->tls, l->fd, send_hello, send_n, rst.priv, &auth);
-    free(eh);
+    int hrc = tls13_handshake_auth(&l->tls, l->fd, send_hello, send_n, rst->priv, &auth);
+    ech_heap_free(eh);
     return hrc;
+}
+
+static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *alpn,
+                        int is_tls) {
+    struct reality_state rst;
+    int rc = sec_tls_run(l, n, alpn, is_tls, &rst);
+    sc_wipe(&rst, sizeof rst);
+    return rc;
 }
 
 static int sec_tls(struct tr_link *l, const struct tr_node *n, const char *alpn) {

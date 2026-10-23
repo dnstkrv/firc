@@ -140,8 +140,8 @@ static bool started(void)
 
 static firc_tunprobe_opts_t opts(uint32_t mark, bool insecure, const char *ca, int64_t kill_ms)
 {
-    firc_tunprobe_opts_t o = {.binary = FAKE, .mark = mark, .insecure = insecure, .ca = ca, .fingerprint = NULL, .timeout_s = 3,
-                              .kill_after_ms = kill_ms};
+    firc_tunprobe_opts_t o = {.binary = FAKE, .mark = mark, .insecure = insecure, .ca = ca,
+                              .timeout_s = 3, .kill_after_ms = kill_ms};
     return o;
 }
 

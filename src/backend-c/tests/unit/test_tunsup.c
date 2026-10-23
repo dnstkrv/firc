@@ -517,6 +517,38 @@ TEST argv_full_and_no_link(void)
     PASS();
 }
 
+TEST argv_with_every_option_set(void)
+{
+    /* catches: an option dropped or reordered when all are set, or an argv array one slot short under sanitize */
+    env_setup("ok");
+    char *links[] = {"vless://secret@h1:443#one"};
+    firc_tunnel_t t;
+    tun_init(&t, "a", 3, links, 1);
+    t.active = 2;
+    t.insecure = true;
+    t.kernel_tcp = true;
+    snprintf(t.ca, sizeof t.ca, "/opt/etc/ca.pem");
+    snprintf(t.fingerprint, sizeof t.fingerprint, "chrome");
+    firc_tunnels_t set = {&t, 1};
+    uint32_t marks[] = {0x1a};
+    static rec_t r;
+    rec_open(&r);
+    const uint8_t pool[4] = {198, 18, 0, 0};
+    firc_tunsup_set_tcp_pool(r.s, pool, 15);
+    ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, marks));
+    run_ms(&r, 700);
+    char buf[512];
+    read_file(g_argv, buf, sizeof buf);
+    ASSERT_STR_EQ("--control\n-d\ntunvless3\n-a\n198.51.100.4/32\n-A\n2\n--by\nlatency\n--interval\n30\n"
+                  "--silence\n10\n-t\n5\n-m\n0x1a\n--insecure\n--ca\n/opt/etc/ca.pem\n--fp\nchrome\n"
+                  "--tcp-port\n3603\n--tcp-pool\n198.18.0.0/15\n",
+                  buf);
+    rec_close(&r);
+    ASSERT(no_children());
+    env_teardown();
+    PASS();
+}
+
 TEST argv_minimal_without_options(void)
 {
     /* catches: -m, --insecure, --ca or --fp passed when not set */
@@ -2383,6 +2415,7 @@ int main(int argc, char **argv)
     RUN_TEST(ok_child_up_links_on_stdin);
     RUN_TEST(reap_hook_names_each_child_once_reaped);
     RUN_TEST(argv_full_and_no_link);
+    RUN_TEST(argv_with_every_option_set);
     RUN_TEST(argv_minimal_without_options);
     RUN_TEST(a_kernel_tcp_tunnel_is_spawned_with_its_port_and_pool);
     RUN_TEST(a_kernel_tcp_tunnel_without_a_pool_gets_only_its_port);

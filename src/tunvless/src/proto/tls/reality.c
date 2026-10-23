@@ -194,9 +194,18 @@ static size_t alpn_body(unsigned char *o, size_t cap, const struct reality_carri
     return ab.len;
 }
 
-static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg,
+static size_t cert_algs_body(unsigned char *o, size_t cap, int fp) {
+    struct buf cb = { o, 0, cap };
+    unsigned algs = reality_cert_algs(fp), n = 0;
+    for (unsigned a = 0; a < 32; a++) n += algs >> a & 1u;
+    put8(&cb, 2 * n);
+    for (unsigned a = 0; a < 32; a++)
+        if (algs >> a & 1u) put16(&cb, a);
+    return cb.len;
+}
+
+static int chrome_body(struct buf *b, size_t *xl, const struct reality_cfg *cfg,
                        struct reality_state *st, const struct reality_carrier *car) {
-    struct buf b = *bp;
     /* GREASE values (RFC 8701): one for each place Chrome puts one, fresh per connection;
      * constant values would be a fingerprint themselves.
      *
@@ -233,14 +242,14 @@ static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg
     };
     const unsigned *suites = cpu_has_aes() ? suites_aes : suites_chacha;
     size_t nsuites = sizeof(suites_aes) / sizeof(suites_aes[0]);
-    put16(&b, (unsigned)(nsuites + 1) * 2);
-    put16(&b, g_cipher);
-    for (size_t i = 0; i < nsuites; i++) put16(&b, suites[i]);
+    put16(b, (unsigned)(nsuites + 1) * 2);
+    put16(b, g_cipher);
+    for (size_t i = 0; i < nsuites; i++) put16(b, suites[i]);
 
-    put8(&b, 1); put8(&b, 0);  /* compression: null */
+    put8(b, 1); put8(b, 0);  /* compression: null */
 
-    *xl = b.len;
-    put16(&b, 0);
+    *xl = b->len;
+    put16(b, 0);
 
     /* The set, contents and order of extensions follow Chrome, checked against a capture of
      * its Hello to the same server (tests/hello-diff.py).
@@ -264,7 +273,7 @@ static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg
 
     /* The post-quantum share (1216 bytes) is per thread, not on the stack, like b_ks below. */
     static __thread unsigned char b_pq[REALITY_MLKEM_SHARE];
-    unsigned char b_sni[300], b_alpn[16], b_cc[4], b_ech[220], b_alps[8], b_reneg[1];
+    unsigned char b_sni[300], b_alpn[16], b_cc[1 + 2 * 32], b_ech[220], b_alps[8], b_reneg[1];
     unsigned char b_ocsp[5], b_vers[8], b_sigs[20], b_grp[12], b_pskm[2];
     /* With the post-quantum share the key_share body is over a kilobyte, too much for the small
      * stacks of connector threads. __thread rather than a shared static: handshakes run in
@@ -292,11 +301,8 @@ static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg
      * EncryptedExtensions. */
     px[pn].type = 0x0010; px[pn].body = b_alpn; px[pn].n = alpn_body(b_alpn, sizeof(b_alpn), car); pn++;
 
-    {
-        struct buf cb = { b_cc, 0, sizeof(b_cc) };
-        put8(&cb, 2); put16(&cb, 0x0002);
-        px[pn].type = 0x001B; px[pn].body = b_cc; px[pn].n = cb.len; pn++;
-    }
+    px[pn].type = 0x001B; px[pn].body = b_cc;
+    px[pn].n = cert_algs_body(b_cc, sizeof b_cc, REALITY_FP_CHROME); pn++;
 
     /* encrypted_client_hello: PADDING, not real ECH.
      *
@@ -388,8 +394,10 @@ static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg
                * from the same random source as the rest of the Hello, so hellofreeze.c
                * substitutes it too. */
               unsigned char seed[SC_MLKEM768_SEED];
-              if (fill_random(seed, sizeof seed) != 0) return REALITY_ECRYPTO;
-              if (sc_mlkem768_keygen(b_pq, st->mlkem_dk, seed) != 0) return REALITY_ECRYPTO;
+              int krc = fill_random(seed, sizeof seed) != 0 ||
+                        sc_mlkem768_keygen(b_pq, st->mlkem_dk, seed) != 0;
+              sc_wipe(seed, sizeof seed);
+              if (krc) return REALITY_ECRYPTO;
               memcpy(b_pq + SC_MLKEM768_EK, st->pub, 32);
               st->pq = 1;
           } else if (fill_random(b_pq, REALITY_MLKEM_SHARE) != 0) return REALITY_ECRYPTO;
@@ -427,8 +435,7 @@ static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg
             struct pend t = px[i]; px[i] = px[j]; px[j] = t;
         }
     }
-    for (size_t i = 0; i < pn; i++) ext(&b, px[i].type, px[i].body, px[i].n);
-    *bp = b;
+    for (size_t i = 0; i < pn; i++) ext(b, px[i].type, px[i].body, px[i].n);
     return 0;
 }
 
@@ -446,7 +453,7 @@ static int firefox_body(struct buf *b, size_t *xl, const struct reality_cfg *cfg
         0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201,
     };
     static __thread unsigned char ks[2 + 4 + REALITY_MLKEM_SHARE + 4 + 32 + 4 + 65];
-    unsigned char sni[300], alpn[16], grp[2 + 2 * 7], dc[2 + 2 * 4], sg[2 + 2 * 11];
+    unsigned char sni[300], alpn[16], grp[2 + 2 * 7], dc[2 + 2 * 4], sg[2 + 2 * 11], cc[1 + 2 * 32];
     unsigned char ech[1 + 2 + 2 + 1 + 2 + 32 + 2 + 239], noise[1 + 32 + 239 + 1];
     unsigned char seed[SC_MLKEM768_SEED], p256[32], p256_pub[65];
 
@@ -476,15 +483,17 @@ static int firefox_body(struct buf *b, size_t *xl, const struct reality_cfg *cfg
     }
     ext(b, 0x0012, NULL, 0);
     {
-        if (fill_random(seed, sizeof seed) != 0) return REALITY_ECRYPTO;
         unsigned char *ek = ks + 2 + 4;
-        if (sc_mlkem768_keygen(ek, st->mlkem_dk, seed) != 0) return REALITY_ECRYPTO;
+        int krc = fill_random(seed, sizeof seed) != 0 || sc_mlkem768_keygen(ek, st->mlkem_dk, seed) != 0;
+        sc_wipe(seed, sizeof seed);
+        if (krc) return REALITY_ECRYPTO;
         memcpy(ek + SC_MLKEM768_EK, st->pub, 32);
         st->pq = 1;
         int tries = 0;
         do {
             if (++tries > 4 || fill_random(p256, sizeof p256) != 0) return REALITY_ECRYPTO;
         } while (sc_p256_pub(p256, p256_pub) != 0);
+        sc_wipe(p256, sizeof p256);
         struct buf kb = { ks, 0, sizeof ks };
         put16(&kb, (unsigned)(sizeof ks - 2));
         put16(&kb, REALITY_GROUP_MLKEM); put16(&kb, REALITY_MLKEM_SHARE);
@@ -501,7 +510,7 @@ static int firefox_body(struct buf *b, size_t *xl, const struct reality_cfg *cfg
         ext(b, 0x000D, sg, sb.len);
     }
     ext(b, 0x001C, "\x40\x01", 2);
-    ext(b, 0x001B, "\x06\x00\x01\x00\x02\x00\x03", 7);
+    ext(b, 0x001B, cc, cert_algs_body(cc, sizeof cc, REALITY_FP_FIREFOX));
     {
         if (fill_random(noise, sizeof noise) != 0) return REALITY_ECRYPTO;
         if (car && car->fill_ech && car->fill_ech(car->ctx, noise + 33, 239, st->shared) != 0)

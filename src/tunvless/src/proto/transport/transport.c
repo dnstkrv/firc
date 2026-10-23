@@ -268,8 +268,8 @@ const char *transport_strerror(int rc) {
         case TLS13_EECH: return "server rejected ECH (stale or unknown ECH key in the link)";
         case TLS13_EGROUP: {
             static __thread char why[96];
-            snprintf(why, sizeof why, "the server chose key share group 0x%04x, which is not offered "
-                     "for completion", tls13_server_group());
+            snprintf(why, sizeof why, "the server chose key share group 0x%04x, which this client "
+                     "offers but cannot complete", tls13_server_group());
             return why;
         }
         case TLS13_EHRR: return "the server asked for a HelloRetryRequest, which is not supported";

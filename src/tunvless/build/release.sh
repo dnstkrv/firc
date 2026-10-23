@@ -9,6 +9,7 @@ DEST="${5:?need a directory to unpack the sources into}"
 TARBALL="${6:-}"
 
 if [ -f "$DEST/$PROBE" ] && [ "$(cat "$DEST/.steer-$NAME" 2>/dev/null)" = "$SHA256" ]; then
+    touch "$DEST/.steer-$NAME"
     exit 0
 fi
 

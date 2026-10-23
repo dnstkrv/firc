@@ -123,6 +123,8 @@ struct vless_sub_stats {
 void vless_set_insecure(int on);
 int vless_insecure(void);
 
+/* --fp: chrome or firefox in place of every link's fp; NULL or "" keeps the link's. Call it
+ * before worker threads start; the pointer is kept, so the string must live on (argv does). */
 void vless_set_fp(const char *fp);
 const char *vless_fp(void);
 

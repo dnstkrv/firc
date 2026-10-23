@@ -14,6 +14,14 @@
 
   let { store, tunnel = $bindable() }: { store: TunnelsStore; tunnel: ClientTunnel } = $props();
 
+  const helloNote = $derived(
+    tunnel.advanced.fingerprint === "firefox"
+      ? t("Firefox ClientHello")
+      : tunnel.advanced.fingerprint === "chrome"
+        ? t("Chrome ClientHello")
+        : "",
+  );
+
   let more = $state(false);
 
   const bad = (value: number, min: number, max: number) =>
@@ -106,7 +114,9 @@
   <Collapsible.Root bind:open={more}>
     <Collapsible.Trigger class="more">
       {#if more}<GroupCollapse size={15} />{:else}<ChevronRight size={15} />{/if}
-      {t("More: connect timeout, certificate check, TCP through the kernel, own CA, device name")}
+      {t(
+        "More: connect timeout, certificate check, TCP through the kernel, own CA, device name",
+      )}{helloNote ? `, ${helloNote}` : ""}
     </Collapsible.Trigger>
     <Collapsible.Content>
       {#if more}

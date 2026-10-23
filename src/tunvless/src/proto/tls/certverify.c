@@ -92,7 +92,7 @@ static int parse_chain(const unsigned char *b, size_t n, const unsigned char **d
     if (p + 3 > n) return CERTV_EPARSE;
     size_t list = ((size_t)b[p] << 16) | ((size_t)b[p + 1] << 8) | b[p + 2];
     p += 3;
-    if (p + list > n) return CERTV_EPARSE;
+    if (p + list != n) return CERTV_EPARSE;
 
     size_t end = p + list;
     while (p + 3 <= end) {

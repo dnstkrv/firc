@@ -71,8 +71,8 @@ int  sc_hash_clone(struct sc_hash_ctx *dst, const struct sc_hash_ctx *src);
 void sc_hash_free(struct sc_hash_ctx *c);
 int  sc_hash(enum sc_hash h, const void *d, size_t n, unsigned char *out);
 
-/* One-call HMAC (RFC 2104). Two message pieces in a row serve the TLS 1.2 PRF (A(i) || seed)
- * and HKDF-Expand: joining them in a caller's buffer would cost a copy and a length limit.
+/* One-call HMAC (RFC 2104). Two message pieces in a row: joining them in a caller's buffer
+ * would cost a copy and a length limit.
  * msg2 may be NULL when n2 == 0. */
 int sc_hmac(enum sc_hash h, const void *key, size_t key_n,
             const void *msg, size_t n, unsigned char *out);
@@ -147,6 +147,10 @@ int sc_x25519(unsigned char out[32], const unsigned char scalar[32], const unsig
 /* The public half: X25519(scalar, 9). */
 int sc_x25519_base(unsigned char pub[32], const unsigned char scalar[32]);
 int sc_p256_pub(const unsigned char seed[32], unsigned char pub[65]);
+/* Zeroes n bytes at p in a way the compiler does not drop. */
+void sc_wipe(void *p, size_t n);
+/* 0 when pub is an uncompressed SEC1 point on P-256, else an error. */
+int sc_p256_on_curve(const unsigned char pub[65]);
 
 /* ---- ML-KEM-768 and ML-DSA-65 (FIPS 203 and 204) ------------------------------------------ */
 
