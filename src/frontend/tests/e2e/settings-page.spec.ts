@@ -359,3 +359,53 @@ test("the save dialog keeps a long URL inside its row on a 390 px phone", async 
   const apart = name.y + name.height <= values.y || name.x + name.width <= values.x;
   expect(apart).toBe(true);
 });
+
+const CLOUDFLARE = "http://cp.cloudflare.com/generate_204";
+
+test("the Cloudflare chip puts the default check URL back and a save sends it", async ({
+  page,
+}) => {
+  // Catches the chip filling another key, another URL, or a draft never marked changed.
+  const puts: unknown[] = [];
+  await openSettings(page, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(route.request().postDataJSON());
+      await route.fulfill({ json: { applied: ["app.check.url"], pendingRestart: [] } });
+      return;
+    }
+    await route.fulfill({ json: answer({ "app.check.url": "http://example.com/204" }) });
+  });
+  const section = page.locator('[data-section="check"]');
+  const field = section.getByRole("textbox", { name: "Check URL", exact: true });
+  await expect(field).toHaveValue("http://example.com/204");
+  await section.getByRole("button", { name: "Cloudflare" }).click();
+  await expect(field).toHaveValue(CLOUDFLARE);
+  await expect(field).toHaveClass(/changed-live/);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  expect(puts).toEqual([{ settings: { "app.check.url": CLOUDFLARE } }]);
+});
+
+for (const width of [320, 360, 390, 414, 768, 1024, 1280, 1920]) {
+  test(`both check chips sit beside their fields inside a ${width} px screen`, async ({ page }) => {
+    // Catches a chip pushed off the screen, drawn over its field, or the page scrolling sideways.
+    await openSettings(page, (r) => r.fulfill({ json: answer() }));
+    await page.setViewportSize({ width, height: 900 });
+    for (const [key, name] of [
+      ["app.check.url", "Cloudflare"],
+      ["app.check.wanUrl", "Yandex"],
+    ]) {
+      const row = page.locator(`[data-row="${key}"]`);
+      const chip = (await row.getByRole("button", { name }).boundingBox())!;
+      const input = (await row.getByRole("textbox").boundingBox())!;
+      expect(chip.x).toBeGreaterThanOrEqual(0);
+      expect(chip.x + chip.width).toBeLessThanOrEqual(width);
+      expect(input.x + input.width).toBeLessThanOrEqual(width);
+      const apart = input.x + input.width <= chip.x || input.y + input.height <= chip.y;
+      expect(apart).toBe(true);
+    }
+    const scroll = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scroll).toBeLessThanOrEqual(width);
+  });
+}

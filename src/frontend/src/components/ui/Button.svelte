@@ -151,6 +151,7 @@
       background: transparent !important;
       color: color-mix(in srgb, var(--accent), transparent 20%);
       clip-path: inset(0 round 0.5rem);
+      overflow: hidden;
       transition:
         color 0.3s ease,
         opacity 0.3s ease;

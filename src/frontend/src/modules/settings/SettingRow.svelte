@@ -159,6 +159,7 @@
     font: inherit;
     box-sizing: border-box;
     max-width: 100%;
+    min-width: 0;
   }
   input.changed-live,
   .switch.changed-live,
@@ -179,7 +180,7 @@
   }
   @media (max-width: 700px) {
     .row {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
       gap: 8px;
     }
   }
