@@ -155,7 +155,7 @@ bool firc_kn_token_refusal(long status, const char *detail)
     return strstr(detail, "0x2312") != NULL || strstr(detail, "0x1218") != NULL;
 }
 
-static int spawn_ndmc(const char *ndmc, const char *cmd, int out_fd, pid_t *pid)
+static int spawn_ndmc(const char *ndmc, const char *cmd, int out_fd, int err_fd, pid_t *pid)
 {
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
@@ -172,7 +172,7 @@ static int spawn_ndmc(const char *ndmc, const char *cmd, int out_fd, pid_t *pid)
     char *argv[] = {(char *)ndmc, "-c", (char *)cmd, NULL};
     if ((rc = posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0)) == 0 &&
         (rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDOUT_FILENO)) == 0 &&
-        (rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDERR_FILENO)) == 0 &&
+        (rc = posix_spawn_file_actions_adddup2(&fa, err_fd, STDERR_FILENO)) == 0 &&
         (rc = posix_spawnattr_setsigdefault(&attr, &all)) == 0 && (rc = posix_spawnattr_setsigmask(&attr, &none)) == 0 &&
         (rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)) == 0) {
         rc = posix_spawn(pid, ndmc, &fa, &attr, argv, environ);
@@ -211,36 +211,54 @@ static firc_err_t ndmc_run(const char *ndmc, const char *cmd, char **out)
     *out = NULL;
     char *buf = malloc(NDMC_OUT_MAX + 1);
     if (buf == NULL) { return FIRC_ERR_NOMEM; }
-    int pfd[2];
+    int pfd[2], efd[2];
     if (pipe2(pfd, O_CLOEXEC) != 0) {
+        free(buf);
+        return FIRC_ERR_IO;
+    }
+    if (pipe2(efd, O_CLOEXEC) != 0) {
+        close(pfd[0]);
+        close(pfd[1]);
         free(buf);
         return FIRC_ERR_IO;
     }
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     pid_t pid;
-    int rc = spawn_ndmc(ndmc, cmd, pfd[1], &pid);
+    int rc = spawn_ndmc(ndmc, cmd, pfd[1], efd[1], &pid);
     close(pfd[1]);
+    close(efd[1]);
     if (rc != 0) {
         close(pfd[0]);
+        close(efd[0]);
         free(buf);
         return FIRC_ERR_IO;
     }
 
-    size_t len = 0;
-    for (;;) {
+    char ebuf[512];
+    size_t len = 0, elen = 0;
+    struct pollfd p[2] = {{.fd = pfd[0], .events = POLLIN}, {.fd = efd[0], .events = POLLIN}};
+    while (p[0].fd >= 0 || p[1].fd >= 0) {
         long left = ms_left(&start);
         if (left <= 0) { break; }
-        struct pollfd p = {.fd = pfd[0], .events = POLLIN};
-        int pr = poll(&p, 1, (int)left);
+        int pr = poll(p, 2, (int)left);
         if (pr < 0 && errno == EINTR) { continue; }
         if (pr <= 0) { break; }
-        ssize_t n = read(pfd[0], buf + len, NDMC_OUT_MAX - len);
-        if (n < 0 && errno == EINTR) { continue; }
-        if (n <= 0 || (len += (size_t)n) == NDMC_OUT_MAX) { break; }
+        if (p[0].revents != 0) {
+            ssize_t n = read(pfd[0], buf + len, NDMC_OUT_MAX - len);
+            if (n < 0 && errno == EINTR) { continue; }
+            if (n <= 0 || (len += (size_t)n) == NDMC_OUT_MAX) { p[0].fd = -1; }
+        }
+        if (p[1].revents != 0) {
+            ssize_t n = read(efd[0], ebuf + elen, sizeof ebuf - 1 - elen);
+            if (n < 0 && errno == EINTR) { continue; }
+            if (n <= 0 || (elen += (size_t)n) == sizeof ebuf - 1) { p[1].fd = -1; }
+        }
     }
     close(pfd[0]);
+    close(efd[0]);
     buf[len] = '\0';
+    ebuf[elen] = '\0';
     int status = 0;
     if (!reap(pid, &start, &status)) {
         free(buf);
@@ -252,7 +270,7 @@ static firc_err_t ndmc_run(const char *ndmc, const char *cmd, char **out)
         return FIRC_ERR_NOSYS;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        char *clean = dup_clean(buf);
+        char *clean = dup_clean(elen > 0 ? ebuf : buf);
         char none[1] = "";
         char *line = clean != NULL ? trim(clean) : none;
         line[strcspn(line, "\r\n")] = '\0';
