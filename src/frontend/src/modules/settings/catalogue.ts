@@ -254,7 +254,14 @@ export const SECTIONS: Section[] = [
           {
             key: "app.check.url",
             label: () => t("Check URL"),
-            control: { kind: "text", width: "22rem" },
+            control: {
+              kind: "text",
+              width: "18rem",
+              suggest: {
+                label: () => t("Cloudflare"),
+                value: "http://cp.cloudflare.com/generate_204",
+              },
+            },
           },
         ],
       ),
