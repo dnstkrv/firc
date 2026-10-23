@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <cjson/cJSON.h>
+#include <curl/curl.h>
 
 #include "firc/bytebuf.h"
 #include "firc/json.h"
@@ -155,10 +156,15 @@ static void *preview_thread(void *arg) {
     list_preview_t *p = arg;
     char *body = NULL;
     size_t body_len = 0;
-    p->fetch_err = firc_sub_fetch_list_ex(p->url, &body, &body_len, preview_progress, p, NULL);
+    long status = 0;
+    char errbuf[CURL_ERROR_SIZE] = "";
+    p->fetch_err = firc_sub_fetch_list_opts(p->url, FIRC_SUB_FETCH_MAX_BODY_BYTES, &body, &body_len,
+                                            preview_progress, p, &status, errbuf, sizeof errbuf);
     p->parse_err = FIRC_OK;
     if (p->fetch_err != FIRC_OK) {
-        preview_set(p, 502, firc_json_error("list fetch failed"));
+        char why[CURL_ERROR_SIZE + 32];
+        firc_sub_fetch_reason(p->fetch_err, status, errbuf, why, sizeof why);
+        preview_set(p, 502, firc_json_error(why));
     } else {
         firc_sub_rules_t rules;
         firc_sub_rules_init(&rules);
@@ -558,6 +564,7 @@ void firc_groups_api_close_streams(firc_groups_ctx_t *ctx) {
         p->pending = NULL;
         if (!p->posted) { preview_free(p); }
     }
+    firc_list_catalog_close(ctx);
     while (ctx->subscribers != NULL) {
         list_subscriber_t *e = ctx->subscribers;
         ctx->subscribers = e->next;
@@ -628,6 +635,7 @@ static void handle_sync(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
 
 void firc_group_lists_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx) {
     must_route(h, "GET", "/api/v1/groups/list/preview", handle_preview, ctx);
+    firc_list_catalog_register_routes(h, ctx);
     must_route(h, "GET", "/api/v1/groups/{groupID}/list/rules", handle_get_page, ctx);
     must_route(h, "PATCH", "/api/v1/groups/{groupID}/list/rules", handle_patch_rules, ctx);
     must_route(h, "POST", "/api/v1/groups/{groupID}/list/sync", handle_sync, ctx);

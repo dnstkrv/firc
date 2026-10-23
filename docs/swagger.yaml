@@ -1103,6 +1103,40 @@ definitions:
         example: namespace
         type: string
     type: object
+  types.ListCatalogSource:
+    properties:
+      id:
+        description: 'Source id, `[a-z0-9-]{1,32}`; the WebUI shows it as a badge'
+        example: sagernet
+        type: string
+      names:
+        description: 'Rule-set names, each `[A-Za-z0-9._@!-]{1,128}`'
+        items:
+          type: string
+        type: array
+      url:
+        description: 'Raw URL template on raw.githubusercontent.com with exactly one `{}`, replaced by a name'
+        example: https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{}.srs
+        type: string
+    type: object
+  types.ListCatalogRes:
+    properties:
+      fetchedAt:
+        description: 'Unix seconds of the fetch this copy came from'
+        example: 1792634400
+        type: integer
+      generated:
+        description: 'When the index was built, as the index says'
+        example: '2026-10-22T03:00:00Z'
+        type: string
+      sources:
+        items:
+          $ref: '#/definitions/types.ListCatalogSource'
+        type: array
+      stale:
+        description: 'true when the last refetch failed and this is the older copy'
+        type: boolean
+    type: object
   types.SubPreviewRes:
     description: 'What a list contains, without the list. `total` and `byType` are counted over all of it; `rules` is a bounded SAMPLE (100), because serialising every rule of a real blocklist costs the router about eight times the response in cJSON tree. `dropped` is the number of LINES the parser could make nothing of -- a hosts-format or AdBlock list yields nothing routable, and an empty preview with no reason reads as an empty file, a wrong URL, or a bug.'
     properties:
@@ -2134,6 +2168,27 @@ paths:
       summary: 'Update a rule'
       tags:
       - rules
+  /api/v1/groups/list/catalog:
+    get:
+      description: 'The index of sing-box rule-sets the group dialog searches by name. The router fetches it from https://raw.githubusercontent.com/hoaxisr/rulesets/master/catalog.json on first use and keeps it in memory for 6 hours; the body is capped at 1 MiB and refused whole if any source or name is malformed. The fetch runs on a separate thread: requests arriving meanwhile wait for that one fetch, and a client that closes the connection does not cancel it. A failed fetch is remembered for 1 minute and answered without a new fetch. A refetch that fails while an older copy exists answers that copy with `stale: true`.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.ListCatalogRes'
+        "500":
+          description: 'Internal Server Error -- out of memory, or the fetch could not start'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+        "502":
+          description: 'Bad Gateway -- no copy and the fetch failed: the reason a list fetch reports (`the server answered 404`, `the list is too big`, libcurl''s text), or `catalog refused: <why>` for an index that did not pass the checks'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+      summary: 'Rule-set catalog'
+      tags:
+      - groups
   /api/v1/groups/list/preview:
     get:
       description: 'Downloads and parses a list by URL without saving anything: the preview for the "List by URL" block in the group dialog. Returns counters over the whole list (`total`, `byType`, `dropped` -- lines that yielded no rule) and at most the first 100 rules. The download and parse run on a separate thread: the answer comes when the list is downloaded, while DNS and other requests are served meanwhile. At most two previews run at once; the next one gets 503 until one of them finishes. A client that closes the connection before the answer cancels the download.'

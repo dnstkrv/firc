@@ -76,11 +76,11 @@ test.describe("Group dialog: list preview", () => {
 
   test("the daemon's 502 is shown verbatim", async ({ page }) => {
     await page.route("**/groups/list/preview*", (route) =>
-      route.fulfill({ status: 502, json: { error: "list fetch failed" } }),
+      route.fulfill({ status: 502, json: { error: "the server answered 404" } }),
     );
     const dialog = await openDialog(page);
     await dialog.getByRole("button", { name: "Preview", exact: true }).click();
-    await expect(dialog).toContainText("list fetch failed");
+    await expect(dialog).toContainText("the server answered 404");
   });
 });
 
@@ -204,5 +204,229 @@ test.describe("Group dialog on a phone", () => {
     });
     expect(widest.right).toBeLessThanOrEqual(400);
     expect(widest.scroll).toBeLessThanOrEqual(widest.client);
+  });
+});
+
+const SAGERNET = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{}.srs";
+const HOAXISR = "https://raw.githubusercontent.com/hoaxisr/rulesets/master/srs/{}.srs";
+const CATALOG = {
+  generated: "2026-10-22T00:00:00Z",
+  fetchedAt: 1761091200,
+  stale: false,
+  sources: [
+    { id: "sagernet", url: SAGERNET, names: ["google", "youtube", "youtube@cn", "telegram"] },
+    { id: "hoaxisr", url: HOAXISR, names: ["youtube", "discord"] },
+  ],
+};
+
+type CatalogAnswer = { status: number; json: unknown };
+
+async function catalogDialog(
+  page: Page,
+  answers: CatalogAnswer[] = [{ status: 200, json: CATALOG }],
+  opts: { locale?: string; gate?: Promise<void> } = {},
+) {
+  const calls = { count: 0 };
+  await signedIn(page);
+  if (opts.locale) {
+    const locale = opts.locale;
+    await page.addInitScript((value) => {
+      localStorage.setItem("locale", JSON.stringify({ value }));
+    }, locale);
+  }
+  await page.route("**/interfaces", (route) => route.fulfill({ json: { interfaces: ["eth0"] } }));
+  await page.route("**/groups?with_rules=true", (route) => route.fulfill({ json: { groups: [] } }));
+  await page.route("**/groups/list/catalog", async (route) => {
+    const answer = answers[Math.min(calls.count, answers.length - 1)];
+    calls.count++;
+    if (opts.gate) await opts.gate;
+    await route.fulfill(answer);
+  });
+  await page.goto("/");
+  const add = opts.locale === "ru" ? "Добавить группу" : "Add Group";
+  const toggle = opts.locale === "ru" ? "Список по URL" : "List by URL";
+  const open = async () => {
+    await page.locator(`[data-value="${add}"] button`).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.locator("#gd-name").fill("YouTube");
+    await dialog.locator(`[aria-label="${toggle}"]`).click();
+    return dialog;
+  };
+  const dialog = await open();
+  return { dialog, calls, open };
+}
+
+test.describe("Group dialog: finding a list by name", () => {
+  // Catches the arrow keys or Enter not picking the highlighted row, or the list staying open after a pick.
+  test("typing a word lists matches, arrow down and Enter put the URL in", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    const options = dialog.getByRole("option");
+    await expect(options).toHaveCount(3);
+    await expect(options.first()).toContainText("youtube");
+    await expect(options.first()).toContainText("sagernet");
+    await expect(field).toHaveAttribute("aria-expanded", "true");
+    await field.press("ArrowDown");
+    await field.press("Enter");
+    await expect(field).toHaveValue(
+      "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs",
+    );
+    await expect(dialog.getByRole("listbox")).toHaveCount(0);
+    await expect(field).toHaveAttribute("aria-expanded", "false");
+    await expect(dialog.getByRole("button", { name: "Preview", exact: true })).toBeEnabled();
+  });
+
+  // Catches one source's name hiding the other's, or a pick taking the wrong source's URL.
+  test("the same name in both sources is two rows, each with its own URL", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("youtube");
+    const named = dialog
+      .getByRole("option")
+      .filter({ hasText: /^\s*youtube\s*(sagernet|hoaxisr)\s*$/ });
+    await expect(named).toHaveCount(2);
+    await dialog.getByRole("option").filter({ hasText: "hoaxisr" }).click();
+    await expect(field).toHaveValue(
+      "https://raw.githubusercontent.com/hoaxisr/rulesets/master/srs/youtube.srs",
+    );
+    await expect(dialog.getByRole("listbox")).toHaveCount(0);
+  });
+
+  // Catches Escape closing the whole dialog, or clearing what was typed.
+  test("Escape closes the list and keeps the text", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await field.press("Escape");
+    await expect(dialog.getByRole("listbox")).toHaveCount(0);
+    await expect(field).toHaveValue("you");
+    await page.waitForTimeout(300);
+    await expect(dialog).toBeVisible();
+    await field.press("Escape");
+    await expect(dialog).toBeHidden();
+  });
+
+  // Catches a URL being searched as a word, or the catalog being fetched for it.
+  test("a full URL opens no list and asks for no catalog", async ({ page }) => {
+    const { dialog, calls } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("https://example.com/list.txt");
+    await expect(dialog.getByRole("button", { name: "Preview", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("listbox")).toHaveCount(0);
+    await expect(field).toHaveAttribute("aria-expanded", "false");
+    expect(calls.count).toBe(0);
+    await field.fill("you");
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    expect(calls.count).toBe(1);
+  });
+
+  // Catches text without a scheme being treated as a URL, or an empty search showing nothing at all.
+  test("an address without a scheme finds nothing and cannot be previewed", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    await dialog.locator("#gd-url").fill("raw.githubusercontent.com/x");
+    await expect(dialog.locator(".catalog-panel")).toContainText("nothing found");
+    await expect(dialog.locator("#gd-url")).toHaveAttribute("aria-controls", "gd-url-catalog");
+    await expect(dialog.locator("#gd-url-catalog")).toHaveAttribute("aria-live", "polite");
+    await expect(dialog.getByRole("option")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Preview", exact: true })).toBeDisabled();
+  });
+
+  // Catches the router's reason being replaced by a generic message, or a failed catalog blocking a hand-typed URL.
+  test("a catalog the router could not fetch says why and a URL still works", async ({ page }) => {
+    const { dialog } = await catalogDialog(page, [
+      { status: 502, json: { error: "the server answered 404" } },
+    ]);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    await expect(dialog.locator(".catalog-panel")).toContainText("the server answered 404");
+    await field.fill("https://example.com/list.txt");
+    await expect(dialog.locator(".catalog-panel")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Preview", exact: true })).toBeEnabled();
+  });
+
+  // Catches the unreadable-answer fallback bypassing translation.
+  test("an unreadable catalog failure is shown in the chosen language", async ({ page }) => {
+    const { dialog } = await catalogDialog(page, [{ status: 502, json: "x" }], { locale: "ru" });
+    await dialog.locator("#gd-url").fill("you");
+    await expect(dialog.locator(".catalog-panel")).toContainText("Каталог недоступен");
+  });
+
+  // Catches a failed catalog being remembered, so the next word never asks again.
+  test("after a failed catalog the next word asks again and shows rows", async ({ page }) => {
+    const { dialog, calls } = await catalogDialog(page, [
+      { status: 502, json: { error: "the server answered 404" } },
+      { status: 200, json: CATALOG },
+    ]);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    await expect(dialog.locator(".catalog-panel")).toContainText("the server answered 404");
+    await field.fill("goo");
+    await expect(dialog.getByRole("option")).toHaveCount(1);
+    await expect(dialog.getByRole("option")).toContainText("google");
+    expect(calls.count).toBe(2);
+  });
+
+  // Catches the catalog being fetched again for every word or every opening of the dialog.
+  test("the catalog is asked for once across words and a reopened dialog", async ({ page }) => {
+    const { dialog, calls, open } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await field.fill("goo");
+    await expect(dialog.getByRole("option")).toHaveCount(1);
+    await dialog.locator(".close").click();
+    await expect(dialog).toBeHidden();
+    const again = await open();
+    await again.locator("#gd-url").fill("disc");
+    await expect(again.getByRole("option")).toHaveCount(1);
+    await expect(again.getByRole("option")).toContainText("discord");
+    expect(calls.count).toBe(1);
+  });
+
+  // Catches a word being called an invalid URL, or a word letting the group be created.
+  test("a word is not an invalid URL and Create waits for a pick", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    const field = dialog.locator("#gd-url");
+    await field.fill("you");
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await expect(dialog).not.toContainText("Invalid URL");
+    await expect(field).not.toHaveClass(/invalid/);
+    const create = dialog.getByRole("button", { name: "Create", exact: true });
+    await expect(create).toBeDisabled();
+    await dialog.getByRole("option").first().click();
+    await expect(create).toBeEnabled();
+  });
+
+  // Catches an empty panel while the catalog is still on its way.
+  test("the list says it is loading until the catalog arrives", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { dialog } = await catalogDialog(page, undefined, { gate });
+    await dialog.locator("#gd-url").fill("you");
+    await expect(dialog.locator(".catalog-panel")).toContainText("loading the catalog…");
+    release();
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await expect(dialog.locator(".catalog-panel")).not.toContainText("loading the catalog…");
+  });
+
+  // Catches the field still being labelled as taking only an address.
+  test("the field is called Address or name", async ({ page }) => {
+    const { dialog } = await catalogDialog(page);
+    await expect(dialog.locator('label[for="gd-url"]')).toHaveText("Address or name");
+  });
+
+  // Catches the cap of 50 rows missing, or the rest going uncounted, or the Russian strings missing.
+  test("in Russian past 50 rows the list counts the rest", async ({ page }) => {
+    const names = Array.from({ length: 55 }, (_, i) => `site${String(i).padStart(2, "0")}`);
+    const big = { ...CATALOG, sources: [{ id: "hoaxisr", url: HOAXISR, names }] };
+    const { dialog } = await catalogDialog(page, [{ status: 200, json: big }], { locale: "ru" });
+    await expect(dialog.locator('label[for="gd-url"]')).toHaveText("Адрес или название");
+    await dialog.locator("#gd-url").fill("site");
+    await expect(dialog.getByRole("option")).toHaveCount(50);
+    await expect(dialog.locator(".catalog-panel")).toContainText("ещё 5");
+    await dialog.locator("#gd-url").fill("zzz");
+    await expect(dialog.locator(".catalog-panel")).toContainText("ничего не найдено");
   });
 });

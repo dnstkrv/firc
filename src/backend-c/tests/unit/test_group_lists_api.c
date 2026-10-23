@@ -167,6 +167,73 @@ static void gate_reset(void) {
     atomic_store(&g_gate_entered, 0);
 }
 
+static atomic_int g_catalog_hits;
+
+static const char catalog_body[] =
+    "{\"generated\":\"2026-10-22T03:00:00Z\",\"sources\":["
+    "{\"id\":\"sagernet\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{}.srs\","
+    "\"names\":[\"youtube\",\"youtube@cn\"]},"
+    "{\"id\":\"hoaxisr\",\"url\":\"https://raw.githubusercontent.com/hoaxisr/rulesets/master/srs/{}.srs\","
+    "\"names\":[\"discord\"]}]}";
+
+static void h_stub_catalog(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    atomic_fetch_add(&g_catalog_hits, 1);
+    firc_http_res_write(res, 200, "application/json", (const uint8_t *)catalog_body, sizeof(catalog_body) - 1);
+}
+
+static void h_stub_catalog_slow(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    atomic_fetch_add(&g_catalog_hits, 1);
+    stub_sleep();
+    firc_http_res_write(res, 200, "application/json", (const uint8_t *)catalog_body, sizeof(catalog_body) - 1);
+}
+
+static void h_stub_catalog_gate(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    atomic_fetch_add(&g_gate_entered, 1);
+    for (int i = 0; i < 500 && !atomic_load(&g_gate_open); i++) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    h_stub_catalog(req, res, ud);
+}
+
+static void h_stub_catalog_404(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    atomic_fetch_add(&g_catalog_hits, 1);
+    h_stub_404(req, res, ud);
+}
+
+static void h_stub_catalog_bad(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    atomic_fetch_add(&g_catalog_hits, 1);
+    static const char body[] =
+        "{\"generated\":\"x\",\"sources\":[{\"id\":\"Bad Id\","
+        "\"url\":\"https://raw.githubusercontent.com/a/b/{}.srs\",\"names\":[\"x\"]}]}";
+    firc_http_res_write(res, 200, "application/json", (const uint8_t *)body, sizeof(body) - 1);
+}
+
+#define CATALOG_BIG_BYTES ((size_t)1024 * 1024 + 1)
+
+static void h_stub_catalog_big(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    (void)ud;
+    atomic_fetch_add(&g_catalog_hits, 1);
+    static const char head[] = "{\"generated\":\"x\",\"sources\":[],\"pad\":\"";
+    static const char tail[] = "\"}";
+    uint8_t *body = malloc(CATALOG_BIG_BYTES);
+    if (body == NULL) {
+        firc_http_res_write_error(res, 500, "oom");
+        return;
+    }
+    memset(body, 'a', CATALOG_BIG_BYTES);
+    memcpy(body, head, sizeof(head) - 1);
+    memcpy(body + CATALOG_BIG_BYTES - (sizeof(tail) - 1), tail, sizeof(tail) - 1);
+    firc_http_res_take(res, 200, "application/json", body, CATALOG_BIG_BYTES);
+}
+
 static char g_stub_url[128];
 static const char *stub_url(const char *path) {
     snprintf(g_stub_url, sizeof(g_stub_url), "http://127.0.0.1:%d%s", STUB_PORT, path);
@@ -247,6 +314,12 @@ static harness_t *harness_start_ex(bool with_worker, bool with_config) {
     firc_httpd_route(h->stub, "GET", "/slow", h_stub_slow, NULL);
     firc_httpd_route(h->stub, "GET", "/slow404", h_stub_slow_404, NULL);
     firc_httpd_route(h->stub, "GET", "/gate", h_stub_gate, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog", h_stub_catalog, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog-slow", h_stub_catalog_slow, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog-gate", h_stub_catalog_gate, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog-404", h_stub_catalog_404, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog-bad", h_stub_catalog_bad, NULL);
+    firc_httpd_route(h->stub, "GET", "/catalog-big", h_stub_catalog_big, NULL);
     if (firc_httpd_listen_tcp(h->stub, "127.0.0.1", STUB_PORT) != FIRC_OK) { return NULL; }
     pthread_create(&h->stub_thread, NULL, loop_thread, h->stub_loop);
 
@@ -892,6 +965,23 @@ TEST the_preview_fetch_failure_is_502(void) {
     PASS();
 }
 
+/* Catches: the preview answering a generic text instead of why the fetch failed. */
+TEST the_preview_fetch_failure_says_why(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[256];
+    snprintf(path, sizeof(path), "/api/v1/groups/list/preview?url=%s", stub_url("/404"));
+    cJSON *out = NULL;
+    ASSERT_EQ(502, do_request("GET", path, NULL, &out));
+    ASSERT(out != NULL);
+    const cJSON *err = cJSON_GetObjectItemCaseSensitive(out, "error");
+    ASSERT(cJSON_IsString(err));
+    ASSERT_STR_EQ("the server answered 404", err->valuestring);
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
 static int64_t mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1041,6 +1131,231 @@ TEST a_preview_in_flight_at_shutdown_is_ended(void) {
     int fd = stream_open(path);
     ASSERT(fd >= 0);
     ASSERTm("the preview is in flight", wait_previews(h, 1, 2000));
+
+    int64_t t0 = mono_ms();
+    harness_stop(h);
+    int64_t took = mono_ms() - t0;
+    close(hole);
+    char buf[64];
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    close(fd);
+    ASSERT_EQ_FMTm("the client sees the connection end", (ssize_t)0, n, "%zd");
+    ASSERT_LTm("the stop did not wait out the fetch", took, (int64_t)5000);
+    PASS();
+}
+
+#define CATALOG_PATH "/api/v1/groups/list/catalog"
+#define CATALOG_FRESH_MS ((uint64_t)6 * 3600 * 1000)
+
+static atomic_uint_fast64_t g_catalog_now;
+static uint64_t catalog_fake_now(void) { return (uint64_t)atomic_load(&g_catalog_now); }
+
+static char g_catalog_url[128];
+
+static void catalog_set_url(void *arg) {
+    harness_t *h = arg;
+    h->ctx.catalog_url = g_catalog_url;
+    h->ctx.catalog_now_ms = catalog_fake_now;
+}
+
+static bool catalog_use(harness_t *h, const char *url) {
+    snprintf(g_catalog_url, sizeof(g_catalog_url), "%s", url);
+    return on_loop(h, catalog_set_url, h);
+}
+
+static harness_t *catalog_harness(const char *path) {
+    atomic_store(&g_catalog_hits, 0);
+    atomic_store(&g_catalog_now, (uint64_t)1000000);
+    harness_t *h = harness_start();
+    if (h != NULL && !catalog_use(h, stub_url(path))) { return NULL; }
+    return h;
+}
+
+static void catalog_advance(uint64_t ms) { atomic_fetch_add(&g_catalog_now, ms); }
+
+static cJSON *catalog_names(cJSON *out, int source) {
+    return jobj(cJSON_GetArrayItem(jobj(out, "sources"), source), "names");
+}
+
+/* Catches: a catalog fetched on every request, or an answer missing its fields. */
+TEST catalog_is_fetched_once_and_cached(void) {
+    harness_t *h = catalog_harness("/catalog");
+    ASSERT(h != NULL);
+    time_t before = time(NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &out));
+    time_t after = time(NULL);
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ("2026-10-22T03:00:00Z", jstr(out, "generated"));
+    ASSERT(cJSON_IsFalse(jobj(out, "stale")));
+    ASSERT(jnum(out, "fetchedAt") >= (double)before && jnum(out, "fetchedAt") <= (double)after);
+    ASSERT_EQ(2, cJSON_GetArraySize(jobj(out, "sources")));
+    ASSERT_STR_EQ("sagernet", jstr(cJSON_GetArrayItem(jobj(out, "sources"), 0), "id"));
+    ASSERT_STR_EQ("youtube@cn", cJSON_GetArrayItem(catalog_names(out, 0), 1)->valuestring);
+    ASSERT_STR_EQ("discord", cJSON_GetArrayItem(catalog_names(out, 1), 0)->valuestring);
+    cJSON_Delete(out);
+    out = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT(cJSON_IsFalse(jobj(out, "stale")));
+    ASSERT_EQ(2, cJSON_GetArraySize(jobj(out, "sources")));
+    cJSON_Delete(out);
+    ASSERT_EQ(1, atomic_load(&g_catalog_hits));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a second request starting its own fetch while one is running. */
+TEST catalog_requests_share_one_fetch(void) {
+    harness_t *h = catalog_harness("/catalog-slow");
+    ASSERT(h != NULL);
+    int a = stream_open(CATALOG_PATH);
+    int b = stream_open(CATALOG_PATH);
+    ASSERT(a >= 0 && b >= 0);
+    char resp[8192];
+    ASSERT(recv_response(a, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(200, status_code_of(resp));
+    ASSERT(recv_response(b, resp, sizeof(resp)) > 0);
+    ASSERT_EQ(200, status_code_of(resp));
+    close(a);
+    close(b);
+    ms_sleep(STUB_SLOW_MS);
+    ASSERT_EQ(1, atomic_load(&g_catalog_hits));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a copy kept forever, or refetched before six hours. */
+TEST catalog_refetches_after_six_hours(void) {
+    harness_t *h = catalog_harness("/catalog");
+    ASSERT(h != NULL);
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, NULL));
+    catalog_advance(CATALOG_FRESH_MS - 1);
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, NULL));
+    ASSERT_EQ(1, atomic_load(&g_catalog_hits));
+    catalog_advance(2);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT(cJSON_IsFalse(jobj(out, "stale")));
+    cJSON_Delete(out);
+    ASSERT_EQ(2, atomic_load(&g_catalog_hits));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a failed fetch retried on every keystroke, or remembered past its minute. */
+TEST catalog_failure_is_remembered_for_a_minute(void) {
+    harness_t *h = catalog_harness("/catalog-404");
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_STR_EQ("the server answered 404", jstr(out, "error"));
+    cJSON_Delete(out);
+    catalog_advance(59 * 1000);
+    out = NULL;
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_STR_EQ("the server answered 404", jstr(out, "error"));
+    cJSON_Delete(out);
+    ASSERT_EQ(1, atomic_load(&g_catalog_hits));
+    catalog_advance(2 * 1000);
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, NULL));
+    ASSERT_EQ(2, atomic_load(&g_catalog_hits));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a failed refetch throwing away the copy it had, or serving it as fresh. */
+TEST catalog_refetch_failure_serves_the_old_copy_stale(void) {
+    harness_t *h = catalog_harness("/catalog");
+    ASSERT(h != NULL);
+    cJSON *first = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &first));
+    ASSERT(first != NULL);
+    ASSERT(catalog_use(h, stub_url("/404")));
+    catalog_advance(CATALOG_FRESH_MS);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT(out != NULL);
+    ASSERT(cJSON_IsTrue(jobj(out, "stale")));
+    ASSERT_EQ_FMT(jnum(first, "fetchedAt"), jnum(out, "fetchedAt"), "%f");
+    ASSERT(cJSON_Compare(jobj(first, "sources"), jobj(out, "sources"), true));
+    cJSON_Delete(first);
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a failure answered with a generic text instead of the status or the refusal. */
+TEST catalog_fetch_failure_says_why(void) {
+    harness_t *h = catalog_harness("/404");
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_STR_EQ("the server answered 404", jstr(out, "error"));
+    cJSON_Delete(out);
+    ASSERT(catalog_use(h, stub_url("/catalog-bad")));
+    catalog_advance(61 * 1000);
+    out = NULL;
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_STR_EQ("catalog refused: source 1 has no valid id", jstr(out, "error"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a client leaving calling the fetch off, which then blocks the catalog as a failure. */
+TEST catalog_client_leaving_does_not_cancel(void) {
+    gate_reset();
+    harness_t *h = catalog_harness("/catalog-gate");
+    ASSERT(h != NULL);
+    int fd = stream_open(CATALOG_PATH);
+    ASSERT(fd >= 0);
+    ASSERTm("the stub has the catalog's fetch", wait_gate_entered(1, 2000));
+    close(fd);
+    ms_sleep(1500);
+    atomic_store(&g_gate_open, true);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_EQ(2, cJSON_GetArraySize(jobj(out, "sources")));
+    cJSON_Delete(out);
+    ASSERT_EQ(1, atomic_load(&g_catalog_hits));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the catalog fetched under the lists' 8 MiB cap instead of its own 1 MiB. */
+TEST catalog_over_one_mib_is_refused(void) {
+    harness_t *h = catalog_harness("/catalog-big");
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(502, do_request("GET", CATALOG_PATH, NULL, &out));
+    ASSERT_STR_EQ("the list is too big", jstr(out, "error"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the stop waiting out the catalog fetch, or leaving its thread to post to a freed loop. */
+TEST catalog_fetch_in_flight_at_stop_is_joined(void) {
+    int hole = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT(hole >= 0);
+    int one = 1;
+    setsockopt(hole, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(BLACKHOLE_PORT)};
+    inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+    ASSERT_EQ(0, bind(hole, (struct sockaddr *)&sa, sizeof(sa)));
+    ASSERT_EQ(0, listen(hole, 4));
+
+    harness_t *h = catalog_harness("/catalog");
+    ASSERT(h != NULL);
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/catalog", BLACKHOLE_PORT);
+    ASSERT(catalog_use(h, url));
+    int fd = stream_open(CATALOG_PATH);
+    ASSERT(fd >= 0);
+    struct pollfd p = {hole, POLLIN, 0};
+    ASSERT_EQm("the fetch reached the blackhole", 1, poll(&p, 1, 2000));
 
     int64_t t0 = mono_ms();
     harness_stop(h);
@@ -2367,10 +2682,20 @@ int main(int argc, char **argv) {
     RUN_TEST(the_preview_requires_a_url);
     RUN_TEST(the_preview_returns_the_parsed_rules);
     RUN_TEST(the_preview_fetch_failure_is_502);
+    RUN_TEST(the_preview_fetch_failure_says_why);
     RUN_TEST(a_preview_in_flight_leaves_the_loop_serving);
     RUN_TEST(a_client_that_leaves_mid_preview_is_forgotten);
     RUN_TEST(previews_past_two_at_once_are_503);
     RUN_TEST(a_preview_in_flight_at_shutdown_is_ended);
+    RUN_TEST(catalog_is_fetched_once_and_cached);
+    RUN_TEST(catalog_requests_share_one_fetch);
+    RUN_TEST(catalog_refetches_after_six_hours);
+    RUN_TEST(catalog_failure_is_remembered_for_a_minute);
+    RUN_TEST(catalog_refetch_failure_serves_the_old_copy_stale);
+    RUN_TEST(catalog_fetch_failure_says_why);
+    RUN_TEST(catalog_client_leaving_does_not_cancel);
+    RUN_TEST(catalog_over_one_mib_is_refused);
+    RUN_TEST(catalog_fetch_in_flight_at_stop_is_joined);
     RUN_TEST(a_rule_edit_does_not_carry_the_whole_list);
     RUN_TEST(a_rule_edit_whose_save_fails_answers_500);
     RUN_TEST(a_list_interval_outside_uint32_seconds_is_refused);

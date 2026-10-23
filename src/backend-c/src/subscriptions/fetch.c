@@ -373,13 +373,14 @@ typedef struct mem_sink {
     char *data;
     size_t len;
     size_t cap;
+    size_t max;
     bool over_cap;
     bool nomem;
 } mem_sink_t;
 
 static bool mem_sink_write(void *ud, const uint8_t *data, size_t n) {
     mem_sink_t *m = ud;
-    if (m->len + n > FIRC_SUB_FETCH_MAX_BODY_BYTES) {
+    if (m->len + n > m->max) {
         m->over_cap = true;
         return false;
     }
@@ -400,12 +401,18 @@ static bool mem_sink_write(void *ud, const uint8_t *data, size_t n) {
     return true;
 }
 
-static firc_err_t fetch(const char *url, uint32_t mark, const char *const *headers, char **out_body,
-                        size_t *out_len, firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status) {
+static firc_err_t fetch(const char *url, uint32_t mark, const char *const *headers, size_t max, char **out_body,
+                        size_t *out_len, firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status,
+                        char *errbuf, size_t errbuf_cap) {
     *out_body = NULL;
     *out_len = 0;
-    firc_sub_fetch_opts_t o = {.mark = mark, .headers = headers, .progress = progress, .progress_ud = ud};
-    mem_sink_t m = {0};
+    firc_sub_fetch_opts_t o = {.mark = mark,
+                               .headers = headers,
+                               .progress = progress,
+                               .progress_ud = ud,
+                               .errbuf = errbuf,
+                               .errbuf_cap = errbuf_cap};
+    mem_sink_t m = {.max = max};
     firc_err_t err = firc_sub_fetch_to(url, &o, mem_sink_write, &m, out_http_status);
     if (err == FIRC_ERR_CANCELED && m.over_cap) { err = FIRC_ERR_LIMIT; }
     if (err == FIRC_ERR_CANCELED && m.nomem) { err = FIRC_ERR_NOMEM; }
@@ -437,14 +444,38 @@ firc_err_t firc_sub_fetch_list(const char *url, char **out_body, size_t *out_len
 
 firc_err_t firc_sub_fetch_list_ex(const char *url, char **out_body, size_t *out_len,
                                   firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status) {
-    return fetch(url, 0, NULL, out_body, out_len, progress, ud, out_http_status);
+    return firc_sub_fetch_list_opts(url, FIRC_SUB_FETCH_MAX_BODY_BYTES, out_body, out_len, progress, ud,
+                                    out_http_status, NULL, 0);
+}
+
+firc_err_t firc_sub_fetch_list_opts(const char *url, size_t cap, char **out_body, size_t *out_len,
+                                    firc_sub_fetch_progress_fn progress, void *ud, long *out_status, char *errbuf,
+                                    size_t errbuf_cap) {
+    return fetch(url, 0, NULL, cap, out_body, out_len, progress, ud, out_status, errbuf, errbuf_cap);
+}
+
+void firc_sub_fetch_reason(firc_err_t err, long http_status, const char *errbuf, char *out, size_t cap) {
+    if (cap == 0) { return; }
+    if (err == FIRC_ERR_PROTO && http_status >= 200 && http_status <= 299) {
+        snprintf(out, cap, "the list is not text");
+    } else if (err == FIRC_ERR_PROTO && http_status > 0) {
+        snprintf(out, cap, "the server answered %ld", http_status);
+    } else if (err == FIRC_ERR_IO) {
+        snprintf(out, cap, "%s", errbuf != NULL && errbuf[0] != '\0' ? errbuf : firc_err_str(FIRC_ERR_IO));
+    } else if (err == FIRC_ERR_LIMIT && (http_status == 301 || http_status == 302)) {
+        snprintf(out, cap, "too many redirects");
+    } else if (err == FIRC_ERR_LIMIT) {
+        snprintf(out, cap, "the list is too big");
+    } else {
+        snprintf(out, cap, "%s", firc_err_str(err));
+    }
 }
 
 firc_err_t firc_sub_fetch_list_mark_ex(const char *url, uint32_t mark, const char *const *headers,
                                        char **out_body, size_t *out_len, int *out_http_status,
                                        firc_sub_fetch_progress_fn progress, void *ud) {
     long status = 0;
-    firc_err_t err = fetch(url, mark, headers, out_body, out_len, progress, ud, &status);
+    firc_err_t err = fetch(url, mark, headers, FIRC_SUB_FETCH_MAX_BODY_BYTES, out_body, out_len, progress, ud, &status, NULL, 0);
     if (out_http_status != NULL) { *out_http_status = (int)status; }
     return err;
 }

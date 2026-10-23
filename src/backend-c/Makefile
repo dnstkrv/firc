@@ -142,6 +142,7 @@ API_SRCS := \
     src/api/capture.c \
     src/api/staticfiles.c \
     src/api/group_lists.c \
+    src/api/list_catalog.c \
     src/api/tunnels.c \
     src/api/update_api.c \
     src/crypto/jwt.c

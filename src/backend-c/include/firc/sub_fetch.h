@@ -56,6 +56,14 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
 firc_err_t firc_sub_fetch_list_ex(const char *url, char **out_body, size_t *out_len,
                                   firc_sub_fetch_progress_fn progress, void *ud, long *out_http_status);
 
+/* firc_sub_fetch_list_ex with its own body cap and a buffer for libcurl's words on an IO failure. */
+firc_err_t firc_sub_fetch_list_opts(const char *url, size_t cap, char **out_body, size_t *out_len,
+                                    firc_sub_fetch_progress_fn progress, void *ud, long *out_status, char *errbuf,
+                                    size_t errbuf_cap);
+
+/* Writes a human reason for a failed fetch into out: the status for PROTO, errbuf for IO, a size verdict for LIMIT. */
+void firc_sub_fetch_reason(firc_err_t err, long http_status, const char *errbuf, char *out, size_t cap);
+
 /* firc_sub_fetch_list(url, body, len) == firc_sub_fetch_list_ex(url, body, len, NULL, NULL, NULL). */
 firc_err_t firc_sub_fetch_list(const char *url, char **out_body, size_t *out_len);
 

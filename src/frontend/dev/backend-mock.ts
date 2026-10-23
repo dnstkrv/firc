@@ -621,11 +621,31 @@ app.patch(`${API_BASE}/groups/:id/list/rules`, async (c) => {
   return c.json({ status: "ok" });
 });
 
+app.get(`${API_BASE}/groups/list/catalog`, (c) =>
+  c.json({
+    generated: "2026-10-22T00:00:00Z",
+    fetchedAt: Math.floor(Date.now() / 1000),
+    stale: false,
+    sources: [
+      {
+        id: "sagernet",
+        url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{}.srs",
+        names: ["youtube", "youtube@cn", "google", "google@cn", "telegram", "netflix", "openai"],
+      },
+      {
+        id: "hoaxisr",
+        url: "https://raw.githubusercontent.com/hoaxisr/rulesets/master/srs/{}.srs",
+        names: ["youtube", "discord", "telegram-ip", "meta"],
+      },
+    ],
+  }),
+);
+
 app.get(`${API_BASE}/groups/list/preview`, (c) => {
   const url = c.req.query("url");
   if (!url) return c.json({ error: "list url is required" }, 400);
   if (Math.random() < 0.5) {
-    return c.json({ error: "list fetch failed" }, 502);
+    return c.json({ error: "the server answered 404" }, 502);
   }
 
   const count = Math.random() < 0.2 ? 0 : Math.floor(Math.random() * 50) + 5;

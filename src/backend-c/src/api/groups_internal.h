@@ -62,4 +62,7 @@ bool firc_groups_maybe_save(firc_groups_ctx_t *ctx, firc_http_req_t *req, firc_h
 /* must be called before firc_groups_register_routes, so the literal /groups/list/preview matches first */
 void firc_group_lists_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx);
 
+void firc_list_catalog_register_routes(firc_httpd_t *h, firc_groups_ctx_t *ctx);
+void firc_list_catalog_close(firc_groups_ctx_t *ctx);
+
 #endif /* FIRC_API_GROUPS_INTERNAL_H */

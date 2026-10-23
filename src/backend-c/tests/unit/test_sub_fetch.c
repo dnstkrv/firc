@@ -6,6 +6,8 @@
 #include <strings.h>
 #include <time.h>
 
+#include <curl/curl.h>
+
 #include "firc/loop.h"
 #include "firc/httpd.h"
 #include "firc/sub_fetch.h"
@@ -899,6 +901,61 @@ TEST a_url_whose_authority_is_missing_is_refused(void) {
     PASS();
 }
 
+/* Catches: a fetch reason that drops the status, libcurl's words or the size verdict. */
+TEST a_fetch_reason_says_what_went_wrong(void) {
+    char out[128];
+    firc_sub_fetch_reason(FIRC_ERR_PROTO, 404, "", out, sizeof out);
+    ASSERT_STR_EQ("the server answered 404", out);
+    firc_sub_fetch_reason(FIRC_ERR_PROTO, 0, "", out, sizeof out);
+    ASSERT_STR_EQ(firc_err_str(FIRC_ERR_PROTO), out);
+    firc_sub_fetch_reason(FIRC_ERR_IO, 0, "Failed to connect", out, sizeof out);
+    ASSERT_STR_EQ("Failed to connect", out);
+    firc_sub_fetch_reason(FIRC_ERR_IO, 0, "", out, sizeof out);
+    ASSERT_STR_EQ("i/o error", out);
+    firc_sub_fetch_reason(FIRC_ERR_LIMIT, 0, "", out, sizeof out);
+    ASSERT_STR_EQ("the list is too big", out);
+    firc_sub_fetch_reason(FIRC_ERR_LIMIT, 200, "", out, sizeof out);
+    ASSERT_STR_EQ("the list is too big", out);
+    firc_sub_fetch_reason(FIRC_ERR_LIMIT, 302, "", out, sizeof out);
+    ASSERT_STR_EQ("too many redirects", out);
+    firc_sub_fetch_reason(FIRC_ERR_PROTO, 200, "", out, sizeof out);
+    ASSERT_STR_EQ("the list is not text", out);
+    firc_sub_fetch_reason(FIRC_ERR_PROTO, 500, "", out, sizeof out);
+    ASSERT_STR_EQ("the server answered 500", out);
+    firc_sub_fetch_reason(FIRC_ERR_NOMEM, 0, "", out, sizeof out);
+    ASSERT_STR_EQ("out of memory", out);
+    PASS();
+}
+
+/* Catches: a per-call cap ignored in favour of the global one. */
+TEST a_fetch_with_its_own_cap_is_limit_past_it(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char *body = NULL;
+    size_t len = 0;
+    long status = 0;
+    char errbuf[CURL_ERROR_SIZE] = "";
+    ASSERT_EQ(FIRC_ERR_LIMIT, firc_sub_fetch_list_opts(url_for("/big300k"), 1024, &body, &len, NULL, NULL, &status,
+                                                       errbuf, sizeof errbuf));
+    ASSERT_EQ(NULL, body);
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_list_opts(url_for("/list"), 1024, &body, &len, NULL, NULL, &status, errbuf,
+                                                sizeof errbuf));
+    free(body);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: libcurl's words not reaching the caller's buffer. */
+TEST a_fetch_with_its_own_cap_fills_the_errbuf_on_a_transport_failure(void) {
+    char *body = NULL;
+    size_t len = 0;
+    char errbuf[CURL_ERROR_SIZE] = "";
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_list_opts("http://127.0.0.1:1/list", 1024, &body, &len, NULL, NULL, NULL,
+                                                    errbuf, sizeof errbuf));
+    ASSERT(errbuf[0] != '\0');
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -940,5 +997,8 @@ int main(int argc, char **argv) {
     RUN_TEST(a_fetch_told_not_to_follow_answers_the_redirect);
     RUN_TEST(a_pinned_address_takes_a_name_no_resolver_knows);
     RUN_TEST(a_url_whose_authority_is_missing_is_refused);
+    RUN_TEST(a_fetch_reason_says_what_went_wrong);
+    RUN_TEST(a_fetch_with_its_own_cap_is_limit_past_it);
+    RUN_TEST(a_fetch_with_its_own_cap_fills_the_errbuf_on_a_transport_failure);
     GREATEST_MAIN_END();
 }

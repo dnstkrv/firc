@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, tick } from "svelte";
 
   import DevicesDialog from "../../../components/DevicesDialog.svelte";
   import Button from "../../../components/ui/Button.svelte";
@@ -21,6 +21,13 @@
   import { resolverListProblem } from "../../../utils/resolver-validators";
   import { ifaceList, ifaceValue } from "../iface-list";
   import { intervalOptionsFor, parseIntervalSeconds } from "../intervals";
+  import {
+    isUrlText,
+    loadCatalog,
+    searchCatalog,
+    type Catalog,
+    type CatalogRow,
+  } from "../list-catalog";
   import type { GroupLive } from "../live-state";
   import {
     autoEffectiveServers,
@@ -70,6 +77,65 @@
   let previewRules = $state<ListRule[]>([]);
   let previewedUrl = $state<string | null>(null);
 
+  let catalog = $state<Catalog | null>(null);
+  let catalogError = $state<string | null>(null);
+  let catalogLoading = $state(false);
+  let catalogOpen = $state(false);
+  let catalogActive = $state(-1);
+  let catalogQuery = $derived(isUrlText(url) ? "" : url.trim());
+  let catalogShown = $derived(listEnabled && catalogOpen && catalogQuery !== "");
+  let catalogHits = $derived(
+    catalog && catalogQuery !== "" ? searchCatalog(catalog, catalogQuery) : { rows: [], more: 0 },
+  );
+  let urlInvalid = $derived(url !== "" && isUrlText(url) && !isValidListUrl(url));
+
+  function askCatalog() {
+    if (catalog || catalogLoading) return;
+    catalogLoading = true;
+    catalogError = null;
+    void loadCatalog().then((r) => {
+      catalogLoading = false;
+      if (r.ok) catalog = r.data;
+      else catalogError = r.error;
+    });
+  }
+
+  function onUrlInput(e: Event) {
+    const text = (e.currentTarget as HTMLInputElement).value;
+    catalogActive = -1;
+    catalogOpen = !isUrlText(text) && text.trim() !== "";
+    if (catalogOpen) askCatalog();
+  }
+
+  function pickCatalog(row: CatalogRow) {
+    url = row.url;
+    catalogOpen = false;
+    catalogActive = -1;
+  }
+
+  function onUrlKey(e: KeyboardEvent) {
+    if (!catalogShown) return;
+    const n = catalogHits.rows.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (n === 0) return;
+      if (e.key === "ArrowDown") catalogActive = (catalogActive + 1) % n;
+      else catalogActive = catalogActive <= 0 ? n - 1 : catalogActive - 1;
+      const id = `gd-url-option-${catalogActive}`;
+      void tick().then(() => document.getElementById(id)?.scrollIntoView({ block: "nearest" }));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (catalogActive >= 0 && catalogActive < n) pickCatalog(catalogHits.rows[catalogActive]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      catalogOpen = false;
+      catalogActive = -1;
+    } else if (e.key === "Tab") {
+      catalogOpen = false;
+    }
+  }
+
   function resetPreview() {
     previewLoading = false;
     previewError = null;
@@ -101,6 +167,8 @@
     url = group?.list?.url ?? "";
     interval = group?.list?.interval ?? 86400;
     resetPreview();
+    catalogOpen = false;
+    catalogActive = -1;
     dnsMode = modeOf(group?.resolve);
     dnsServer = group?.resolve?.server ?? "";
     serverErrorShown = serverError;
@@ -323,18 +391,66 @@
 
       {#if listEnabled}
         <div class="field">
-          <label for="gd-url">{t("Address")}</label>
+          <label for="gd-url">{t("Address or name")}</label>
           <div class="group-dialog-input-wrapper">
             <span class="icon"><Link size={18} /></span>
             <input
               id="gd-url"
               type="text"
+              role="combobox"
+              autocomplete="off"
+              aria-autocomplete="list"
+              aria-expanded={catalogShown}
+              aria-controls={catalogShown ? "gd-url-catalog" : undefined}
+              aria-activedescendant={catalogShown &&
+              catalogActive >= 0 &&
+              catalogActive < catalogHits.rows.length
+                ? `gd-url-option-${catalogActive}`
+                : undefined}
               bind:value={url}
+              oninput={onUrlInput}
+              onkeydown={onUrlKey}
+              onblur={() => (catalogOpen = false)}
               placeholder="https://example.com/list.txt"
-              class:invalid={url !== "" && !isValidListUrl(url)}
+              class:invalid={urlInvalid}
             />
           </div>
-          {#if url !== "" && !isValidListUrl(url)}
+          {#if catalogShown}
+            <div class="catalog-panel" id="gd-url-catalog" aria-live="polite">
+              {#if catalogHits.rows.length > 0}
+                <ul role="listbox" aria-label={t("Address or name")}>
+                  {#each catalogHits.rows as row, i (i)}
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <li
+                      id={`gd-url-option-${i}`}
+                      role="option"
+                      aria-selected={i === catalogActive}
+                      class:active={i === catalogActive}
+                      onpointerdown={(e) => e.preventDefault()}
+                      onclick={() => pickCatalog(row)}
+                    >
+                      <span class="catalog-name">{row.name}</span>
+                      <span class="catalog-badge">{row.source}</span>
+                    </li>
+                  {/each}
+                </ul>
+                {#if catalogHits.more > 0}
+                  <div class="catalog-note">
+                    {t("{n} more").replace("{n}", String(catalogHits.more))}
+                  </div>
+                {/if}
+              {:else if catalogLoading}
+                <div class="catalog-note">{t("loading the catalog…")}</div>
+              {:else if catalogError !== null}
+                <div class="catalog-note catalog-error">
+                  {catalogError || t("Catalog unavailable")}
+                </div>
+              {:else}
+                <div class="catalog-note">{t("nothing found")}</div>
+              {/if}
+            </div>
+          {/if}
+          {#if urlInvalid}
             <span class="field-error">{t("Invalid URL")}</span>
           {/if}
         </div>
@@ -625,6 +741,66 @@
     color: var(--red);
     font-size: 0.85rem;
     margin: 0;
+  }
+
+  .catalog-panel {
+    box-sizing: border-box;
+    padding: 0.3rem;
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light-extra);
+    border-radius: 0.5rem;
+    box-shadow: var(--shadow-popover);
+  }
+
+  .catalog-panel ul {
+    max-height: 16rem;
+    overflow-y: auto;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .catalog-panel li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+  }
+
+  .catalog-panel li:hover,
+  .catalog-panel li.active {
+    background: var(--bg-light-extra);
+  }
+
+  .catalog-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .catalog-badge {
+    flex: none;
+    padding: 0.05rem 0.4rem;
+    border-radius: 0.3rem;
+    background: var(--bg-light);
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+
+  .catalog-note {
+    padding: 0.35rem 0.5rem;
+    color: var(--text-2);
+    font-size: 0.85rem;
+  }
+
+  .catalog-error {
+    color: var(--red);
   }
 
   .field-error {
