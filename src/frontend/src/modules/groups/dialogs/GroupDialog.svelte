@@ -84,6 +84,9 @@
   let catalogActive = $state(-1);
   let catalogQuery = $derived(isUrlText(url) ? "" : url.trim());
   let catalogShown = $derived(listEnabled && catalogOpen && catalogQuery !== "");
+  let catalogHits = $derived(
+    catalog && catalogQuery !== "" ? searchCatalog(catalog, catalogQuery) : { rows: [], more: 0 },
+  );
   let catalogStatus = $derived(
     !catalogShown || catalogHits.rows.length > 0
       ? ""
@@ -92,9 +95,6 @@
         : catalogError !== null
           ? catalogError || t("Catalog unavailable")
           : t("nothing found"),
-  );
-  let catalogHits = $derived(
-    catalog && catalogQuery !== "" ? searchCatalog(catalog, catalogQuery) : { rows: [], more: 0 },
   );
   let urlInvalid = $derived(url !== "" && isUrlText(url) && !isValidListUrl(url));
 
