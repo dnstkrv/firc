@@ -84,6 +84,15 @@
   let catalogActive = $state(-1);
   let catalogQuery = $derived(isUrlText(url) ? "" : url.trim());
   let catalogShown = $derived(listEnabled && catalogOpen && catalogQuery !== "");
+  let catalogStatus = $derived(
+    !catalogShown || catalogHits.rows.length > 0
+      ? ""
+      : catalogLoading
+        ? t("loading the catalog…")
+        : catalogError !== null
+          ? catalogError || t("Catalog unavailable")
+          : t("nothing found"),
+  );
   let catalogHits = $derived(
     catalog && catalogQuery !== "" ? searchCatalog(catalog, catalogQuery) : { rows: [], more: 0 },
   );
@@ -415,8 +424,9 @@
               class:invalid={urlInvalid}
             />
           </div>
+          <span class="catalog-status" role="status">{catalogStatus}</span>
           {#if catalogShown}
-            <div class="catalog-panel" id="gd-url-catalog" aria-live="polite">
+            <div class="catalog-panel" id="gd-url-catalog">
               {#if catalogHits.rows.length > 0}
                 <ul role="listbox" aria-label={t("Address or name")}>
                   {#each catalogHits.rows as row, i (i)}
@@ -554,6 +564,14 @@
 />
 
 <style>
+  .catalog-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .group-dialog-content {
     display: flex;
     flex-direction: column;

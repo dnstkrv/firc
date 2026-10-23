@@ -328,7 +328,7 @@ test.describe("Group dialog: finding a list by name", () => {
     await dialog.locator("#gd-url").fill("raw.githubusercontent.com/x");
     await expect(dialog.locator(".catalog-panel")).toContainText("nothing found");
     await expect(dialog.locator("#gd-url")).toHaveAttribute("aria-controls", "gd-url-catalog");
-    await expect(dialog.locator("#gd-url-catalog")).toHaveAttribute("aria-live", "polite");
+    await expect(dialog.locator('[role="status"]')).toHaveText("nothing found");
     await expect(dialog.getByRole("option")).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Preview", exact: true })).toBeDisabled();
   });
@@ -399,13 +399,16 @@ test.describe("Group dialog: finding a list by name", () => {
     await expect(create).toBeEnabled();
   });
 
-  // Catches an empty panel while the catalog is still on its way.
+  // Catches an empty panel while the catalog is still on its way, or a status region born with its text.
   test("the list says it is loading until the catalog arrives", async ({ page }) => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const { dialog } = await catalogDialog(page, undefined, { gate });
+    const status = dialog.locator('[role="status"]');
+    await expect(status).toHaveText("");
     await dialog.locator("#gd-url").fill("you");
     await expect(dialog.locator(".catalog-panel")).toContainText("loading the catalog…");
+    await expect(status).toHaveText("loading the catalog…");
     release();
     await expect(dialog.getByRole("option")).toHaveCount(3);
     await expect(dialog.locator(".catalog-panel")).not.toContainText("loading the catalog…");
