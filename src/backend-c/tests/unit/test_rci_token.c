@@ -248,13 +248,14 @@ static bool bench_make(bench_t *b, const char *generate_out)
              "[ \"$1\" = -c ] || exit 2\n"
              "echo \"$2\" >> %s/calls\n"
              "[ ! -e %s/old ] || { echo 'no such command'; exit 127; }\n"
+             "[ ! -e %s/firmware-libs ] || [ \"$LD_LIBRARY_PATH\" = /lib:/usr/lib ] || { echo 'ndmc: initialization failure.' >&2; exit 1; }\n"
              "case \"$2\" in\n"
              "  'authentication token generate firc') [ ! -e %s/fail-generate ] || { printf '\\033[K\\n\\nCore::Security: user \"admin\" not found.\\n' >&2; exit 1; }; if [ -e %s/noisy-generate ]; then head -n 3 %s/generate; printf 'Core::Note: a note.\\n' >&2; tail -n +4 %s/generate; else cat %s/generate; fi ;;\n"
              "  'show authentication token') cat %s/show ;;\n"
              "  'authentication token delete '*) [ ! -e %s/fail-delete ] || exit 1 ;;\n"
              "  *) echo 'no such command'; exit 127 ;;\n"
              "esac\n",
-             b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir);
+             b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir, b->dir);
     return write_text(b->ndmc, script, 0700);
 }
 
@@ -689,6 +690,23 @@ TEST a_failed_generate_says_what_ndmc_answered(void)
     PASS();
 }
 
+/* Catches: ndmc run with the daemon's Entware library path, which it cannot start with. */
+TEST ndmc_runs_on_the_firmware_libraries(void)
+{
+    bench_t b;
+    ASSERT(bench_make(&b, GENERATE_OUT));
+    ASSERT(bench_flag(&b, "firmware-libs"));
+    ASSERT_EQ(0, setenv("LD_LIBRARY_PATH", "/opt/lib:/opt/usr/lib", 1));
+    firc_kn_token_setup(b.token, b.ndmc);
+    firc_kn_token_set_release("5.02.A.11.0-1");
+    char tok[FIRC_KN_TOKEN_MAX];
+    firc_kn_token_current(tok);
+    unsetenv("LD_LIBRARY_PATH");
+    ASSERT_STR_EQ(TOK_A, tok);
+    bench_drop(&b);
+    PASS();
+}
+
 /* Catches: ndmc's stderr read as part of its stdout, so a note amid the token cuts it short. */
 TEST a_note_on_stderr_amid_the_token_keeps_it(void)
 {
@@ -773,6 +791,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_token_that_cannot_be_kept_is_deleted_again);
     RUN_TEST(a_failed_generate_gives_no_token);
     RUN_TEST(a_failed_generate_says_what_ndmc_answered);
+    RUN_TEST(ndmc_runs_on_the_firmware_libraries);
     RUN_TEST(a_note_on_stderr_amid_the_token_keeps_it);
     RUN_TEST(a_failed_revoke_keeps_the_file);
     RUN_TEST(revoke_on_a_router_without_token_commands_drops_the_file);

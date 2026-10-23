@@ -20,8 +20,6 @@
 #include "firc/atomic_write.h"
 #include "firc/log.h"
 
-extern char **environ;
-
 #define NDMC_OUT_MAX (64 * 1024)
 #define MAX_IDS 32
 
@@ -170,12 +168,13 @@ static int spawn_ndmc(const char *ndmc, const char *cmd, int out_fd, int err_fd,
     sigfillset(&all);
     sigemptyset(&none);
     char *argv[] = {(char *)ndmc, "-c", (char *)cmd, NULL};
+    char *envp[] = {"PATH=/sbin:/usr/sbin:/bin:/usr/bin", "LD_LIBRARY_PATH=/lib:/usr/lib", NULL};
     if ((rc = posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0)) == 0 &&
         (rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDOUT_FILENO)) == 0 &&
         (rc = posix_spawn_file_actions_adddup2(&fa, err_fd, STDERR_FILENO)) == 0 &&
         (rc = posix_spawnattr_setsigdefault(&attr, &all)) == 0 && (rc = posix_spawnattr_setsigmask(&attr, &none)) == 0 &&
         (rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)) == 0) {
-        rc = posix_spawn(pid, ndmc, &fa, &attr, argv, environ);
+        rc = posix_spawn(pid, ndmc, &fa, &attr, argv, envp);
     }
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
