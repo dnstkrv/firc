@@ -50,6 +50,48 @@ test.describe("Tunnel editor", () => {
     await expect(card).toContainText("Now: tunvless listens on port 3600");
   });
 
+  // Catches the select not reaching `advanced.fingerprint`, or a changed fingerprint not restarting the tunnel.
+  test("the fingerprint select writes advanced.fingerprint and a change restarts the tunnel", async ({
+    page,
+  }) => {
+    const daemon = await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK] })],
+      states: [state("a", "tunvless0")],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    await card.getByRole("button", { name: "ClientHello fingerprint" }).click();
+    await page.locator('[data-select-item][data-value="firefox"]').click();
+    await expect(page.getByText("will restart on save")).toContainText("tunvless0");
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+    expect(daemon.puts[0].tunnels[0].advanced.fingerprint).toBe("firefox");
+  });
+
+  // Catches the AES warning shown for the link default or Chrome, or never shown for Firefox.
+  test("the fingerprint hint warns about AES on routers", async ({ page }) => {
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK] })],
+      states: [state("a", "tunvless0")],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const card = tunnels.card("a");
+    await card.getByRole("button", { name: "More: connect timeout" }).click();
+    const hint = card.getByText("Firefox lists AES first", { exact: false });
+    await expect(hint).toHaveCount(0);
+    await card.getByRole("button", { name: "ClientHello fingerprint" }).click();
+    await page.locator('[data-select-item][data-value="firefox"]').click();
+    await expect(hint).toBeVisible();
+    await card.getByRole("button", { name: "ClientHello fingerprint" }).click();
+    await page.locator('[data-select-item][data-value="chrome"]').click();
+    await expect(hint).toHaveCount(0);
+  });
+
   // Catches the skipped segments not shown, shown by kernel name, shown with the switch off, or joined without a separator.
   test("kernel TCP names the segments it leaves on the TUN", async ({ page }) => {
     const daemon = await stubDaemon(page, {
@@ -59,7 +101,7 @@ test.describe("Tunnel editor", () => {
       tunnels: [
         tunnel("a", "tunvless0", {
           sources: [SUB, LINK],
-          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true, fingerprint: "" },
         }),
       ],
       states: [state("a", "tunvless0", { tcpPort: 3600, tcpSkipped: ["br1", "nwg2"] })],
@@ -84,7 +126,7 @@ test.describe("Tunnel editor", () => {
       tunnels: [
         tunnel("a", "tunvless0", {
           sources: [SUB, LINK],
-          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+          advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true, fingerprint: "" },
         }),
       ],
       states: off("acl"),

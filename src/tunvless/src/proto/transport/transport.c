@@ -266,6 +266,13 @@ const char *transport_strerror(int rc) {
         case TLS13_EBADSUITE: return "server chose an unsupported cipher suite";
         case TLS13_EBADREC: return "corrupt TLS record";
         case TLS13_EECH: return "server rejected ECH (stale or unknown ECH key in the link)";
+        case TLS13_EGROUP: {
+            static __thread char why[96];
+            snprintf(why, sizeof why, "the server chose key share group 0x%04x, which is not offered "
+                     "for completion", tls13_server_group());
+            return why;
+        }
+        case TLS13_EHRR: return "the server asked for a HelloRetryRequest, which is not supported";
         case ECH_EPARSE: return "ECH: cannot parse the ECHConfigList from the link";
         case ECH_ENOCONFIG: return "ECH: no usable config in the ECHConfigList (need X25519, "
                                    "HKDF-SHA256, AES-128-GCM or ChaCha20-Poly1305)";

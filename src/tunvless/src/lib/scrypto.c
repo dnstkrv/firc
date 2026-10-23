@@ -434,6 +434,21 @@ int sc_x25519_base(unsigned char pub[32], const unsigned char scalar[32]) {
     return rc == 0 ? 0 : SC_ECRYPTO;
 }
 
+int sc_p256_pub(const unsigned char seed[32], unsigned char pub[65]) {
+    ecc_key *key = malloc(sizeof(*key));
+    if (!key) return SC_ENOMEM;
+    if (wc_ecc_init(key) != 0) { free(key); return SC_ECRYPTO; }
+    word32 n = 65;
+    int rc = SC_EINVAL;
+    if (wc_ecc_import_private_key_ex(seed, 32, NULL, 0, key, ECC_SECP256R1) == 0 &&
+        wc_ecc_make_pub(key, NULL) == 0)
+        rc = wc_ecc_export_x963(key, pub, &n) == 0 && n == 65 ? 0 : SC_ECRYPTO;
+    wc_ecc_free(key);
+    wc_ForceZero(key, sizeof(*key));
+    free(key);
+    return rc;
+}
+
 /* ---- signatures ----------------------------------------------------------------------------- */
 
 /* Compare without early exit. Signatures and digests here are not secret, but this file should

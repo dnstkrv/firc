@@ -15,6 +15,7 @@ extern long tr_nopq_skip_s;
 
 static char g_cur[64];
 static int g_dials, g_hs, g_last_pq;
+static size_t g_last_n;
 static int g_all_silent;
 
 int tr_dial(const char *host, uint16_t port, int timeout_s) {
@@ -35,7 +36,7 @@ int reality_build_hello(const struct reality_cfg *cfg, struct reality_state *st,
     memset(st, 0, sizeof *st);
     st->pq = cfg->pq;
     g_last_pq = cfg->pq;
-    *out_len = cfg->pq ? 1760 : 537;
+    *out_len = reality_fp_of(cfg->fp) == REALITY_FP_FIREFOX ? (cfg->pq ? 1890 : 600) : cfg->pq ? 1760 : 537;
     memset(out, 0x16, *out_len);
     return 0;
 }
@@ -56,6 +57,7 @@ int tls13_handshake_auth(struct tls13 *t, int fd, const unsigned char *ch, size_
                          const unsigned char *ss, const struct tls13_auth *auth) {
     (void)t; (void)fd; (void)ch; (void)ss; (void)auth;
     g_hs++;
+    g_last_n = n;
     if (g_all_silent || !strncmp(g_cur, "dead", 4)) return TLS13_ETIMEOUT;
     if (!strncmp(g_cur, "rej", 3)) return TLS13_ECERT;
     if (long_dropped(g_cur) && n > 1400) return TLS13_ETIMEOUT;
@@ -84,19 +86,23 @@ int ech_wrap(const struct ech_cfg *cfg, const uint8_t *hello, size_t hello_n, ui
 }
 
 static int g_d, g_h, g_pq;
+static size_t g_n;
+static const char *g_fp = "chrome";
 
 static int open_at(const char *host, uint16_t port, const char *sec) {
     struct tr_node n = { .host = host, .port = port, .type = "tcp", .security = sec,
-                         .sni = "www.example.com", .fp = "chrome",
+                         .sni = "www.example.com", .fp = g_fp,
                          .pbk = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA", .sid = "0123456789abcdef" };
     struct tr_link l;
     g_dials = g_hs = 0;
     g_last_pq = -1;
+    g_last_n = 0;
     int rc = tr_link_open(&l, &n, NULL, 1);
     if (rc == 0) close(l.fd);
     g_d = g_dials;
     g_h = g_hs;
     g_pq = g_last_pq;
+    g_n = g_last_n;
     return rc;
 }
 
@@ -227,6 +233,27 @@ int main(void) {
     check("skip ttl 0: a timeout", TLS13_ETIMEOUT, open_to("dead3.invalid", "reality"));
     check("skip ttl 0, again: retried", TLS13_ETIMEOUT, open_to("dead3.invalid", "reality"));
     check("skip ttl 0, again: two connections", 2, g_d);
+
+    tr_nopq_skip_s = 300;
+    g_fp = "Firefox";
+    /* catches: a Firefox node retried with the short Chrome Hello, or the retry's error returned */
+    check("firefox, long Hello dropped: the timeout is the answer", TLS13_ETIMEOUT, open_to("dpiff.invalid", "reality"));
+    check("firefox, long Hello dropped: one connection", 1, g_d);
+    g_fp = "chrome";
+    /* catches: a Firefox failure written to the fallback table as short or useless */
+    check("firefox left no entry: chrome falls back afresh", 0, open_to("dpiff.invalid", "reality"));
+    check("firefox left no entry: two connections", 2, g_d);
+    /* catches: the fallback lost for Chrome along with Firefox */
+    check("chrome, long Hello dropped: the short Hello gets through", 0, open_to("dpich.invalid", "reality"));
+    check("chrome, long Hello dropped: two connections", 2, g_d);
+    g_fp = "Firefox";
+    /* catches: Firefox sent the short Hello from an entry Chrome left for the node */
+    check("firefox after chrome's entry: the timeout is the answer", TLS13_ETIMEOUT, open_to("dpich.invalid", "reality"));
+    check("firefox after chrome's entry: one connection", 1, g_d);
+    check("firefox after chrome's entry: the Hello offers the hybrid", 1, g_pq);
+    check("firefox after chrome's entry: the long Firefox Hello", 1890, (int)g_n);
+    g_fp = "chrome";
+    tr_nopq_skip_s = 0;
 
     setenv("STEER_NOPQ", "1", 1);
     check("STEER_NOPQ: a clean node opens", 0, open_to("ok.invalid", "reality"));

@@ -30,6 +30,7 @@
 
 #include "scrypto.h"
 #include "certverify.h"
+#include "certzip.h"
 #include "tls13.h"
 
 /* From reality.c: the same X25519, with the peer key from ServerHello. Shared rather than
@@ -302,6 +303,34 @@ static __thread char g_verify_reason[96];
 
 const char *tls13_verify_reason(void) { return g_verify_reason; }
 
+static __thread unsigned g_server_group;
+
+unsigned tls13_server_group(void) { return g_server_group; }
+
+static const unsigned char HRR_RANDOM[32] = {
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+};
+
+static size_t be24(const unsigned char *b) { return (size_t)b[0] << 16 | (size_t)b[1] << 8 | b[2]; }
+
+static int cert_has_dc(const unsigned char *b, size_t n) {
+    if (n < 4 || 1 + (size_t)b[0] + 3 > n) return 0;
+    size_t p = 1 + b[0];
+    size_t end = p + 3 + be24(b + p);
+    if (end > n) return 0;
+    for (p += 3; p + 3 <= end;) {
+        p += 3 + be24(b + p);
+        if (p + 2 > end) return 0;
+        size_t xe = p + 2 + ((size_t)b[p] << 8 | b[p + 1]);
+        if (xe > end) return 0;
+        for (p += 2; p + 4 <= xe; p += 4 + ((size_t)b[p + 2] << 8 | b[p + 3]))
+            if (((unsigned)b[p] << 8 | b[p + 1]) == 0x0022) return 1;
+        p = xe;
+    }
+    return 0;
+}
+
 /* Takes the ClientHello record already sent (for the transcript) and our ephemeral private key.
  *
  * auth->host != NULL turns on the certificate check (security=tls); auth->reality_key, the
@@ -335,6 +364,7 @@ static int handshake(struct tls13 *t, int fd,
     int rc = read_record_fd(fd, &type, rec, sizeof(rec), &n);
     if (rc) return rc;
     if (type != 0x16 || n < 44 || rec[0] != 0x02) return TLS13_EBADREC;
+    if (!memcmp(rec + 6, HRR_RANDOM, 32)) return TLS13_EHRR;
     tr_add(t, rec, n);
 
     /* The server's key_share is among the extensions. It is found by type 0x33, not by
@@ -377,6 +407,9 @@ static int handshake(struct tls13 *t, int fd,
                     memcpy(kem_ct, rec + p + 4, SC_MLKEM768_CT);
                     memcpy(server_pub, rec + p + 4 + SC_MLKEM768_CT, 32);
                     have_pub = have_kem = 1;
+                } else if (grp != 0x001D && grp != 0x11EC) {
+                    g_server_group = grp;
+                    return TLS13_EGROUP;
                 } else return TLS13_ENOKEYSHARE;
             }
             p += elen;
@@ -574,20 +607,32 @@ static int handshake(struct tls13 *t, int fd,
                     }
                 }
             }
-            if (want_cert && msg == 0x19) {     /* CompressedCertificate (RFC 8879) */
-                /* Its meaning differs by node kind.
-                 *
-                 * security=tls never sends compress_certificate (reality.c), so a compressed
-                 * certificate means a server that compressed unasked; say so.
-                 *
-                 * Reality does send it (Chrome's look needs it), but a Reality server that
-                 * RECOGNISED the client answers with its temporary certificate, uncompressed.
-                 * A compressed one comes from the camouflage site instead, which is exactly
-                 * "key not recognised"; compression is beside the point for the user. */
+            if (rkey && msg == 0x19) {          /* CompressedCertificate (RFC 8879) */
+                /* A Reality server that RECOGNISED the client answers with its temporary
+                 * certificate, uncompressed. A compressed one comes from the camouflage site
+                 * instead, which is exactly "key not recognised"; compression is beside the point
+                 * for the user. */
                 snprintf(g_verify_reason, sizeof(g_verify_reason), "%s",
-                         rkey ? cert_verify_strerror(CERTV_ENOTREALITY)
-                              : "server sent a compressed certificate without being asked");
+                         cert_verify_strerror(CERTV_ENOTREALITY));
                 return TLS13_ECERT;
+            }
+            if (host && msg == 0x19 && cert_n == 0) {
+                const unsigned char *c = hsbuf + p + 4;
+                unsigned alg = mlen >= 2 ? ((unsigned)c[0] << 8) | c[1] : 0;
+                if (alg >= 32 || !(auth->cert_algs & (1u << alg))) {
+                    snprintf(g_verify_reason, sizeof(g_verify_reason),
+                             "server sent a compressed certificate without being asked");
+                    return TLS13_ECERT;
+                }
+                size_t declared = mlen >= 8 ? ((size_t)c[2] << 16) | ((size_t)c[3] << 8) | c[4] : 0;
+                size_t zn = mlen >= 8 ? ((size_t)c[5] << 16) | ((size_t)c[6] << 8) | c[7] : 0;
+                if (mlen < 8 || 8 + zn != mlen ||
+                    certzip_inflate((int)alg, c + 8, zn, declared, certbuf, sizeof(certbuf)) != 0) {
+                    snprintf(g_verify_reason, sizeof(g_verify_reason),
+                             "cannot decompress the server certificate");
+                    return TLS13_ECERT;
+                }
+                cert_n = declared;
             }
             if (want_cert && msg == 0x0B && cert_n == 0) {   /* Certificate */
                 if (mlen > sizeof(certbuf)) return TLS13_ETOOBIG;
@@ -660,6 +705,11 @@ static int handshake(struct tls13 *t, int fd,
              * from "the certificate does not verify". */
             snprintf(g_verify_reason, sizeof(g_verify_reason),
                      "server sent no %s", cert_n ? "signature" : "certificate");
+            return TLS13_ECERT;
+        }
+        if (cert_has_dc(certbuf, cert_n)) {
+            snprintf(g_verify_reason, sizeof(g_verify_reason),
+                     "the server sent a delegated credential, which is not supported");
             return TLS13_ECERT;
         }
         int vrc = cert_verify_server_ex(certbuf, cert_n, cv_buf, cv_n,

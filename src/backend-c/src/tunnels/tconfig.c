@@ -633,6 +633,12 @@ static firc_err_t parse_advanced(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *
             if (!copy_str(v, t->ca, sizeof t->ca)) {
                 return fail(c, "a path under 256 bytes", "tunnels[%zu].advanced.ca", ti);
             }
+        } else if (strcmp(text(k), "fingerprint") == 0) {
+            if (!copy_str(v, t->fingerprint, sizeof t->fingerprint) ||
+                (t->fingerprint[0] != 0 && strcmp(t->fingerprint, "chrome") != 0 &&
+                 strcmp(t->fingerprint, "firefox") != 0)) {
+                return fail(c, "chrome or firefox, or empty for the link's", "tunnels[%zu].advanced.fingerprint", ti);
+            }
         } else {
             return bad_key(c, k, ti, ".advanced", "unknown key");
         }
@@ -1187,6 +1193,7 @@ static void emit_tunnel(em_t *e, const firc_tunnel_t *t)
     kv_secs(e, "timeout", t->timeout_s);
     kv(e, "insecure", t->insecure ? "true" : "false", false);
     kv(e, "ca", t->ca, true);
+    kv(e, "fingerprint", t->fingerprint, true);
     kv(e, "kernelTcp", t->kernel_tcp ? "true" : "false", false);
     map_end(e);
     if (t->n_inb > 0) {
@@ -1263,6 +1270,7 @@ bool firc_tunnel_same_argv(const firc_tunnel_t *a, const firc_tunnel_t *b)
            a->uplink == b->uplink && strcmp(a->uplink_ref, b->uplink_ref) == 0 && a->active == b->active &&
            strcmp(a->by, b->by) == 0 && a->interval_s == b->interval_s && a->silence_s == b->silence_s &&
            a->timeout_s == b->timeout_s && a->insecure == b->insecure && strcmp(a->ca, b->ca) == 0 &&
+           strcmp(a->fingerprint, b->fingerprint) == 0 &&
            a->kernel_tcp == b->kernel_tcp;
 }
 

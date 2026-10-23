@@ -184,7 +184,13 @@ export type TunnelHeader = { name: string; value: string };
 
 export type TunnelHeadersRes = { headers: TunnelHeader[] };
 
-export type TunnelAdvanced = { ca: string; insecure: boolean; timeout: number; kernelTcp: boolean };
+export type TunnelAdvanced = {
+  ca: string;
+  insecure: boolean;
+  timeout: number;
+  kernelTcp: boolean;
+  fingerprint: "" | "chrome" | "firefox";
+};
 
 export type TunnelInbound = {
   port: number;

@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 """Compare the CONTENTS of two ClientHellos (ours and the uTLS reference): cipher suites, the set
 of extensions with their lengths, groups, signature algorithms, key_share. Extension order is not
-compared: Chrome and uTLS shuffle it on every connection. Exit code 1 — a mismatch.
+compared: Chrome and uTLS shuffle it on every connection. --ordered compares it too, for Firefox,
+whose order is fixed. A P-256 share is checked to be a point on the curve. Exit code 1 — a
+mismatch.
 
-    hellostruct.py reference.bin ours.bin [--show]
+    hellostruct.py reference.bin ours.bin [--show] [--ordered]
 
 The reference comes from tests/utls/hello.go, our Hello from `out/tests/hellofreeze --raw-pq file`.
 uTLS randomises the ECH and padding lengths within bounds, so extension sizes are compared, not
 values. Checked 2026-09-30: uTLS Chrome 133 (HelloChrome_Auto) and our hybrid Hello have the same
 17 extensions of the same lengths, 1757 bytes."""
 import struct, sys
+
+P256_P = 2**256 - 2**224 + 2**192 + 2**96 - 1
+P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+
+def on_p256(pt):
+    if len(pt) != 65 or pt[0] != 4: return False
+    x, y = int.from_bytes(pt[1:33], 'big'), int.from_bytes(pt[33:], 'big')
+    return x < P256_P and y < P256_P and (y * y - x * x * x + 3 * x - P256_B) % P256_P == 0
 
 def grease(x): return (x & 0x0f0f) == 0x0a0a and (x >> 8) == (x & 0xff)
 def norm(t): return 'GREASE' if grease(t) else '%04x' % t
@@ -41,7 +51,9 @@ def describe(exts):
             elif t == '0033':
                 q, ks = 2, []
                 while q < len(d):
-                    g, l = struct.unpack('>HH', d[q:q+4]); ks.append('%s:%d' % (norm(g), l)); q += 4 + l
+                    g, l = struct.unpack('>HH', d[q:q+4])
+                    tag = '' if g != 0x0017 else (':on-curve' if on_p256(d[q+4:q+4+l]) else ':OFF-CURVE')
+                    ks.append('%s:%d%s' % (norm(g), l, tag)); q += 4 + l
                 x = ' '.join(ks)
             elif t == '0010': x = d[2:].hex()
             elif t in ('001b', '44cd'): x = d.hex()
@@ -55,6 +67,8 @@ da, db = describe(a[1]), describe(b[1])
 for k in sorted(set(da) | set(db)):
     if da.get(k) != db.get(k):
         print('MISMATCH %s: reference=%s ours=%s' % (k, da.get(k), db.get(k))); bad = 1
+if '--ordered' in sys.argv and a[2] != b[2]:
+    print('extension order DIFFERS:\n ', ' '.join(a[2]), '\n ', ' '.join(b[2])); bad = 1
 if '--show' in sys.argv:
     for k in sorted(da): print(k, da[k])
 print('Hello contents match the reference' if not bad else 'Hello contents DIFFER')

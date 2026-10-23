@@ -515,7 +515,7 @@ jobs:
           set -eu
           tests="h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq tungromatch tunnelmatch \
                  rtxmatch grpcmatch vlinkmatch ctlmatch nodesmatch ctlnodesmatch tunnamematch \
-                 scryptomatch hellofreeze echmatch vlessmatch takematch"
+                 scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch"
           run=""
           for t in $tests; do
             case " $SKIP " in *" $t "*) echo "skipped under qemu: $t"; continue ;; esac

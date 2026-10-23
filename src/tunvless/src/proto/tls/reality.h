@@ -4,6 +4,7 @@
 #define STEER_REALITY_H
 #include <stdint.h>
 #include <stddef.h>
+#include <strings.h>
 
 #define REALITY_EBADKEY (-2)   /* pbk or sid does not parse */
 #define REALITY_ECRYPTO (-3)   /* a primitive or the random source failed */
@@ -14,20 +15,26 @@
 #define REALITY_GROUP_MLKEM 0x11EC
 #define REALITY_MLKEM_SHARE 1216
 
+enum { REALITY_FP_CHROME = 0, REALITY_FP_FIREFOX = 1 };
+
+static inline int reality_fp_of(const char *fp) {
+    return fp && !strcasecmp(fp, "firefox") ? REALITY_FP_FIREFOX : REALITY_FP_CHROME;
+}
+
 struct reality_cfg {
     const char *sni;   /* SNI: the camouflage domain (Reality) or the server name (plain);
                         * "" sends no server_name extension at all */
     const char *pbk;   /* server public key, base64url */
     const char *sid;   /* short id, hex; may be empty */
-    const char *fp;    /* browser fingerprint; not read: the Hello always looks like Chrome */
+    const char *fp;    /* browser fingerprint: Firefox 148 or Chrome, by reality_fp_of */
     /* The ALPN protocol the transport needs, or NULL. Not read by the builder: the Hello always
      * offers "h2, http/1.1" like Chrome, or http/1.1 alone via reality_carrier.alpn_http11. */
     const char *alpn;
 
     /* PLAIN TLS, NO REALITY (security=tls).
      *
-     * The same ClientHello (Chrome's look, GREASE, the post-quantum share) without the
-     * authenticator: session_id is random bytes, as a browser's, and pbk is not needed. There is
+     * The same ClientHello (Chrome's or Firefox's look by fp, the post-quantum share; GREASE
+     * only in Chrome's) without the authenticator: session_id is random bytes, as a browser's, and pbk is not needed. There is
      * no separate builder because the browser look must live in ONE place: two copies drift
      * apart, and the symptom is not a build error but a node that stops working for no visible
      * reason.

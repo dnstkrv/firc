@@ -514,12 +514,12 @@ TEST get_answers_every_tunnel_in_the_agreed_shape(void)
                      "\"interval\":3600}],"
                      "\"filter\":\"^(A|B)$\",\"order\":[\"0000000b:B\"],\"exclude\":[\"0000000b:C\"],\"inbounds\":[],"
                      "\"active\":2,\"by\":\"site\",\"interval\":30,\"silence\":10,"
-                     "\"advanced\":{\"timeout\":5,\"insecure\":true,\"ca\":\"/etc/ca.pem\",\"kernelTcp\":false}},"
+                     "\"advanced\":{\"timeout\":5,\"insecure\":true,\"ca\":\"/etc/ca.pem\",\"fingerprint\":\"\",\"kernelTcp\":false}},"
                      "{\"id\":\"b\",\"device\":\"tunvless1\",\"description\":\"\",\"enable\":false,"
                      "\"uplink\":{\"kind\":\"iface\",\"ref\":\"eth9\"},\"sources\":[],"
                      "\"filter\":\"\",\"order\":[],\"exclude\":[],\"inbounds\":[],"
                      "\"active\":1,\"by\":\"connection\",\"interval\":60,\"silence\":20,"
-                     "\"advanced\":{\"timeout\":8,\"insecure\":false,\"ca\":\"\",\"kernelTcp\":false}}]}"));
+                     "\"advanced\":{\"timeout\":8,\"insecure\":false,\"ca\":\"\",\"fingerprint\":\"\",\"kernelTcp\":false}}]}"));
     cJSON_Delete(ans);
     PASS();
 }
@@ -1006,6 +1006,23 @@ TEST probe_answers_per_node_key_without_links(void)
     PASS();
 }
 
+/* catches: a probe of a tunnel with a fingerprint run without --fp, so it measures another Hello */
+TEST a_probe_carries_the_tunnels_fingerprint(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    setenv("FAKE_MODE", "probe", 1);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("POST", "/api/v1/tunnels/probe",
+                            "{\"tunnel\":{\"id\":\"new\",\"device\":\"tunvless5\",\"advanced\":{\"fingerprint\":\"firefox\"},"
+                            "\"sources\":[{\"id\":\"0000000f\",\"kind\":\"link\",\"link\":\"" LINK_B "\"}]}}",
+                            &ans));
+    cJSON_Delete(ans);
+    char argv[256];
+    slurp(g_hx->argv, argv, sizeof argv);
+    ASSERT_STR_EQ("--probe\n-t\n3\n--fp\nfirefox\n-\n", argv);
+    PASS();
+}
+
 /* catches: a second probe started while one runs, or the first one's child left behind by its client */
 TEST a_second_probe_is_refused_while_one_runs(void)
 {
@@ -1183,6 +1200,50 @@ TEST get_put_get_keeps_kernel_tcp(void)
     ASSERT(cJSON_IsTrue(at(at(tunnel_named(second, "b"), "advanced"), "kernelTcp")));
     cJSON_Delete(first);
     cJSON_Delete(second);
+    PASS();
+}
+
+/* catches: a fingerprint dropped on the way from a PUT to the file, or missing from the GET answer */
+TEST put_fingerprint_round_trips(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+    cJSON *put = NULL;
+    ASSERT_EQ(200, put_field_error("{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,"
+                                   "\"advanced\":{\"fingerprint\":\"firefox\"}},"
+                                   "{\"id\":\"b\",\"device\":\"tunvless1\",\"enable\":false}",
+                                   &put));
+    cJSON_Delete(put);
+    firc_tunnels_t saved = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_file(&saved, g_hx->path, NULL));
+    ASSERT_STR_EQ("firefox", saved.t[0].fingerprint);
+    ASSERT_STR_EQ("", saved.t[1].fingerprint);
+    firc_tunnels_free(&saved);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &ans));
+    ASSERT_STR_EQ("firefox", at(at(tunnel_named(ans, "a"), "advanced"), "fingerprint")->valuestring);
+    ASSERT_STR_EQ("", at(at(tunnel_named(ans, "b"), "advanced"), "fingerprint")->valuestring);
+    cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: an unknown fingerprint or a non-string one saved instead of refused with its field */
+TEST put_fingerprint_safari_is_400(void)
+{
+    ASSERT(hx_start(NULL, 0) != NULL);
+#define FP_BAD(v) "{\"id\":\"a\",\"device\":\"tunvless0\",\"enable\":false,\"advanced\":{\"fingerprint\":" v "}}"
+    static const char *const cases[][2] = {
+        {FP_BAD("\"safari\""), "{\"error\":\"chrome or firefox, or empty for the link's\","
+                                "\"field\":\"advanced.fingerprint\",\"tunnel\":\"a\"}"},
+        {FP_BAD("5"), "{\"error\":\"must be a string\",\"field\":\"advanced.fingerprint\",\"tunnel\":\"a\"}"},
+    };
+#undef FP_BAD
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        cJSON *ans = NULL;
+        ASSERT_EQm(cases[i][0], 400, put_field_error(cases[i][0], &ans));
+        ASSERTm(cases[i][0], same_json(ans, cases[i][1]));
+        cJSON_Delete(ans);
+    }
+    ASSERT_EQ(-1, access(g_hx->path, F_OK));
     PASS();
 }
 
@@ -1763,6 +1824,7 @@ SUITE(tunnels_api)
     RUN_TEST(redirected_bytes_add_to_the_sysfs_rates);
     RUN_TEST(refresh_and_restart_answer_202_or_404);
     RUN_TEST(probe_answers_per_node_key_without_links);
+    RUN_TEST(a_probe_carries_the_tunnels_fingerprint);
     RUN_TEST(a_saved_probe_clears_down_only_for_the_nodes_that_answered);
     RUN_TEST(a_second_probe_is_refused_while_one_runs);
     RUN_TEST(a_probe_through_an_uplink_needs_the_saved_mark);
@@ -1773,6 +1835,8 @@ SUITE(tunnels_api)
     RUN_TEST(a_description_edit_is_saved_and_restarts_nothing);
     RUN_TEST(kernel_tcp_must_be_a_bool);
     RUN_TEST(get_put_get_keeps_kernel_tcp);
+    RUN_TEST(put_fingerprint_round_trips);
+    RUN_TEST(put_fingerprint_safari_is_400);
     RUN_TEST(state_reports_tcp_port);
     RUN_TEST(tcp_skipped_lists_kernel_names_for_a_tunnel_with_a_port);
     RUN_TEST(tcp_off_names_the_reason_for_a_tunnel_with_a_port);

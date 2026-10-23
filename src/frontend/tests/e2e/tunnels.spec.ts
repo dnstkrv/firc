@@ -107,7 +107,7 @@ test.describe("Tunnels page", () => {
               { kind: "link", link: "vless://u@h.example:443?security=tls#Solo" },
             ],
             uplink: { kind: "auto", ref: "" },
-            advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+            advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "" },
             inbounds: [],
           },
         ],

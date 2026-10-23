@@ -45,6 +45,8 @@
  * (the ECH key in the link is stale, or the server does not know ECH). Going on would reveal the
  * name in the clear, which ECH exists to prevent. */
 #define TLS13_EECH         (-23)
+#define TLS13_EGROUP       (-24)
+#define TLS13_EHRR         (-25)
 
 enum tls13_aead { TLS13_AEAD_AES128, TLS13_AEAD_AES256, TLS13_AEAD_CHACHA };
 
@@ -162,6 +164,7 @@ struct tls13_auth {
     /* Set when the Hello passed to tls13_handshake_auth is an ECH ClientHelloOuter; NULL: no
      * ECH. */
     const struct tls13_ech *ech;
+    unsigned cert_algs;
 };
 
 /* tls13_handshake plus the server authentication described by auth. */
@@ -173,6 +176,8 @@ int tls13_handshake_auth(struct tls13 *t, int fd,
 /* Why the server failed to prove itself, as a string, after TLS13_ECERT; "" if it did not
  * fail. Per thread: several connectors handshake at once. */
 const char *tls13_verify_reason(void);
+
+unsigned tls13_server_group(void);
 
 /* Whether a WHOLE record, ready for decryption, is in the buffer.
  *

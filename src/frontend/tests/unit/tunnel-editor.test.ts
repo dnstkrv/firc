@@ -43,7 +43,7 @@ const tn = (id: string, device: string, extra: Partial<Tunnel> = {}): Tunnel => 
   exclude: [],
   sources: [],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "" },
   ...extra,
 });
 

@@ -22,6 +22,7 @@
 #include "roots.h"
 #include "certverify.h"
 #include "ech.h"
+#include "certzip.h"
 
 /* security=none — a bare stream, no TLS at all (for a trusted network). Without TLS there is no
  * ALPN negotiation, so an HTTP/2 transport starts HTTP/2 at once: the server either accepts bare
@@ -142,6 +143,9 @@ static int sec_tls_like(struct tr_link *l, const struct tr_node *n, const char *
     if (is_tls) {
         auth.host = verify_host;
         auth.roots = tls_cert_roots();
+        auth.cert_algs = reality_fp_of(cfg.fp) == REALITY_FP_FIREFOX
+                             ? 1u << CERTZIP_ZLIB | 1u << CERTZIP_BROTLI | 1u << CERTZIP_ZSTD
+                             : 1u << CERTZIP_BROTLI;
         if (pol.pcs || pol.pks || pol.vcn || pol.insecure) auth.policy = &pol;
     } else auth.reality_key = rst.authkey;
     if (rst.pq) auth.mlkem_dk = rst.mlkem_dk;
@@ -271,6 +275,7 @@ static int link_try(struct tr_link *l, const struct tr_node *n, const char *alpn
 }
 
 int tr_link_open(struct tr_link *l, const struct tr_node *n, const char *alpn, int timeout_s) {
+    if (reality_fp_of(n->fp) == REALITY_FP_FIREFOX) return link_try(l, n, alpn, timeout_s, 0);
     const int pq_able = !getenv("STEER_NOPQ");
     const int st = pq_able ? nopq_state(n) : NOPQ_NONE;
     int rc = link_try(l, n, alpn, timeout_s, st == NOPQ_SHORT || !pq_able);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from "../../../components/ui/Select.svelte";
   import Switch from "../../../components/ui/Switch.svelte";
   import { interfaces } from "../../../data/interfaces.svelte";
   import { t } from "../../../data/locale.svelte";
@@ -19,6 +20,11 @@
   const tcpSkipped = $derived(
     skippedLabels(store.stateOf(tunnel.id)?.tcpSkipped ?? [], interfaces.list),
   );
+  const fingerprintOptions = $derived([
+    { value: "", label: t("From the link") },
+    { value: "chrome", label: "Chrome" },
+    { value: "firefox", label: "Firefox" },
+  ]);
   const tcpOff = $derived(store.stateOf(tunnel.id)?.tcpOff ?? "");
   const offText = $derived(
     tcpOff === "acl"
@@ -98,6 +104,32 @@
       checked={tunnel.advanced.kernelTcp}
       onCheckedChange={(v: boolean) => (tunnel.advanced.kernelTcp = v)}
     />
+  </div>
+</div>
+<div class="row">
+  <div class="label">
+    <div class="name">{t("ClientHello fingerprint")}</div>
+    <div class="hint">
+      {t("Which browser's TLS ClientHello the connection imitates; empty takes it from the link")}
+    </div>
+    {#if tunnel.advanced.fingerprint === "firefox"}
+      <div class="hint">
+        {t(
+          "Firefox lists AES first: a server with AES hardware picks it, which can slow connections without Vision on a router without AES",
+        )}
+      </div>
+    {/if}
+  </div>
+  <div class="controls">
+    <span class="field">
+      <Select
+        ariaLabel={t("ClientHello fingerprint")}
+        options={fingerprintOptions}
+        selected={tunnel.advanced.fingerprint}
+        onValueChange={(v: string) =>
+          (tunnel.advanced.fingerprint = v as typeof tunnel.advanced.fingerprint)}
+      />
+    </span>
   </div>
 </div>
 <div class="row">

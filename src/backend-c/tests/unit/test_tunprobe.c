@@ -140,7 +140,7 @@ static bool started(void)
 
 static firc_tunprobe_opts_t opts(uint32_t mark, bool insecure, const char *ca, int64_t kill_ms)
 {
-    firc_tunprobe_opts_t o = {.binary = FAKE, .mark = mark, .insecure = insecure, .ca = ca, .timeout_s = 3,
+    firc_tunprobe_opts_t o = {.binary = FAKE, .mark = mark, .insecure = insecure, .ca = ca, .fingerprint = NULL, .timeout_s = 3,
                               .kill_after_ms = kill_ms};
     return o;
 }
@@ -188,6 +188,28 @@ TEST the_command_line_carries_mark_insecure_and_ca_only_when_set(void)
     ASSERT_STR_EQ("--probe\n-t\n3\n-m\n0x2a0000\n--insecure\n--ca\n/etc/ca.pem\n-\n", buf);
     g_fx.calls = 0;
     o = opts(0, false, "", 5000);
+    ASSERT_EQ(FIRC_OK, firc_tunprobe_start(g_fx.loop, &o, links, 1, on_done, NULL, &p));
+    run_until(5000, answered);
+    slurp(g_fx.argv, buf, sizeof buf);
+    ASSERT_STR_EQ("--probe\n-t\n3\n-\n", buf);
+    PASS();
+}
+
+/* catches: --fp missing from the probe, given for an empty fingerprint, or an argv that overflows with every option */
+TEST the_command_line_carries_fp_only_when_set(void)
+{
+    char *links[] = {"vless://" U "@a.example.invalid:443?security=none#A"};
+    firc_tunprobe_opts_t o = opts(0x2a0000, true, "/etc/ca.pem", 5000);
+    o.fingerprint = "firefox";
+    firc_tunprobe_t *p = NULL;
+    ASSERT_EQ(FIRC_OK, firc_tunprobe_start(g_fx.loop, &o, links, 1, on_done, NULL, &p));
+    run_until(5000, answered);
+    char buf[512];
+    slurp(g_fx.argv, buf, sizeof buf);
+    ASSERT_STR_EQ("--probe\n-t\n3\n-m\n0x2a0000\n--insecure\n--ca\n/etc/ca.pem\n--fp\nfirefox\n-\n", buf);
+    g_fx.calls = 0;
+    o = opts(0, false, NULL, 5000);
+    o.fingerprint = "";
     ASSERT_EQ(FIRC_OK, firc_tunprobe_start(g_fx.loop, &o, links, 1, on_done, NULL, &p));
     run_until(5000, answered);
     slurp(g_fx.argv, buf, sizeof buf);
@@ -344,6 +366,7 @@ SUITE(tunprobe)
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
     RUN_TEST(each_link_gets_the_row_the_child_printed_for_its_index);
     RUN_TEST(the_command_line_carries_mark_insecure_and_ca_only_when_set);
+    RUN_TEST(the_command_line_carries_fp_only_when_set);
     RUN_TEST(links_beyond_a_pipe_buffer_all_reach_the_child);
     RUN_TEST(a_hung_child_is_killed_at_the_deadline);
     RUN_TEST(a_cancel_kills_the_child_and_never_answers);

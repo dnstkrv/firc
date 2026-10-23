@@ -28,6 +28,7 @@ tunnels:
     timeout: 10s
     insecure: false
     ca: "/opt/etc/firc/ca.pem"
+    fingerprint: "firefox"
     kernelTcp: true
 - id: "chained"
   device: "tunvless1"
@@ -42,4 +43,5 @@ tunnels:
     timeout: 8s
     insecure: false
     ca: ""
+    fingerprint: ""
     kernelTcp: false

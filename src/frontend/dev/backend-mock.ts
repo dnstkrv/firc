@@ -781,7 +781,7 @@ let TUNNELS: any[] = [
       },
     ],
     uplink: { kind: "auto", ref: "" },
-    advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+    advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "" },
     inbounds: [
       { port: 1080, listen: "br0", node: "0000000a:A", user: "", password: "" },
       { port: 1081, listen: "br0", node: "0000000a:A", user: "bob", password: "s3cret" },
@@ -939,7 +939,14 @@ app.put(`${API_BASE}/tunnels`, async (c) => {
   TUNNELS = tunnels.map((tn: any) => ({
     ...tn,
     description: tn.description ?? "",
-    advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, ...tn.advanced },
+    advanced: {
+      ca: "",
+      insecure: false,
+      timeout: 8,
+      kernelTcp: false,
+      fingerprint: "",
+      ...tn.advanced,
+    },
     inbounds: (tn.inbounds ?? []).map((ib: any) => ({
       port: ib.port,
       listen: ib.listen,

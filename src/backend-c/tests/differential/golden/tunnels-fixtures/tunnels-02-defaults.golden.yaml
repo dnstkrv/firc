@@ -17,4 +17,5 @@ tunnels:
     timeout: 8s
     insecure: false
     ca: ""
+    fingerprint: ""
     kernelTcp: false

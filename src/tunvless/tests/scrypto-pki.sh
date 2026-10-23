@@ -10,7 +10,8 @@
 #
 # Contents: root (EC P-256) -> intermediate (RSA 2048, pathlen 0) -> leaves: EC P-256 with SAN
 # good.example, *.wild.example and IP 192.0.2.7; RSA 2048 with SAN rsa.example (PKCS#1 v1.5
-# signature and PSS with salt 32, 20 and 0); P-384 directly under the root; a "fake CA", a leaf
+# signature and PSS with salt 32, 20 and 0); P-384 directly under the root; a P-521 intermediate
+# under the root with a P-521 leaf (SAN p521.example) under it; a "fake CA", a leaf
 # without the CA flag that signs another leaf (a chain through it must fail); an expired leaf
 # (2020-2021); an unrelated root. The rest are valid for 30 years from issue.
 set -eu
@@ -29,6 +30,8 @@ printf '%s\n' '[req]' 'distinguished_name=dn' '[dn]' \
   'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid' 'subjectAltName=DNS:rsa.example' \
   '[p384]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature' \
   'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid' 'subjectAltName=DNS:p384.example' \
+  '[p521]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature' \
+  'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid' 'subjectAltName=DNS:p521.example' \
   '[fakeca]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature' \
   'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid' 'subjectAltName=DNS:fake.example' \
   '[fakeleaf]' 'basicConstraints=critical,CA:FALSE' 'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid' \
@@ -54,6 +57,10 @@ leaf() { # name extension-section issuer serial
 q openssl ecparam -name prime256v1 -genkey -noout -out leaf.key;     leaf leaf leaf inter 10
 q openssl genrsa -out rsaleaf.key 2048;                              leaf rsaleaf rsaleaf inter 11
 q openssl ecparam -name secp384r1 -genkey -noout -out p384.key;      leaf p384 p384 root 12
+q openssl ecparam -name secp521r1 -genkey -noout -out inter521.key
+q openssl req -new -key inter521.key -subj "/CN=steer p521 intermediate" -config ext.cnf -out inter521.csr
+q openssl x509 -req -in inter521.csr -CA root.pem -CAkey root.key -set_serial 15 -sha256 -days $D -extfile ext.cnf -extensions inter -out inter521.pem
+q openssl ecparam -name secp521r1 -genkey -noout -out p521.key;      leaf p521 p521 inter521 16
 q openssl ecparam -name prime256v1 -genkey -noout -out fakeca.key;   leaf fakeca fakeca inter 13
 q openssl ecparam -name prime256v1 -genkey -noout -out fakeleaf.key; leaf fakeleaf fakeleaf fakeca 14
 mkdir new
@@ -66,6 +73,7 @@ q openssl ca -batch -config ca.cnf -cert inter.pem -keyfile inter.key -in expire
 printf 'steer scrypto' > msg
 q openssl dgst -sha256 -sign leaf.key -out s.ecdsa256 msg
 q openssl dgst -sha384 -sign p384.key -out s.ecdsa384 msg
+q openssl dgst -sha512 -sign p521.key -out s.ecdsa521 msg
 q openssl dgst -sha256 -sign rsaleaf.key -out s.pkcs1 msg
 q openssl dgst -sha256 -sign rsaleaf.key -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:32 -out s.pss256 msg
 q openssl dgst -sha384 -sign rsaleaf.key -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:20 -out s.pss384s20 msg
@@ -75,12 +83,12 @@ echo "/* Test PKI for tests/scryptomatch.c: sh tests/scrypto-pki.sh > tests/scry
 echo " * ($(openssl version | cut -d' ' -f1-2), $(date -u +%Y-%m-%d)). Generated; do not edit by hand, regenerate it whole. */"
 echo "#ifndef STEER_TESTS_SCRYPTO_PKI_H"
 echo "#define STEER_TESTS_SCRYPTO_PKI_H"
-for c in root inter leaf rsaleaf p384 fakeca fakeleaf expired other; do
+for c in root inter leaf rsaleaf p384 inter521 p521 fakeca fakeleaf expired other; do
     echo "static const char PEM_$(echo $c | tr a-z A-Z)[] ="
     sed 's/.*/    "&\\n"/' $c.pem
     echo "    ;"
 done
-for s in ecdsa256 ecdsa384 pkcs1 pss256 pss384s20 pss256s0; do
+for s in ecdsa256 ecdsa384 ecdsa521 pkcs1 pss256 pss384s20 pss256s0; do
     echo "static const char SIG_$(echo $s | tr a-z A-Z)[] ="
     od -An -v -tx1 s.$s | tr -d ' \n' | fold -w 60 | sed 's/.*/    "&"/'
     echo

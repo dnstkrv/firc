@@ -100,7 +100,7 @@ static inline void sl_tr_node(const struct vless_node *n, struct tr_node *t) {
     t->type = n->type;
     t->security = n->security;
     t->sni = n->sni;
-    t->fp = n->fp;
+    t->fp = vless_fp() ? vless_fp() : n->fp;
     t->pbk = n->pbk;
     t->sid = n->sid;
     t->path = n->path;

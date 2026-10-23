@@ -3,6 +3,12 @@ set -u
 cd "$(dirname "$0")/.."
 BIN="${TUNVLESS:-./out/tunvless}"
 [ -x "$BIN" ] || { echo "control: no binary $BIN (make)"; exit 2; }
+FPERR="$("$BIN" --fp safari --control < /dev/null 2>&1 >/dev/null)"
+FPRC=$?
+# catches: an --fp other than chrome or firefox accepted, or refused untagged
+if [ "$FPRC" = 2 ] && [ "$FPERR" = "tunvless[error]: --fp is chrome or firefox" ]; then echo "ok   --fp safari: exits 2 with an error line"; else
+    printf 'FAIL --fp safari: exits 2 with an error line\n  actual: %s %s\n' "$FPRC" "$FPERR"; exit 1
+fi
 [ "$(id -u)" = 0 ] || { echo "control: needs root — skipped"; exit 0; }
 for t in ip python3 wget curl; do
     command -v $t >/dev/null 2>&1 || { echo "control: no $t — skipped"; exit 0; }

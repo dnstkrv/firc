@@ -303,6 +303,17 @@ int main(void) {
     }
     check("  padding: the name to maximum_name_length (0..63), the whole to 32", pad_ok);
 
+    struct reality_cfg fcfg = { .sni = "secret.example", .plain = 1, .fp = "firefox" };
+    static unsigned char fh[2560], fwo[6144];
+    static struct ech_state fes;
+    size_t fhn = 0, fon = 0;
+    int fb = reality_build_hello(&fcfg, &rst, fh, sizeof fh, &fhn);
+    int fw = fb == 0 ? ech_wrap(&c, fh, fhn, fwo, sizeof fwo, &fon, &fes) : fb;
+    /* catches: a Firefox Hello too large for the ECH buffers, or its real name left in the outer Hello */
+    check("Firefox Hello wraps under ECH, the name inside only",
+          fw == 0 && memmem(fwo, fon, "secret.example", 14) == NULL &&
+          memmem(fes.inner, fes.inner_n, "secret.example", 14) != NULL);
+
     printf(g_fail ? "echmatch: %d FAILED\n" : "echmatch: all checks passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

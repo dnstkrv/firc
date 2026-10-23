@@ -17,6 +17,9 @@ AR          ?= ar
 CFLAGS      ?= -O2
 LDFLAGS     ?=
 WOLFSSL_SRC ?= third_party/wolfssl
+ZLIB_SRC    ?= third_party/zlib
+BROTLI_SRC  ?= third_party/brotli
+ZSTD_SRC    ?= third_party/zstd
 
 INC      := -Isrc/lib -Isrc/tunnel -Isrc/proto/vless -Isrc/proto/transport -Isrc/proto/tls
 WARN     := -Wall -Wextra
@@ -41,15 +44,44 @@ HDR           := $(wildcard src/*/*.h src/proto/*/*.h)
 
 WOLFSSL_LIB   := $(O)/wolfssl/libwolfssl.a
 WOLFSSL_FLAGS  = $(shell cat $(WOLFSSL_LIB).cflags 2>/dev/null)
+ZLIB_LIB      := $(O)/zlib/libz.a
+BROTLI_LIB    := $(O)/brotli/libbrotlidec.a
+ZSTD_LIB      := $(O)/zstd/libzstd.a
+CERTZIP_LIBS  := $(ZLIB_LIB) $(BROTLI_LIB) $(ZSTD_LIB)
+CERTZIP_FLAGS  = $(foreach l,$(CERTZIP_LIBS),$(shell cat $(l).cflags 2>/dev/null))
 
 .PHONY: all fetch test unit-test crypto-test e2e interop install clean distclean
 
 all: $(O)/tunvless
 
-fetch: $(WOLFSSL_SRC)/wolfssl/wolfcrypt/settings.h
+fetch: $(WOLFSSL_SRC)/wolfssl/wolfcrypt/settings.h $(ZLIB_SRC)/.steer-zlib $(BROTLI_SRC)/.steer-brotli $(ZSTD_SRC)/.steer-zstd
 
 $(WOLFSSL_SRC)/wolfssl/wolfcrypt/settings.h:
 	sh build/wolfssl/fetch.sh $(WOLFSSL_SRC)
+
+$(ZLIB_SRC)/.steer-zlib: build/zlib/fetch.sh
+	sh build/zlib/fetch.sh $(ZLIB_SRC)
+
+$(BROTLI_SRC)/.steer-brotli: build/brotli/fetch.sh
+	sh build/brotli/fetch.sh $(BROTLI_SRC)
+
+$(ZSTD_SRC)/.steer-zstd: build/zstd/fetch.sh
+	sh build/zstd/fetch.sh $(ZSTD_SRC)
+
+LIB_ENV = CC="$(CC)" AR="$(AR)" CFLAGS="$(CFLAGS) $(PREFIXMAP) -ffunction-sections -fdata-sections"
+
+$(ZLIB_LIB): $(ZLIB_SRC)/.steer-zlib build/zlib/build.sh build/archive.sh FORCE
+	@$(LIB_ENV) sh build/zlib/build.sh $(ZLIB_SRC) $@
+
+$(BROTLI_LIB): $(BROTLI_SRC)/.steer-brotli build/brotli/build.sh build/archive.sh FORCE
+	@$(LIB_ENV) sh build/brotli/build.sh $(BROTLI_SRC) $@
+
+$(ZSTD_LIB): $(ZSTD_SRC)/.steer-zstd build/zstd/build.sh build/archive.sh FORCE
+	@$(LIB_ENV) sh build/zstd/build.sh $(ZSTD_SRC) $@
+
+$(O)/certzip.o: src/lib/certzip.c src/lib/certzip.h $(CERTZIP_LIBS)
+	@mkdir -p $(O)
+	$(CC) $(ALL_CFLAGS) $(CERTZIP_FLAGS) -c $< -o $@
 
 # build.sh rebuilds only when the options, the compiler or the flags change.
 $(WOLFSSL_LIB): $(WOLFSSL_SRC)/wolfssl/wolfcrypt/settings.h build/wolfssl/user_settings.h build/wolfssl/build.sh FORCE
@@ -60,9 +92,9 @@ $(O)/scrypto.o: $(CRYPTO_SRC) src/lib/scrypto.h src/lib/blake3.h $(WOLFSSL_LIB)
 	@mkdir -p $(O)
 	$(CC) $(ALL_CFLAGS) $(WOLFSSL_FLAGS) -c $< -o $@
 
-$(O)/tunvless: $(SRC) $(HDR) $(O)/scrypto.o $(WOLFSSL_LIB)
+$(O)/tunvless: $(SRC) $(HDR) $(O)/scrypto.o $(O)/certzip.o $(WOLFSSL_LIB) $(CERTZIP_LIBS)
 	@mkdir -p $(O)
-	$(CC) $(ALL_CFLAGS) $(DEFS) -o $@ $(SRC) $(O)/scrypto.o $(WOLFSSL_LIB) \
+	$(CC) $(ALL_CFLAGS) $(DEFS) -o $@ $(SRC) $(O)/scrypto.o $(O)/certzip.o $(WOLFSSL_LIB) $(CERTZIP_LIBS) \
 		$(LDFLAGS) -Wl,--gc-sections -lpthread
 
 install: $(O)/tunvless
@@ -81,7 +113,7 @@ TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
 UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch
-CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch
+CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch
 
 test: unit-test crypto-test
 	@echo "all tests passed"
@@ -213,6 +245,15 @@ $(T)/certgen.o: tests/certgen.c tests/certgen.h $(TW_LIB)
 	$(CC) $(T_CFLAGS) $(TW_FLAGS) -c $< -o $@
 
 T_CRYPTO = $(T)/scrypto.o src/lib/osrand.c $(TW_LIB) -lpthread
+
+$(T)/certzip.o: src/lib/certzip.c src/lib/certzip.h $(CERTZIP_LIBS)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) $(CERTZIP_FLAGS) -c $< -o $@
+
+T_CERTZIP = $(T)/certzip.o $(CERTZIP_LIBS)
+
+$(T)/certzipmatch: tests/certzipmatch.c tests/certzip-samples.h $(T)/certzip.o
+	$(CC) $(T_CFLAGS) -Wl,--wrap=malloc -o $@ tests/certzipmatch.c $(T_CERTZIP)
 CLIENT_SRC := src/proto/vless/client.c src/proto/vless/vless_proto.c src/proto/vless/vision.c \
               src/proto/vless/sub.c src/proto/vless/sublink.c \
               src/proto/transport/transport.c src/proto/transport/trsec.c src/proto/transport/trgrpc.c \
@@ -224,7 +265,7 @@ CLIENT_SRC := src/proto/vless/client.c src/proto/vless/vless_proto.c src/proto/v
 $(T)/scryptomatch: tests/scryptomatch.c tests/scrypto-pki.h tests/scrypto-pq.h $(T)/scrypto.o
 	$(CC) $(T_CFLAGS) -o $@ tests/scryptomatch.c $(T_CRYPTO)
 
-$(T)/hellofreeze: tests/hellofreeze.c tests/chello-frozen.h tests/chello-frozen-pq.h src/proto/tls/reality.c $(T)/scrypto.o
+$(T)/hellofreeze: tests/hellofreeze.c tests/chello-frozen.h tests/chello-frozen-pq.h tests/chello-frozen-firefox.h src/proto/tls/reality.c src/proto/tls/reality.h src/lib/scrypto.h $(T)/scrypto.o
 	$(CC) $(T_CFLAGS) -o $@ tests/hellofreeze.c $(T_CRYPTO)
 
 $(T)/echmatch: tests/echmatch.c src/proto/tls/ech.c src/proto/tls/reality.c $(T)/scrypto.o $(HDR)
@@ -232,22 +273,22 @@ $(T)/echmatch: tests/echmatch.c src/proto/tls/ech.c src/proto/tls/reality.c $(T)
 
 # vlessmatch includes trdial.c and roots.c (it reaches their static seams).
 $(T)/vlessmatch: tests/vlessmatch.c $(CLIENT_SRC) src/proto/transport/trdial.c src/proto/tls/roots.c \
-                 $(T)/certgen.o $(T)/scrypto.o $(HDR)
-	$(CC) $(T_CFLAGS) -DSTEER_HAVE_X509WRITE -o $@ tests/vlessmatch.c $(CLIENT_SRC) $(T)/certgen.o $(T_CRYPTO)
+                 $(T)/certgen.o $(T)/scrypto.o $(T)/certzip.o $(HDR)
+	$(CC) $(T_CFLAGS) -DSTEER_HAVE_X509WRITE -o $@ tests/vlessmatch.c $(CLIENT_SRC) $(T)/certgen.o $(T_CERTZIP) $(T_CRYPTO)
 
-$(T)/takematch: tests/takematch.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(HDR)
+$(T)/takematch: tests/takematch.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(T)/certzip.o $(HDR)
 	$(CC) $(T_CFLAGS) -o $@ tests/takematch.c src/proto/vless/vldial.c $(TUNNEL_SRC) $(CLIENT_SRC) \
-		src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CRYPTO)
+		src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CERTZIP) $(T_CRYPTO)
 
 # -- probes for the interop scripts (a real server on the other side) --
 
-$(T)/vencprobe: tests/vencprobe.c $(CLIENT_SRC) $(T)/scrypto.o $(HDR)
+$(T)/vencprobe: tests/vencprobe.c $(CLIENT_SRC) $(T)/scrypto.o $(T)/certzip.o $(HDR)
 	$(CC) $(T_CFLAGS) -o $@ tests/vencprobe.c $(CLIENT_SRC) src/proto/transport/trdial.c \
-		src/proto/tls/roots.c $(T_CRYPTO)
+		src/proto/tls/roots.c $(T_CERTZIP) $(T_CRYPTO)
 
-$(T)/xudpprobe: tests/xudpprobe.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(HDR)
+$(T)/xudpprobe: tests/xudpprobe.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(T)/certzip.o $(HDR)
 	$(CC) $(T_CFLAGS) -o $@ tests/xudpprobe.c src/proto/vless/vldial.c $(CLIENT_SRC) \
-		src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CRYPTO)
+		src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CERTZIP) $(T_CRYPTO)
 
 interop: $(T)/vencprobe $(T)/xudpprobe $(O)/tunvless
 	BUILD=$(T) sh tests/venc.sh
@@ -270,6 +311,6 @@ clean:
 	rm -rf $(O)
 
 distclean: clean
-	rm -rf $(WOLFSSL_SRC)
+	rm -rf $(WOLFSSL_SRC) $(ZLIB_SRC) $(BROTLI_SRC) $(ZSTD_SRC)
 
 FORCE:

@@ -924,6 +924,10 @@ static void spawn(slot_t *sl)
         argv[a++] = "--ca";
         argv[a++] = t->ca;
     }
+    if (t->fingerprint[0] != 0) {
+        argv[a++] = "--fp";
+        argv[a++] = t->fingerprint;
+    }
     if (firc_tunnel_tcp_port(t) != 0) {
         argv[a++] = "--tcp-port";
         argv[a++] = tcp_port;

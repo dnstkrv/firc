@@ -35,6 +35,7 @@ int tls13_handshake_auth(struct tls13 *t, int fd, const unsigned char *ch, size_
                          const unsigned char *ss, const struct tls13_auth *auth)
     { (void)t; (void)fd; (void)ch; (void)n; (void)ss; (void)auth; return -1; }
 const char *tls13_verify_reason(void) { return ""; }
+unsigned tls13_server_group(void) { return 0; }
 /* trsec.c parses the pqv key with it (reality.c); not reached here. */
 int xc_b64url_decode(const char *in, unsigned char *out, size_t out_n)
     { (void)in; (void)out; (void)out_n; return -1; }

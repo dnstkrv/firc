@@ -146,6 +146,7 @@ int sc_aes_block(const unsigned char *key, size_t key_n, int decrypt,
 int sc_x25519(unsigned char out[32], const unsigned char scalar[32], const unsigned char point[32]);
 /* The public half: X25519(scalar, 9). */
 int sc_x25519_base(unsigned char pub[32], const unsigned char scalar[32]);
+int sc_p256_pub(const unsigned char seed[32], unsigned char pub[65]);
 
 /* ---- ML-KEM-768 and ML-DSA-65 (FIPS 203 and 204) ------------------------------------------ */
 

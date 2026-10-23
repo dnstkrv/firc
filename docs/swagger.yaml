@@ -1230,6 +1230,14 @@ definitions:
         description: 'Trusted roots (PEM file) for security=tls nodes; empty for the system ones'
         example: ""
         type: string
+      fingerprint:
+        description: 'ClientHello fingerprint for every node; empty for the one each link names'
+        enum:
+        - ""
+        - chrome
+        - firefox
+        example: ""
+        type: string
       insecure:
         description: 'Accept allowInsecure nodes and skip certificate checks'
         example: false

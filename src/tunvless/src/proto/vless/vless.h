@@ -123,6 +123,9 @@ struct vless_sub_stats {
 void vless_set_insecure(int on);
 int vless_insecure(void);
 
+void vless_set_fp(const char *fp);
+const char *vless_fp(void);
+
 typedef void (*vless_node_fn)(void *ud, const struct vless_node *n, const char *skip_reason);
 void vless_set_node_hook(vless_node_fn fn, void *ud);
 void sl_intern_reset(void);

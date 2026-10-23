@@ -487,7 +487,7 @@ TEST ok_child_up_links_on_stdin(void)
 
 TEST argv_full_and_no_link(void)
 {
-    /* catches: a wrong flag, address or mark format, or a link on the command line */
+    /* catches: a wrong flag, address or mark format, --fp missing, or a link on the command line */
     env_setup("ok");
     char *links[] = {"vless://secret@h1:443#one"};
     firc_tunnel_t t;
@@ -498,6 +498,7 @@ TEST argv_full_and_no_link(void)
     t.timeout_s = 7;
     t.insecure = true;
     snprintf(t.ca, sizeof t.ca, "/opt/etc/ca.pem");
+    snprintf(t.fingerprint, sizeof t.fingerprint, "firefox");
     firc_tunnels_t set = {&t, 1};
     uint32_t marks[] = {0x1a};
     static rec_t r;
@@ -507,7 +508,7 @@ TEST argv_full_and_no_link(void)
     char buf[512];
     read_file(g_argv, buf, sizeof buf);
     ASSERT_STR_EQ("--control\n-d\ntunvless3\n-a\n198.51.100.4/32\n-A\n2\n--by\nlatency\n--interval\n45\n"
-                  "--silence\n12\n-t\n7\n-m\n0x1a\n--insecure\n--ca\n/opt/etc/ca.pem\n",
+                  "--silence\n12\n-t\n7\n-m\n0x1a\n--insecure\n--ca\n/opt/etc/ca.pem\n--fp\nfirefox\n",
                   buf);
     ASSERT(strstr(buf, "vless://") == NULL);
     rec_close(&r);
@@ -518,7 +519,7 @@ TEST argv_full_and_no_link(void)
 
 TEST argv_minimal_without_options(void)
 {
-    /* catches: -m, --insecure or --ca passed when not set */
+    /* catches: -m, --insecure, --ca or --fp passed when not set */
     env_setup("ok");
     char *links[] = {"vless://secret@h1:443#one"};
     firc_tunnel_t t;

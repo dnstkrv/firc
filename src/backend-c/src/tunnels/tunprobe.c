@@ -225,7 +225,7 @@ static int spawn_child(const firc_tunprobe_opts_t *o, pid_t *pid, int *in_fd, in
     char mark[16];
     snprintf(timeout, sizeof timeout, "%d", o->timeout_s);
     snprintf(mark, sizeof mark, "0x%x", (unsigned)o->mark);
-    const char *argv[12];
+    const char *argv[16];
     size_t a = 0;
     argv[a++] = o->binary;
     argv[a++] = "--probe";
@@ -241,6 +241,10 @@ static int spawn_child(const firc_tunprobe_opts_t *o, pid_t *pid, int *in_fd, in
     if (o->ca != NULL && o->ca[0] != 0) {
         argv[a++] = "--ca";
         argv[a++] = o->ca;
+    }
+    if (o->fingerprint != NULL && o->fingerprint[0] != 0) {
+        argv[a++] = "--fp";
+        argv[a++] = o->fingerprint;
     }
     argv[a++] = "-";
     argv[a] = NULL;

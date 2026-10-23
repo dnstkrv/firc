@@ -128,9 +128,7 @@ static const char CV_LABEL[] = "TLS 1.3, server CertificateVerify";
  * server that picks a scheme outside this list gets its own reason (CERTV_EALG), not "bad
  * signature".
  *
- * ecdsa_secp521r1 (0x0603) and rsa_pss_pss_* (0x0809..0x080B) pass here although we do not offer
- * them. The wolfSSL build has no P-521 (build/wolfssl/user_settings.h), so a server that picks
- * 0x0603 still fails: its certificate's key does not parse. */
+ * rsa_pss_pss_* (0x0809..0x080B) pass here although we do not offer them. */
 static int sig_alg(unsigned code, enum sc_hash *md, enum sc_sig_alg *alg) {
     switch (code) {
         case 0x0403: *md = SC_SHA256; *alg = SC_SIG_ECDSA; return 0;  /* ecdsa_secp256r1 */

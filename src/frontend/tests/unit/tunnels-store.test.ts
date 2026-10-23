@@ -97,7 +97,7 @@ const tunnel = (id: string, extra: Record<string, unknown> = {}) => ({
     },
   ],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "" },
   ...extra,
 });
 
@@ -357,7 +357,7 @@ describe("TunnelsStore.saveChanges", () => {
   // Catches a WebUI save turning kernelTcp off because normalize dropped it.
   it("normalize keeps advanced.kernelTcp", async () => {
     const on = tunnel("main", {
-      advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true },
+      advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: true, fingerprint: "" },
     });
     const s = stub({
       "/tunnels": (body: any) => (body ? { tunnels: body.tunnels } : { tunnels: [on] }),
@@ -372,6 +372,26 @@ describe("TunnelsStore.saveChanges", () => {
     const put = s.requests.find((r) => r.method === "PUT");
     assert.strictEqual(put!.body.tunnels[0].advanced.kernelTcp, true);
     assert.strictEqual(store.data[0].advanced.kernelTcp, true);
+  });
+
+  // Catches a WebUI save turning the fingerprint to the link default because normalize dropped it.
+  it("normalize keeps advanced.fingerprint", async () => {
+    const on = tunnel("main", {
+      advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "firefox" },
+    });
+    const s = stub({
+      "/tunnels": (body: any) => (body ? { tunnels: body.tunnels } : { tunnels: [on] }),
+      "/system/interfaces": { interfaces: [{ id: "tunvless0" }] },
+      "/tunnels/state": { tunnels: [stateOf("main")] },
+    });
+    const store = new TunnelsStore();
+    await store.load();
+    assert.strictEqual(store.canSave, false);
+    store.data[0].interval = 90;
+    await store.saveChanges();
+    const put = s.requests.find((r) => r.method === "PUT");
+    assert.strictEqual(put!.body.tunnels[0].advanced.fingerprint, "firefox");
+    assert.strictEqual(store.data[0].advanced.fingerprint, "firefox");
   });
 
   // Catches new devices not reaching the group pickers after a save.

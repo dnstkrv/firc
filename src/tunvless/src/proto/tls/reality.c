@@ -171,63 +171,32 @@ static void ext(struct buf *b, unsigned type, const void *body, size_t n) {
     put(b, body, n);
 }
 
-/* The Hello without a carrier; tests/hellofreeze.c pins its bytes. */
-int reality_build_hello(const struct reality_cfg *cfg, struct reality_state *st,
-                        unsigned char *out, size_t out_n, size_t *out_len) {
-    return reality_build_hello_carry(cfg, st, NULL, out, out_n, out_len);
+static size_t sni_body(unsigned char *o, size_t cap, const char *sni) {
+    size_t sni_len = strlen(sni);
+    struct buf sb = { o, 0, cap };
+    put16(&sb, (unsigned)(sni_len + 3));
+    put8(&sb, 0);
+    put16(&sb, (unsigned)sni_len);
+    put(&sb, sni, sni_len);
+    return sb.len;
 }
 
-int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_state *st,
-                              const struct reality_carrier *car,
-                              unsigned char *out, size_t out_n, size_t *out_len) {
-    unsigned char pbk[32], sid[16];
-    int sid_n = 0;
-    if (!cfg->plain) {
-        int pbk_n = b64url_decode(cfg->pbk, pbk, sizeof(pbk));
-        if (pbk_n != 32) return REALITY_EBADKEY;
-        sid_n = cfg->sid[0] ? hex_decode(cfg->sid, sid, sizeof(sid)) : 0;
-        if (sid_n < 0) return REALITY_EBADKEY;
-    }
-
-    st->pq = 0;
-    if (car && car->priv) {
-        memcpy(st->priv, car->priv, 32);
-        memcpy(st->pub, car->pub, 32);
-    } else if (x25519_keypair(st->priv, st->pub) != 0) return REALITY_ECRYPTO;
-    /* The secret shared with the server's STATIC key serves only the authenticator (or a
-     * carrier's callbacks). Plain TLS has none: there is only the ephemeral exchange with the
-     * server's key_share, which tls13.c computes from ServerHello. */
-    if (!cfg->plain && x25519_shared(st->priv, pbk, st->shared) != 0) return REALITY_ECRYPTO;
-
-    /* The authenticator is computed AFTER the Hello is built (below, where it is written in
-     * place), because it signs the whole ClientHello. Here only the plaintext: 16 meaningful
-     * bytes and 16 zeros for the tag. */
-    unsigned char sess[32] = {0};
-    if (cfg->plain) {
-        /* A browser sends 32 random bytes in legacy_session_id, a leftover of TLS 1.2
-         * resumption. TLS 1.3 does not use them (the server echoes them back), but a modern
-         * client never leaves the field empty, and a zero one would be a fingerprint. */
-        if (fill_random(sess, sizeof(sess)) != 0) return REALITY_ECRYPTO;
+static size_t alpn_body(unsigned char *o, size_t cap, const struct reality_carrier *car) {
+    struct buf ab = { o, 0, cap };
+    if (car && car->alpn_http11) {
+        put16(&ab, 9);
+        put8(&ab, 8); put(&ab, "http/1.1", 8);
     } else {
-        /* Reality client version, as Xray's core.Version_{x,y,z}; a server checks it only with
-         * minClientVer/maxClientVer set, but it is part of the signed 16 bytes, so it must be
-         * plausible. Bytes 4..7 are Unix time: a server with maxTimeDiff set rejects a client
-         * whose clock is off. */
-        sess[0] = 26; sess[1] = 9; sess[2] = 8; sess[3] = 0;
-        uint32_t now = (uint32_t)time(NULL);
-        sess[4] = (unsigned char)(now >> 24);
-        sess[5] = (unsigned char)(now >> 16);
-        sess[6] = (unsigned char)(now >> 8);
-        sess[7] = (unsigned char)now;
-        if (sid_n > 0) memcpy(sess + 8, sid, (size_t)(sid_n > 8 ? 8 : sid_n));
+        put16(&ab, 12);
+        put8(&ab, 2); put(&ab, "h2", 2);
+        put8(&ab, 8); put(&ab, "http/1.1", 8);
     }
-    memcpy(st->session_id, sess, 32);
+    return ab.len;
+}
 
-    /* ---- the Hello itself ---- */
-    struct buf b = { out, 0, out_n };
-    unsigned char rnd[32];
-    if (fill_random(rnd, sizeof(rnd)) != 0) return REALITY_ECRYPTO;
-
+static int chrome_body(struct buf *bp, size_t *xl, const struct reality_cfg *cfg,
+                       struct reality_state *st, const struct reality_carrier *car) {
+    struct buf b = *bp;
     /* GREASE values (RFC 8701): one for each place Chrome puts one, fresh per connection;
      * constant values would be a fingerprint themselves.
      *
@@ -240,25 +209,6 @@ int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_stat
     unsigned g_version = 0x0A0Au + (unsigned)(gr[2] & 15) * 0x1010u;
     unsigned g_ext_a   = 0x0A0Au + (unsigned)(gr[3] & 15) * 0x1010u;
     unsigned g_ext_b   = 0x0A0Au + (unsigned)((gr[4] & 15) ^ (((gr[4] & 15) == (gr[3] & 15)) ? 1 : 0)) * 0x1010u;
-
-    /* The record header is filled in at the end, when the length is known. */
-    size_t rec_at = b.len;
-    put8(&b, 0x16);            /* handshake */
-    /* Record version 0x0301, as browsers and openssl send it (checked by capture; RFC 8446
-     * §5.1 allows it for an initial ClientHello). Do not "fix" it to 0x0303. */
-    put16(&b, 0x0301);
-    size_t rec_len_at = b.len;
-    put16(&b, 0);
-
-    size_t hs_at = b.len;
-    put8(&b, 0x01);            /* ClientHello */
-    size_t hs_len_at = b.len;
-    put8(&b, 0); put16(&b, 0); /* 24-bit length */
-
-    put16(&b, 0x0303);         /* legacy_version TLS 1.2, as TLS 1.3 requires */
-    put(&b, rnd, 32);
-    put8(&b, 32);
-    put(&b, st->session_id, 32);
 
     /* Chrome's cipher suites in Chrome's order, GREASE first; checked against a capture. The
      * server picks: Go's crypto/tls takes the first suite of ITS preference order
@@ -289,9 +239,8 @@ int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_stat
 
     put8(&b, 1); put8(&b, 0);  /* compression: null */
 
-    size_t exts_len_at = b.len;
+    *xl = b.len;
     put16(&b, 0);
-    size_t exts_at = b.len;
 
     /* The set, contents and order of extensions follow Chrome, checked against a capture of
      * its Hello to the same server (tests/hello-diff.py).
@@ -334,45 +283,16 @@ int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_stat
      * extension with a zero-length name is something no browser or client builds, and the
      * server's check does not recognise it. Subscriptions do declare nodes without `sni`. */
     if (cfg->sni[0]) {
-        size_t sni_len = strlen(cfg->sni);
-        struct buf sb = { b_sni, 0, sizeof(b_sni) };
-        put16(&sb, (unsigned)(sni_len + 3));
-        put8(&sb, 0);
-        put16(&sb, (unsigned)sni_len);
-        put(&sb, cfg->sni, sni_len);
-        px[pn].type = 0x0000; px[pn].body = b_sni; px[pn].n = sb.len; pn++;
+        px[pn].type = 0x0000; px[pn].body = b_sni; px[pn].n = sni_body(b_sni, sizeof(b_sni), cfg->sni); pn++;
     }
 
     /* ALPN: ALWAYS "h2, http/1.1" as the browser sends it, whatever the node's transport
      * (http/1.1 alone with car->alpn_http11, see reality.h). A server that wants h2 picks it;
      * Reality, having recognised us, picks nothing (NextProtos is nil in Xray) and sends empty
      * EncryptedExtensions. */
-    {
-        struct buf ab = { b_alpn, 0, sizeof(b_alpn) };
-        if (car && car->alpn_http11) {
-            put16(&ab, 9);
-            put8(&ab, 8); put(&ab, "http/1.1", 8);
-        } else {
-            put16(&ab, 12);
-            put8(&ab, 2); put(&ab, "h2", 2);
-            put8(&ab, 8); put(&ab, "http/1.1", 8);
-        }
-        px[pn].type = 0x0010; px[pn].body = b_alpn; px[pn].n = ab.len; pn++;
-    }
+    px[pn].type = 0x0010; px[pn].body = b_alpn; px[pn].n = alpn_body(b_alpn, sizeof(b_alpn), car); pn++;
 
-    /* compress_certificate: brotli (2), but NOT for plain TLS.
-     *
-     * The extension promises that we decompress a compressed certificate (RFC 8879). Reality
-     * can afford the promise: it never reads the certificate, and CompressedCertificate enters
-     * the transcript as received. With security=tls the certificate is the only proof and must
-     * be read, and there is no brotli here. Whether to compress is the server's choice:
-     * Cloudflare (1.1.1.1:443) accepts the promise and sends CompressedCertificate, Google sends
-     * a plain Certificate.
-     *
-     * The cost: the plain TLS Hello differs from Chrome's by one extension. That would be fatal
-     * for Reality, but security=tls does not pose as a browser anyway: it has the real name in
-     * SNI and a real certificate. The Reality Hello is unchanged (tests/hellofreeze.c). */
-    if (!cfg->plain) {
+    {
         struct buf cb = { b_cc, 0, sizeof(b_cc) };
         put8(&cb, 2); put16(&cb, 0x0002);
         px[pn].type = 0x001B; px[pn].body = b_cc; px[pn].n = cb.len; pn++;
@@ -508,11 +428,184 @@ int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_stat
         }
     }
     for (size_t i = 0; i < pn; i++) ext(&b, px[i].type, px[i].body, px[i].n);
+    *bp = b;
+    return 0;
+}
+
+static int firefox_body(struct buf *b, size_t *xl, const struct reality_cfg *cfg,
+                        struct reality_state *st, const struct reality_carrier *car) {
+    static const unsigned suites[] = {
+        0x1301, 0x1303, 0x1302, 0xC02B, 0xC02F, 0xCCA9, 0xCCA8, 0xC02C, 0xC030,
+        0xC00A, 0xC009, 0xC013, 0xC014, 0x009C, 0x009D, 0x002F, 0x0035,
+    };
+    static const unsigned groups[] = {
+        REALITY_GROUP_MLKEM, 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101,
+    };
+    static const unsigned dcs[] = { 0x0403, 0x0503, 0x0603, 0x0203 };
+    static const unsigned sigs[] = {
+        0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201,
+    };
+    static __thread unsigned char ks[2 + 4 + REALITY_MLKEM_SHARE + 4 + 32 + 4 + 65];
+    unsigned char sni[300], alpn[16], grp[2 + 2 * 7], dc[2 + 2 * 4], sg[2 + 2 * 11];
+    unsigned char ech[1 + 2 + 2 + 1 + 2 + 32 + 2 + 239], noise[1 + 32 + 239 + 1];
+    unsigned char seed[SC_MLKEM768_SEED], p256[32], p256_pub[65];
+
+    put16(b, (unsigned)(sizeof suites / sizeof suites[0]) * 2);
+    for (size_t i = 0; i < sizeof suites / sizeof suites[0]; i++) put16(b, suites[i]);
+    put8(b, 1); put8(b, 0);
+    *xl = b->len;
+    put16(b, 0);
+
+    if (cfg->sni[0]) ext(b, 0x0000, sni, sni_body(sni, sizeof sni, cfg->sni));
+    ext(b, 0x0017, NULL, 0);
+    ext(b, 0xFF01, "\x00", 1);
+    {
+        struct buf gb = { grp, 0, sizeof grp };
+        put16(&gb, (unsigned)(sizeof groups / sizeof groups[0]) * 2);
+        for (size_t i = 0; i < sizeof groups / sizeof groups[0]; i++) put16(&gb, groups[i]);
+        ext(b, 0x000A, grp, gb.len);
+    }
+    ext(b, 0x000B, "\x01\x00", 2);
+    ext(b, 0x0010, alpn, alpn_body(alpn, sizeof alpn, car));
+    ext(b, 0x0005, "\x01\x00\x00\x00\x00", 5);
+    {
+        struct buf db = { dc, 0, sizeof dc };
+        put16(&db, (unsigned)(sizeof dcs / sizeof dcs[0]) * 2);
+        for (size_t i = 0; i < sizeof dcs / sizeof dcs[0]; i++) put16(&db, dcs[i]);
+        ext(b, 0x0022, dc, db.len);
+    }
+    ext(b, 0x0012, NULL, 0);
+    {
+        if (fill_random(seed, sizeof seed) != 0) return REALITY_ECRYPTO;
+        unsigned char *ek = ks + 2 + 4;
+        if (sc_mlkem768_keygen(ek, st->mlkem_dk, seed) != 0) return REALITY_ECRYPTO;
+        memcpy(ek + SC_MLKEM768_EK, st->pub, 32);
+        st->pq = 1;
+        int tries = 0;
+        do {
+            if (++tries > 4 || fill_random(p256, sizeof p256) != 0) return REALITY_ECRYPTO;
+        } while (sc_p256_pub(p256, p256_pub) != 0);
+        struct buf kb = { ks, 0, sizeof ks };
+        put16(&kb, (unsigned)(sizeof ks - 2));
+        put16(&kb, REALITY_GROUP_MLKEM); put16(&kb, REALITY_MLKEM_SHARE);
+        kb.len += REALITY_MLKEM_SHARE;
+        put16(&kb, 0x001D); put16(&kb, 32); put(&kb, st->pub, 32);
+        put16(&kb, 0x0017); put16(&kb, 65); put(&kb, p256_pub, 65);
+        ext(b, 0x0033, ks, kb.len);
+    }
+    ext(b, 0x002B, "\x04\x03\x04\x03\x03", 5);
+    {
+        struct buf sb = { sg, 0, sizeof sg };
+        put16(&sb, (unsigned)(sizeof sigs / sizeof sigs[0]) * 2);
+        for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) put16(&sb, sigs[i]);
+        ext(b, 0x000D, sg, sb.len);
+    }
+    ext(b, 0x001C, "\x40\x01", 2);
+    ext(b, 0x001B, "\x06\x00\x01\x00\x02\x00\x03", 7);
+    {
+        if (fill_random(noise, sizeof noise) != 0) return REALITY_ECRYPTO;
+        if (car && car->fill_ech && car->fill_ech(car->ctx, noise + 33, 239, st->shared) != 0)
+            return REALITY_ECRYPTO;
+        struct buf eb = { ech, 0, sizeof ech };
+        put8(&eb, 0x00);
+        put16(&eb, 0x0001);
+        put16(&eb, (noise[sizeof noise - 1] & 1) ? 0x0003 : 0x0001);
+        put8(&eb, noise[0]);
+        put16(&eb, 32);
+        put(&eb, noise + 1, 32);
+        put16(&eb, 239);
+        put(&eb, noise + 33, 239);
+        ext(b, 0xFE0D, ech, eb.len);
+    }
+    return 0;
+}
+
+/* The Hello without a carrier; tests/hellofreeze.c pins its bytes. */
+int reality_build_hello(const struct reality_cfg *cfg, struct reality_state *st,
+                        unsigned char *out, size_t out_n, size_t *out_len) {
+    return reality_build_hello_carry(cfg, st, NULL, out, out_n, out_len);
+}
+
+int reality_build_hello_carry(const struct reality_cfg *cfg, struct reality_state *st,
+                              const struct reality_carrier *car,
+                              unsigned char *out, size_t out_n, size_t *out_len) {
+    unsigned char pbk[32], sid[16];
+    int sid_n = 0;
+    if (!cfg->plain) {
+        int pbk_n = b64url_decode(cfg->pbk, pbk, sizeof(pbk));
+        if (pbk_n != 32) return REALITY_EBADKEY;
+        sid_n = cfg->sid[0] ? hex_decode(cfg->sid, sid, sizeof(sid)) : 0;
+        if (sid_n < 0) return REALITY_EBADKEY;
+    }
+
+    st->pq = 0;
+    if (car && car->priv) {
+        memcpy(st->priv, car->priv, 32);
+        memcpy(st->pub, car->pub, 32);
+    } else if (x25519_keypair(st->priv, st->pub) != 0) return REALITY_ECRYPTO;
+    /* The secret shared with the server's STATIC key serves only the authenticator (or a
+     * carrier's callbacks). Plain TLS has none: there is only the ephemeral exchange with the
+     * server's key_share, which tls13.c computes from ServerHello. */
+    if (!cfg->plain && x25519_shared(st->priv, pbk, st->shared) != 0) return REALITY_ECRYPTO;
+
+    /* The authenticator is computed AFTER the Hello is built (below, where it is written in
+     * place), because it signs the whole ClientHello. Here only the plaintext: 16 meaningful
+     * bytes and 16 zeros for the tag. */
+    unsigned char sess[32] = {0};
+    if (cfg->plain) {
+        /* A browser sends 32 random bytes in legacy_session_id, a leftover of TLS 1.2
+         * resumption. TLS 1.3 does not use them (the server echoes them back), but a modern
+         * client never leaves the field empty, and a zero one would be a fingerprint. */
+        if (fill_random(sess, sizeof(sess)) != 0) return REALITY_ECRYPTO;
+    } else {
+        /* Reality client version, as Xray's core.Version_{x,y,z}; a server checks it only with
+         * minClientVer/maxClientVer set, but it is part of the signed 16 bytes, so it must be
+         * plausible. Bytes 4..7 are Unix time: a server with maxTimeDiff set rejects a client
+         * whose clock is off. */
+        sess[0] = 26; sess[1] = 9; sess[2] = 8; sess[3] = 0;
+        uint32_t now = (uint32_t)time(NULL);
+        sess[4] = (unsigned char)(now >> 24);
+        sess[5] = (unsigned char)(now >> 16);
+        sess[6] = (unsigned char)(now >> 8);
+        sess[7] = (unsigned char)now;
+        if (sid_n > 0) memcpy(sess + 8, sid, (size_t)(sid_n > 8 ? 8 : sid_n));
+    }
+    memcpy(st->session_id, sess, 32);
+
+    /* ---- the Hello itself ---- */
+    struct buf b = { out, 0, out_n };
+    unsigned char rnd[32];
+    if (fill_random(rnd, sizeof(rnd)) != 0) return REALITY_ECRYPTO;
+
+    /* The record header is filled in at the end, when the length is known. */
+    size_t rec_at = b.len;
+    put8(&b, 0x16);            /* handshake */
+    /* Record version 0x0301, as browsers and openssl send it (checked by capture; RFC 8446
+     * §5.1 allows it for an initial ClientHello). Do not "fix" it to 0x0303. */
+    put16(&b, 0x0301);
+    size_t rec_len_at = b.len;
+    put16(&b, 0);
+
+    size_t hs_at = b.len;
+    put8(&b, 0x01);            /* ClientHello */
+    size_t hs_len_at = b.len;
+    put8(&b, 0); put16(&b, 0); /* 24-bit length */
+
+    put16(&b, 0x0303);         /* legacy_version TLS 1.2, as TLS 1.3 requires */
+    put(&b, rnd, 32);
+    put8(&b, 32);
+    put(&b, st->session_id, 32);
+
+    size_t exts_len_at = 0;
+    int brc = reality_fp_of(cfg->fp) == REALITY_FP_FIREFOX
+                  ? firefox_body(&b, &exts_len_at, cfg, st, car)
+                  : chrome_body(&b, &exts_len_at, cfg, st, car);
+    if (brc) return brc;
 
     if (b.len > b.cap) return REALITY_ETOOBIG;
 
     /* Back-fill the lengths. */
-    size_t exts_len = b.len - exts_at;
+    size_t exts_len = b.len - exts_len_at - 2;
     out[exts_len_at] = (unsigned char)(exts_len >> 8);
     out[exts_len_at + 1] = (unsigned char)exts_len;
     size_t hs_len = b.len - hs_at - 4;

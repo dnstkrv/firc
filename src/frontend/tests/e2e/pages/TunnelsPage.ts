@@ -19,7 +19,7 @@ export const tunnel = (id: string, device: string, extra: Json = {}): Json => ({
   exclude: [],
   sources: [],
   uplink: { kind: "auto", ref: "" },
-  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false },
+  advanced: { ca: "", insecure: false, timeout: 8, kernelTcp: false, fingerprint: "" },
   inbounds: [],
   ...extra,
 });

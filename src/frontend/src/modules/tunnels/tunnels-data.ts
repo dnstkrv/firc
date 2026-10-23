@@ -49,6 +49,7 @@ export function normalizeTunnel(raw: Partial<Tunnel>): Tunnel {
       insecure: raw.advanced?.insecure ?? false,
       timeout: raw.advanced?.timeout ?? 8,
       kernelTcp: raw.advanced?.kernelTcp ?? false,
+      fingerprint: raw.advanced?.fingerprint ?? "",
     },
     inbounds: (raw.inbounds ?? []).map((ib) => ({ ...ib })),
   };

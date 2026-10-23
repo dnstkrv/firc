@@ -16,6 +16,7 @@
  *   ChaCha20-Poly1305 — RFC 8439 §2.8.2;
  *   X25519            — RFC 7748 §5.2 (unclamped scalar), §5.2 iterations, §6.1 (Alice and Bob);
  *                      a secret with zero first and last bytes (Go's crypto/ecdh);
+ *   P-256 public key  — RFC 6979 A.2.5 (the point also derived by openssl);
  *   AES-256-CTR       — NIST SP 800-38A F.5.5, whole and in pieces of different lengths;
  *   MD5, SHA-1, SHA-224 — RFC 1321 and FIPS 180-4 ("abc", empty string); HMAC-MD5 and HMAC-SHA1 —
  *                      RFC 2202, case 1; HKDF-SHA1 — RFC 5869, case 4;
@@ -467,6 +468,28 @@ static void test_x25519(void) {
                 "000edf1da6da6165bf86aa2eaff7952031c8f5e96e8b92d7ab78c765e7706600", out, 32);
 }
 
+/* Catches a P-256 public key that is not the scalar's point, or not uncompressed SEC1. */
+static void p256_pub_matches_a_known_vector(void) {
+    unsigned char d[32], pub[65];
+    unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", d, 32);
+    check("P-256 RFC 6979 A.2.5: return code", 0, sc_p256_pub(d, pub));
+    check_bytes("P-256 RFC 6979 A.2.5: public point",
+                "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6"
+                "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", pub, 65);
+}
+
+/* Catches a seed at or past the group order, or zero, taken as a key instead of refused for a redraw. */
+static void p256_pub_refuses_a_seed_out_of_range(void) {
+    unsigned char n[32], ff[32], zero[32] = { 0 }, pub[65];
+    unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", n, 32);
+    memset(ff, 0xff, sizeof ff);
+    check("P-256: seed equal to the order refused", 1, sc_p256_pub(n, pub) != 0);
+    check("P-256: all-ones seed refused", 1, sc_p256_pub(ff, pub) != 0);
+    check("P-256: zero seed refused", 1, sc_p256_pub(zero, pub) != 0);
+    n[31] = 0x50;
+    check("P-256: seed one below the order accepted", 0, sc_p256_pub(n, pub));
+}
+
 /* ---- certificates --------------------------------------------------------------------------- */
 
 /* PEM → DER with our own decoder: the test must not check the library with its own function. */
@@ -493,7 +516,7 @@ static size_t pem_der(const char *pem, unsigned char *out, size_t cap) {
 }
 
 struct der { unsigned char b[2048]; size_t n; };
-static struct der D_LEAF, D_INTER, D_RSALEAF, D_P384, D_FAKECA, D_FAKELEAF, D_EXPIRED;
+static struct der D_LEAF, D_INTER, D_RSALEAF, D_P384, D_INTER521, D_P521, D_FAKECA, D_FAKELEAF, D_EXPIRED;
 
 static struct sc_roots *roots_of(const char *pem) {
     struct sc_roots *r = NULL;
@@ -511,12 +534,14 @@ static int chain(struct sc_roots *r, const char *host, int n, ...) {
 }
 
 static void test_sig(void) {
-    unsigned char d256[32], d384[48], sig[512];
+    unsigned char d256[32], d384[48], d512[64], sig[512];
     sc_hash(SC_SHA256, "steer scrypto", 13, d256);
     sc_hash(SC_SHA384, "steer scrypto", 13, d384);
+    sc_hash(SC_SHA512, "steer scrypto", 13, d512);
     struct { const char *name, *hex; struct der *cert; enum sc_sig_alg alg; enum sc_hash h; } v[] = {
         { "ECDSA P-256 SHA-256",      SIG_ECDSA256,  &D_LEAF,    SC_SIG_ECDSA,     SC_SHA256 },
         { "ECDSA P-384 SHA-384",      SIG_ECDSA384,  &D_P384,    SC_SIG_ECDSA,     SC_SHA384 },
+        { "ECDSA P-521 SHA-512",      SIG_ECDSA521,  &D_P521,    SC_SIG_ECDSA,     SC_SHA512 },
         { "RSA PKCS#1 v1.5 SHA-256",  SIG_PKCS1,     &D_RSALEAF, SC_SIG_RSA_PKCS1, SC_SHA256 },
         { "RSA-PSS SHA-256 salt 32",  SIG_PSS256,    &D_RSALEAF, SC_SIG_RSA_PSS,   SC_SHA256 },
         { "RSA-PSS SHA-384 salt 20",  SIG_PSS384S20, &D_RSALEAF, SC_SIG_RSA_PSS,   SC_SHA384 },
@@ -524,7 +549,7 @@ static void test_sig(void) {
     };
     for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
         size_t sn = unhex(v[i].hex, sig, sizeof(sig));
-        const unsigned char *dg = v[i].h == SC_SHA256 ? d256 : d384;
+        const unsigned char *dg = v[i].h == SC_SHA256 ? d256 : v[i].h == SC_SHA384 ? d384 : d512;
         size_t dn = sc_hash_len(v[i].h);
         char what[96];
         snprintf(what, sizeof(what), "OpenSSL signature %s verifies", v[i].name);
@@ -535,7 +560,7 @@ static void test_sig(void) {
         /* A wrong digest is a failure, not "close enough": the intact signature over a digest
          * one bit off. (A corrupted RSA signature fails in the padding, before any digest.) */
         sig[sn / 2] ^= 0x10;
-        unsigned char other[48];
+        unsigned char other[64];
         memcpy(other, dg, dn);
         other[0] ^= 1;
         snprintf(what, sizeof(what), "%s over another digest gives SC_ESIG", v[i].name);
@@ -585,6 +610,8 @@ static void test_chain(void) {
           chain(r, "good.example", 3, &D_LEAF, &D_RSALEAF, &D_INTER));
     check("temporary intermediates removed after a check", SC_ECHAIN, chain(r, "good.example", 1, &D_LEAF));
     check("leaf directly under the root (P-384)", 0, chain(r, "p384.example", 1, &D_P384));
+    /* catches: a P-521 key in a chain that does not parse, so a Firefox-offered P-521 node fails */
+    check("P-521 leaf under a P-521 intermediate", 0, chain(r, "p521.example", 2, &D_P521, &D_INTER521));
     check("intermediate without the CA flag rejected", SC_ECHAIN,
           chain(r, "good.example", 3, &D_FAKELEAF, &D_FAKECA, &D_INTER));
     check("expired leaf rejected", SC_ECHAIN, chain(r, "good.example", 2, &D_EXPIRED, &D_INTER));
@@ -619,6 +646,7 @@ static void test_chain(void) {
 int main(void) {
     struct { const char *pem; struct der *d; } all[] = {
         { PEM_LEAF, &D_LEAF }, { PEM_INTER, &D_INTER }, { PEM_RSALEAF, &D_RSALEAF }, { PEM_P384, &D_P384 },
+        { PEM_INTER521, &D_INTER521 }, { PEM_P521, &D_P521 },
         { PEM_FAKECA, &D_FAKECA }, { PEM_FAKELEAF, &D_FAKELEAF }, { PEM_EXPIRED, &D_EXPIRED },
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
@@ -631,6 +659,8 @@ int main(void) {
     test_aesctr();
     test_proxy_prims();
     test_x25519();
+    p256_pub_matches_a_known_vector();
+    p256_pub_refuses_a_seed_out_of_range();
     test_mlkem();
     test_mldsa();
     test_sig();

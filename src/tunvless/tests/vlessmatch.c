@@ -154,6 +154,12 @@ struct plan {
      * must go in the request's Sec-WebSocket-Protocol: with Ed > 0 Xray holds the request until
      * the first write. */
     int ed_first;
+    int compress;
+    int compress_junk;
+    int firefox;
+    unsigned keyshare_group;
+    int hrr;
+    int dc;
 };
 
 struct srv {
@@ -330,8 +336,11 @@ static void chain_free(void) {
  * length, holding one entry "3-byte length + DER + 2-byte extensions". The root is left out on
  * purpose: it is already in the store, and the chain must verify without it, or the test would
  * check the server's generosity instead of the verification. */
-static size_t cert_msg(const struct leaf *l, unsigned char *out, size_t cap) {
-    size_t body = 1 + 3 + 3 + l->der_n + 2;
+static size_t cert_msg(const struct leaf *l, int dc, unsigned char *out, size_t cap) {
+    static const unsigned char dcx[] = { 0x00, 0x0C, 0x00, 0x22, 0x00, 0x08, 0x00, 0x01, 0x51, 0x80,
+                                         0x04, 0x03, 0x00, 0x00 };
+    size_t xn = dc ? sizeof dcx : 2;
+    size_t body = 1 + 3 + 3 + l->der_n + xn;
     if (4 + body > cap) return 0;
     size_t n = 0;
     out[n++] = 0x0B;
@@ -339,7 +348,7 @@ static size_t cert_msg(const struct leaf *l, unsigned char *out, size_t cap) {
     out[n++] = (unsigned char)(body >> 8);
     out[n++] = (unsigned char)body;
     out[n++] = 0x00;                                     /* certificate_request_context */
-    size_t list = 3 + l->der_n + 2;
+    size_t list = 3 + l->der_n + xn;
     out[n++] = (unsigned char)(list >> 16);
     out[n++] = (unsigned char)(list >> 8);
     out[n++] = (unsigned char)list;
@@ -347,8 +356,53 @@ static size_t cert_msg(const struct leaf *l, unsigned char *out, size_t cap) {
     out[n++] = (unsigned char)(l->der_n >> 8);
     out[n++] = (unsigned char)l->der_n;
     memcpy(out + n, l->der, l->der_n); n += l->der_n;
-    out[n++] = 0x00; out[n++] = 0x00;                    /* extensions: none */
+    if (dc) { memcpy(out + n, dcx, sizeof dcx); n += sizeof dcx; }
+    else { out[n++] = 0x00; out[n++] = 0x00; }
     return n;
+}
+
+static size_t stored_stream(int alg, const unsigned char *in, size_t n, unsigned char *out) {
+    size_t k = 0;
+    if (alg == 1) {
+        uint32_t a = 1, b = 0;
+        for (size_t i = 0; i < n; i++) { a = (a + in[i]) % 65521; b = (b + a) % 65521; }
+        out[k++] = 0x78; out[k++] = 0x01; out[k++] = 0x01;
+        out[k++] = (unsigned char)n; out[k++] = (unsigned char)(n >> 8);
+        out[k++] = (unsigned char)~n; out[k++] = (unsigned char)(~n >> 8);
+        memcpy(out + k, in, n); k += n;
+        out[k++] = (unsigned char)(b >> 8); out[k++] = (unsigned char)b;
+        out[k++] = (unsigned char)(a >> 8); out[k++] = (unsigned char)a;
+    } else if (alg == 2) {
+        uint32_t h = ((uint32_t)(n - 1) << 4) | (1u << 20);
+        out[k++] = (unsigned char)h; out[k++] = (unsigned char)(h >> 8); out[k++] = (unsigned char)(h >> 16);
+        memcpy(out + k, in, n); k += n;
+        out[k++] = 0x03;
+    } else {
+        uint32_t h = 1u | ((uint32_t)n << 3);
+        out[k++] = 0x28; out[k++] = 0xB5; out[k++] = 0x2F; out[k++] = 0xFD;
+        out[k++] = 0x00; out[k++] = 0x30;
+        out[k++] = (unsigned char)h; out[k++] = (unsigned char)(h >> 8); out[k++] = (unsigned char)(h >> 16);
+        memcpy(out + k, in, n); k += n;
+    }
+    return k;
+}
+
+static size_t compressed_msg(int alg, int junk, unsigned char *msg, size_t n, size_t cap) {
+    unsigned char z[3072];
+    size_t bn = n - 4;
+    if (bn + 16 > sizeof z) return 0;
+    size_t zn = stored_stream(alg, msg + 4, bn, z);
+    size_t body = 2 + 3 + 3 + zn + (junk ? 1 : 0);
+    if (4 + body > cap) return 0;
+    size_t k = 0;
+    msg[k++] = 0x19;
+    msg[k++] = (unsigned char)(body >> 16); msg[k++] = (unsigned char)(body >> 8); msg[k++] = (unsigned char)body;
+    msg[k++] = 0x00; msg[k++] = (unsigned char)alg;
+    msg[k++] = (unsigned char)(bn >> 16); msg[k++] = (unsigned char)(bn >> 8); msg[k++] = (unsigned char)bn;
+    msg[k++] = (unsigned char)(zn >> 16); msg[k++] = (unsigned char)(zn >> 8); msg[k++] = (unsigned char)zn;
+    memcpy(msg + k, z, zn); k += zn;
+    if (junk) msg[k++] = 0x00;
+    return k;
 }
 
 /* CertificateVerify: a signature over 64 spaces, the label, a zero byte and the transcript hash
@@ -664,7 +718,12 @@ static void *server_half(void *arg) {
     size_t m = 0;
     sh[m++] = 0x02; m += 3;                          /* length filled in below */
     sh[m++] = 0x03; sh[m++] = 0x03;
-    if (xc_random(sh + m, 32) != 0) return NULL;
+    static const unsigned char HRR[32] = {
+        0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+        0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+    };
+    if (pl->hrr) memcpy(sh + m, HRR, 32);
+    else if (xc_random(sh + m, 32) != 0) return NULL;
     m += 32;
     sh[m++] = (unsigned char)sid_n;
     memcpy(sh + m, sid, sid_n); m += sid_n;
@@ -673,7 +732,16 @@ static void *server_half(void *arg) {
     size_t exts_at = m; m += 2;
     sh[m++] = 0x00; sh[m++] = 0x2b; sh[m++] = 0x00; sh[m++] = 0x02;
     sh[m++] = 0x03; sh[m++] = 0x04;                  /* supported_versions: TLS 1.3 */
-    if (!pl->no_keyshare) {
+    if (pl->hrr) {
+        sh[m++] = 0x00; sh[m++] = 0x33; sh[m++] = 0x00; sh[m++] = 0x02;
+        sh[m++] = 0x00; sh[m++] = 0x18;
+    } else if (pl->keyshare_group) {
+        sh[m++] = 0x00; sh[m++] = 0x33; sh[m++] = 0x00; sh[m++] = 0x45;
+        sh[m++] = (unsigned char)(pl->keyshare_group >> 8); sh[m++] = (unsigned char)pl->keyshare_group;
+        sh[m++] = 0x00; sh[m++] = 0x41; sh[m++] = 0x04;
+        if (xc_random(sh + m, 64) != 0) return NULL;
+        m += 64;
+    } else if (!pl->no_keyshare) {
         sh[m++] = 0x00; sh[m++] = 0x33; sh[m++] = 0x00; sh[m++] = 0x24;
         sh[m++] = 0x00; sh[m++] = 0x1d; sh[m++] = 0x00; sh[m++] = 0x20;
         memcpy(sh + m, spub, 32); m += 32;
@@ -694,7 +762,7 @@ static void *server_half(void *arg) {
     sc_hash_update(&s->tr, ch, ch_n);
     sc_hash_update(&s->tr, sh, m);
 
-    if (pl->no_keyshare) { s->rc = 0; return NULL; }   /* the client stops listening here */
+    if (pl->no_keyshare || pl->hrr || pl->keyshare_group) { s->rc = 0; return NULL; }   /* the client stops listening here */
 
     /* ---- handshake key schedule, RFC 8446 §7.1 ---- */
     unsigned char zeros[HLEN] = {0}, empty[HLEN];
@@ -735,7 +803,8 @@ static void *server_half(void *arg) {
     if (pl->chain) {
         const struct leaf *l = &g_leaf[pl->chain];
         unsigned char msg[3072];
-        size_t mn = cert_msg(l, msg, sizeof(msg));
+        size_t mn = cert_msg(l, pl->dc, msg, sizeof(msg));
+        if (mn && pl->compress) mn = compressed_msg(pl->compress, pl->compress_junk, msg, mn, sizeof(msg));
         if (!mn) return NULL;
         if (send_enc(s, msg, mn)) return NULL;
         sc_hash_update(&s->tr, msg, mn);
@@ -1050,10 +1119,20 @@ int main(void) {
         { .name = "ServerHello without key_share", .no_keyshare = 1 },
         { .name = "server Finished does not match", .bad_finished = 1 },
         { .name = "server closed after ClientHello", .hangup = 1 },
+        /* Catches a ServerHello on P-256 taken for a missing key_share instead of a group we cannot finish. */
+        { .name = "server chose P-256", .keyshare_group = 0x0017 },
+        /* Catches a HelloRetryRequest parsed as a ServerHello instead of told by its random. */
+        { .name = "server asked for a HelloRetryRequest", .hrr = 1 },
     };
     static const int want[] = {
         TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
         TLS13_ENOKEYSHARE, TLS13_EFINISHED, TLS13_ECLOSED,
+        TLS13_EGROUP, TLS13_EHRR,
+    };
+    static const char *text_want[] = {
+        "", "", "", "", "", "",
+        "the server chose key share group 0x0017, which is not offered for completion",
+        "the server asked for a HelloRetryRequest, which is not supported",
     };
     /* The failure reason must reach the caller: without it "the node is down" and "the node is
      * not ours" look the same. Checked for the three ECERT paths, the only ones with a reason. */
@@ -1067,7 +1146,7 @@ int main(void) {
          * certificate") would send the user after compression, which has nothing to do with
          * it. */
         "did not accept the key",
-        "", "", "",
+        "", "", "", "", "",
     };
 
     for (size_t i = 0; i < sizeof(plans) / sizeof(*plans); i++) {
@@ -1084,6 +1163,12 @@ int main(void) {
         if (why_want[i][0]) {
             snprintf(what, sizeof(what), "%s: reason reported", plans[i].name);
             check_str(what, why_want[i], why);
+        }
+
+        /* catches: a group the client cannot finish or a HelloRetryRequest told as a bad share or record */
+        if (text_want[i][0]) {
+            snprintf(what, sizeof(what), "%s: error text", plans[i].name);
+            check_str(what, text_want[i], transport_strerror(rc));
         }
 
         /* Our Finished goes only to a server that has proved itself (tls13.c). Not after a
@@ -1199,14 +1284,32 @@ int main(void) {
             { .name = "tls: no CertificateVerify",          .chain = LEAF_OK, .no_cv = 1 },
             { .name = "tls: signature does not verify",     .chain = LEAF_OK, .cv_bad_sig = 1 },
             { .name = "tls: signature scheme not offered",  .chain = LEAF_OK, .cv_bad_alg = 1 },
+            /* Catches a CompressedCertificate refused on plain TLS, or hashed decompressed instead of as received. */
+            { .name = "tls: brotli certificate verifies",   .chain = LEAF_OK, .compress = 2 },
+            /* Catches an algorithm the Hello did not offer decompressed anyway. */
+            { .name = "tls: zlib certificate refused",      .chain = LEAF_OK, .compress = 1 },
+            /* Catches the offered set read as "any known algorithm". */
+            { .name = "tls: zstd certificate refused",      .chain = LEAF_OK, .compress = 3 },
+            /* Catches a CompressedCertificate taken for a plain chain that does not verify. */
+            { .name = "tls: brotli wrong-name leaf refused", .chain = LEAF_NAME, .compress = 2 },
+            /* Catches a CompressedCertificate whose stream length disagrees with its message length. */
+            { .name = "tls: brotli with a byte past the stream", .chain = LEAF_OK, .compress = 2, .compress_junk = 1 },
+            /* Catches a Firefox Hello whose offer of zlib the client does not honour. */
+            { .name = "tls: firefox zlib certificate verifies", .chain = LEAF_OK, .compress = 1, .firefox = 1 },
+            /* Catches a Firefox Hello whose offer of zstd the client does not honour. */
+            { .name = "tls: firefox zstd certificate verifies", .chain = LEAF_OK, .compress = 3, .firefox = 1 },
+            /* Catches a delegated credential ignored, or refused as a bad signature instead of by name. */
+            { .name = "tls: delegated credential refused",   .chain = LEAF_OK, .dc = 1, .firefox = 1 },
         };
         /* The ALPN case MUST NOT run on tcp. tcp asks for no ALPN at all (transport.c: tr_tcp
          * has alpn = NULL), so the "server did not choose h2" check is not made there, and on tcp
          * this case would silently pass as a success. */
-        static const char *tls_type[] = { "tcp", "grpc", "tcp", "tcp", "tcp", "tcp", "tcp" };
+        static const char *tls_type[] = { "tcp", "grpc", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp", "tcp" };
         static const int tls_want[] = {
             0, TR_ENOH2, TLS13_ECERT, TLS13_ECERT,
             TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
+            0, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT, TLS13_ECERT,
+            0, 0, TLS13_ECERT,
         };
         /* Each needle is the END of its reason in certverify.c or tls13.c, so a reason cut short
          * (g_verify_reason in tls13.c is 96 bytes) fails the check. */
@@ -1217,10 +1320,18 @@ int main(void) {
             "sent no signature",           /* tls13.c tells "no certificate" from "no signature" */
             "bad server signature",        /* CERTV_ESIG */
             "algorithm we did not offer",  /* CERTV_EALG: its own reason, not "bad signature" */
+            "",
+            "compressed certificate without being asked",
+            "compressed certificate without being asked",
+            "names another host",
+            "cannot decompress the server certificate",
+            "", "",
+            "the server sent a delegated credential, which is not supported",
         };
         for (size_t i = 0; i < sizeof(tls_plans) / sizeof(*tls_plans); i++) {
             struct vless_node tn;
             node_tls(&tn, tls_type[i]);
+            if (tls_plans[i].firefox) snprintf(tn.fp, sizeof(tn.fp), "%s", "firefox");
             char what[160], why[256] = "";
             int fd0 = fd_count(), ctx_left = -1;
             int rc = run_case(&tls_plans[i], &tn, why, sizeof(why), &ctx_left);

@@ -156,6 +156,7 @@ static cJSON *tunnel_json(const firc_tunnel_t *t)
     ok = ok && cJSON_AddNumberToObject(adv, "timeout", t->timeout_s) != NULL &&
          cJSON_AddBoolToObject(adv, "insecure", t->insecure) != NULL &&
          cJSON_AddStringToObject(adv, "ca", t->ca) != NULL &&
+         cJSON_AddStringToObject(adv, "fingerprint", t->fingerprint) != NULL &&
          cJSON_AddBoolToObject(adv, "kernelTcp", t->kernel_tcp) != NULL;
     ok = ok && cJSON_AddStringToObject(o, "id", t->id) != NULL &&
          cJSON_AddStringToObject(o, "device", t->device) != NULL &&
@@ -471,7 +472,7 @@ static const jkey_t INBOUND_KEYS[] = {
     {"port", T_NUM}, {"listen", T_STR}, {"node", T_STR}, {"user", T_STR}, {"password", T_STR}};
 static const jkey_t UPLINK_KEYS[] = {{"kind", T_STR}, {"ref", T_STR}};
 static const jkey_t ADVANCED_KEYS[] = {
-    {"timeout", T_NUM}, {"insecure", T_BOOL}, {"ca", T_STR}, {"kernelTcp", T_BOOL}};
+    {"timeout", T_NUM}, {"insecure", T_BOOL}, {"ca", T_STR}, {"fingerprint", T_STR}, {"kernelTcp", T_BOOL}};
 static const jkey_t SOURCE_KEYS[] = {{"id", T_STR},   {"kind", T_STR}, {"link", T_STR},
                                      {"name", T_STR}, {"url", T_STR},  {"interval", T_NUM}, {"headers", T_OBJ}};
 
@@ -563,7 +564,7 @@ static bool tunnel_typed(const cJSON *t, load_err_t *le)
     const cJSON *up = cJSON_GetObjectItemCaseSensitive(t, "uplink");
     const cJSON *adv = cJSON_GetObjectItemCaseSensitive(t, "advanced");
     if ((cJSON_IsObject(up) && !keys_typed(up, UPLINK_KEYS, 2, "uplink.", le)) ||
-        (cJSON_IsObject(adv) && !keys_typed(adv, ADVANCED_KEYS, 4, "advanced.", le)) ||
+        (cJSON_IsObject(adv) && !keys_typed(adv, ADVANCED_KEYS, 5, "advanced.", le)) ||
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "order"), "order", le) ||
         !strings_typed(cJSON_GetObjectItemCaseSensitive(t, "exclude"), "exclude", le)) {
         return false;
@@ -1480,6 +1481,7 @@ static void start_probe(firc_tunnels_ctx_t *ctx, firc_http_res_t *res, const fir
                               .mark = mark,
                               .insecure = t->insecure,
                               .ca = t->ca,
+                              .fingerprint = t->fingerprint,
                               .timeout_s = PROBE_TIMEOUT_S,
                               .kill_after_ms = firc_tunprobe_deadline_ms(c->n)};
     c->ctx = ctx;

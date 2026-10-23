@@ -1,11 +1,12 @@
-// Captures the ClientHello uTLS would build for a Chrome fingerprint: the reference our Hello is
-// compared with (tests/hellostruct.py). Run with Go 1.24+, modules from Xray-core's go.mod
+// Captures the ClientHello uTLS would build for a Chrome or Firefox fingerprint: the reference our
+// Hello is compared with (tests/hellostruct.py). Run with Go 1.24+, modules from Xray-core's go.mod
 // (uTLS v1.8.x):
 //
-//	go run hello.go auto|133|131|120 out.bin
+//	go run hello.go auto|133|131|120|firefox|148 out.bin
 //
 // uTLS "auto" is currently Chrome 133: the X25519MLKEM768 hybrid, ALPS with the new code 0x44cd,
 // ECH GREASE. It is the fingerprint Xray-core uses with fp=chrome (transport/internet/tls).
+// "firefox" is HelloFirefox_Auto, currently Firefox 148, what Xray-core uses with fp=firefox.
 package main
 
 import (
@@ -28,6 +29,10 @@ func main() {
 		id = utls.HelloChrome_131
 	case "120":
 		id = utls.HelloChrome_120
+	case "firefox":
+		id = utls.HelloFirefox_Auto
+	case "148":
+		id = utls.HelloFirefox_148
 	default:
 		panic(os.Args[1])
 	}

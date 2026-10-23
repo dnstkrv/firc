@@ -8,6 +8,7 @@
 #include "sublink.h"
 #include "vlink.h"
 #include "sub-pq-samples.h"
+#include "reality.h"
 
 #define UUID "b831381d-6324-4d53-ad4f-8cda48b30811"
 #define U2 "11111111-2222-3333-4444-555555555555"
@@ -649,6 +650,36 @@ int main(void) {
         vless_parse_sub("vless://" UUID "@h.example:443?security=xtls#after\n", out, 8, NULL);
         /* catches: the hook still called once it is cleared */
         check("node hook: cleared hook not called", 3, sk.n);
+    }
+
+    {
+        static struct vless_node fx[2];
+        size_t c = vless_parse_sub("vless://" UUID "@h.example:443?security=reality&pbk=" PBK "&sni=a.com&fp=firefox#f\n"
+                                   "vless://" UUID "@h.example:443?security=reality&pbk=" PBK "&sni=a.com&fp=chrome#c\n",
+                                   fx, 2, NULL);
+        struct tr_node t[6];
+        vless_set_fp("chrome");
+        sl_tr_node(&fx[0], &t[0]);
+        vless_set_fp("firefox");
+        sl_tr_node(&fx[1], &t[1]);
+        vless_set_fp("");
+        sl_tr_node(&fx[0], &t[2]);
+        sl_tr_node(&fx[1], &t[3]);
+        vless_set_fp("firefox");
+        vless_set_fp(NULL);
+        sl_tr_node(&fx[0], &t[4]);
+        sl_tr_node(&fx[1], &t[5]);
+        check("fp switch: both links usable", 2, (long)c);
+        /* catches: --fp chrome lost on the way to the transport, or a firefox link kept over it */
+        check("fp switch: chrome beats a firefox link", REALITY_FP_CHROME, reality_fp_of(t[0].fp));
+        /* catches: --fp firefox lost on the way to the transport, or a chrome link kept over it */
+        check("fp switch: firefox beats a chrome link", REALITY_FP_FIREFOX, reality_fp_of(t[1].fp));
+        /* catches: an empty switch taken as a choice instead of the link's own fp */
+        check("fp switch: empty leaves each link its fp", 10 * REALITY_FP_FIREFOX + REALITY_FP_CHROME,
+              10 * reality_fp_of(t[2].fp) + reality_fp_of(t[3].fp));
+        /* catches: a switch that NULL does not clear */
+        check("fp switch: NULL leaves each link its fp", 10 * REALITY_FP_FIREFOX + REALITY_FP_CHROME,
+              10 * reality_fp_of(t[4].fp) + reality_fp_of(t[5].fp));
     }
 
     for (size_t i = 0; i < NFIELDS; i++) {

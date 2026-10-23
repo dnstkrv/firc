@@ -63,6 +63,7 @@ typedef struct {
     bool insecure;
     bool kernel_tcp;
     char ca[256];
+    char fingerprint[8];
     firc_tun_inbound_t inb[FIRC_TUN_MAX_INBOUNDS];
     size_t n_inb;
 } firc_tunnel_t;

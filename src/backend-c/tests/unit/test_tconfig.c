@@ -905,6 +905,42 @@ TEST kernel_tcp_is_argv_affecting(void) {
     PASS();
 }
 
+/* catches: a fingerprint read into the wrong member, dropped by save, or a non-empty default */
+TEST fingerprint_loads_saves_and_defaults_empty(void) {
+    static const char ff[] = "tunnels:\n  - id: a1\n    device: tunvless0\n    sources:\n" LINK
+                             "    advanced: { fingerprint: firefox }\n";
+    firc_tunnels_t b = {0};
+    char file[4096];
+    ASSERT(save_and_reload(ff, &b, file, sizeof file));
+    ASSERT_STR_EQ("firefox", b.t[0].fingerprint);
+    ASSERT(strstr(file, "\n    ca: \"\"\n    fingerprint: \"firefox\"\n    kernelTcp: false\n") != NULL);
+    firc_tunnels_free(&b);
+    ASSERT(save_and_reload(ONE, &b, file, sizeof file));
+    ASSERT_STR_EQ("", b.t[0].fingerprint);
+    ASSERT(strstr(file, "\n    fingerprint: \"\"\n") != NULL);
+    firc_tunnels_free(&b);
+    ASSERT(loads_extra("    advanced: { fingerprint: chrome }\n"));
+    ASSERT(loads_extra("    advanced: { fingerprint: \"\" }\n"));
+    PASS();
+}
+
+/* catches: any string passed to tunvless as a fingerprint, which then exits 2 */
+TEST fingerprint_safari_is_refused(void) {
+    static const char why[] = "chrome or firefox, or empty for the link's";
+    ASSERT(with_extra("    advanced: { fingerprint: safari }\n", "tunnels[0].advanced.fingerprint", why));
+    ASSERT(with_extra("    advanced: { fingerprint: Firefox }\n", "tunnels[0].advanced.fingerprint", why));
+    ASSERT(with_extra("    advanced: { fingerprint: firefox1 }\n", "tunnels[0].advanced.fingerprint", why));
+    ASSERT(with_extra("    advanced: { fingerprint: [firefox] }\n", "tunnels[0].advanced.fingerprint", why));
+    PASS();
+}
+
+/* catches: same_argv ignoring the fingerprint, so a change never reaches the running child */
+TEST a_fingerprint_change_restarts(void) {
+    ASSERT_EQ(2, same_after("active: 1", "active: 1\n    advanced: { fingerprint: firefox }"));
+    ASSERT_EQ(3, same_after("active: 1", "active: 1\n    advanced: { fingerprint: \"\" }"));
+    PASS();
+}
+
 #define INB_HEAD "tunnels:\n  - id: a1\n    device: tunvless0\n    sources:\n" LINK "    inbounds:\n"
 #define INB_P0 "tunnels[0].inbounds[0].port"
 
@@ -1235,6 +1271,9 @@ int main(int argc, char **argv) {
     RUN_TEST(an_enabled_tunnel_without_sources_is_refused);
     RUN_TEST(kernel_tcp_loads_saves_and_refuses_a_non_bool);
     RUN_TEST(kernel_tcp_is_argv_affecting);
+    RUN_TEST(fingerprint_loads_saves_and_defaults_empty);
+    RUN_TEST(fingerprint_safari_is_refused);
+    RUN_TEST(a_fingerprint_change_restarts);
     RUN_TEST(the_tcp_port_is_3600_plus_the_device_number);
     RUN_TEST(inbounds_load_and_save_back);
     RUN_TEST(no_inbounds_are_not_written);

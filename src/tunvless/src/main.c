@@ -64,6 +64,7 @@ static struct {
     int active, by, interval_s;
     int list, probe, no_probe, no_retry, insecure, control;
     const char *ca;
+    const char *fp;
     const char *bind_dev;
     uint32_t mark;
     uint32_t table;
@@ -108,6 +109,8 @@ static void usage(FILE *f) {
 "      --insecure         accept allowInsecure nodes; do not verify certificates of\n"
 "                         security=tls nodes\n"
 "      --ca FILE          trusted roots (PEM) for security=tls\n"
+"      --fp NAME          chrome or firefox: the browser every node's TLS Hello\n"
+"                         imitates (default: the link's fp, firefox there, else chrome)\n"
 "\n"
 "The device:\n"
 "  -d, --dev NAME         device name (default tunvless0)\n"
@@ -205,7 +208,7 @@ static void raise_nofile(void) {
 }
 
 enum { OPT_NO_PROBE = 256, OPT_INSECURE, OPT_CA, OPT_SILENCE, OPT_NO_RETRY, OPT_BY, OPT_INTERVAL, OPT_CONTROL,
-       OPT_TCP_PORT, OPT_TCP_POOL };
+       OPT_TCP_PORT, OPT_TCP_POOL, OPT_FP };
 
 static int parse_args(int argc, char **argv) {
     static const struct option opts[] = {
@@ -215,6 +218,7 @@ static int parse_args(int argc, char **argv) {
         { "no-probe", no_argument,       NULL, OPT_NO_PROBE },
         { "insecure", no_argument,       NULL, OPT_INSECURE },
         { "ca",       required_argument, NULL, OPT_CA },
+        { "fp",       required_argument, NULL, OPT_FP },
         { "dev",      required_argument, NULL, 'd' },
         { "addr",     required_argument, NULL, 'a' },
         { "route",    required_argument, NULL, 'r' },
@@ -245,6 +249,13 @@ static int parse_args(int argc, char **argv) {
         case OPT_NO_PROBE: g.no_probe = 1; break;
         case OPT_INSECURE: g.insecure = 1; break;
         case OPT_CA: g.ca = optarg; break;
+        case OPT_FP:
+            if (strcmp(optarg, "chrome") && strcmp(optarg, "firefox")) {
+                fprintf(stderr, LOG_E "--fp is chrome or firefox\n");
+                return 2;
+            }
+            g.fp = optarg;
+            break;
         case 'd':
             if (!optarg[0] || strlen(optarg) >= IFNAMSIZ) {
                 fprintf(stderr, LOG_E "device name must be 1..%d characters\n", IFNAMSIZ - 1);
@@ -742,6 +753,7 @@ int main(int argc, char **argv) {
 
     /* Before the nodes are parsed: whether allowInsecure nodes are usable depends on it. */
     vless_set_insecure(g.insecure);
+    vless_set_fp(g.fp);
     if (g.ca) tls_set_cert_roots(g.ca);
     /* Before the first connection, so probes go the way the tunnel will. */
     transport_set_sock_mark(g.mark, g.mark != 0);
