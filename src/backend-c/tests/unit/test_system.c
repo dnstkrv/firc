@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 #include <sys/socket.h>
 #include <linux/if.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cjson/cJSON.h>
@@ -32,11 +34,18 @@ typedef struct stub_kn {
 } stub_kn_t;
 
 static const stub_kn_t *g_kn;
+static long g_kn_delay_ms;
+static atomic_int g_kn_calls;
 
 firc_err_t __real_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
 firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out);
 firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out) {
     if (g_kn == NULL) { return __real_firc_kn_get_iface_aliases(out); }
+    atomic_fetch_add(&g_kn_calls, 1);
+    if (g_kn_delay_ms > 0) {
+        struct timespec ts = {g_kn_delay_ms / 1000, (g_kn_delay_ms % 1000) * 1000000L};
+        nanosleep(&ts, NULL);
+    }
     size_t n = 0;
     while (g_kn[n].iface != NULL) { n++; }
     out->items = calloc(n + 1, sizeof(*out->items));
@@ -85,6 +94,16 @@ static void reset_stubs(void *ud) {
     (void)ud;
     g_ifs = NULL;
     g_kn = NULL;
+    g_kn_delay_ms = 0;
+    atomic_store(&g_kn_calls, 0);
+}
+
+static firc_err_t list_with_aliases(firc_iface_info_t **out, size_t *n) {
+    firc_kn_aliases_t aliases = {0};
+    firc_err_t err = firc_kn_get_iface_aliases(&aliases);
+    if (err == FIRC_OK) { err = firc_app_list_interfaces(&aliases, out, n); }
+    firc_kn_aliases_free(&aliases);
+    return err;
 }
 
 typedef struct harness {
@@ -132,6 +151,7 @@ static harness_t *harness_start(bool with_config_path) {
 static void harness_stop(harness_t *h) {
     firc_loop_stop(h->loop);
     pthread_join(h->thread, NULL);
+    firc_system_close(&h->ctx);
     firc_httpd_destroy(h->tcp);
     firc_loop_destroy(h->loop);
     firc_app_destroy(h->app);
@@ -781,7 +801,7 @@ TEST the_list_holds_what_ndms_knows_and_every_tunnel(void) {
     g_kn = kn;
     firc_iface_info_t *ifs_out = NULL;
     size_t n = 0;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifs_out, &n));
+    ASSERT_EQ(FIRC_OK, list_with_aliases(&ifs_out, &n));
     static const char *const ids[] = {"br0", "ppp0", "nwg1", "eth2.1", "apcli0", "tunvless0"};
     static const firc_iface_role_t roles[] = {FIRC_IFACE_LAN, FIRC_IFACE_WAN, FIRC_IFACE_TUNNEL,
                                               FIRC_IFACE_OTHER, FIRC_IFACE_OTHER, FIRC_IFACE_TUNNEL};
@@ -807,7 +827,7 @@ TEST without_ndms_data_the_list_falls_back_to_the_shape_rules(void) {
     g_kn = none;
     firc_iface_info_t *ifs_out = NULL;
     size_t n = 0;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifs_out, &n));
+    ASSERT_EQ(FIRC_OK, list_with_aliases(&ifs_out, &n));
     static const char *const ids[] = {"br0", "tunl0", "eth2.1", "nwg1"};
     ASSERT_EQ_FMT(sizeof(ids) / sizeof(ids[0]), n, "%zu");
     for (size_t i = 0; i < n; i++) { ASSERT_STR_EQ(ids[i], ifs_out[i].id); }
@@ -855,6 +875,106 @@ TEST the_interfaces_route_answers_role_description_and_ndms_name(void) {
     PASS();
 }
 
+typedef struct iface_call {
+    pthread_t th;
+    int status;
+    cJSON *out;
+} iface_call_t;
+
+static void *iface_call_thread(void *ud) {
+    iface_call_t *c = ud;
+    c->status = do_request("GET", "/api/v1/system/interfaces", NULL, &c->out);
+    return NULL;
+}
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void wait_kn_calls(int n) {
+    for (int i = 0; i < 200 && atomic_load(&g_kn_calls) < n; i++) {
+        struct timespec ts = {0, 5000000};
+        nanosleep(&ts, NULL);
+    }
+}
+
+static const stub_kn_t g_kn_broadband[] = {{"ppp0", "Broadband", "PPPoE0", true}, {NULL, NULL, NULL, false}};
+static const stub_if_t g_ifs_ppp0[] = {{"ppp0", 0}, {NULL, 0}};
+
+/* Catches: the interface list reading RCI on the loop thread, so a slow ndm stalls every other request. */
+TEST a_slow_rci_does_not_hold_up_the_loop(void) {
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    g_ifs = g_ifs_ppp0;
+    g_kn = g_kn_broadband;
+    g_kn_delay_ms = 800;
+    iface_call_t c = {0};
+    pthread_create(&c.th, NULL, iface_call_thread, &c);
+    wait_kn_calls(1);
+
+    int64_t t0 = mono_ms();
+    cJSON *ev = NULL;
+    int ev_status = do_request("GET", "/api/v1/system/events", NULL, &ev);
+    int64_t took = mono_ms() - t0;
+    cJSON_Delete(ev);
+    pthread_join(c.th, NULL);
+
+    ASSERT_EQ(200, ev_status);
+    ASSERT_LT(took, 400);
+    ASSERT_EQ(200, c.status);
+    const cJSON *ppp0 = iface_item(c.out, "ppp0");
+    ASSERT(ppp0 != NULL);
+    ASSERT_STR_EQ("Broadband", cJSON_GetObjectItemCaseSensitive(ppp0, "name")->valuestring);
+    cJSON_Delete(c.out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a second caller left unanswered, or each caller reading RCI again while one read is under way. */
+TEST callers_at_once_share_one_rci_read(void) {
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    g_ifs = g_ifs_ppp0;
+    g_kn = g_kn_broadband;
+    g_kn_delay_ms = 1000;
+    iface_call_t a = {0};
+    iface_call_t b = {0};
+    pthread_create(&a.th, NULL, iface_call_thread, &a);
+    wait_kn_calls(1);
+    pthread_create(&b.th, NULL, iface_call_thread, &b);
+    pthread_join(a.th, NULL);
+    pthread_join(b.th, NULL);
+
+    ASSERT_EQ(200, a.status);
+    ASSERT_EQ(200, b.status);
+    ASSERT(iface_item(a.out, "ppp0") != NULL);
+    ASSERT(iface_item(b.out, "ppp0") != NULL);
+    ASSERT_EQ(1, atomic_load(&g_kn_calls));
+    cJSON_Delete(a.out);
+    cJSON_Delete(b.out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a stop during an RCI read freeing what the reader still writes, or leaking its caller. */
+TEST a_stop_during_an_rci_read_waits_for_it(void) {
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    g_ifs = g_ifs_ppp0;
+    g_kn = g_kn_broadband;
+    g_kn_delay_ms = 300;
+    iface_call_t c = {0};
+    pthread_create(&c.th, NULL, iface_call_thread, &c);
+    wait_kn_calls(1);
+    harness_stop(h);
+    pthread_join(c.th, NULL);
+    ASSERT(c.status != 200);
+    cJSON_Delete(c.out);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -882,5 +1002,8 @@ int main(int argc, char **argv) {
     RUN_TEST(the_list_holds_what_ndms_knows_and_every_tunnel);
     RUN_TEST(without_ndms_data_the_list_falls_back_to_the_shape_rules);
     RUN_TEST(the_interfaces_route_answers_role_description_and_ndms_name);
+    RUN_TEST(a_slow_rci_does_not_hold_up_the_loop);
+    RUN_TEST(callers_at_once_share_one_rci_read);
+    RUN_TEST(a_stop_during_an_rci_read_waits_for_it);
     GREATEST_MAIN_END();
 }

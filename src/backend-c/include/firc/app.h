@@ -27,6 +27,7 @@
 #include "firc/nflogsock.h"
 #include "firc/resolveroute.h"
 #include "firc/keenetic_resolvers.h"
+#include "firc/keenetic_rci.h"
 #include "firc/ktcp.h"
 #include "firc/xtables.h"
 
@@ -282,8 +283,9 @@ typedef struct firc_iface_info {
     firc_iface_role_t role;
 } firc_iface_info_t;
 
-/* enumerates system interfaces (getifaddrs, deduped) but lo, ezcfg0 and the radios ra<N>/rai<N>[.<M>] */
-firc_err_t firc_app_list_interfaces(firc_iface_info_t **out, size_t *out_n);
+/* enumerates system interfaces (getifaddrs, deduped) but lo, ezcfg0 and the radios ra<N>/rai<N>[.<M>];
+ * names and roles from aliases, NULL for none */
+firc_err_t firc_app_list_interfaces(const firc_kn_aliases_t *aliases, firc_iface_info_t **out, size_t *out_n);
 
 /* "tunnel", "wan", "lan" or "other" */
 const char *firc_iface_role_name(firc_iface_role_t role);

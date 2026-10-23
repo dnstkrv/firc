@@ -1,13 +1,18 @@
 #include "firc/system.h"
 
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <cjson/cJSON.h>
 
 #include "firc/keenetic_policy.h"
 #include "firc/events.h"
+#include "firc/json.h"
+#include "firc/keenetic_rci.h"
 #include "firc/keenetic_resolvers.h"
 #include "firc/log.h"
 
@@ -314,34 +319,180 @@ void firc_system_name_tunnels(firc_iface_info_t *ifaces, size_t n, const firc_tu
     }
 }
 
+typedef struct ifaces_waiter {
+    struct ifaces_waiter *next;
+    struct ifaces_read *read;
+    firc_http_deferred_t *d;
+} ifaces_waiter_t;
+
+typedef struct ifaces_read {
+    firc_system_ctx_t *ctx;
+    firc_loop_t *loop;
+    pthread_t thread;
+    firc_kn_aliases_t aliases;
+    atomic_bool stopping;
+    bool posted;
+    bool joined;
+    ifaces_waiter_t *waiters;
+} ifaces_read_t;
+
+static char *interfaces_body(const firc_system_ctx_t *ctx, const firc_kn_aliases_t *aliases, int *status) {
+    firc_iface_info_t *ifaces = NULL;
+    size_t n = 0;
+    firc_err_t err = firc_app_list_interfaces(aliases, &ifaces, &n);
+    cJSON *out;
+    if (err != FIRC_OK) {
+        *status = 500;
+        out = firc_json_error(firc_err_str(err));
+    } else {
+        *status = 200;
+        firc_system_name_tunnels(ifaces, n, ctx->tunnels);
+        out = cJSON_CreateObject();
+        cJSON *arr = cJSON_AddArrayToObject(out, "interfaces");
+        cJSON *blackhole = cJSON_CreateObject();
+        cJSON_AddStringToObject(blackhole, "id", "blackhole");
+        cJSON_AddItemToArray(arr, blackhole);
+        for (size_t i = 0; i < n; i++) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "id", ifaces[i].id);
+            if (ifaces[i].name[0] != '\0') { cJSON_AddStringToObject(item, "name", ifaces[i].name); }
+            if (ifaces[i].ndms_name[0] != '\0') { cJSON_AddStringToObject(item, "ndmsName", ifaces[i].ndms_name); }
+            cJSON_AddStringToObject(item, "role", firc_iface_role_name(ifaces[i].role));
+            cJSON_AddItemToArray(arr, item);
+        }
+        free(ifaces);
+    }
+    char *text = out != NULL ? firc_json_dump(out) : NULL;
+    cJSON_Delete(out);
+    if (text == NULL) {
+        *status = 500;
+        text = strdup("{\"error\":\"out of memory\"}");
+    }
+    return text;
+}
+
+static void read_free(ifaces_read_t *r) {
+    firc_kn_aliases_free(&r->aliases);
+    free(r);
+}
+
+static void read_done(firc_loop_t *loop, void *ud);
+
+static void read_drop(void *ud) {
+    ifaces_read_t *r = ud;
+    if (!r->joined) { pthread_join(r->thread, NULL); }
+    read_free(r);
+}
+
+static void *read_thread(void *arg) {
+    ifaces_read_t *r = arg;
+    firc_err_t err = firc_kn_get_iface_aliases(&r->aliases);
+    if (err != FIRC_OK) {
+        FIRC_DEBUG("failed to load interface aliases: %s", firc_err_str(err));
+        firc_kn_aliases_free(&r->aliases);
+    }
+    r->posted = true;
+    while (firc_loop_post_with_drop(r->loop, read_done, r, read_drop) != FIRC_OK) {
+        if (atomic_load(&r->stopping)) {
+            r->posted = false;
+            return NULL;
+        }
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
+static void read_done(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    ifaces_read_t *r = ud;
+    if (!r->joined) {
+        pthread_join(r->thread, NULL);
+        r->joined = true;
+    }
+    if (r->ctx != NULL) {
+        r->ctx->ifaces_read = NULL;
+        while (r->waiters != NULL) {
+            ifaces_waiter_t *w = r->waiters;
+            r->waiters = w->next;
+            int status;
+            char *text = interfaces_body(r->ctx, &r->aliases, &status);
+            firc_http_deferred_finish(w->d, status, "application/json; charset=utf-8", (uint8_t *)text,
+                                      text != NULL ? strlen(text) : 0);
+            free(w);
+        }
+    }
+    read_free(r);
+}
+
+static void waiter_left(void *ud) {
+    ifaces_waiter_t *w = ud;
+    for (ifaces_waiter_t **link = &w->read->waiters; *link != NULL; link = &(*link)->next) {
+        if (*link == w) {
+            *link = w->next;
+            break;
+        }
+    }
+    firc_http_deferred_drop(w->d);
+    free(w);
+}
+
 static void handle_list_interfaces(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)req;
     firc_system_ctx_t *ctx = ud;
-
-    firc_iface_info_t *ifaces = NULL;
-    size_t n = 0;
-    firc_err_t err = firc_app_list_interfaces(&ifaces, &n);
-    if (err != FIRC_OK) {
-        firc_http_res_write_error(res, 500, firc_err_str(err));
+    ifaces_waiter_t *w = calloc(1, sizeof(*w));
+    if (w == NULL) {
+        firc_http_res_write_error(res, 500, "out of memory");
         return;
     }
-    firc_system_name_tunnels(ifaces, n, ctx->tunnels);
-
-    cJSON *out = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(out, "interfaces");
-    cJSON *blackhole = cJSON_CreateObject();
-    cJSON_AddStringToObject(blackhole, "id", "blackhole");
-    cJSON_AddItemToArray(arr, blackhole);
-    for (size_t i = 0; i < n; i++) {
-        cJSON *item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "id", ifaces[i].id);
-        if (ifaces[i].name[0] != '\0') { cJSON_AddStringToObject(item, "name", ifaces[i].name); }
-        if (ifaces[i].ndms_name[0] != '\0') { cJSON_AddStringToObject(item, "ndmsName", ifaces[i].ndms_name); }
-        cJSON_AddStringToObject(item, "role", firc_iface_role_name(ifaces[i].role));
-        cJSON_AddItemToArray(arr, item);
+    ifaces_read_t *r = ctx->ifaces_read;
+    if (r == NULL) {
+        r = calloc(1, sizeof(*r));
+        if (r == NULL) {
+            free(w);
+            firc_http_res_write_error(res, 500, "out of memory");
+            return;
+        }
+        r->ctx = ctx;
+        r->loop = firc_http_res_loop(res);
+        atomic_init(&r->stopping, false);
+        if (pthread_create(&r->thread, NULL, read_thread, r) != 0) {
+            free(r);
+            free(w);
+            firc_http_res_write_error(res, 500, "failed to start the interface read");
+            return;
+        }
+        ctx->ifaces_read = r;
     }
-    free(ifaces);
-    firc_http_res_write_json(res, 200, out);
+    w->read = r;
+    w->d = firc_http_res_defer(res, waiter_left, w);
+    if (w->d == NULL) {
+        free(w);
+        firc_http_res_write_error(res, 500, "out of memory");
+        return;
+    }
+    w->next = r->waiters;
+    r->waiters = w;
+}
+
+void firc_system_close(firc_system_ctx_t *ctx) {
+    ifaces_read_t *r = ctx->ifaces_read;
+    if (r == NULL) { return; }
+    ctx->ifaces_read = NULL;
+    atomic_store(&r->stopping, true);
+    pthread_join(r->thread, NULL);
+    r->joined = true;
+    while (r->waiters != NULL) {
+        ifaces_waiter_t *w = r->waiters;
+        r->waiters = w->next;
+        firc_http_deferred_drop(w->d);
+        free(w);
+    }
+    if (r->posted) {
+        r->ctx = NULL;
+    } else {
+        read_free(r);
+    }
 }
 
 static void handle_save_config(firc_http_req_t *req, firc_http_res_t *res, void *ud) {

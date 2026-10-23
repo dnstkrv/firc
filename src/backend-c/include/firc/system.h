@@ -24,9 +24,13 @@ typedef struct firc_system_ctx {
     uint16_t web_moved_from; /* the port it was configured on when that one was busy, else 0 */
     const firc_tunnels_t *tunnels; /* the running tunnels, read on the loop thread; NULL if none */
     firc_update_t *update; /* the updater, whose install refuses a restart; NULL if none */
+    struct ifaces_read *ifaces_read; /* the interface read in flight, NULL if none; loop thread only */
 } firc_system_ctx_t;
 
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx);
+
+/* waits out an interface read in flight and drops its callers; after the loop stops, before the servers go */
+void firc_system_close(firc_system_ctx_t *ctx);
 
 /* names each tunnel device in ifaces by its tunnel's description, over any alias; ts NULL changes nothing */
 void firc_system_name_tunnels(firc_iface_info_t *ifaces, size_t n, const firc_tunnels_t *ts);

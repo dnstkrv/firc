@@ -2420,20 +2420,14 @@ const char *firc_iface_role_name(firc_iface_role_t role) {
     return "other";
 }
 
-firc_err_t firc_app_list_interfaces(firc_iface_info_t **out, size_t *out_n) {
+firc_err_t firc_app_list_interfaces(const firc_kn_aliases_t *aliases, firc_iface_info_t **out, size_t *out_n) {
     *out = NULL;
     *out_n = 0;
+    static const firc_kn_aliases_t none = {0};
+    if (aliases == NULL) { aliases = &none; }
 
     struct ifaddrs *ifap;
     if (getifaddrs(&ifap) != 0) { return firc_err_from_errno(errno); }
-
-    /* friendly names where the platform supplies them; an unreachable RCI must never fail the interface list itself */
-    firc_kn_aliases_t aliases = {0};
-    firc_err_t alias_err = firc_kn_get_iface_aliases(&aliases);
-    if (alias_err != FIRC_OK) {
-        FIRC_DEBUG("failed to load interface aliases: %s", firc_err_str(alias_err));
-        firc_kn_aliases_free(&aliases);
-    }
 
     size_t cap = 0;
     size_t n = 0;
@@ -2457,7 +2451,6 @@ firc_err_t firc_app_list_interfaces(firc_iface_info_t **out, size_t *out_n) {
             if (!na) {
                 free(arr);
                 freeifaddrs(ifap);
-                firc_kn_aliases_free(&aliases);
                 return FIRC_ERR_NOMEM;
             }
             arr = na;
@@ -2465,18 +2458,17 @@ firc_err_t firc_app_list_interfaces(firc_iface_info_t **out, size_t *out_n) {
         }
         memset(&arr[n], 0, sizeof(arr[n]));
         snprintf(arr[n].id, sizeof(arr[n].id), "%s", p->ifa_name);
-        const char *description = firc_kn_aliases_lookup(&aliases, arr[n].id);
+        const char *description = firc_kn_aliases_lookup(aliases, arr[n].id);
         if (description) { snprintf(arr[n].name, sizeof(arr[n].name), "%.63s", description); }
-        const char *ndms_name = firc_kn_aliases_ndms_name(&aliases, arr[n].id);
+        const char *ndms_name = firc_kn_aliases_ndms_name(aliases, arr[n].id);
         if (ndms_name) { snprintf(arr[n].ndms_name, sizeof(arr[n].ndms_name), "%.63s", ndms_name); }
-        arr[n].role = iface_role(arr[n].id, p->ifa_flags, firc_kn_aliases_inet(&aliases, arr[n].id));
-        if (aliases.n > 0 && arr[n].role != FIRC_IFACE_TUNNEL && !firc_kn_aliases_known(&aliases, arr[n].id)) {
+        arr[n].role = iface_role(arr[n].id, p->ifa_flags, firc_kn_aliases_inet(aliases, arr[n].id));
+        if (aliases->n > 0 && arr[n].role != FIRC_IFACE_TUNNEL && !firc_kn_aliases_known(aliases, arr[n].id)) {
             continue;
         }
         n++;
     }
     freeifaddrs(ifap);
-    firc_kn_aliases_free(&aliases);
 
     *out = arr;
     *out_n = n;

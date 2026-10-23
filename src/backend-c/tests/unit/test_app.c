@@ -2737,7 +2737,7 @@ TEST remove_by_id_and_by_index(void) {
 TEST the_list_never_holds_the_loopback(void) {
     firc_iface_info_t *ifaces = NULL;
     size_t n = 0;
-    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(&ifaces, &n));
+    ASSERT_EQ(FIRC_OK, firc_app_list_interfaces(NULL, &ifaces, &n));
     for (size_t i = 0; i < n; i++) {
         ASSERT(strcmp(ifaces[i].id, "lo") != 0);
         for (size_t j = i + 1; j < n; j++) {

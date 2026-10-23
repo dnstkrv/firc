@@ -126,6 +126,7 @@ struct daemon {
     const char *config_path;
     /* Not owned: open list-sync streams hang off it and teardown ends them before the servers go. */
     firc_groups_ctx_t *groups_ctx;
+    firc_system_ctx_t *system_ctx;
     firc_tunnels_ctx_t *tunnels_ctx;
     firc_update_api_ctx_t *update_ctx;
 };
@@ -337,6 +338,7 @@ static void daemon_teardown(struct daemon *d)
 
     /* After the worker has joined, before the servers go (httpd_destroy would drop the streams silently). */
     firc_groups_api_close_streams(d->groups_ctx);
+    if (d->system_ctx != NULL) { firc_system_close(d->system_ctx); }
 
     firc_httpd_destroy(d->http_tcp);
     d->http_tcp = NULL;
@@ -1618,6 +1620,7 @@ int main(int argc, char **argv)
     system_ctx.resolvers = d.resolvers;
 #endif
     d.groups_ctx = &groups_ctx;
+    d.system_ctx = &system_ctx;
     firc_tunnels_ctx_t tunnels_ctx = {
         .run = d.tunrun,
         .subs = d.tunsubs,
