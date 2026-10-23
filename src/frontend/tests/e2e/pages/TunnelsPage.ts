@@ -243,6 +243,7 @@ export class TunnelsPage {
 
   async expand(id: string) {
     await this.card(id).getByRole("button", { name: "Expand", exact: true }).click();
+    await expect(this.card(id).getByText(/^\d+ of \d+ match$/)).toBeVisible();
   }
 
   nodeRows(id: string): Locator {

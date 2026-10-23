@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
 
   import Button from "../../../components/ui/Button.svelte";
   import Tooltip from "../../../components/ui/Tooltip.svelte";
@@ -57,6 +57,10 @@
     const body = draft;
     void fetched;
     if (timer) clearTimeout(timer);
+    if (untrack(() => preview) === null && inflight === null) {
+      void runPreview(JSON.parse(body) as Tunnel);
+      return;
+    }
     timer = setTimeout(() => void runPreview(JSON.parse(body) as Tunnel), PREVIEW_DEBOUNCE_MS);
   });
 

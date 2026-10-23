@@ -334,6 +334,18 @@ test.describe("Tunnels page", () => {
     await expect.poll(() => daemon.polls).toBeGreaterThan(shown);
   });
 
+  // Catches the node table of an opened card waiting out the edit debounce, so the card jumps late.
+  test("an opened card asks for its nodes at once", async ({ page }) => {
+    await stubDaemon(page, { tunnels: [tunnel("a", "tunvless0")], states: [] });
+    const tunnels = new TunnelsPage(page);
+    await page.clock.install();
+    await tunnels.open();
+    await page.clock.pauseAt(Date.now() + 60_000);
+    const asked = page.waitForRequest("**/tunnels/preview", { timeout: 2000 });
+    await tunnels.card("a").getByRole("button", { name: "Expand", exact: true }).click();
+    await asked;
+  });
+
   // Catches an uplink list offering a loop, or the tunnels' own devices as an outgoing interface.
   test("the uplink select disables a loop and leaves out tunnel devices", async ({ page }) => {
     await stubDaemon(page, {
