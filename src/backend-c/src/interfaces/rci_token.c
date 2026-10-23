@@ -253,7 +253,8 @@ static firc_err_t ndmc_run(const char *ndmc, const char *cmd, char **out)
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         char *clean = dup_clean(buf);
-        char *line = clean != NULL ? trim(clean) : "";
+        char none[1] = "";
+        char *line = clean != NULL ? trim(clean) : none;
         line[strcspn(line, "\r\n")] = '\0';
         if (WIFEXITED(status)) {
             FIRC_WARN("rci token: ndmc \"%s\" failed (exit %d): %s", cmd, WEXITSTATUS(status), line);
