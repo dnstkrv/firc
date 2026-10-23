@@ -349,7 +349,7 @@ static bool eq_text(const firc_sub_rules_t *rs, uint32_t idx, const rule_key_t *
 }
 
 /* ASCII whitespace only; unicode spaces aren't expected in subscription lists */
-static char *trim(char *s)
+char *firc_sub_trim(char *s)
 {
     while (*s != '\0' && isspace((unsigned char)*s)) {
         s++;
@@ -389,7 +389,7 @@ firc_err_t firc_sub_sink_take(firc_sub_sink_t *s, char *piece, const char *type,
     /* only a guessed line (type==NULL) gets trim-and-skip-# treatment; a typed empty value is a drop, not a no-op */
     char *line = piece;
     if (type == NULL) {
-        line = trim(piece);
+        line = firc_sub_trim(piece);
         if (*line == '\0' || line[0] == '#') {
             *took = true; /* nothing to take and nothing wrong: not a drop */
             return FIRC_OK;
@@ -469,9 +469,11 @@ static firc_err_t parse_lines(char *copy, firc_sub_sink_t *sink, size_t *dropped
     for (char *raw = strtok_r(copy, "\n\r", &lsave); raw != NULL;
          raw = strtok_r(NULL, "\n\r", &lsave)) {
         bool took = false;
-        if ((err = firc_sub_sink_take(sink, raw, NULL, NULL, NULL, &took)) != FIRC_OK) { return err; }
+        bool typed = false;
+        if ((err = firc_sub_typed_line(sink, raw, &typed, &took)) != FIRC_OK) { return err; }
+        if (!typed && (err = firc_sub_sink_take(sink, raw, NULL, NULL, NULL, &took)) != FIRC_OK) { return err; }
         if (!took) {
-            if (strchr(raw, ',') == NULL) {
+            if (typed || strchr(raw, ',') == NULL) {
                 /* dropped and counted per LINE, not per comma-token (a 3-line list could otherwise report 4 drops) */
                 (*dropped)++;
             } else {
@@ -523,7 +525,7 @@ firc_err_t firc_sub_parse_rules_stats(const char *list, size_t len, firc_sub_rul
     } else if (*p == '{') {
         err = firc_sub_parse_singbox(p, &sink, st, progress, ud);
     } else {
-        char *copy = strdup(list);
+        char *copy = strdup(p);
         err = copy != NULL ? parse_lines(copy, &sink, &st->dropped, progress, ud) : FIRC_ERR_NOMEM;
         free(copy);
     }

@@ -105,6 +105,7 @@ CONFIG_SRCS := \
     src/rules/devices.c \
     src/subscriptions/subparse.c \
     src/subscriptions/subparse_singbox.c \
+    src/subscriptions/subparse_clash.c \
     src/subscriptions/subparse_srs.c \
     src/fakeip/from_config.c \
     src/dns/pipeline.c \

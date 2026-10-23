@@ -10,6 +10,12 @@ typedef struct firc_sub_sink firc_sub_sink_t;
 firc_err_t firc_sub_sink_take(firc_sub_sink_t *s, char *piece, const char *type, const char *proto,
                               const char *ports, bool *took);
 
+char *firc_sub_trim(char *s);
+
+bool firc_sub_keyword_wildcard(const char *kw, char *buf, size_t cap);
+
+firc_err_t firc_sub_typed_line(firc_sub_sink_t *s, char *raw, bool *typed, bool *took);
+
 /* The sing-box walker: body starts with '{'; emits into sink, counts into st. */
 firc_err_t firc_sub_parse_singbox(const char *body, firc_sub_sink_t *sink, firc_sub_parse_stats_t *st,
                                   firc_sub_parse_progress_fn progress, void *ud);

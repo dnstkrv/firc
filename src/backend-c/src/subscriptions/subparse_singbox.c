@@ -137,9 +137,7 @@ firc_err_t firc_sub_walk_name(firc_sub_walk_t *w, const char *s, const char *typ
     char buf[300];
     if (strcmp(type, FIRC_RULE_NAMESPACE) == 0 && s[0] == '.') { s++; }
     if (strcmp(type, FIRC_RULE_WILDCARD) == 0) {
-        /* a domain_keyword already holding '*'/'?' would route more than sing-box meant once wrapped; dropped instead */
-        if (strpbrk(s, "*?") != NULL) { return firc_sub_walk_drop(w); }
-        if (snprintf(buf, sizeof(buf), "*%s*", s) >= (int)sizeof(buf)) { return firc_sub_walk_drop(w); }
+        if (!firc_sub_keyword_wildcard(s, buf, sizeof(buf))) { return firc_sub_walk_drop(w); }
         s = buf;
     }
     return take(w, s, type, NULL, NULL, constrained);
