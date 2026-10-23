@@ -112,6 +112,8 @@ static struct {
     int pub;
     char why[256];              /* reason of the last failed check */
     char sig[1024];             /* the last active set logged */
+    int *down;                  /* nodes reported down and not reported up since */
+    size_t down_n, down_cap;
 } g_pl = { .mu = PTHREAD_MUTEX_INITIALIZER };
 
 static const void *pl_node(int i) {
@@ -251,6 +253,28 @@ static void pl_slot_alive(struct pl_slot *sl) {
     sl->due = sl->checked_at + (uint64_t)g_pl.cf.interval_s * 1000ull;
 }
 
+static void pl_mark_down(int node) {
+    for (size_t k = 0; k < g_pl.down_n; k++)
+        if (g_pl.down[k] == node) return;
+    if (g_pl.down_n == g_pl.down_cap) {
+        size_t cap = g_pl.down_cap ? g_pl.down_cap * 2 : 8;
+        int *d = realloc(g_pl.down, cap * sizeof(*d));
+        if (!d) return;
+        g_pl.down = d;
+        g_pl.down_cap = cap;
+    }
+    g_pl.down[g_pl.down_n++] = node;
+}
+
+static int pl_unmark_down(int node) {
+    for (size_t k = 0; k < g_pl.down_n; k++)
+        if (g_pl.down[k] == node) {
+            g_pl.down[k] = g_pl.down[--g_pl.down_n];
+            return 1;
+        }
+    return 0;
+}
+
 static int pl_in(const struct pl_sel *sel, int c) {
     for (size_t k = 0; k < sel->n; k++)
         if (sel->c[k] == c) return 1;
@@ -272,6 +296,7 @@ static int pl_refill(int i, int own) {
             pthread_mutex_lock(&g_pl.mu);
             if (g_pl.slot[i].gen != gen) { pthread_mutex_unlock(&g_pl.mu); return 0; }
             pl_slot_alive(&g_pl.slot[i]);
+            pl_unmark_down(prev);
             pthread_mutex_unlock(&g_pl.mu);
             fprintf(stderr, PL_LOG_I "node %s answers again\n", g_pl.cf.proto->name(pl_node(prev)));
             ctl_emit_node_up(g_pl.cf.proto->name(pl_node(prev)), prev);
@@ -302,8 +327,12 @@ static int pl_refill(int i, int own) {
         __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);  /* pl_stale reads it without the lock */
         sl->unproven = 0;
         pl_slot_alive(sl);
-        int n = g_pl.n;
+        int n = g_pl.n, again = pl_unmark_down(c);
         pthread_mutex_unlock(&g_pl.mu);
+        if (again) {
+            fprintf(stderr, PL_LOG_I "node %s answers again\n", g_pl.cf.proto->name(pl_node(c)));
+            ctl_emit_node_up(g_pl.cf.proto->name(pl_node(c)), c);
+        }
         if (prev >= 0)
             fprintf(stderr, PL_LOG_D "node %s does not answer — %s takes its place\n",
                     g_pl.cf.proto->name(pl_node(prev)), g_pl.cf.proto->name(pl_node(c)));
@@ -374,6 +403,7 @@ static void pl_check(int i) {
     sl->fails = 0;
     __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);
     if (!unproven) sl->retry = PL_RETRY_S;
+    pl_mark_down(node);
     pthread_mutex_unlock(&g_pl.mu);
     snprintf(g_pl.why, sizeof g_pl.why, "%s", why);
     fprintf(stderr, PL_LOG_D "node %s does not answer: %s — looking for a replacement\n",

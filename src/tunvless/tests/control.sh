@@ -123,6 +123,12 @@ check "A down reported" 1 "$(grep -c '"node_down","node":"A"' "$W/ev")"
 check "B takes over" '{"type":"active","nodes":["B"],"index":[1]}' "$(grep '"active"' "$W/ev" | tail -1)"
 check "no link in stderr" 0 "$(grep -c "vless://\|$UUID" "$W/tun.log")"
 check "no link in stdout" 0 "$(grep -c "vless://\|$UUID" "$W/ev")"
+node_up A; sleep 1
+kill "$SRV_B"; sleep 12
+# catches: a node once reported down and taken back by a replacement round, never reported up
+check "A answers again: reported up" 1 "$(grep -c '"type":"node_up","node":"A"' "$W/ev")"
+check "A takes over again" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev" | tail -1)"
+node_up B; sleep 1
 printf 'garbage-%s@host:1\n\n' "$UUID" | HX "$BIN" --control -d tvc1 > /dev/null 2> "$W/bad.log"
 check "malformed line: no uuid in stderr" 0 "$(grep -c "$UUID" "$W/bad.log")"
 check "malformed line named by number" 1 "$(grep -c 'line 1: not a vless:// link' "$W/bad.log")"
