@@ -664,7 +664,6 @@ TEST a_failed_generate_gives_no_token(void)
     PASS();
 }
 
-/* Catches: the file deleted although the router kept the token, so nothing knows of it any more. */
 /* Catches: the warning for a failed ndmc call leaving out what ndmc answered on stderr. */
 TEST a_failed_generate_says_what_ndmc_answered(void)
 {
@@ -690,6 +689,7 @@ TEST a_failed_generate_says_what_ndmc_answered(void)
     PASS();
 }
 
+/* Catches: the file deleted although the router kept the token, so nothing knows of it any more. */
 TEST a_failed_revoke_keeps_the_file(void)
 {
     bench_t b;

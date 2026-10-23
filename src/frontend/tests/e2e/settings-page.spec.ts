@@ -354,7 +354,7 @@ test("the save dialog keeps a long URL inside its row on a 390 px phone", async 
   const row = page.getByRole("dialog").locator('[data-key="app.check.wanUrl"]');
   const rowBox = (await row.boundingBox())!;
   const name = (await row.locator(".name").boundingBox())!;
-  const values = (await row.locator(".values").boundingBox())!;
+  const values = (await row.locator(".now").boundingBox())!;
   expect(values.x + values.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
   const apart = name.y + name.height <= values.y || name.x + name.width <= values.x;
   expect(apart).toBe(true);
