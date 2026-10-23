@@ -676,6 +676,30 @@ static void tunnel_defaults(firc_tunnel_t *t)
     t->timeout_s = 8;
 }
 
+static bool key_has_source(const firc_tunnel_t *t, const char *key)
+{
+    const char *colon = strchr(key, ':');
+    for (size_t i = 0; colon != NULL && i < t->n_src; i++) {
+        if (strlen(t->src[i].id) == (size_t)(colon - key) && strncmp(t->src[i].id, key, (size_t)(colon - key)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void drop_orphan_keys(const firc_tunnel_t *t, char **keys, size_t *n)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < *n; i++) {
+        if (key_has_source(t, keys[i])) {
+            keys[kept++] = keys[i];
+        } else {
+            free(keys[i]);
+        }
+    }
+    *n = kept;
+}
+
 static firc_err_t parse_tunnel(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
 {
     tunnel_defaults(t);
@@ -751,6 +775,8 @@ static firc_err_t parse_tunnel(ctx_t *c, node_t *m, size_t ti, firc_tunnel_t *t)
     if (!have_id) {
         return fail(c, "required", "tunnels[%zu].id", ti);
     }
+    drop_orphan_keys(t, t->order, &t->n_order);
+    drop_orphan_keys(t, t->exclude, &t->n_exclude);
     if (t->enable && t->n_src == 0) {
         return fail(c, "needs at least one source", "tunnels[%zu].sources", ti);
     }

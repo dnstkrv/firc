@@ -524,7 +524,26 @@ TEST a_long_order_or_exclude_key_is_refused(void) {
 
 /* catches: a filter edit restarting tunvless although the links it is sent stay the same */
 TEST same_run_ignores_filter_order_and_exclude(void) {
-    ASSERT_EQ(3, same_after("active: 1", "active: 1\n    filter: x\n    order: [a]\n    exclude: [b]"));
+    static const char base[] = "tunnels:\n  - id: x1\n    device: tunvless0\n    active: 1\n    enable: true\n"
+                               "    sources:\n      - id: 0000000a\n        link: \"vless://u@h:443#a\"\n";
+    ASSERT_EQ(3, same_after_in(base, "active: 1",
+                               "active: 1\n    filter: x\n    order: [\"0000000a:a\"]\n    exclude: [\"0000000a:b\"]"));
+    PASS();
+}
+
+/* catches: keys of a deleted source kept in order or exclude, or the key of a node gone from a source that is still there dropped */
+TEST order_and_exclude_lose_only_keys_of_deleted_sources(void) {
+    static const char doc[] = "tunnels:\n  - id: a1\n    device: tunvless0\n"
+                              "    order: [\"bbbbbbbb:X\", \"aaaaaaaa:Gone\", \"loose\"]\n"
+                              "    exclude: [\"aaaaaaaa:Z\", \"bbbbbbbb:Y\"]\n"
+                              "    sources:\n      - id: aaaaaaaa\n        link: \"vless://u@h:443#A\"\n";
+    firc_tunnels_t t = {0}; firc_tun_err_t e = {0};
+    ASSERT_EQ(FIRC_OK, firc_tunnels_load_buffer(&t, doc, sizeof doc - 1, &e));
+    ASSERT_EQ(1u, t.t[0].n_order);
+    ASSERT_STR_EQ("aaaaaaaa:Gone", t.t[0].order[0]);
+    ASSERT_EQ(1u, t.t[0].n_exclude);
+    ASSERT_STR_EQ("aaaaaaaa:Z", t.t[0].exclude[0]);
+    firc_tunnels_free(&t);
     PASS();
 }
 
@@ -1183,6 +1202,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_filter_that_does_not_compile_is_refused);
     RUN_TEST(a_long_order_or_exclude_key_is_refused);
     RUN_TEST(same_run_ignores_filter_order_and_exclude);
+    RUN_TEST(order_and_exclude_lose_only_keys_of_deleted_sources);
     RUN_TEST(nine_tunnels_are_refused);
     RUN_TEST(a_description_survives_save_and_load);
     RUN_TEST(no_description_is_empty_and_not_written);
