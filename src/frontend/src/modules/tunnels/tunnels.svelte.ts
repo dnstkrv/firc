@@ -92,6 +92,13 @@ export class TunnelsStore {
     );
   }
 
+  #asSaved(tunnel: Tunnel): boolean {
+    const draft = JSON.stringify(plain([tunnel])[0]);
+    return (JSON.parse(this.#baseline) as Tunnel[]).some(
+      (tn) => tn.id === tunnel.id && JSON.stringify(tn) === draft,
+    );
+  }
+
   isSaved(id: string): boolean {
     return (JSON.parse(this.#baseline) as Tunnel[]).some((tn) => tn.id === id);
   }
@@ -215,7 +222,7 @@ export class TunnelsStore {
     try {
       const answer = await fetcher.post<{ nodes?: TunnelProbeRow[] }>(
         "/tunnels/probe",
-        { tunnel: plain([tunnel])[0] },
+        this.#asSaved(tunnel) ? { id: tunnel.id } : { tunnel: plain([tunnel])[0] },
         { quiet: true },
       );
       return answer?.nodes ?? [];

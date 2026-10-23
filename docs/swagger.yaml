@@ -3039,7 +3039,8 @@ paths:
         3 s per node; answers once
         it is done. A tunnel that leaves by an interface or another tunnel is
         probed only through the uplink of the saved tunnel with that id while
-        its tunvless runs.
+        its tunvless runs. A node of a saved tunnel that answers is no longer
+        shown down in /tunnels/state; a draft's probe changes no state.
       parameters:
       - description: 'Request body'
         in: body

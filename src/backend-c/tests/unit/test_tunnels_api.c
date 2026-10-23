@@ -837,6 +837,48 @@ TEST a_node_down_shows_as_down_with_its_since(void)
     PASS();
 }
 
+static const char *node_state(const char *key)
+{
+    static char out[32];
+    cJSON *ans = NULL;
+    call_api("GET", "/api/v1/tunnels/state", NULL, &ans);
+    snprintf(out, sizeof out, "none");
+    const cJSON *n = NULL;
+    cJSON_ArrayForEach(n, at(tunnel_named(ans, "a"), "nodes"))
+    {
+        if (strcmp(at(n, "key")->valuestring, key) == 0) {
+            snprintf(out, sizeof out, "%s", at(n, "state")->valuestring);
+        }
+    }
+    cJSON_Delete(ans);
+    return out;
+}
+
+/* catches: a node the saved tunnel's probe reached still shown down, one it did not reach cleared, or a draft's probe clearing it */
+TEST a_saved_probe_clears_down_only_for_the_nodes_that_answered(void)
+{
+    setenv("FAKE_MODE", "down", 1);
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n"
+                    "      - id: 0000000a\n        link: \"" LINK_A "\"\n"
+                    "      - id: 0000000c\n        link: \"" LINK_B "\"\n"
+                    "      - id: 0000000d\n        link: \"vless://" U "@fail.example.invalid:443?security=none#B\"\n",
+                    0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    sleep_ms(200);
+    ASSERT_STR_EQ("down", node_state("0000000c:B"));
+    ASSERT_STR_EQ("down", node_state("0000000d:B"));
+    setenv("FAKE_MODE", "probe", 1);
+    ASSERT_EQ(200, call_api("POST", "/api/v1/tunnels/probe",
+                            "{\"tunnel\":{\"id\":\"a\",\"device\":\"tunvless0\",\"sources\":[{\"id\":\"0000000c\","
+                            "\"kind\":\"link\",\"link\":\"" LINK_B "\"}]}}",
+                            NULL));
+    ASSERT_STR_EQ("down", node_state("0000000c:B"));
+    ASSERT_EQ(200, call_api("POST", "/api/v1/tunnels/probe", "{\"id\":\"a\"}", NULL));
+    ASSERT_STR_EQ("reserve", node_state("0000000c:B"));
+    ASSERT_STR_EQ("down", node_state("0000000d:B"));
+    PASS();
+}
+
 static long long rate_of(const char *which)
 {
     cJSON *ans = NULL;
@@ -1721,6 +1763,7 @@ SUITE(tunnels_api)
     RUN_TEST(redirected_bytes_add_to_the_sysfs_rates);
     RUN_TEST(refresh_and_restart_answer_202_or_404);
     RUN_TEST(probe_answers_per_node_key_without_links);
+    RUN_TEST(a_saved_probe_clears_down_only_for_the_nodes_that_answered);
     RUN_TEST(a_second_probe_is_refused_while_one_runs);
     RUN_TEST(a_probe_through_an_uplink_needs_the_saved_mark);
     RUN_TEST(the_routes_need_a_session);

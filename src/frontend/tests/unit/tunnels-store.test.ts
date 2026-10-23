@@ -629,7 +629,7 @@ describe("TunnelsStore editor actions", () => {
     assert.strictEqual(store.isSaved(store.data[2].id), false);
   });
 
-  // Catches a draft probe sent with the client key, or a busy probe shown as a generic failure.
+  // Catches an unchanged tunnel probed as a draft, an edited one as the saved, the client key sent, or a busy probe shown as a generic failure.
   it("probes the draft without its key and names a busy probe", async () => {
     const s = stub({
       "/tunnels": { tunnels: [tunnel("a")] },
@@ -637,10 +637,15 @@ describe("TunnelsStore editor actions", () => {
     });
     const store = new TunnelsStore();
     await store.load();
+    await store.probe(store.data[0]);
+    const probes = () => s.requests.filter((r) => r.path === "/tunnels/probe").map((r) => r.body);
+    assert.deepStrictEqual(probes()[0], { id: "a" });
+    store.data[0].silence = 5;
     const answer = await store.probe(store.data[0]);
     assert.strictEqual(answer, null);
-    const sent = s.requests.find((r) => r.path === "/tunnels/probe")?.body;
+    const sent = probes()[1];
     assert.strictEqual(sent.tunnel.id, "a");
+    assert.strictEqual(sent.tunnel.silence, 5);
     assert.strictEqual("key" in sent.tunnel, false);
     assert.strictEqual(events.at(-1)?.detail.content, "A check is already running");
   });

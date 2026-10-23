@@ -197,13 +197,23 @@ test.describe("Tunnel editor", () => {
     await expect(tunnels.nodeRows("a").nth(2).locator(".lat")).toHaveText(
       /^300 ms\s*to the node 113 ms$/,
     );
-    expect(daemon.probes[0].tunnel.id).toBe("a");
+    expect(daemon.probes[0]).toEqual({ id: "a" });
 
     await card.locator("button", { hasText: "By latency" }).click();
     await expect(tunnels.nodeNames("a")).toHaveText(["C", "A", "B"]);
     await tunnels.save.click();
     await expect(page.getByText("Saved")).toBeVisible();
     expect(daemon.puts[0].tunnels[0].order).toEqual(["0000000a:C", "0000000a:A", "0000000a:B"]);
+  });
+
+  // Catches an edited card probed as the saved tunnel, so the edit goes unmeasured.
+  test("Check nodes on an edited card sends the draft", async ({ page }) => {
+    const { daemon, tunnels } = await saved(page);
+    await tunnels.filter("a").fill("B");
+    await tunnels.card("a").locator("button", { hasText: "Check nodes" }).click();
+    await expect.poll(() => daemon.probes.length).toBe(1);
+    expect(daemon.probes[0].id).toBeUndefined();
+    expect(daemon.probes[0].tunnel.filter).toBe("B");
   });
 
   // Catches the second number shown without the words that tell it from the first, at any width.

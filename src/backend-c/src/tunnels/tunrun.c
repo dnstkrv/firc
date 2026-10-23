@@ -1358,6 +1358,14 @@ bool firc_tunrun_node_down(const firc_tunrun_t *t, const char *id, const char *k
     return true;
 }
 
+void firc_tunrun_node_answered(firc_tunrun_t *t, const char *id, const char *key)
+{
+    ssize_t i = find(&t->cur, id);
+    if (i >= 0) {
+        key_del(&t->ext[i].downs, key);
+    }
+}
+
 bool firc_tunrun_node_active(const firc_tunrun_t *t, const char *id, const char *key)
 {
     ssize_t i = find(&t->cur, id);

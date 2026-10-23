@@ -21,6 +21,7 @@ struct tun_probe_call {
     firc_http_deferred_t *pending;
     char (*keys)[192];
     size_t n;
+    char *saved;
 };
 
 static int64_t mono_ms(void)
@@ -1349,6 +1350,7 @@ static void handle_preview(firc_http_req_t *req, firc_http_res_t *res, void *ud)
 
 static void call_free(tun_probe_call_t *c)
 {
+    free(c->saved);
     free(c->keys);
     free(c);
 }
@@ -1362,6 +1364,9 @@ static void probe_done(const firc_tunprobe_row_t *rows, size_t n, void *ud)
     bool ok = o != NULL && a != NULL;
     for (size_t i = 0; ok && i < n && i < c->n; i++) {
         const firc_tunprobe_row_t *r = &rows[i];
+        if (c->saved != NULL && r->have && r->ok && c->ctx->run != NULL) {
+            firc_tunrun_node_answered(c->ctx->run, c->saved, c->keys[i]);
+        }
         cJSON *x = cJSON_CreateObject();
         ok = x != NULL && cJSON_AddStringToObject(x, "key", c->keys[i]) != NULL &&
              cJSON_AddBoolToObject(x, "ok", r->have && r->ok) != NULL &&
@@ -1422,7 +1427,8 @@ static bool probe_target(firc_tunnels_ctx_t *ctx, const cJSON *body, firc_http_r
     return true;
 }
 
-static void start_probe(firc_tunnels_ctx_t *ctx, firc_http_res_t *res, const firc_tunnel_t *t, uint32_t mark)
+static void start_probe(firc_tunnels_ctx_t *ctx, firc_http_res_t *res, const firc_tunnel_t *t, uint32_t mark,
+                        bool saved)
 {
     size_t nb = 0;
     const firc_tun_body_t *b = bodies_of(ctx, &nb);
@@ -1439,8 +1445,9 @@ static void start_probe(firc_tunnels_ctx_t *ctx, firc_http_res_t *res, const fir
     char **links = calloc(nodes.n + 1, sizeof *links);
     if (c != NULL) {
         c->keys = calloc(nodes.n + 1, sizeof *c->keys);
+        c->saved = saved ? strdup(t->id) : NULL;
     }
-    if (c == NULL || links == NULL || c->keys == NULL) {
+    if (c == NULL || links == NULL || c->keys == NULL || (saved && c->saved == NULL)) {
         free(links);
         if (c != NULL) {
             call_free(c);
@@ -1517,7 +1524,7 @@ static void handle_probe(firc_http_req_t *req, firc_http_res_t *res, void *ud)
     if (!usable_mark(ctx, t, &mark)) {
         firc_http_res_write_error(res, 409, "save first");
     } else {
-        start_probe(ctx, res, t, mark);
+        start_probe(ctx, res, t, mark, set.n == 0);
     }
     firc_tunnels_free(&set);
 }

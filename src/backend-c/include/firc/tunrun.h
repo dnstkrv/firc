@@ -74,6 +74,9 @@ const firc_tun_nodes_t *firc_tunrun_nodes(const firc_tunrun_t *t, const char *id
 /* True while tunvless reports the node with this key of tunnel id down; since_ms is monotonic. */
 bool firc_tunrun_node_down(const firc_tunrun_t *t, const char *id, const char *key, int64_t *since_ms);
 
+/* Forgets that the node with this key of tunnel id was reported down: it answered a probe. */
+void firc_tunrun_node_answered(firc_tunrun_t *t, const char *id, const char *key);
+
 /* True while the node with this key of tunnel id is among tunvless's active ones. */
 bool firc_tunrun_node_active(const firc_tunrun_t *t, const char *id, const char *key);
 
