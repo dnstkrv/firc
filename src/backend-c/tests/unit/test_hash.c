@@ -121,10 +121,23 @@ TEST base64_std_vectors(void) {
         uint8_t decoded[16] = {0};
         size_t decoded_len = 0;
         ASSERT_EQ(0, firc_base64_decode(cases[i].out, strlen(cases[i].out),
-                                      decoded, &decoded_len));
+                                      decoded, sizeof(decoded), &decoded_len));
         ASSERT_EQ(inlen, decoded_len);
         ASSERT_EQ(0, memcmp(cases[i].in, decoded, inlen));
     }
+    PASS();
+}
+
+/* Catches: a decoder that writes past the capacity it was given. */
+TEST base64_decode_stops_at_its_capacity(void) {
+    uint8_t decoded[4] = {0, 0, 0, 0xa5};
+    size_t decoded_len = 0;
+    ASSERT_EQ(-1, firc_base64_decode("Zm9vYg==", 8, decoded, 3, &decoded_len));
+    ASSERT_EQ(0xa5, decoded[3]);
+    ASSERT_EQ(-1, firc_base64url_decode("Zm9vYg", 6, decoded, 3, &decoded_len));
+    ASSERT_EQ(0xa5, decoded[3]);
+    ASSERT_EQ(0, firc_base64_decode("Zm9v", 4, decoded, 3, &decoded_len));
+    ASSERT_EQ(3u, decoded_len);
     PASS();
 }
 
@@ -138,7 +151,7 @@ TEST base64url_no_padding(void) {
 
     uint8_t decoded[8] = {0};
     size_t decoded_len = 0;
-    ASSERT_EQ(0, firc_base64url_decode("Zg", 2, decoded, &decoded_len));
+    ASSERT_EQ(0, firc_base64url_decode("Zg", 2, decoded, sizeof(decoded), &decoded_len));
     ASSERT_EQ(1u, decoded_len);
     ASSERT_EQ('f', decoded[0]);
     PASS();
@@ -169,6 +182,7 @@ int main(int argc, char **argv) {
     RUN_TEST(hmac_sha256_rfc4231_case1);
     RUN_TEST(hash_equal_semantics);
     RUN_TEST(base64_std_vectors);
+    RUN_TEST(base64_decode_stops_at_its_capacity);
     RUN_TEST(base64url_no_padding);
     RUN_TEST(base64_urlsafe_alphabet_chars);
     GREATEST_MAIN_END();

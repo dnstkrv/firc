@@ -276,15 +276,12 @@ static firc_err_t load_or_create_secret(const char *state_dir) {
         while (end > start && isspace((unsigned char)buf[end - 1])) { end--; }
         if (end == start) { return FIRC_ERR_INVAL; }
 
-        uint8_t decoded[64];
-        if (end - start > (sizeof(decoded) + 2) / 3 * 4) { return FIRC_ERR_INVAL; }
         size_t decoded_len = 0;
-        if (firc_base64_decode(buf + start, end - start, decoded, &decoded_len) != 0) {
+        if (firc_base64_decode(buf + start, end - start, g_secret, sizeof(g_secret), &decoded_len) != 0 ||
+            decoded_len != sizeof(g_secret)) {
             return FIRC_ERR_INVAL;
         }
-        size_t copy_len = decoded_len > sizeof(g_secret) ? sizeof(g_secret) : decoded_len;
-        memcpy(g_secret, decoded, copy_len);
-        g_secret_len = copy_len;
+        g_secret_len = decoded_len;
         return FIRC_OK;
     }
     if (errno != ENOENT) { return firc_err_from_errno(errno); }

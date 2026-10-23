@@ -73,7 +73,7 @@ static int decode_char(char c, const char *alphabet, uint8_t *val) {
 }
 
 static int decode_core(const char *in, size_t in_len, const char *alphabet, uint8_t *out,
-                       size_t *out_len) {
+                       size_t out_cap, size_t *out_len) {
     while (in_len > 0 && in[in_len - 1] == '=') {
         in_len--;
     }
@@ -88,6 +88,7 @@ static int decode_core(const char *in, size_t in_len, const char *alphabet, uint
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
+            if (o == out_cap) { return -1; }
             out[o++] = (uint8_t)((acc >> bits) & 0xff);
         }
     }
@@ -95,10 +96,12 @@ static int decode_core(const char *in, size_t in_len, const char *alphabet, uint
     return 0;
 }
 
-int firc_base64_decode(const char *in, size_t in_len, uint8_t *out, size_t *out_len) {
-    return decode_core(in, in_len, std_alphabet, out, out_len);
+int firc_base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap,
+                       size_t *out_len) {
+    return decode_core(in, in_len, std_alphabet, out, out_cap, out_len);
 }
 
-int firc_base64url_decode(const char *in, size_t in_len, uint8_t *out, size_t *out_len) {
-    return decode_core(in, in_len, url_alphabet, out, out_len);
+int firc_base64url_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap,
+                          size_t *out_len) {
+    return decode_core(in, in_len, url_alphabet, out, out_cap, out_len);
 }

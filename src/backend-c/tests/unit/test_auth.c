@@ -803,6 +803,65 @@ TEST a_secret_file_longer_than_any_secret_is_refused(void) {
     PASS();
 }
 
+static firc_err_t load_secret_text_into(const char *text, uint8_t *secret, size_t *n) {
+    char *dir = mkdtemp_dup("/tmp/firc_auth_text_XXXXXX");
+    if (!dir) { return FIRC_ERR_SYS; }
+    char sp[600];
+    snprintf(sp, sizeof(sp), "%s/auth_secret", dir);
+    FILE *f = fopen(sp, "we");
+    if (!f) { free(dir); return FIRC_ERR_SYS; }
+    fputs(text, f);
+    fclose(f);
+
+    firc_auth_forget_secret_for_test();
+    firc_err_t err = firc_auth_load_secret(dir, secret, n);
+    firc_auth_forget_secret_for_test();
+
+    unlink(sp);
+    rmdir(dir);
+    free(dir);
+    return err;
+}
+
+static firc_err_t load_secret_text(const char *text) {
+    uint8_t secret[64];
+    size_t n = 0;
+    return load_secret_text_into(text, secret, &n);
+}
+
+/* Catches: 88 unpadded characters decoded into a 64-byte stack buffer. */
+TEST a_secret_decoding_past_its_buffer_is_refused(void) {
+    char text[89];
+    memset(text, 'A', 88);
+    text[88] = '\0';
+    ASSERT_EQ_FMT(FIRC_ERR_INVAL, load_secret_text(text), "%d");
+    PASS();
+}
+
+/* Catches: a one-byte secret accepted as the signing key. */
+TEST a_secret_shorter_than_a_secret_is_refused(void) {
+    ASSERT_EQ_FMT(FIRC_ERR_INVAL, load_secret_text("Zg=="), "%d");
+    PASS();
+}
+
+/* Catches: a 33-byte secret silently cut to 32 instead of refused. */
+TEST a_secret_longer_than_a_secret_is_refused(void) {
+    ASSERT_EQ_FMT(FIRC_ERR_INVAL,
+                  load_secret_text("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), "%d");
+    PASS();
+}
+
+/* Catches: the exact-length check refusing the secret firc writes itself, or loading other bytes than the file's. */
+TEST a_secret_of_32_bytes_loads(void) {
+    uint8_t secret[64] = {0};
+    size_t n = 0;
+    ASSERT_EQ_FMT(FIRC_OK,
+                  load_secret_text_into("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n", secret, &n), "%d");
+    ASSERT_EQ_FMT((size_t)32, n, "%zu");
+    for (size_t i = 0; i < 32; i++) { ASSERT_EQ_FMT((unsigned)i, (unsigned)secret[i], "%u"); }
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -814,6 +873,10 @@ int main(int argc, char **argv) {
     RUN_TEST(authenticate_and_verify_round_trip);
     RUN_TEST(the_config_directory_is_not_left_to_the_umask);
     RUN_TEST(a_secret_file_longer_than_any_secret_is_refused);
+    RUN_TEST(a_secret_decoding_past_its_buffer_is_refused);
+    RUN_TEST(a_secret_shorter_than_a_secret_is_refused);
+    RUN_TEST(a_secret_longer_than_a_secret_is_refused);
+    RUN_TEST(a_secret_of_32_bytes_loads);
     RUN_TEST(a_run_of_wrong_passwords_stops_costing_a_crypt);
     RUN_TEST(what_the_cache_cannot_hold_it_does_not_answer_for);
     RUN_TEST(a_login_name_cannot_write_its_own_log_line);

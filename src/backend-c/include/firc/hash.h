@@ -58,10 +58,12 @@ void firc_base64_encode(const uint8_t *data, size_t len, char *out);
 size_t firc_base64url_encoded_len(size_t in_len);
 void firc_base64url_encode(const uint8_t *data, size_t len, char *out);
 
-/* out needs ((in_len+3)/4)*3 bytes; returns 0 on success, -1 on malformed input */
-int firc_base64url_decode(const char *in, size_t in_len, uint8_t *out, size_t *out_len);
+/* writes at most out_cap bytes; returns 0 on success, -1 on malformed input or overflow */
+int firc_base64url_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap,
+                          size_t *out_len);
 
 /* same contract as firc_base64url_decode */
-int firc_base64_decode(const char *in, size_t in_len, uint8_t *out, size_t *out_len);
+int firc_base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap,
+                       size_t *out_len);
 
 #endif /* FIRC_HASH_H */
