@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "firc/keenetic_rci.h"
+#include "firc/log.h"
 #include "firc/rci_token.h"
 
 #define TOK_A "1dz8KNQ3YSk74t3W2NtZfmWidUurH8i7XPyXIEOHsHRWmAIdoUWhmSdM"
@@ -248,7 +249,7 @@ static bool bench_make(bench_t *b, const char *generate_out)
              "echo \"$2\" >> %s/calls\n"
              "[ ! -e %s/old ] || { echo 'no such command'; exit 127; }\n"
              "case \"$2\" in\n"
-             "  'authentication token generate firc') cat %s/generate; [ ! -e %s/fail-generate ] || exit 1 ;;\n"
+             "  'authentication token generate firc') [ ! -e %s/fail-generate ] || { printf '\\033[K\\n\\nCore::Security: user \"admin\" not found.\\n' >&2; exit 1; }; cat %s/generate ;;\n"
              "  'show authentication token') cat %s/show ;;\n"
              "  'authentication token delete '*) [ ! -e %s/fail-delete ] || exit 1 ;;\n"
              "  *) echo 'no such command'; exit 127 ;;\n"
@@ -664,6 +665,31 @@ TEST a_failed_generate_gives_no_token(void)
 }
 
 /* Catches: the file deleted although the router kept the token, so nothing knows of it any more. */
+/* Catches: the warning for a failed ndmc call leaving out what ndmc answered on stderr. */
+TEST a_failed_generate_says_what_ndmc_answered(void)
+{
+    bench_t b;
+    ASSERT(bench_make(&b, GENERATE_OUT));
+    ASSERT(bench_flag(&b, "fail-generate"));
+    int lp[2];
+    ASSERT_EQ(0, pipe(lp));
+    firc_log_set_fd(lp[1]);
+    firc_kn_token_setup(b.token, b.ndmc);
+    firc_kn_token_set_release("5.02.A.11.0-1");
+    char tok[FIRC_KN_TOKEN_MAX];
+    firc_kn_token_current(tok);
+    firc_log_set_fd(STDOUT_FILENO);
+    close(lp[1]);
+    char log[4096];
+    ssize_t n = read(lp[0], log, sizeof log - 1);
+    close(lp[0]);
+    log[n > 0 ? n : 0] = '\0';
+    ASSERT(strstr(log, "rci token: ndmc \"authentication token generate firc\" failed (exit 1): "
+                      "Core::Security: user \"admin\" not found.\n") != NULL);
+    bench_drop(&b);
+    PASS();
+}
+
 TEST a_failed_revoke_keeps_the_file(void)
 {
     bench_t b;
@@ -731,6 +757,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_refusal_of_a_replaced_token_gives_the_current_one);
     RUN_TEST(a_token_that_cannot_be_kept_is_deleted_again);
     RUN_TEST(a_failed_generate_gives_no_token);
+    RUN_TEST(a_failed_generate_says_what_ndmc_answered);
     RUN_TEST(a_failed_revoke_keeps_the_file);
     RUN_TEST(revoke_on_a_router_without_token_commands_drops_the_file);
     RUN_TEST(revoke_without_a_file_asks_unless_the_firmware_is_known_old);

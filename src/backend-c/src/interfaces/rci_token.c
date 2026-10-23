@@ -172,7 +172,7 @@ static int spawn_ndmc(const char *ndmc, const char *cmd, int out_fd, pid_t *pid)
     char *argv[] = {(char *)ndmc, "-c", (char *)cmd, NULL};
     if ((rc = posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0)) == 0 &&
         (rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDOUT_FILENO)) == 0 &&
-        (rc = posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0)) == 0 &&
+        (rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDERR_FILENO)) == 0 &&
         (rc = posix_spawnattr_setsigdefault(&attr, &all)) == 0 && (rc = posix_spawnattr_setsigmask(&attr, &none)) == 0 &&
         (rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)) == 0) {
         rc = posix_spawn(pid, ndmc, &fa, &attr, argv, environ);
@@ -252,7 +252,15 @@ static firc_err_t ndmc_run(const char *ndmc, const char *cmd, char **out)
         return FIRC_ERR_NOSYS;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        FIRC_WARN("rci token: ndmc \"%s\" failed (status %d)", cmd, status);
+        char *clean = dup_clean(buf);
+        char *line = clean != NULL ? trim(clean) : "";
+        line[strcspn(line, "\r\n")] = '\0';
+        if (WIFEXITED(status)) {
+            FIRC_WARN("rci token: ndmc \"%s\" failed (exit %d): %s", cmd, WEXITSTATUS(status), line);
+        } else {
+            FIRC_WARN("rci token: ndmc \"%s\" failed (signal %d): %s", cmd, WTERMSIG(status), line);
+        }
+        free(clean);
         free(buf);
         return FIRC_ERR_UPSTREAM;
     }
