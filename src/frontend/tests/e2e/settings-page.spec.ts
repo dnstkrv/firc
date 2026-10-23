@@ -341,3 +341,21 @@ test("the Yandex chip stays inside a 390 px phone", async ({ page }) => {
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
 });
+
+test("the save dialog keeps a long URL inside its row on a 390 px phone", async ({ page }) => {
+  // Catches the new value pushed past the row's edge or drawn over the setting's name.
+  await openSettings(page, (r) => r.fulfill({ json: answer() }));
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page
+    .locator('[data-row="app.check.wanUrl"]')
+    .getByRole("button", { name: "Yandex" })
+    .click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const row = page.getByRole("dialog").locator('[data-key="app.check.wanUrl"]');
+  const rowBox = (await row.boundingBox())!;
+  const name = (await row.locator(".name").boundingBox())!;
+  const values = (await row.locator(".values").boundingBox())!;
+  expect(values.x + values.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
+  const apart = name.y + name.height <= values.y || name.x + name.width <= values.x;
+  expect(apart).toBe(true);
+});

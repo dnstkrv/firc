@@ -120,7 +120,7 @@
   }
   .change {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(8em, 1fr) auto;
     gap: 12px;
     align-items: center;
     padding: 9px 12px;
@@ -132,6 +132,8 @@
     outline: 1px solid var(--danger);
   }
   .values {
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-family: var(--font-mono);
     font-size: 0.85rem;
     color: var(--text-2);
@@ -165,6 +167,10 @@
     min-width: 0;
   }
   @media (max-width: 760px) {
+    .change {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+    }
     .save-actions {
       flex-direction: column;
       align-items: stretch;
