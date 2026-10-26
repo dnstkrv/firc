@@ -170,6 +170,15 @@
               <span class="bulk-menu-label bulk-menu-danger">{t("Block")}</span>
             </DropdownMenu.Item>
           {/if}
+          {#if choices.block}
+            {#if !choices.blackhole}<DropdownMenu.Separator class="bulk-menu-separator" />{/if}
+            <DropdownMenu.Item
+              class="bulk-menu-item"
+              onSelect={() => store.setSelectedInterface("block")}
+            >
+              <span class="bulk-menu-label bulk-menu-warn">{t("Block by DNS")}</span>
+            </DropdownMenu.Item>
+          {/if}
           {#if choices.rest.length > 0}
             <DropdownMenu.Separator class="bulk-menu-separator" />
             <DropdownMenu.Item
@@ -442,6 +451,9 @@
 
   :global(.bulk-menu-danger) {
     color: var(--danger);
+  }
+  :global(.bulk-menu-warn) {
+    color: var(--orange);
   }
 
   :global(.bulk-menu-separator) {

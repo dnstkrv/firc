@@ -230,6 +230,20 @@ TEST an_ordered_key_no_source_has_is_a_missing_row(void)
     PASS();
 }
 
+TEST a_link_key_its_link_no_longer_names_gives_no_row(void)
+{
+    /* catches: a key of an edited link kept as a missing row for good */
+    const firc_tunnel_t *t = tunnel("      - id: cccccccc\n        link: \"vless://" U "@g.example:443?security=none#Germany\"\n",
+                                    "    order: [\"cccccccc:Estonia\", \"cccccccc:Germany\"]\n"
+                                    "    exclude: [\"cccccccc:Estonia\"]\n");
+    ASSERT(t != NULL);
+    ASSERT_EQ(FIRC_OK, build(t, 0, NULL, 0));
+    const char *want[] = {"cccccccc:Germany"};
+    ASSERT(keys_are(want, 1));
+    ASSERT_EQ(1u, sendable());
+    PASS();
+}
+
 TEST a_link_source_counts_whatever_the_filter(void)
 {
     /* catches: the filter applied to a manual link, or link sources not listed first */
@@ -583,6 +597,7 @@ int main(int argc, char **argv)
     RUN_TEST(a_name_with_key_characters_is_encoded);
     RUN_TEST(a_name_with_control_bytes_gets_a_key_the_config_takes);
     RUN_TEST(an_ordered_key_no_source_has_is_a_missing_row);
+    RUN_TEST(a_link_key_its_link_no_longer_names_gives_no_row);
     RUN_TEST(a_link_source_counts_whatever_the_filter);
     RUN_TEST(at_most_256_nodes_are_sent);
     RUN_TEST(the_body_of_another_mark_is_not_used);

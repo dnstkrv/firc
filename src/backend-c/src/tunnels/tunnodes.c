@@ -513,6 +513,18 @@ static bool order_seen(const firc_tunnel_t *t, size_t i)
     return false;
 }
 
+static bool of_link(const firc_tunnel_t *t, const char *key)
+{
+    const char *colon = strchr(key, ':');
+    for (size_t i = 0; colon != NULL && i < t->n_src; i++) {
+        size_t idl = strlen(t->src[i].id);
+        if ((size_t)(colon - key) == idl && strncmp(key, t->src[i].id, idl) == 0) {
+            return t->src[i].kind == FIRC_TUN_SRC_LINK;
+        }
+    }
+    return false;
+}
+
 static void assemble(build_t *b, firc_tun_nodes_t *out)
 {
     const firc_tunnel_t *t = b->t;
@@ -536,6 +548,9 @@ static void assemble(build_t *b, firc_tun_nodes_t *out)
         }
         cand_t *c = find_key(b, ix, t->order[i]);
         if (c == NULL) {
+            if (of_link(t, t->order[i])) {
+                continue;
+            }
             firc_tun_node_t row;
             missing_row(t, t->order[i], &row);
             emit(&e, &row, false);

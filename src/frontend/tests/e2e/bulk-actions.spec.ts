@@ -265,6 +265,38 @@ test.describe("Group bulk actions", () => {
     await expect(bar(page).getByRole("status")).toHaveText("2 groups selected");
   });
 
+  // Catches the bulk menu offering no Block by DNS, or sending another interface than "block".
+  test("the interface menu blocks the selected groups by DNS", async ({ page }) => {
+    const daemon = await setup(page);
+    await page.route("**/system/interfaces", (route) =>
+      route.fulfill({
+        json: {
+          interfaces: [
+            { id: "nwg0", name: "vdsina", role: "tunnel" },
+            { id: "blackhole" },
+            { id: "block" },
+          ],
+        },
+      }),
+    );
+    await page.reload();
+    await numberOf(page, "Speedtest").click();
+    await numberOf(page, "Insta").click();
+
+    await bar(page).getByRole("button", { name: "Interface" }).click();
+    const menu = page.getByRole("menu");
+    await expect(menu.getByRole("menuitem")).toHaveText([/vdsina\s*nwg0/, "Block", "Block by DNS"]);
+    await menu.getByRole("menuitem", { name: "Block by DNS" }).click();
+    await expect(menu).toHaveCount(0);
+
+    await page.locator("#save-changes").click();
+    await expect.poll(() => daemon.puts.length).toBe(1);
+    const sent = Object.fromEntries(daemon.puts[0].groups.map((g: any) => [g.name, g.interface]));
+    expect(sent.Speedtest).toBe("block");
+    expect(sent.Insta).toBe("block");
+    expect(Object.values(sent).filter((i) => i === "block")).toHaveLength(2);
+  });
+
   // Catches enable/disable hitting the wrong groups or value, or never reaching Save.
   test("enable and disable the selected groups", async ({ page }) => {
     const daemon = await setup(page);

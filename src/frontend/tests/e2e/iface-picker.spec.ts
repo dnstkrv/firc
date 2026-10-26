@@ -181,17 +181,18 @@ test("the bulk interface menu folds the rest the same way", async ({ page }) => 
     /Wireguard2\s*nwg2/,
     /VLESS tunnel\s*tunvless0/,
     "Block",
+    "Block by DNS",
     /3 more interfaces/,
   ]);
   await menu.filter({ hasText: "3 more interfaces" }).click();
   await expect(menu.filter({ hasText: "Broadband" })).toContainText("provider");
-  await expect(menu).toHaveCount(8);
+  await expect(menu).toHaveCount(9);
   await page.keyboard.press("Escape");
   await page
     .getByRole("region", { name: "Selected groups" })
     .getByRole("button", { name: "Interface" })
     .click();
-  await expect(menu).toHaveCount(5);
+  await expect(menu).toHaveCount(6);
 });
 
 const ROUTER = [
