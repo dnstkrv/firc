@@ -1,6 +1,7 @@
 #include "firc/system.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -481,7 +482,11 @@ static void handle_list_interfaces(firc_http_req_t *req, firc_http_res_t *res, v
     r->waiters = w;
 }
 
+static void stat_scratch_free(struct dnsstat_scratch *sc);
+
 void firc_system_close(firc_system_ctx_t *ctx) {
+    stat_scratch_free(ctx->dnsstat_scratch);
+    ctx->dnsstat_scratch = NULL;
     ifaces_read_t *r = ctx->ifaces_read;
     if (r == NULL) { return; }
     ctx->ifaces_read = NULL;
@@ -560,9 +565,480 @@ static void handle_iflayer_hook(firc_http_req_t *req, firc_http_res_t *res, void
     firc_http_res_write(res, 200, NULL, NULL, 0);
 }
 
+#define DNSSTAT_PAGE_DEFAULT 50
+#define DNSSTAT_PAGE_MAX 500
+#define DNSSTAT_PAGE_SPAN 550
+#define DNSSTAT_DEVICES_MAX 12
+#define DNSSTAT_ROW_CLIENTS 16
+#define DNSSTAT_QUERY_VALUE_MAX 511
+
+typedef struct {
+    const char *name;
+    uint32_t gen, queries, blocked, clients, head, tail;
+    int64_t last;
+    firc_id_t owner;
+    bool owner_blocked, hidden, listed;
+} stat_name_t;
+
+typedef struct {
+    firc_ip_t ip;
+    uint32_t queries, next;
+} stat_client_t;
+
+typedef struct {
+    uint32_t n;
+    stat_client_t c[DNSSTAT_ROW_CLIENTS];
+} stat_row_t;
+
+typedef struct {
+    uint32_t queries, slot;
+} stat_pick_t;
+
+struct dnsstat_scratch {
+    size_t slots;
+    uint32_t gen;
+    stat_name_t *names;
+    uint32_t *matched;
+    stat_pick_t *picks;
+    stat_client_t *clients;
+    stat_name_t *heap[DNSSTAT_PAGE_SPAN];
+};
+
+typedef struct {
+    const firc_dnsstat_t *store;
+    stat_name_t *names;
+    uint32_t *matched_slots;
+    stat_pick_t *picks;
+    stat_client_t *clients;
+    size_t slots, n_clients;
+    uint32_t gen;
+    firc_ip_t devices[DNSSTAT_DEVICES_MAX];
+    size_t n_devices;
+    bool arpa;
+    const char *needle;
+    size_t needle_len;
+    uint64_t queries, blocked;
+    size_t domains, matched;
+} stat_walk_t;
+
+static uint32_t sat_add32(uint32_t a, uint32_t b) {
+    return a > UINT32_MAX - b ? UINT32_MAX : a + b;
+}
+
+static bool stat_keeps(const stat_walk_t *w, const firc_ip_t *client) {
+    if (w->n_devices == 0) { return true; }
+    size_t i = 0;
+    while (i < w->n_devices &&
+           !(w->devices[i].len == client->len && memcmp(w->devices[i].b, client->b, client->len) == 0)) {
+        i++;
+    }
+    return i < w->n_devices;
+}
+
+static bool stat_contains(const char *s, const char *needle, size_t len) {
+    for (const char *p = strchr(s, needle[0]); p != NULL; p = strchr(p + 1, needle[0])) {
+        if (strncmp(p + 1, needle + 1, len - 1) == 0) { return true; }
+    }
+    return false;
+}
+
+static bool stat_aggregate(void *ud, uint32_t slot, const char *name, const firc_ip_t *client,
+                           firc_dnsstat_count_t c, int64_t last, firc_id_t owner, bool last_blocked) {
+    stat_walk_t *w = ud;
+    if (!stat_keeps(w, client)) { return true; }
+    stat_name_t *n = &w->names[slot];
+    if (n->gen != w->gen) {
+        *n = (stat_name_t){.name = name, .gen = w->gen};
+        n->hidden = !w->arpa && firc_dnsstat_name_is_arpa(w->store, slot);
+        if (n->hidden) { return true; }
+        w->domains++;
+        n->listed = w->needle == NULL || stat_contains(name, w->needle, w->needle_len);
+        if (n->listed) { w->matched_slots[w->matched++] = slot; }
+    } else if (n->hidden) {
+        return true;
+    }
+    n->queries = sat_add32(n->queries, c.queries);
+    n->blocked = sat_add32(n->blocked, c.blocked);
+    n->clients++;
+    if (n->clients == 1 || last > n->last) {
+        n->last = last;
+        n->owner = owner;
+        n->owner_blocked = last_blocked;
+    }
+    w->queries += c.queries;
+    w->blocked += c.blocked;
+    if (n->listed && w->n_clients < w->slots) {
+        uint32_t e = (uint32_t)++w->n_clients;
+        w->clients[e - 1] = (stat_client_t){*client, c.queries, 0};
+        if (n->tail == 0) {
+            n->head = e;
+        } else {
+            w->clients[n->tail - 1].next = e;
+        }
+        n->tail = e;
+    }
+    return true;
+}
+
+static void stat_row_clients(const stat_walk_t *w, const stat_name_t *n, stat_row_t *r) {
+    r->n = 0;
+    for (uint32_t e = n->head; e != 0; e = w->clients[e - 1].next) {
+        const stat_client_t *c = &w->clients[e - 1];
+        if (r->n < DNSSTAT_ROW_CLIENTS) {
+            r->c[r->n++] = *c;
+            continue;
+        }
+        size_t low = 0;
+        for (size_t i = 1; i < DNSSTAT_ROW_CLIENTS; i++) {
+            if (r->c[i].queries < r->c[low].queries) { low = i; }
+        }
+        if (c->queries > r->c[low].queries) { r->c[low] = *c; }
+    }
+}
+
+static bool stat_ranks_below(const stat_name_t *a, const stat_name_t *b) {
+    return a->queries < b->queries || (a->queries == b->queries && strcmp(a->name, b->name) > 0);
+}
+
+static int stat_cmp_rows(const void *x, const void *y) {
+    const stat_name_t *a = *(const stat_name_t *const *)x, *b = *(const stat_name_t *const *)y;
+    if (stat_ranks_below(a, b)) { return 1; }
+    return stat_ranks_below(b, a) ? -1 : 0;
+}
+
+static int stat_cmp_clients(const void *x, const void *y) {
+    const stat_client_t *a = x, *b = y;
+    if (a->queries != b->queries) { return a->queries < b->queries ? 1 : -1; }
+    if (a->ip.len != b->ip.len) { return a->ip.len < b->ip.len ? -1 : 1; }
+    return memcmp(a->ip.b, b->ip.b, a->ip.len);
+}
+
+static void stat_sift_down(stat_name_t **heap, size_t n, size_t pos) {
+    for (;;) {
+        size_t low = pos, l = 2 * pos + 1, r = l + 1;
+        if (l < n && stat_ranks_below(heap[l], heap[low])) { low = l; }
+        if (r < n && stat_ranks_below(heap[r], heap[low])) { low = r; }
+        if (low == pos) { return; }
+        stat_name_t *t = heap[pos];
+        heap[pos] = heap[low];
+        heap[low] = t;
+        pos = low;
+    }
+}
+
+static void stat_sift_up(stat_name_t **heap, size_t pos) {
+    while (pos > 0) {
+        size_t parent = (pos - 1) / 2;
+        if (!stat_ranks_below(heap[pos], heap[parent])) { return; }
+        stat_name_t *t = heap[pos];
+        heap[pos] = heap[parent];
+        heap[parent] = t;
+        pos = parent;
+    }
+}
+
+static void stat_partition(stat_pick_t *v, size_t n, size_t k, size_t *lt_out, size_t *gt_out) {
+    size_t lo = 0, hi = n;
+    for (;;) {
+        uint32_t a = v[lo].queries, b = v[lo + (hi - lo) / 2].queries, c = v[hi - 1].queries;
+        uint32_t p = a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));
+        size_t lt = lo, i = lo, gt = hi;
+        while (i < gt) {
+            stat_pick_t x = v[i];
+            if (x.queries > p) {
+                v[i++] = v[lt];
+                v[lt++] = x;
+            } else if (x.queries < p) {
+                v[i] = v[--gt];
+                v[gt] = x;
+            } else {
+                i++;
+            }
+        }
+        if (k < lt) {
+            hi = lt;
+        } else if (k >= gt) {
+            lo = gt;
+        } else {
+            *lt_out = lt;
+            *gt_out = gt;
+            return;
+        }
+    }
+}
+
+static size_t stat_select(const stat_walk_t *w, size_t k, stat_name_t **heap) {
+    size_t m = w->matched;
+    if (k == 0) { return 0; }
+    if (m <= k) {
+        for (size_t i = 0; i < m; i++) { heap[i] = &w->names[w->matched_slots[i]]; }
+        qsort(heap, m, sizeof(*heap), stat_cmp_rows);
+        return m;
+    }
+    stat_pick_t *v = w->picks;
+    for (size_t i = 0; i < m; i++) { v[i] = (stat_pick_t){w->names[w->matched_slots[i]].queries, w->matched_slots[i]}; }
+    size_t lt = 0, gt = 0;
+    stat_partition(v, m, k - 1, &lt, &gt);
+    for (size_t i = 0; i < lt; i++) { heap[i] = &w->names[v[i].slot]; }
+    stat_name_t **ties = heap + lt;
+    size_t room = k - lt, n = 0;
+    for (size_t i = lt; i < gt; i++) {
+        stat_name_t *x = &w->names[v[i].slot];
+        if (n < room) {
+            ties[n] = x;
+            stat_sift_up(ties, n++);
+        } else if (n > 0 && stat_ranks_below(ties[0], x)) {
+            ties[0] = x;
+            stat_sift_down(ties, n, 0);
+        }
+    }
+    qsort(heap, lt + n, sizeof(*heap), stat_cmp_rows);
+    return lt + n;
+}
+
+static bool stat_read_devices(firc_http_req_t *req, firc_http_res_t *res, stat_walk_t *w) {
+    const char *v = firc_http_req_query(req, "device");
+    if (v == NULL || v[0] == '\0') { return true; }
+    if (strlen(v) >= DNSSTAT_QUERY_VALUE_MAX) {
+        firc_http_res_write_error(res, 400, "device: too long");
+        return false;
+    }
+    char buf[DNSSTAT_QUERY_VALUE_MAX + 1];
+    snprintf(buf, sizeof(buf), "%s", v);
+    char *p = buf;
+    for (;;) {
+        char *comma = strchr(p, ',');
+        if (comma != NULL) { *comma = '\0'; }
+        if (w->n_devices == DNSSTAT_DEVICES_MAX) {
+            firc_http_res_write_error(res, 400, "device: at most 12 addresses");
+            return false;
+        }
+        firc_ip_t *ip = &w->devices[w->n_devices];
+        struct in6_addr a6;
+        if (inet_pton(AF_INET, p, ip->b) == 1) {
+            ip->len = 4;
+        } else if (inet_pton(AF_INET6, p, &a6) == 1) {
+            if (IN6_IS_ADDR_V4MAPPED(&a6)) {
+                memcpy(ip->b, &a6.s6_addr[12], 4);
+                ip->len = 4;
+            } else {
+                memcpy(ip->b, &a6, 16);
+                ip->len = 16;
+            }
+        } else {
+            char msg[DNSSTAT_QUERY_VALUE_MAX + 48];
+            snprintf(msg, sizeof(msg), "device: not an address: \"%s\"", p);
+            firc_http_res_write_error(res, 400, msg);
+            return false;
+        }
+        w->n_devices++;
+        if (comma == NULL) { return true; }
+        p = comma + 1;
+    }
+}
+
+static int64_t mono_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec;
+}
+
+static firc_err_t stat_put_str(firc_bytebuf_t *b, const char *s) {
+    firc_err_t err = firc_bytebuf_append_byte(b, '"');
+    const char *run = s;
+    for (const char *p = s; err == FIRC_OK; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (ch >= 32 && ch != '"' && ch != '\\') { continue; }
+        err = firc_bytebuf_append(b, run, (size_t)(p - run));
+        if (ch == '\0' || err != FIRC_OK) { break; }
+        char esc[8];
+        switch (ch) {
+        case '"': snprintf(esc, sizeof(esc), "\\\""); break;
+        case '\\': snprintf(esc, sizeof(esc), "\\\\"); break;
+        case '\b': snprintf(esc, sizeof(esc), "\\b"); break;
+        case '\f': snprintf(esc, sizeof(esc), "\\f"); break;
+        case '\n': snprintf(esc, sizeof(esc), "\\n"); break;
+        case '\r': snprintf(esc, sizeof(esc), "\\r"); break;
+        case '\t': snprintf(esc, sizeof(esc), "\\t"); break;
+        default: snprintf(esc, sizeof(esc), "\\u%04x", ch); break;
+        }
+        err = firc_bytebuf_append_str(b, esc);
+        run = p + 1;
+    }
+    return err == FIRC_OK ? firc_bytebuf_append_byte(b, '"') : err;
+}
+
+static firc_err_t stat_put_owner(firc_bytebuf_t *b, const firc_system_ctx_t *ctx, const stat_name_t *n) {
+    firc_ruleset_t *rs = firc_id_is_zero(n->owner) || ctx->app == NULL
+                             ? NULL
+                             : firc_app_find_group_by_id(ctx->app, n->owner);
+    if (rs == NULL) { return firc_bytebuf_append_str(b, "null"); }
+    const firc_group_t *g = firc_ruleset_group(rs);
+    const char *iface = firc_ruleset_active_iface(rs);
+    char id[FIRC_ID_STR_LEN];
+    firc_id_format(n->owner, id);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"name\":", id);
+    firc_err_t err = firc_bytebuf_append_str(b, buf);
+    if (err == FIRC_OK) { err = stat_put_str(b, g->name != NULL ? g->name : ""); }
+    if (err == FIRC_OK && iface != NULL) {
+        err = firc_bytebuf_append_str(b, ",\"interface\":");
+        if (err == FIRC_OK) { err = stat_put_str(b, iface); }
+    }
+    if (err != FIRC_OK) { return err; }
+    return firc_bytebuf_append_str(b, n->owner_blocked ? ",\"blocked\":true}" : ",\"blocked\":false}");
+}
+
+static firc_err_t stat_put_row(firc_bytebuf_t *b, const firc_system_ctx_t *ctx, const stat_walk_t *w,
+                               const stat_name_t *n, int64_t to_unix) {
+    stat_row_t r;
+    stat_row_clients(w, n, &r);
+    qsort(r.c, r.n, sizeof(r.c[0]), stat_cmp_clients);
+    char buf[128];
+    firc_err_t err = firc_bytebuf_append_str(b, "{\"name\":");
+    if (err == FIRC_OK) { err = stat_put_str(b, n->name); }
+    if (err == FIRC_OK) {
+        snprintf(buf, sizeof(buf), ",\"queries\":%u,\"blocked\":%u,\"last\":%lld,\"owner\":", (unsigned)n->queries,
+                 (unsigned)n->blocked, (long long)(n->last + to_unix));
+        err = firc_bytebuf_append_str(b, buf);
+    }
+    if (err == FIRC_OK) { err = stat_put_owner(b, ctx, n); }
+    if (err == FIRC_OK) { err = firc_bytebuf_append_str(b, ",\"clients\":["); }
+    for (uint32_t i = 0; err == FIRC_OK && i < r.n; i++) {
+        char addr[INET6_ADDRSTRLEN];
+        const firc_ip_t *ip = &r.c[i].ip;
+        bool named = ip->len != 0 && inet_ntop(ip->len == 4 ? AF_INET : AF_INET6, ip->b, addr, sizeof(addr)) != NULL;
+        if (named) {
+            snprintf(buf, sizeof(buf), "%s{\"address\":\"%s\",\"queries\":%u}", i > 0 ? "," : "", addr,
+                     (unsigned)r.c[i].queries);
+        } else {
+            snprintf(buf, sizeof(buf), "%s{\"queries\":%u}", i > 0 ? "," : "", (unsigned)r.c[i].queries);
+        }
+        err = firc_bytebuf_append_str(b, buf);
+    }
+    if (err == FIRC_OK) {
+        snprintf(buf, sizeof(buf), "],\"clientsTotal\":%u}", (unsigned)n->clients);
+        err = firc_bytebuf_append_str(b, buf);
+    }
+    return err;
+}
+
+static void stat_scratch_free(struct dnsstat_scratch *sc) {
+    if (sc == NULL) { return; }
+    free(sc->names);
+    free(sc->matched);
+    free(sc->picks);
+    free(sc->clients);
+    free(sc);
+}
+
+static struct dnsstat_scratch *stat_scratch(firc_system_ctx_t *ctx, size_t slots) {
+    struct dnsstat_scratch *sc = ctx->dnsstat_scratch;
+    if (sc != NULL && sc->slots != slots) {
+        stat_scratch_free(sc);
+        sc = ctx->dnsstat_scratch = NULL;
+    }
+    size_t cap = slots > 0 ? slots : 1;
+    if (sc == NULL) {
+        sc = calloc(1, sizeof(*sc));
+        if (sc == NULL) { return NULL; }
+        sc->slots = slots;
+        sc->names = calloc(cap, sizeof(*sc->names));
+        sc->matched = malloc(cap * sizeof(*sc->matched));
+        sc->picks = malloc(cap * sizeof(*sc->picks));
+        sc->clients = malloc(cap * sizeof(*sc->clients));
+        if (sc->names == NULL || sc->matched == NULL || sc->picks == NULL || sc->clients == NULL) {
+            stat_scratch_free(sc);
+            return NULL;
+        }
+        ctx->dnsstat_scratch = sc;
+    }
+    if (++sc->gen == 0) {
+        memset(sc->names, 0, cap * sizeof(*sc->names));
+        sc->gen = 1;
+    }
+    return sc;
+}
+
+static void handle_dnsstats(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    firc_system_ctx_t *ctx = ud;
+    stat_walk_t w;
+    memset(&w, 0, sizeof(w));
+    size_t offset = 0, limit = DNSSTAT_PAGE_DEFAULT;
+    if (!firc_http_req_size(req, res, "offset", 0, &offset)) { return; }
+    if (!firc_http_req_size(req, res, "limit", DNSSTAT_PAGE_DEFAULT, &limit)) { return; }
+    if (limit == 0) { limit = DNSSTAT_PAGE_DEFAULT; }
+    if (limit > DNSSTAT_PAGE_MAX) { limit = DNSSTAT_PAGE_MAX; }
+    if (offset > DNSSTAT_PAGE_SPAN - limit) {
+        firc_http_res_write_error(res, 400, "invalid offset: offset + limit is at most 550");
+        return;
+    }
+    if (!stat_read_devices(req, res, &w)) { return; }
+    const char *arpa = firc_http_req_query(req, "arpa");
+    w.arpa = arpa != NULL && strcmp(arpa, "1") == 0;
+    char needle[DNSSTAT_QUERY_VALUE_MAX + 1];
+    const char *q = firc_http_req_query(req, "q");
+    if (q != NULL && q[0] != '\0') {
+        size_t i = 0;
+        for (; i < DNSSTAT_QUERY_VALUE_MAX && q[i] != '\0'; i++) { needle[i] = (char)tolower((unsigned char)q[i]); }
+        needle[i] = '\0';
+        w.needle = needle;
+        w.needle_len = i;
+    }
+
+    int64_t now_mono = mono_s();
+    int64_t to_unix = (int64_t)time(NULL) - now_mono;
+    size_t slots = firc_dnsstat_name_slots(ctx->dnsstat);
+    struct dnsstat_scratch *sc = stat_scratch(ctx, slots);
+    if (sc == NULL) {
+        firc_http_res_write_error(res, 500, firc_err_str(FIRC_ERR_NOMEM));
+        return;
+    }
+    w.store = ctx->dnsstat;
+    w.names = sc->names;
+    w.matched_slots = sc->matched;
+    w.picks = sc->picks;
+    w.clients = sc->clients;
+    w.slots = slots;
+    w.gen = sc->gen;
+    firc_dnsstat_each(ctx->dnsstat, now_mono, stat_aggregate, &w);
+    size_t k = offset + limit < slots ? offset + limit : slots;
+    size_t n_top = stat_select(&w, k, sc->heap);
+    size_t n_rows = n_top > offset ? n_top - offset : 0;
+
+    uint64_t queries = w.queries, blocked = w.blocked;
+    if (w.n_devices == 0) {
+        firc_dnsstat_count_t t = firc_dnsstat_totals(ctx->dnsstat, now_mono);
+        firc_dnsstat_count_t a = w.arpa ? (firc_dnsstat_count_t){0, 0} : firc_dnsstat_totals_arpa(ctx->dnsstat, now_mono);
+        queries = t.queries > a.queries ? t.queries - a.queries : 0;
+        blocked = t.blocked > a.blocked ? t.blocked - a.blocked : 0;
+    }
+    int64_t since = ctx->dnsstat != NULL ? ctx->dnsstat_since_mono + to_unix : now_mono + to_unix;
+    firc_bytebuf_t b;
+    firc_bytebuf_init(&b);
+    char head[224];
+    snprintf(head, sizeof(head),
+             "{\"window\":%d,\"now\":%lld,\"since\":%lld,\"queries\":%llu,\"blocked\":%llu,\"domains\":%zu,"
+             "\"rows\":[",
+             FIRC_DNSSTAT_HOUR * FIRC_DNSSTAT_HOURS, (long long)(now_mono + to_unix), (long long)since,
+             (unsigned long long)queries, (unsigned long long)blocked, w.domains);
+    firc_err_t err = firc_bytebuf_append_str(&b, head);
+    for (size_t i = 0; err == FIRC_OK && i < n_rows; i++) {
+        if (i > 0) { err = firc_bytebuf_append_byte(&b, ','); }
+        if (err == FIRC_OK) { err = stat_put_row(&b, ctx, &w, sc->heap[offset + i], to_unix); }
+    }
+    if (err == FIRC_OK) {
+        char tail[96];
+        snprintf(tail, sizeof(tail), "],\"matched\":%zu,\"offset\":%zu}", w.matched, offset);
+        err = firc_bytebuf_append_str(&b, tail);
+    }
+    firc_http_res_take_json(res, &b, err);
+}
+
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx) {
     must_route(h, "GET", "/api/v1/system/interfaces", handle_list_interfaces, ctx);
     must_route(h, "GET", "/api/v1/system/events", handle_events, ctx);
+    must_route(h, "GET", "/api/v1/system/dnsstats", handle_dnsstats, ctx);
     must_route(h, "GET", "/api/v1/system/policies", handle_policies, ctx);
     must_route(h, "GET", "/api/v1/system/hosts", handle_hosts, ctx);
     must_route(h, "GET", "/api/v1/system/resolvers", handle_resolvers, ctx);

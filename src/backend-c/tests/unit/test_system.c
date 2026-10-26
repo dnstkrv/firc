@@ -16,6 +16,7 @@
 #include <cjson/cJSON.h>
 
 #include "firc/app.h"
+#include "firc/dnsstat.h"
 #include "firc/events.h"
 #include "firc/keenetic_policy.h"
 #include "firc/keenetic_rci.h"
@@ -25,6 +26,14 @@
 #include "firc/tunnels.h"
 
 static void *g_policies;
+
+typedef struct harness harness_t;
+
+static firc_dnsstat_t *g_dnsstat;
+static int64_t g_dnsstat_since;
+static void (*g_before_loop)(harness_t *h);
+static harness_t *g_harness;
+static void harness_stop(harness_t *h);
 
 typedef struct stub_kn {
     const char *iface;
@@ -96,6 +105,11 @@ static void reset_stubs(void *ud) {
     g_kn = NULL;
     g_kn_delay_ms = 0;
     atomic_store(&g_kn_calls, 0);
+    if (g_harness != NULL) { harness_stop(g_harness); }
+    firc_dnsstat_free(g_dnsstat);
+    g_dnsstat = NULL;
+    g_dnsstat_since = 0;
+    g_before_loop = NULL;
 }
 
 static firc_err_t list_with_aliases(firc_iface_info_t **out, size_t *n) {
@@ -141,14 +155,19 @@ static harness_t *harness_start(bool with_config_path) {
 
     if (firc_loop_create(&h->loop) != FIRC_OK) { return NULL; }
     if (firc_httpd_create(h->loop, &h->tcp) != FIRC_OK) { return NULL; }
+    h->ctx.dnsstat = g_dnsstat;
+    h->ctx.dnsstat_since_mono = g_dnsstat_since;
+    if (g_before_loop != NULL) { g_before_loop(h); }
     firc_system_register_routes(h->tcp, &h->ctx);
     if (firc_httpd_listen_tcp(h->tcp, "127.0.0.1", TEST_PORT) != FIRC_OK) { return NULL; }
 
     pthread_create(&h->thread, NULL, loop_thread, h);
+    g_harness = h;
     return h;
 }
 
 static void harness_stop(harness_t *h) {
+    g_harness = NULL;
     firc_loop_stop(h->loop);
     pthread_join(h->thread, NULL);
     firc_system_close(&h->ctx);
@@ -1050,6 +1069,599 @@ TEST a_stop_during_an_rci_read_waits_for_it(void) {
     PASS();
 }
 
+static int64_t mono_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec;
+}
+
+static firc_ip_t v4(const char *s) {
+    firc_ip_t ip = {.len = 4};
+    inet_pton(AF_INET, s, ip.b);
+    return ip;
+}
+
+static void note_n(const char *name, const char *client, firc_id_t owner, bool blocked, int n, int64_t at) {
+    firc_ip_t c = v4(client);
+    for (int i = 0; i < n; i++) { firc_dnsstat_note(g_dnsstat, name, &c, owner, blocked, at); }
+}
+
+static double num(const cJSON *o, const char *key) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    return cJSON_IsNumber(v) ? v->valuedouble : -1;
+}
+
+static const char *str(const cJSON *o, const char *key) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    return cJSON_IsString(v) ? v->valuestring : "";
+}
+
+static const cJSON *rows_of(const cJSON *out) { return cJSON_GetObjectItemCaseSensitive(out, "rows"); }
+
+static const cJSON *row(const cJSON *out, int i) { return cJSON_GetArrayItem(rows_of(out), i); }
+
+static const firc_id_t NO_OWNER = {{0}};
+
+/* Catches: rows not merged by name, totals or clients not narrowed to the device asked, or the window misreported. */
+TEST dnsstats_aggregates_by_name_and_filters_by_device(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    g_dnsstat_since = m - 600;
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 3, m - 100);
+    note_n("b.test", "192.168.1.10", NO_OWNER, true, 1, m - 90);
+    note_n("a.test", "192.168.1.20", NO_OWNER, false, 1, m - 50);
+    note_n("b.test", "192.168.1.20", NO_OWNER, false, 2, m - 40);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    int64_t now = (int64_t)time(NULL);
+
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_EQ_FMT(86400.0, num(out, "window"), "%f");
+    ASSERT_IN_RANGE((double)(now - 600), num(out, "since"), 2.0);
+    ASSERT_IN_RANGE((double)now, num(out, "now"), 2.0);
+    ASSERT_IN_RANGE(num(out, "now") - 600.0, num(out, "since"), 1.0);
+    ASSERT_EQ_FMT(7.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(1.0, num(out, "blocked"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "matched"), "%f");
+    ASSERT_EQ_FMT(0.0, num(out, "offset"), "%f");
+    ASSERT_EQ_FMT(2, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+    ASSERT_EQ_FMT(4.0, num(row(out, 0), "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(row(out, 0), "blocked"), "%f");
+    ASSERT_IN_RANGE(num(out, "now") - 50.0, num(row(out, 0), "last"), 1.0);
+    ASSERT_IN_RANGE((double)(now - 50), num(row(out, 0), "last"), 2.0);
+    ASSERT(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(row(out, 0), "owner")));
+    ASSERT_EQ_FMT(2.0, num(row(out, 0), "clientsTotal"), "%f");
+    const cJSON *cl = cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients");
+    ASSERT_EQ_FMT(2, cJSON_GetArraySize(cl), "%d");
+    ASSERT_STR_EQ("192.168.1.10", str(cJSON_GetArrayItem(cl, 0), "address"));
+    ASSERT_EQ_FMT(3.0, num(cJSON_GetArrayItem(cl, 0), "queries"), "%f");
+    ASSERT_STR_EQ("192.168.1.20", str(cJSON_GetArrayItem(cl, 1), "address"));
+    ASSERT_EQ_FMT(1.0, num(cJSON_GetArrayItem(cl, 1), "queries"), "%f");
+    ASSERT_STR_EQ("b.test", str(row(out, 1), "name"));
+    ASSERT_EQ_FMT(3.0, num(row(out, 1), "queries"), "%f");
+    ASSERT_EQ_FMT(1.0, num(row(out, 1), "blocked"), "%f");
+    ASSERT_IN_RANGE((double)(now - 40), num(row(out, 1), "last"), 2.0);
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.20", NULL, &out));
+    ASSERT_EQ_FMT(3.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(out, "blocked"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+    ASSERT_STR_EQ("b.test", str(row(out, 0), "name"));
+    ASSERT_EQ_FMT(2.0, num(row(out, 0), "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(row(out, 0), "blocked"), "%f");
+    ASSERT_EQ_FMT(1.0, num(row(out, 0), "clientsTotal"), "%f");
+    cl = cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients");
+    ASSERT_EQ_FMT(1, cJSON_GetArraySize(cl), "%d");
+    ASSERT_STR_EQ("192.168.1.20", str(cJSON_GetArrayItem(cl, 0), "address"));
+    ASSERT_STR_EQ("a.test", str(row(out, 1), "name"));
+    ASSERT_EQ_FMT(1.0, num(row(out, 1), "queries"), "%f");
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=::ffff:192.168.1.20", NULL, &out));
+    ASSERT_EQ_FMT(3.0, num(out, "queries"), "%f");
+    ASSERT_STR_EQ("b.test", str(row(out, 0), "name"));
+    ASSERT_EQ_FMT(2.0, num(row(out, 0), "queries"), "%f");
+    ASSERT_STR_EQ("192.168.1.20", str(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients"), 0), "address"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10,192.168.1.99", NULL, &out));
+    ASSERT_EQ_FMT(4.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(1.0, num(out, "blocked"), "%f");
+    ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+    ASSERT_EQ_FMT(3.0, num(row(out, 0), "queries"), "%f");
+    ASSERT_IN_RANGE((double)(now - 100), num(row(out, 0), "last"), 2.0);
+    ASSERT_EQ_FMT(1.0, num(row(out, 1), "blocked"), "%f");
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=10.9.9.9", NULL, &out));
+    ASSERT_EQ_FMT(0.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(out, "domains"), "%f");
+    ASSERT_EQ_FMT(0, cJSON_GetArraySize(rows_of(out)), "%d");
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: rows out of order, a tie not broken by name, an offset or limit misapplied, or a search that narrows the totals. */
+TEST dnsstats_pages_and_searches(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    static const int order[] = {3, 9, 0, 6, -1, 1, 8, 4, 2, 7, 5};
+    for (size_t j = 0; j < sizeof(order) / sizeof(order[0]); j++) {
+        int i = order[j];
+        if (i < 0) {
+            note_n("other.example", "192.168.1.10", NO_OWNER, false, 5, m);
+            continue;
+        }
+        char name[24];
+        snprintf(name, sizeof(name), "n%d.test", i);
+        note_n(name, "192.168.1.10", NO_OWNER, false, i + 1, m);
+    }
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=2&limit=3", NULL, &out));
+    ASSERT_EQ_FMT(11.0, num(out, "matched"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "offset"), "%f");
+    ASSERT_EQ_FMT(60.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(3, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("n7.test", str(row(out, 0), "name"));
+    ASSERT_STR_EQ("n6.test", str(row(out, 1), "name"));
+    ASSERT_STR_EQ("n5.test", str(row(out, 2), "name"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=5&limit=3", NULL, &out));
+    ASSERT_STR_EQ("n4.test", str(row(out, 0), "name"));
+    ASSERT_STR_EQ("other.example", str(row(out, 1), "name"));
+    ASSERT_STR_EQ("n3.test", str(row(out, 2), "name"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?q=EXAM", NULL, &out));
+    ASSERT_EQ_FMT(1.0, num(out, "matched"), "%f");
+    ASSERT_EQ_FMT(11.0, num(out, "domains"), "%f");
+    ASSERT_EQ_FMT(60.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(1, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("other.example", str(row(out, 0), "name"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?limit=0", NULL, &out));
+    ASSERT_EQ_FMT(11, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("n9.test", str(row(out, 0), "name"));
+    ASSERT_STR_EQ("n0.test", str(row(out, 10), "name"));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=500&limit=50", NULL, &out));
+    ASSERT_EQ_FMT(0, cJSON_GetArraySize(rows_of(out)), "%d");
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?offset=501&limit=50", NULL, &out));
+    ASSERT(strstr(str(out, "error"), "offset") != NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?offset=51&limit=500", NULL, &out));
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?offset=501", NULL, &out));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=20", NULL, &out));
+    ASSERT_EQ_FMT(0, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_EQ_FMT(11.0, num(out, "matched"), "%f");
+    cJSON_Delete(out);
+
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?limit=abc", NULL, &out));
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?offset=-1", NULL, &out));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static const firc_id_t G1 = {{1, 1, 1, 1}};
+static const firc_id_t G2 = {{2, 2, 2, 2}};
+
+static firc_group_t *named_group(firc_id_t id, const char *name, const char *iface) {
+    firc_group_t *g = firc_group_new();
+    g->id = id;
+    firc_strset(&g->name, name);
+    firc_strset(&g->iface, iface);
+    return g;
+}
+
+static void add_owner_groups(harness_t *h) {
+    firc_app_add_group(h->app, named_group(G1, "first", "nwg0"));
+    firc_app_add_group(h->app, named_group(G2, "block grp", "block"));
+}
+
+typedef struct {
+    harness_t *h;
+    bool remove;
+    _Atomic int done;
+} group_edit_t;
+
+static void group_edit_on_loop(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    group_edit_t *e = ud;
+    if (e->remove) {
+        firc_app_remove_group_by_id(e->h->app, G1);
+    } else {
+        firc_strset(&firc_ruleset_group_mut(firc_app_find_group_by_id(e->h->app, G1))->name, "renamed");
+    }
+    atomic_store(&e->done, 1);
+}
+
+static bool edit_g1(harness_t *h, bool remove) {
+    group_edit_t e = {.h = h, .remove = remove};
+    if (firc_loop_post(h->loop, group_edit_on_loop, &e) != FIRC_OK) { return false; }
+    for (int i = 0; i < 200 && !atomic_load(&e.done); i++) {
+        struct timespec ts = {0, 10000000};
+        nanosleep(&ts, NULL);
+    }
+    return atomic_load(&e.done) != 0;
+}
+
+/* Catches: an owner frozen at the time of the query, a deleted group still named, or the owner not the newest client's. */
+TEST dnsstats_names_the_owner_at_read_time(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    note_n("x.test", "192.168.1.10", G1, false, 1, m - 100);
+    note_n("x.test", "192.168.1.20", G2, true, 1, m - 50);
+    note_n("y.test", "192.168.1.10", NO_OWNER, false, 1, m - 40);
+    g_before_loop = add_owner_groups;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_STR_EQ("x.test", str(row(out, 0), "name"));
+    const cJSON *o = cJSON_GetObjectItemCaseSensitive(row(out, 0), "owner");
+    ASSERT_STR_EQ("02020202", str(o, "id"));
+    ASSERT_STR_EQ("block grp", str(o, "name"));
+    ASSERT_STR_EQ("block", str(o, "interface"));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(o, "blocked")));
+    ASSERT_STR_EQ("y.test", str(row(out, 1), "name"));
+    ASSERT(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(row(out, 1), "owner")));
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10", NULL, &out));
+    o = cJSON_GetObjectItemCaseSensitive(row(out, 0), "owner");
+    ASSERT_STR_EQ("01010101", str(o, "id"));
+    ASSERT_STR_EQ("first", str(o, "name"));
+    ASSERT_STR_EQ("nwg0", str(o, "interface"));
+    ASSERT(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(o, "blocked")));
+    cJSON_Delete(out);
+
+    ASSERT(edit_g1(h, false));
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10", NULL, &out));
+    ASSERT_STR_EQ("renamed", str(cJSON_GetObjectItemCaseSensitive(row(out, 0), "owner"), "name"));
+    cJSON_Delete(out);
+
+    ASSERT(edit_g1(h, true));
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10", NULL, &out));
+    ASSERT_STR_EQ("x.test", str(row(out, 0), "name"));
+    ASSERT(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(row(out, 0), "owner")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+static int get_body(const char *path, char *body, size_t cap) {
+    int fd = connect_tcp(TEST_PORT);
+    if (fd < 0) { return -1; }
+    char req[1024];
+    snprintf(req, sizeof(req), "GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", path);
+    if (send(fd, req, strlen(req), 0) <= 0) {
+        close(fd);
+        return -1;
+    }
+    char resp[16384];
+    ssize_t got = recv_response(fd, resp, sizeof(resp));
+    close(fd);
+    if (got <= 0) { return -1; }
+    snprintf(body, cap, "%s", body_of(resp));
+    return status_code_of(resp);
+}
+
+static void add_quoted_group(harness_t *h) { firc_app_add_group(h->app, named_group(G1, "g \"1\"", "nwg0")); }
+
+/* Catches: a row written with other keys, order, number form or string escapes than the API has always answered. */
+TEST dnsstats_answers_the_exact_bytes(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    g_dnsstat_since = m - 600;
+    const char *odd = "q\"b\\s\x01\b\f\n\r\t\x7f\xc3\xa9.test";
+    firc_ip_t six = {.len = 16};
+    inet_pton(AF_INET6, "fd00::5", six.b);
+    for (int i = 0; i < 3; i++) { firc_dnsstat_note(g_dnsstat, odd, &six, NO_OWNER, true, m - 200); }
+    note_n(odd, "192.168.1.10", G1, false, 2, m - 100);
+    note_n("plain.test", "192.168.1.10", NO_OWNER, false, 1, m - 50);
+    g_before_loop = add_quoted_group;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+
+    char body[4096], want[4096];
+    int64_t before = 0, after = 1;
+    for (int tries = 0; tries < 5 && before != after; tries++) {
+        before = mono_s();
+        ASSERT_EQ(200, get_body("/api/v1/system/dnsstats", body, sizeof(body)));
+        after = mono_s();
+    }
+    ASSERT_EQ(before, after);
+    const char *at = strstr(body, "\"now\":");
+    ASSERT(at != NULL);
+    long long now = strtoll(at + 6, NULL, 10), to_unix = now - (long long)before;
+    snprintf(want, sizeof(want),
+             "{\"window\":86400,\"now\":%lld,\"since\":%lld,\"queries\":6,\"blocked\":3,\"domains\":2,\"rows\":["
+             "{\"name\":\"q\\\"b\\\\s\\u0001\\b\\f\\n\\r\\t\x7f\xc3\xa9.test\",\"queries\":5,\"blocked\":3,\"last\":%lld,"
+             "\"owner\":{\"id\":\"01010101\",\"name\":\"g \\\"1\\\"\",\"interface\":\"nwg0\",\"blocked\":false},"
+             "\"clients\":[{\"address\":\"fd00::5\",\"queries\":3},{\"address\":\"192.168.1.10\",\"queries\":2}],"
+             "\"clientsTotal\":2},"
+             "{\"name\":\"plain.test\",\"queries\":1,\"blocked\":0,\"last\":%lld,\"owner\":null,"
+             "\"clients\":[{\"address\":\"192.168.1.10\",\"queries\":1}],\"clientsTotal\":1}"
+             "],\"matched\":2,\"offset\":0}",
+             now, (long long)(m - 600) + to_unix, (long long)(m - 100) + to_unix, (long long)(m - 50) + to_unix);
+    ASSERT_STR_EQ(want, body);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: an address that does not parse, or a list cut short, answered as a device that asked nothing. */
+TEST dnsstats_refuses_a_bad_device_address(void) {
+    g_dnsstat = firc_dnsstat_new(64);
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 1, mono_s());
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10,nope", NULL, &out));
+    ASSERT(strstr(str(out, "error"), "nope") != NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.300", NULL, &out));
+    ASSERT(strstr(str(out, "error"), "192.168.1.300") != NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10,", NULL, &out));
+    cJSON_Delete(out);
+    char path[1024] = "/api/v1/system/dnsstats?device=10.0.0.1";
+    for (int i = 2; i <= 13; i++) {
+        size_t l = strlen(path);
+        snprintf(path + l, sizeof(path) - l, ",10.0.0.%d", i);
+    }
+    ASSERT_EQ(400, do_request("GET", path, NULL, &out));
+    cJSON_Delete(out);
+    snprintf(path, sizeof(path), "/api/v1/system/dnsstats?device=");
+    for (int i = 0; i < 11; i++) { strcat(path, "0000:0000:0000:0000:0000:ffff:192.168.100.100,"); }
+    strcat(path, "::1:2:3");
+    ASSERT_EQm("a value cut at 511 bytes to ::1:2", 400, do_request("GET", path, NULL, &out));
+    cJSON_Delete(out);
+    snprintf(path, sizeof(path), "/api/v1/system/dnsstats?device=");
+    for (int i = 0; i < 11; i++) { strcat(path, "1111:2222:3333:4444:5555:6666:7777:8888,"); }
+    strcat(path, "::1");
+    ASSERT_EQm("twelve full v6 addresses fit", 200, do_request("GET", path, NULL, &out));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: every client listed for a busy name, the wrong sixteen kept, or clientsTotal counting only those listed. */
+TEST dnsstats_caps_clients_per_row(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    for (int i = 1; i <= 20; i++) {
+        char c[16];
+        snprintf(c, sizeof(c), "10.0.0.%d", i);
+        note_n("many.test", c, NO_OWNER, false, i, m);
+    }
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_EQ_FMT(210.0, num(row(out, 0), "queries"), "%f");
+    ASSERT_EQ_FMT(20.0, num(row(out, 0), "clientsTotal"), "%f");
+    const cJSON *cl = cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients");
+    ASSERT_EQ_FMT(16, cJSON_GetArraySize(cl), "%d");
+    for (int i = 0; i < 16; i++) {
+        char want[16];
+        snprintf(want, sizeof(want), "10.0.0.%d", 20 - i);
+        ASSERT_STR_EQ(want, str(cJSON_GetArrayItem(cl, i), "address"));
+        ASSERT_EQ_FMT((double)(20 - i), num(cJSON_GetArrayItem(cl, i), "queries"), "%f");
+    }
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: reverse lookups shown or counted by default, a name merely containing arpa hidden, or arpa=1 ignored. */
+TEST dnsstats_hides_arpa_unless_asked(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 2, m);
+    note_n("10.1.168.192.in-addr.arpa", "192.168.1.10", NO_OWNER, false, 2, m);
+    note_n("10.1.168.192.in-addr.arpa", "192.168.1.10", NO_OWNER, true, 1, m);
+    note_n("arpa.example", "192.168.1.10", NO_OWNER, false, 1, m);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    const char *paths[] = {"/api/v1/system/dnsstats", "/api/v1/system/dnsstats?device=192.168.1.10"};
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(200, do_request("GET", paths[i], NULL, &out));
+        ASSERT_EQ_FMT(3.0, num(out, "queries"), "%f");
+        ASSERT_EQ_FMT(0.0, num(out, "blocked"), "%f");
+        ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(2.0, num(out, "matched"), "%f");
+        ASSERT_EQ_FMT(2, cJSON_GetArraySize(rows_of(out)), "%d");
+        ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+        ASSERT_STR_EQ("arpa.example", str(row(out, 1), "name"));
+        cJSON_Delete(out);
+    }
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?arpa=1", NULL, &out));
+    ASSERT_EQ_FMT(6.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(1.0, num(out, "blocked"), "%f");
+    ASSERT_EQ_FMT(3.0, num(out, "domains"), "%f");
+    ASSERT_EQ_FMT(3, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("10.1.168.192.in-addr.arpa", str(row(out, 0), "name"));
+    ASSERT_EQ_FMT(1.0, num(row(out, 0), "blocked"), "%f");
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?arpa=true", NULL, &out));
+    ASSERT_EQ_FMT(3.0, num(out, "queries"), "%f");
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: queries of evicted reverse-lookup keys left in the default totals. */
+TEST dnsstats_default_totals_exclude_evicted_arpa(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(2);
+    note_n("1.0.0.10.in-addr.arpa", "192.168.1.10", NO_OWNER, true, 1, m);
+    note_n("2.0.0.10.in-addr.arpa", "192.168.1.10", NO_OWNER, false, 1, m);
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 3, m);
+    note_n("b.test", "192.168.1.10", NO_OWNER, false, 2, m);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_EQ_FMT(5.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(out, "blocked"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?arpa=1", NULL, &out));
+    ASSERT_EQ_FMT(7.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(1.0, num(out, "blocked"), "%f");
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: the totals summed from the keys left, so queries of an evicted key drop out of the day. */
+TEST dnsstats_totals_keep_what_eviction_dropped(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(2);
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 3, m);
+    note_n("b.test", "192.168.1.10", NO_OWNER, true, 2, m);
+    note_n("c.test", "192.168.1.10", NO_OWNER, false, 1, m);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_EQ_FMT(6.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "blocked"), "%f");
+    ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+    ASSERT_EQ_FMT(2, cJSON_GetArraySize(rows_of(out)), "%d");
+    ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+    ASSERT_STR_EQ("c.test", str(row(out, 1), "name"));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.10", NULL, &out));
+    ASSERT_EQ_FMT(4.0, num(out, "queries"), "%f");
+    ASSERT_EQ_FMT(0.0, num(out, "blocked"), "%f");
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a page edge inside a run of equal counts filled in visit order instead of by name. */
+TEST dnsstats_breaks_ties_at_the_page_edge_by_name(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    static const int order[] = {7, 2, 9, 0, 5, 3, 8, 1, 6, 4};
+    for (size_t j = 0; j < sizeof(order) / sizeof(order[0]); j++) {
+        char name[24];
+        snprintf(name, sizeof(name), "t%d.test", order[j]);
+        note_n(name, "192.168.1.10", NO_OWNER, false, 3, m);
+    }
+    note_n("hi.test", "192.168.1.10", NO_OWNER, false, 9, m);
+    note_n("lo.test", "192.168.1.10", NO_OWNER, false, 1, m);
+    note_n("mid.test", "192.168.1.10", NO_OWNER, false, 5, m);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?limit=5", NULL, &out));
+    ASSERT_EQ_FMT(13.0, num(out, "matched"), "%f");
+    const char *first[] = {"hi.test", "mid.test", "t0.test", "t1.test", "t2.test"};
+    ASSERT_EQ_FMT(5, cJSON_GetArraySize(rows_of(out)), "%d");
+    for (int i = 0; i < 5; i++) { ASSERT_STR_EQ(first[i], str(row(out, i), "name")); }
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=6&limit=3", NULL, &out));
+    const char *later[] = {"t4.test", "t5.test", "t6.test"};
+    ASSERT_EQ_FMT(3, cJSON_GetArraySize(rows_of(out)), "%d");
+    for (int i = 0; i < 3; i++) { ASSERT_STR_EQ(later[i], str(row(out, i), "name")); }
+    cJSON_Delete(out);
+
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=10&limit=5", NULL, &out));
+    const char *last[] = {"t8.test", "t9.test", "lo.test"};
+    ASSERT_EQ_FMT(3, cJSON_GetArraySize(rows_of(out)), "%d");
+    for (int i = 0; i < 3; i++) { ASSERT_STR_EQ(last[i], str(row(out, i), "name")); }
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a name's sums, clients, search match or row carried from one request into the next. */
+TEST dnsstats_requests_in_a_row_answer_apart(void) {
+    int64_t m = mono_s();
+    g_dnsstat = firc_dnsstat_new(64);
+    note_n("a.test", "192.168.1.10", NO_OWNER, false, 3, m - 30);
+    note_n("a.test", "192.168.1.20", NO_OWNER, false, 1, m - 20);
+    note_n("b.test", "192.168.1.20", NO_OWNER, true, 2, m - 10);
+    note_n("c.example", "192.168.1.10", NO_OWNER, false, 1, m - 10);
+    note_n("1.0.168.192.in-addr.arpa", "192.168.1.10", NO_OWNER, false, 2, m - 10);
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+
+    cJSON *out = NULL;
+    for (int pass = 0; pass < 2; pass++) {
+        ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?q=example", NULL, &out));
+        ASSERT_EQ_FMT(3.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(1.0, num(out, "matched"), "%f");
+        ASSERT_EQ_FMT(1, cJSON_GetArraySize(rows_of(out)), "%d");
+        ASSERT_STR_EQ("c.example", str(row(out, 0), "name"));
+        ASSERT_EQ_FMT(1.0, num(row(out, 0), "queries"), "%f");
+        cJSON_Delete(out);
+
+        ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+        ASSERT_EQ_FMT(3.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(3.0, num(out, "matched"), "%f");
+        ASSERT_EQ_FMT(7.0, num(out, "queries"), "%f");
+        ASSERT_EQ_FMT(3, cJSON_GetArraySize(rows_of(out)), "%d");
+        ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+        ASSERT_EQ_FMT(4.0, num(row(out, 0), "queries"), "%f");
+        ASSERT_EQ_FMT(2.0, num(row(out, 0), "clientsTotal"), "%f");
+        ASSERT_EQ_FMT(2, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients")), "%d");
+        ASSERT_STR_EQ("b.test", str(row(out, 1), "name"));
+        ASSERT_EQ_FMT(2.0, num(row(out, 1), "blocked"), "%f");
+        cJSON_Delete(out);
+
+        ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?device=192.168.1.20", NULL, &out));
+        ASSERT_EQ_FMT(3.0, num(out, "queries"), "%f");
+        ASSERT_EQ_FMT(2.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(2, cJSON_GetArraySize(rows_of(out)), "%d");
+        ASSERT_STR_EQ("b.test", str(row(out, 0), "name"));
+        ASSERT_STR_EQ("a.test", str(row(out, 1), "name"));
+        ASSERT_EQ_FMT(1.0, num(row(out, 1), "queries"), "%f");
+        ASSERT_EQ_FMT(1.0, num(row(out, 1), "clientsTotal"), "%f");
+        cJSON_Delete(out);
+
+        ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?arpa=1&limit=1", NULL, &out));
+        ASSERT_EQ_FMT(4.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(4.0, num(out, "matched"), "%f");
+        ASSERT_STR_EQ("a.test", str(row(out, 0), "name"));
+        cJSON_Delete(out);
+
+        ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats?offset=1&limit=1", NULL, &out));
+        ASSERT_EQ_FMT(3.0, num(out, "domains"), "%f");
+        ASSERT_EQ_FMT(1, cJSON_GetArraySize(rows_of(out)), "%d");
+        ASSERT_STR_EQ("b.test", str(row(out, 0), "name"));
+        const cJSON *cl = cJSON_GetObjectItemCaseSensitive(row(out, 0), "clients");
+        ASSERT_EQ_FMT(1, cJSON_GetArraySize(cl), "%d");
+        ASSERT_STR_EQ("192.168.1.20", str(cJSON_GetArrayItem(cl, 0), "address"));
+        ASSERT_EQ_FMT(2.0, num(cJSON_GetArrayItem(cl, 0), "queries"), "%f");
+        cJSON_Delete(out);
+    }
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1083,5 +1695,16 @@ int main(int argc, char **argv) {
     RUN_TEST(a_slow_rci_does_not_hold_up_the_loop);
     RUN_TEST(callers_at_once_share_one_rci_read);
     RUN_TEST(a_stop_during_an_rci_read_waits_for_it);
+    RUN_TEST(dnsstats_aggregates_by_name_and_filters_by_device);
+    RUN_TEST(dnsstats_pages_and_searches);
+    RUN_TEST(dnsstats_requests_in_a_row_answer_apart);
+    RUN_TEST(dnsstats_breaks_ties_at_the_page_edge_by_name);
+    RUN_TEST(dnsstats_names_the_owner_at_read_time);
+    RUN_TEST(dnsstats_answers_the_exact_bytes);
+    RUN_TEST(dnsstats_refuses_a_bad_device_address);
+    RUN_TEST(dnsstats_caps_clients_per_row);
+    RUN_TEST(dnsstats_hides_arpa_unless_asked);
+    RUN_TEST(dnsstats_totals_keep_what_eviction_dropped);
+    RUN_TEST(dnsstats_default_totals_exclude_evicted_arpa);
     GREATEST_MAIN_END();
 }
