@@ -735,8 +735,9 @@
 
   .preview-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.5rem 0.75rem;
   }
 
   .preview-row :global(button) {
@@ -745,7 +746,7 @@
   }
 
   .preview-hint {
-    flex: 1 1 auto;
+    flex: 1 1 10rem;
     min-width: 0;
     font-size: 0.8rem;
     line-height: 1.3;

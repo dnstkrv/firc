@@ -305,4 +305,75 @@ test.describe("Tunnel inbounds", () => {
       expect(Math.abs(head.x - box.x)).toBeLessThanOrEqual(1);
     }
   });
+
+  // Catches a long interface name running its select into the Node column on a tablet.
+  test("at 768 px the interface select keeps clear of the node select", async ({ page }) => {
+    await page.setViewportSize({ width: 768, height: 900 });
+    const daemon = await stubDaemon(page, {
+      link: ["br0"],
+      interfaces: ["wg0", "br0"],
+      names: { br0: "Home network" },
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB], inbounds: [saved({ listen: "br0" })] })],
+      states: [state("a", "tunvless0")],
+    });
+    expect(daemon.link).toEqual(["br0"]);
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const row = tunnels.inboundRows("a").first();
+    await expect(row.locator(".cell").nth(1)).toContainText("Home network");
+    const iface = (await row
+      .locator(".cell")
+      .nth(1)
+      .locator("[data-select-trigger]")
+      .boundingBox())!;
+    const node = (await row
+      .locator(".cell")
+      .nth(2)
+      .locator("[data-select-trigger]")
+      .boundingBox())!;
+    expect(node.x - (iface.x + iface.width)).toBeGreaterThanOrEqual(4);
+  });
+
+  // Catches a "·" separator left dangling at the end of a wrapped head line on a phone.
+  test("on a phone the head line never ends a line with a separator", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 800 });
+    const live = [
+      { port: 1080, state: "up", why: "", rxBps: 4800, txBps: 1200 },
+      { port: 1081, state: "up", why: "", rxBps: 4800, txBps: 1200 },
+    ];
+    const daemon = await stubDaemon(page, {
+      tunnels: [
+        tunnel("a", "tunvless0", {
+          sources: [SUB],
+          inbounds: [saved({ port: 1080 }), saved({ port: 1081 })],
+        }),
+      ],
+      states: [state("a", "tunvless0", { inbounds: live, rxBps: 9600, txBps: 2400 })],
+    });
+    expect(daemon.states.length).toBe(1);
+    const tunnels = new TunnelsPage(page);
+    await tunnels.openOnPhone();
+    const line = tunnels.card("a").locator(".head .line");
+    await expect(line).toContainText(":1081");
+    const dangling = await line.evaluate((root) => {
+      const clip = (root.parentElement ?? root).getBoundingClientRect();
+      const all = [...root.querySelectorAll("*")].filter((el) => el.children.length === 0);
+      const rects = all.map((el) => ({ el, r: el.getBoundingClientRect() }));
+      return rects
+        .filter(({ el, r }) => el.textContent?.trim() === "·" && r.left >= clip.left)
+        .filter(
+          ({ el, r }) =>
+            !rects.some(
+              (o) =>
+                o.el !== el &&
+                o.el.textContent?.trim() !== "·" &&
+                o.r.width > 0 &&
+                Math.abs(o.r.top + o.r.height / 2 - (r.top + r.height / 2)) <= 4 &&
+                o.r.left >= r.right - 1,
+            ),
+        ).length;
+    });
+    expect(dangling).toBe(0);
+  });
 });

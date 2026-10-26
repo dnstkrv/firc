@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { answerConfirm } from "./pages/confirm";
 import { GroupsPage } from "./pages/GroupsPage";
@@ -518,7 +518,12 @@ test.describe("Groups Management", () => {
 
     const groupRules = page.locator(".group-rules");
     if (!(await groupRules.isVisible())) {
-      await page.locator("[data-collapsible-trigger]").first().click();
+      await page
+        .locator(".group-wrapper")
+        .first()
+        .locator("[data-collapsible-trigger]:visible")
+        .first()
+        .click();
     }
     await expect(groupRules).toBeVisible();
 
@@ -542,4 +547,400 @@ test.describe("Groups Management", () => {
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
   });
+});
+
+test.describe("Groups layout", () => {
+  const rule = (id: string, type: string, text: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name: "",
+    type,
+    rule: text,
+    enable: true,
+    ...extra,
+  });
+
+  async function openGroups(
+    page: Page,
+    width: number,
+    groups: unknown[],
+    {
+      locale = "ru",
+      expand = true,
+      interfaces = ["eth0", "wlan0"] as unknown[],
+    }: { locale?: string; expand?: boolean; interfaces?: unknown[] } = {},
+  ) {
+    await page.setViewportSize({ width, height: 900 });
+    await signedIn(page);
+    await page.addInitScript(
+      (value) => localStorage.setItem("locale", JSON.stringify({ value })),
+      locale,
+    );
+    await page.route("**/groups?with_rules=true", async (route) => {
+      await route.fulfill({ json: { groups } });
+    });
+    await page.route("**/interfaces", async (route) => {
+      await route.fulfill({ json: { interfaces } });
+    });
+    await page.route(/\/list\/rules(\?.*)?$/, async (route) => {
+      const rules = [rule("ccccccc1", "domain", "google.com"), rule("ccccccc2", "domain", "x.com")];
+      await route.fulfill({ json: { total: 2, matched: 2, offset: 0, rules } });
+    });
+    await page.goto("/");
+    await expect(page.locator(".group-wrapper")).toHaveCount(groups.length);
+    if (!expand) return;
+    for (const trigger of await page.locator("[data-collapsible-trigger]").all()) {
+      if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
+    }
+  }
+
+  const ruleGroup = {
+    id: "aaaaaaa1",
+    name: "Telegram",
+    interface: "eth0",
+    enable: true,
+    rules: [
+      rule("bbbbbbb1", "namespace", "oaiusercontent.com", { comment: "chat" }),
+      rule("bbbbbbb2", "subnet", "149.154.160.0/20", { proto: "udp", ports: "596-599,1400" }),
+      rule("bbbbbbb3", "subnet", "91.108.4.0/22"),
+    ],
+  };
+
+  for (const width of [768, 1024]) {
+    // Catches the ports chip shrinking before the pattern field, so "any protocol" ends in an ellipsis.
+    test(`at ${width} the ports chip shows its whole summary`, async ({ page }) => {
+      await openGroups(page, width, [ruleGroup]);
+      const chips = page.locator(".rule-ports");
+      await expect(chips).toHaveCount(2);
+      const cut = await page.$$eval(".rule-ports-summary", (els) =>
+        els.map((e) => e.scrollWidth > e.clientWidth),
+      );
+      expect(cut).toEqual([false, false]);
+      await expect(chips.first()).toHaveAttribute("title", "UDP · 596–599, 1400");
+    });
+  }
+
+  for (const [width, locale] of [
+    [360, "ru"],
+    [390, "ru"],
+    [360, "en"],
+  ] as const) {
+    // Catches the actions column eating the pattern field on a phone, and the comment icon floating between the lines.
+    test(`at ${width} ${locale} the pattern gets the row's width and the comment sits with the actions`, async ({
+      page,
+    }) => {
+      await openGroups(page, width, [ruleGroup], { locale });
+      await expect(page.locator(".rule")).toHaveCount(3);
+      const boxes = await page.$$eval(".rule", (rules) =>
+        rules.map((r) => {
+          const box = (s: string) => (r.querySelector(s) as HTMLElement).getBoundingClientRect();
+          const label = r.querySelector(".pattern .label") as HTMLElement;
+          const input = r.querySelector(".pattern-input") as HTMLInputElement;
+          const type = r.querySelector(".type .selected-value") as HTMLElement;
+          return {
+            typeCut: type.scrollWidth > type.clientWidth,
+            row: box(".rule-row").width,
+            input: box(".pattern-input"),
+            inputCut: input.scrollWidth > input.clientWidth,
+            labelCut: label.scrollWidth > label.clientWidth,
+            label: box(".pattern .label"),
+            type: box(".type"),
+            pattern: box(".pattern"),
+            comment: box(".rule-comment"),
+            switch: box('[role="switch"]'),
+          };
+        }),
+      );
+      for (const b of boxes) {
+        expect(b.input.width).toBeGreaterThan(b.row * 0.6);
+        expect(b.inputCut).toBe(false);
+        expect(b.typeCut).toBe(false);
+        expect(b.labelCut).toBe(false);
+        expect(b.label.right).toBeLessThanOrEqual(b.input.left + 0.5);
+        const mid = b.comment.top + b.comment.height / 2;
+        expect(mid).toBeGreaterThanOrEqual(b.type.top);
+        expect(mid).toBeLessThanOrEqual(b.type.bottom);
+        expect(Math.abs(mid - (b.switch.top + b.switch.height / 2))).toBeLessThan(2);
+        expect(b.comment.bottom).toBeLessThanOrEqual(b.pattern.top + 0.5);
+      }
+    });
+  }
+
+  // Catches the duplicate warning taking the type line's width on a phone, cutting "Namespace".
+  test("at 360 a rule with a duplicate warning keeps its type whole", async ({ page }) => {
+    const twin = (id: string, name: string, ruleId: string) => ({
+      id,
+      name,
+      interface: "eth0",
+      enable: true,
+      devices: { allow: [], deny: [] },
+      rules: [rule(ruleId, "namespace", "youtube.com")],
+    });
+    await openGroups(page, 360, [
+      twin("aaaaaaa5", "One", "ccccccc1"),
+      twin("aaaaaaa6", "Two", "ccccccc2"),
+    ]);
+    const row = page.locator(".group-wrapper").nth(1).locator(".rule").first();
+    await expect(row.locator(".duplicate-indicator")).toBeVisible();
+    const m = await row.evaluate((r) => {
+      const box = (s: string) => (r.querySelector(s) as HTMLElement).getBoundingClientRect();
+      const type = r.querySelector(".type .selected-value") as HTMLElement;
+      const input = r.querySelector(".pattern-input") as HTMLElement;
+      return {
+        typeCut: type.scrollWidth > type.clientWidth,
+        icon: box(".duplicate-indicator"),
+        pattern: box(".pattern"),
+        input: input.getBoundingClientRect(),
+      };
+    });
+    expect(m.typeCut).toBe(false);
+    const mid = m.icon.top + m.icon.height / 2;
+    expect(mid).toBeGreaterThanOrEqual(m.pattern.top);
+    expect(mid).toBeLessThanOrEqual(m.pattern.bottom);
+    expect(m.icon.left).toBeGreaterThanOrEqual(m.input.right - 0.5);
+  });
+
+  const listGroup = {
+    id: "aaaaaaa2",
+    name: "Bad Bad Services",
+    interface: "eth0",
+    enable: true,
+    rules: [],
+    list: {
+      url: "https://services.should.be.blocked.example/list.txt",
+      interval: 86400,
+      lastUpdate: 1700000000,
+      sync: { state: "idle", error: "", lastCheck: 1800000000 },
+      rulesTotal: 2,
+    },
+  };
+
+  for (const width of [360, 768, 1440]) {
+    // Catches the list sections' headings and rows sitting flush with the card edge, or a heading torn in two.
+    test(`at ${width} a list group's headings and rows keep an inset`, async ({ page }) => {
+      await openGroups(page, width, [listGroup]);
+      await expect(page.locator(".list-rule")).toHaveCount(2);
+      const m = await page.evaluate(() => {
+        const card = document.querySelector(".group") as HTMLElement;
+        const left = card.getBoundingClientRect().left;
+        const heads = [...card.querySelectorAll(".rules-section-header h3")].map((h) => {
+          const range = document.createRange();
+          range.selectNodeContents(h);
+          const tops = new Set([...range.getClientRects()].map((r) => Math.round(r.top)));
+          return { inset: h.getBoundingClientRect().left - left, lines: tops.size };
+        });
+        const firstText = [...card.querySelectorAll(".list-rule")].map((row) => {
+          const label = row.querySelector(".list-rule-pattern .label") as HTMLElement;
+          const shown = getComputedStyle(label).display !== "none";
+          const text = document.createRange();
+          text.selectNodeContents(
+            shown ? label : (row.querySelector(".list-rule-number") as HTMLElement),
+          );
+          return {
+            inset: text.getBoundingClientRect().left - left,
+            cut: shown && label.scrollWidth > label.clientWidth,
+          };
+        });
+        return { heads, firstText };
+      });
+      expect(m.heads).toHaveLength(2);
+      for (const h of m.heads) {
+        expect(h.inset).toBeGreaterThanOrEqual(8);
+        expect(h.lines).toBe(1);
+      }
+      for (const r of m.firstText) {
+        expect(r.inset).toBeGreaterThanOrEqual(8);
+        expect(r.cut).toBe(false);
+      }
+    });
+  }
+
+  for (const width of [768, 1440]) {
+    // Catches the type select centred in its column, so types of different lengths start at different places, and headers off their values.
+    test(`at ${width} rule columns line up with their headers`, async ({ page }) => {
+      await openGroups(page, width, [
+        {
+          ...ruleGroup,
+          rules: [...ruleGroup.rules, rule("bbbbbbb4", "wildcard", "*.youtube-nocookie.com")],
+        },
+        listGroup,
+      ]);
+      await expect(page.locator(".list-rule")).toHaveCount(2);
+      const m = await page.evaluate(() => {
+        const textLeft = (el: Element) => {
+          const node = [...el.childNodes].find((n) => n.nodeType === 3 && n.textContent!.trim());
+          const range = document.createRange();
+          range.selectNodeContents(node ?? el);
+          return range.getBoundingClientRect().left;
+        };
+        const head = (sel: string, i: number) =>
+          textLeft(document.querySelectorAll(sel)[i] as Element);
+        return {
+          types: [...document.querySelectorAll(".rule .type .selected-value")].map(textLeft),
+          patterns: [...document.querySelectorAll(".rule .pattern-input")].map(
+            (e) => e.getBoundingClientRect().left,
+          ),
+          typeHead: head(".group-rules-header-column", 1),
+          patternHead: head(".group-rules-header-column", 2),
+          listTypes: [...document.querySelectorAll(".list-rule-type .selected-value")].map(
+            textLeft,
+          ),
+          listPatterns: [...document.querySelectorAll(".list-rule-value")].map(textLeft),
+          listTypeHead: head(".list-rules-header-column", 1),
+          listPatternHead: head(".list-rules-header-column", 2),
+        };
+      });
+      for (const x of m.types) expect(Math.abs(x - m.typeHead)).toBeLessThan(2);
+      for (const x of m.patterns) expect(Math.abs(x - m.patternHead)).toBeLessThan(2);
+      for (const x of m.listTypes) expect(Math.abs(x - m.listTypeHead)).toBeLessThan(2);
+      for (const x of m.listPatterns) expect(Math.abs(x - m.listPatternHead)).toBeLessThan(2);
+    });
+  }
+
+  for (const width of [768, 1024, 1440]) {
+    // Catches the interface select hugging its label, so the card's columns move with the interface name, and the duplicate mark floating far from the name.
+    test(`at ${width} the group header columns stay put`, async ({ page }) => {
+      const group = (id: string, name: string, iface: string) => ({
+        id,
+        name,
+        interface: iface,
+        enable: true,
+        devices: { allow: [], deny: [] },
+        rules: [rule(`b${id.slice(1)}`, "namespace", "same.example.com")],
+      });
+      await openGroups(
+        page,
+        width,
+        [group("aaaaaaa1", "YouTube", "nwg0"), group("aaaaaaa2", "Telegram", "nwg1")],
+        {
+          expand: false,
+          interfaces: [
+            { id: "nwg0", name: "WARP", role: "tunnel" },
+            { id: "nwg1", name: "AmneziaWG NL", role: "tunnel" },
+          ],
+        },
+      );
+      await expect(page.locator(".group-duplicate-menu-trigger")).toHaveCount(1);
+      const m = await page.$$eval(".group-header", (heads) =>
+        heads.map((h) => {
+          const range = document.createRange();
+          range.selectNodeContents(h.querySelector(".iface-select .selected-value")!);
+          const mirror = h.querySelector(".name-mirror") as HTMLElement;
+          const text = document.createRange();
+          text.selectNodeContents(mirror);
+          const input = h.querySelector("input.group-name") as HTMLInputElement;
+          const ctx = document.createElement("canvas").getContext("2d")!;
+          const cs = getComputedStyle(input);
+          ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+          const warn = h.querySelector(".group-duplicate-menu-trigger");
+          return {
+            text: range.toString(),
+            label: range.getBoundingClientRect().left,
+            open: h.querySelector(".iface-select .selected-open")!.getBoundingClientRect().left,
+            nameEnd: input.getBoundingClientRect().left + ctx.measureText(input.value).width,
+            warn: warn ? warn.getBoundingClientRect().left : null,
+          };
+        }),
+      );
+      expect(m).toHaveLength(2);
+      expect(m.map((x) => x.text.trim())).toEqual(["WARP", "AmneziaWG NL"]);
+      expect(Math.abs(m[0].label - m[1].label)).toBeLessThan(1);
+      expect(Math.abs(m[0].open - m[1].open)).toBeLessThan(1);
+      const marked = m.find((x) => x.warn !== null)!;
+      expect(marked.warn! - marked.nameEnd).toBeGreaterThanOrEqual(0);
+      expect(marked.warn! - marked.nameEnd).toBeLessThan(40);
+    });
+  }
+
+  // Catches a match deep in a long pattern left behind the ellipsis, also once the field narrows after the search.
+  test("a match deep in a long pattern is scrolled into view at any width", async ({ page }) => {
+    const pattern =
+      "^([a-z0-9-]+\\.)*(cdn-assets-prefix|static-content-mirror|googlevideo|youtube)\\.(com|net)$";
+    await openGroups(
+      page,
+      1440,
+      [{ ...ruleGroup, rules: [...ruleGroup.rules, rule("bbbbbbb9", "regex", pattern)] }],
+      {
+        expand: false,
+      },
+    );
+    await new GroupsPage(page).search("youtube");
+    await page.locator("[data-collapsible-trigger]").click();
+    const markShown = () =>
+      page.evaluate(() => {
+        const overlay = document.querySelector(
+          ".rule[data-uuid='bbbbbbb9'] .search-highlight-overlay",
+        )!;
+        const m = overlay.querySelector("mark")!.getBoundingClientRect();
+        const o = overlay.getBoundingClientRect();
+        return o.width > 0 && m.left >= o.left - 0.5 && m.right <= o.right + 0.5;
+      });
+    const mark = page.locator(".rule[data-uuid='bbbbbbb9'] .search-highlight-overlay mark");
+    await expect(mark).toHaveCount(1);
+    await expect.poll(markShown).toBe(true);
+    for (const width of [768, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect.poll(markShown).toBe(true);
+    }
+  });
+
+  for (const width of [360, 390]) {
+    // Catches the block answer, the interface select and the list's update select left under 32 px to tap on a phone.
+    test(`at ${width} the header's small controls are 32 px to tap`, async ({ page }) => {
+      await openGroups(page, width, [
+        { ...ruleGroup, id: "aaaaaaa3", interface: "block", block: "nxdomain" },
+        listGroup,
+      ]);
+      const reach = (sel: string) =>
+        page.$$eval(sel, (els) =>
+          els.map((el) => {
+            const r = el.getBoundingClientRect();
+            const x = r.left + Math.min(r.width / 2, 12);
+            let n = 0;
+            for (let y = Math.floor(r.top) - 24; y <= Math.ceil(r.bottom) + 24; y++) {
+              const hit = document.elementFromPoint(x, y);
+              if (hit && (hit === el || el.contains(hit))) n++;
+            }
+            return n;
+          }),
+        );
+      for (const sel of [
+        ".block-answer",
+        ".group-header .iface-select [data-select-trigger]",
+        ".update-interval [data-select-trigger]",
+      ]) {
+        const heights = await reach(sel);
+        expect(heights.length, sel).toBeGreaterThan(0);
+        for (const h of heights) expect(h, sel).toBeGreaterThanOrEqual(32);
+      }
+    });
+  }
+
+  for (const [width, locale] of [
+    [360, "ru"],
+    [390, "ru"],
+    [360, "en"],
+  ] as const) {
+    // Catches the order hint leaving its last word alone on a line.
+    test(`at ${width} ${locale} the order hint ends with no lone word`, async ({ page }) => {
+      await openGroups(page, width, [], { locale, expand: false });
+      const tops = await page.locator(".order-hint").evaluate((el) => {
+        const node = el.firstChild!;
+        const text = node.textContent!;
+        const out: number[] = [];
+        let at = 0;
+        for (const word of text.split(/[ ]+/)) {
+          const start = text.indexOf(word, at);
+          at = start + word.length;
+          if (!word.trim()) continue;
+          const range = document.createRange();
+          range.setStart(node, start);
+          range.setEnd(node, at);
+          out.push(Math.round(range.getBoundingClientRect().top));
+        }
+        return out;
+      });
+      expect(tops.length).toBeGreaterThan(2);
+      expect(tops.at(-1)).toBe(tops.at(-2));
+    });
+  }
 });

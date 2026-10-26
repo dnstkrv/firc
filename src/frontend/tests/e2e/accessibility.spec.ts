@@ -46,6 +46,38 @@ test.describe("Accessibility", () => {
     await expect(bubble).toHaveAttribute("role", "tooltip");
   });
 
+  // Catches a tooltip left over the control after a click.
+  test("a click hides the tooltip", async ({ page }) => {
+    const button = page.locator(".info button");
+    await button.hover();
+    await expect(page.locator("#global-tooltip")).toHaveText("About this app");
+    await page.locator(".locale button").hover();
+    await expect(page.locator("#global-tooltip")).toHaveText("Change Locale");
+    await page.locator(".locale button").click();
+    await expect(page.locator("#global-tooltip")).toHaveCount(0);
+  });
+
+  // Catches a tooltip that keeps the words it opened with after its control changed them.
+  test("a shown tooltip follows its text", async ({ page }) => {
+    await page.locator(".info button").focus();
+    await page.keyboard.press("Tab");
+    await expect(page.locator(".locale button")).toBeFocused();
+    await expect(page.locator("#global-tooltip")).toHaveText("Change Locale");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("tab", { name: "Группы" })).toBeVisible();
+    await expect(page.locator("#global-tooltip")).toHaveText("Изменить язык");
+  });
+
+  // Catches the tooltip coming back when a dialog opened by a click hands focus back to its button.
+  test("closing a dialog does not bring its button's tooltip back", async ({ page }) => {
+    await page.locator(".info button").click();
+    await expect(page.locator("[data-dialog-content]")).toBeVisible();
+    await page.locator("[data-dialog-content] button[data-dialog-close].close").click();
+    await expect(page.locator("[data-dialog-content]")).toHaveCount(0);
+    await expect(page.locator(".info button")).toBeFocused();
+    await expect(page.locator("#global-tooltip")).toHaveCount(0);
+  });
+
   test("should focus group name on creation", async ({ page }) => {
     await groupsPage.createGroup();
 

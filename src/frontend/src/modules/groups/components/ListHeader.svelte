@@ -252,6 +252,10 @@
       max-width: 100%;
     }
 
+    .update-interval :global([data-select-trigger]) {
+      min-height: 2rem;
+    }
+
     .url-line {
       max-width: 100%;
     }

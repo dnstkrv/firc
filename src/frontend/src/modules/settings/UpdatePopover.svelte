@@ -174,6 +174,15 @@
     border-radius: 0.4rem;
     cursor: pointer;
   }
+  @media (max-width: 700px) {
+    :global(.version-button) {
+      box-sizing: border-box;
+      min-width: 32px;
+      min-height: 32px;
+      gap: 0.3rem;
+      padding: 0 0.2rem;
+    }
+  }
   :global(.version-button:hover),
   :global(.version-button:focus-visible) {
     background: var(--bg-light);

@@ -179,13 +179,14 @@
 
   .devices-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     align-items: center;
     gap: 0.75rem;
   }
 
   .done-hint {
-    flex: 1 1 auto;
+    flex: 1 1 16rem;
     min-width: 0;
     color: var(--orange);
   }

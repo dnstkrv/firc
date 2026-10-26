@@ -114,6 +114,24 @@
   );
   const hasPatternSearchHighlight = $derived(Boolean(patternHighlightParts));
 
+  let overlay = $state<HTMLDivElement>();
+
+  $effect(() => {
+    void patternHighlightParts;
+    const box = overlay;
+    if (!box) return;
+    const align = () => {
+      const mark = box.querySelector("mark");
+      const end = mark ? mark.offsetLeft + mark.offsetWidth : 0;
+      box.scrollLeft =
+        mark && end > box.clientWidth ? end - box.clientWidth + box.clientWidth / 4 : 0;
+    };
+    const observer = new ResizeObserver(align);
+    observer.observe(box);
+    void tick().then(align);
+    return () => observer.disconnect();
+  });
+
   function handlerDrop(source: DnDTransferData, target: DnDTransferData, edge: Edge) {
     if (source.rule_id === target.rule_id && source.group_id === target.group_id) {
       return;
@@ -179,7 +197,7 @@
             onfocusout={patternValidation}
           />
           {#if hasPatternSearchHighlight && patternHighlightParts}
-            <div class="search-highlight-overlay" aria-hidden="true">
+            <div class="search-highlight-overlay" aria-hidden="true" bind:this={overlay}>
               {#each patternHighlightParts as part}
                 {#if part.matched}
                   <mark>{part.text}</mark>
@@ -239,7 +257,7 @@
 
   .rule-row {
     display: grid;
-    grid-template-columns: 1.1rem 1fr 4fr 1fr;
+    grid-template-columns: 1.1rem minmax(8rem, 1fr) minmax(0, 4fr) 10rem;
     gap: 0.5rem;
     padding: 0.1rem;
     background: inherit;
@@ -275,6 +293,11 @@
 
   .pattern-fields.with-ports > .search-highlight-field {
     flex: 0 1 19rem;
+  }
+
+  .pattern-fields > :global(.rule-ports) {
+    flex-shrink: 0;
+    max-width: 60%;
   }
 
   .search-highlight-overlay {
@@ -374,7 +397,7 @@
   .pattern {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     padding: 0.1rem;
   }
 
@@ -450,22 +473,28 @@
     .rule-row {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto;
-      column-gap: 0.4rem;
+      column-gap: 0.25rem;
       row-gap: 0.35rem;
-      padding: 0.5rem 0.35rem 0.45rem;
+      padding: 0.5rem 0.25rem 0.45rem;
       align-items: start;
     }
     .label {
       display: block;
+      width: auto;
+      padding-right: 0;
+      white-space: nowrap;
     }
     .type,
     .pattern {
       display: grid;
-      grid-template-columns: 3.2rem minmax(0, 1fr);
+      grid-template-columns: 3.5rem minmax(0, 1fr);
       align-items: center;
-      gap: 0.35rem;
+      gap: 0.25rem;
       padding: 0.05rem 0;
       grid-column: 2;
+    }
+    .pattern {
+      grid-column: 2 / 4;
     }
     .pattern .label,
     .type .label {
@@ -494,6 +523,27 @@
     }
     .type :global([data-select-trigger]) {
       justify-content: flex-start;
+      max-width: 100%;
+    }
+    .type :global(.select-wrap),
+    .type :global([data-select-root]) {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .duplicate-indicator-slot.is-empty {
+      display: none;
+    }
+    .rule-row {
+      position: relative;
+    }
+    .duplicate-indicator-slot:not(.is-empty) {
+      position: absolute;
+      right: 0.25rem;
+      bottom: 0.45rem;
+      height: 1.6rem;
+    }
+    .rule-row:has(.duplicate-indicator-slot:not(.is-empty)) .pattern {
+      padding-right: 2rem;
     }
     .grip {
       grid-column: 1;
@@ -504,13 +554,13 @@
     }
     .actions {
       grid-column: 3;
-      grid-row: 1 / span 2;
+      grid-row: 1;
       display: flex;
       flex-direction: row;
-      gap: 0.35rem;
+      gap: 0.2rem;
       justify-content: center;
       align-items: center;
-      align-self: stretch;
+      align-self: center;
     }
   }
 </style>

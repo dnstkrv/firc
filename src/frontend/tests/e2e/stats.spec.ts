@@ -581,4 +581,122 @@ test.describe("DNS stats", () => {
     expect(daemon.settings).toEqual([{ settings: { "app.dnsProxy.disableStats": false } }]);
     await expect(page.getByRole("tab", { name: /Статистика запросов/ })).toContainText("7");
   });
+
+  for (const lang of ["ru", "en"]) {
+    for (const width of [1024, 1440]) {
+      // Catches a long domain cut by fixed columns that leave the devices area half empty.
+      test(`at ${width} px in ${lang} a long domain and every cell fit`, async ({ page }) => {
+        await page.addInitScript(
+          (l) => localStorage.setItem("locale", JSON.stringify({ value: l })),
+          lang,
+        );
+        await page.setViewportSize({ width, height: 900 });
+        await setup(
+          page,
+          [ADS_GROUP],
+          [
+            key("connectivitycheck.gstatic.com", "192.168.1.5", 400, 0, 2400, null),
+            key("connectivitycheck.gstatic.com", "192.168.1.42", 30, 0, 2400, null),
+            key("connectivitycheck.gstatic.com", "192.168.1.7", 20, 0, 2400, null),
+            key("connectivitycheck.gstatic.com", "192.168.1.8", 10, 0, 2400, null),
+          ],
+        );
+        await expect(row(page, "connectivitycheck.gstatic.com")).toBeVisible();
+        const over = await page.evaluate(() => {
+          const fits = (el: Element) => el.scrollWidth <= el.clientWidth;
+          const inside = (el: Element, cell: Element) => {
+            const a = el.getBoundingClientRect();
+            const b = cell.getBoundingClientRect();
+            return a.left >= b.left - 0.5 && a.right <= b.right + 0.5;
+          };
+          const bad: string[] = [];
+          for (const r of document.querySelectorAll(".stats-row")) {
+            const dom = r.querySelector(".dom")!;
+            if (!fits(dom)) bad.push(`dom ${dom.textContent}`);
+            for (const sel of [".devs .more", ".last", ".act > *", ".pct"])
+              for (const el of r.querySelectorAll(sel))
+                if (!inside(el, el.closest(".stats-row > *")!))
+                  bad.push(`${sel} ${el.textContent}`);
+          }
+          for (const h of document.querySelectorAll(".head > span"))
+            if (!fits(h)) bad.push(`head ${h.textContent}`);
+          return bad;
+        });
+        expect(over).toEqual([]);
+      });
+    }
+  }
+
+  // Catches the summary's second line starting with a dangling «·».
+  test("at 360 px a wrapped summary line never starts with a dot", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 800 });
+    await setup(page, [ADS_GROUP]);
+    const lines = await page.evaluate(() => {
+      const sum = document.querySelector(".stats-sum")!;
+      const left = document.querySelector(".st-bar")!.getBoundingClientRect().left;
+      const tops = new Set<number>();
+      const starts: number[] = [];
+      const walker = document.createTreeWalker(sum, NodeFilter.SHOW_TEXT);
+      const glyphs: { ch: string; x: number; top: number; seen: boolean }[] = [];
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const text = n.textContent ?? "";
+        for (let i = 0; i < text.length; i++) {
+          if (!text[i].trim()) continue;
+          const range = document.createRange();
+          range.setStart(n, i);
+          range.setEnd(n, i + 1);
+          const r = range.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          glyphs.push({
+            ch: text[i],
+            x: r.left,
+            top: Math.round(r.top),
+            seen: !!hit && sum.contains(hit) && r.right > left,
+          });
+        }
+      }
+      for (const g of glyphs) tops.add(g.top);
+      for (const top of tops) {
+        const visible = glyphs.filter((g) => g.top === top && g.seen).sort((a, b) => a.x - b.x);
+        if (visible.length) starts.push(visible[0].ch.charCodeAt(0));
+      }
+      return { lines: tops.size, starts: starts.map((c) => String.fromCharCode(c)) };
+    });
+    expect(lines.lines).toBeGreaterThan(1);
+    expect(lines.starts).not.toContain("·");
+  });
+
+  // Catches the phone table scrolling inside its box while the page scrolls too.
+  test("at 360 px only the page scrolls, not the table box", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 700 });
+    await setup(
+      page,
+      [ADS_GROUP],
+      Array.from({ length: 30 }, (_, i) =>
+        key(`host${i}.example.com`, "192.168.1.7", 5, 0, 60, null),
+      ),
+    );
+    await expect(page.locator(".stats-row")).toHaveCount(37);
+    const pane = await page.locator(".pane").evaluate((el) => ({
+      scroll: el.scrollHeight,
+      client: el.clientHeight,
+    }));
+    expect(pane.scroll).toBeLessThanOrEqual(pane.client + 1);
+    const doc = await page.evaluate(() => document.documentElement.scrollHeight);
+    expect(doc).toBeGreaterThan(700);
+  });
+
+  // Catches the desktop table losing its own scroll box and sticky header.
+  test("at 1440 px the table box scrolls under a sticky header", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await setup(
+      page,
+      [ADS_GROUP],
+      Array.from({ length: 30 }, (_, i) =>
+        key(`host${i}.example.com`, "192.168.1.7", 5, 0, 60, null),
+      ),
+    );
+    const pane = await page.locator(".pane").evaluate((el) => el.scrollHeight - el.clientHeight);
+    expect(pane).toBeGreaterThan(100);
+  });
 });

@@ -130,12 +130,6 @@
     }
   }
 
-  @media (max-width: 380px) {
-    .keys {
-      display: none;
-    }
-  }
-
   @media (max-width: 960px) {
     .info-label {
       display: none;
@@ -143,13 +137,21 @@
   }
 
   @media (max-width: 700px) {
+    .keys {
+      display: none;
+    }
+
     .locale,
     .logout {
       gap: 0.5rem;
     }
 
     .container {
-      gap: 0.5rem;
+      gap: 0.4rem;
+    }
+
+    .info :global(button) {
+      min-width: 34px;
     }
   }
 </style>

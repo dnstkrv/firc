@@ -135,7 +135,8 @@
   .nm {
     display: flex;
     align-items: center;
-    gap: 6px;
+    flex-wrap: wrap;
+    gap: 4px 6px;
     min-width: 0;
   }
   .name {

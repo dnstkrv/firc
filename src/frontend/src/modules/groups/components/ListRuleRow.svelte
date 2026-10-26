@@ -214,7 +214,7 @@
       grid-template-columns: minmax(0, 1fr) auto;
       column-gap: 0.4rem;
       row-gap: 0.35rem;
-      padding: 0.5rem 0.35rem 0.45rem;
+      padding: 0.5rem 0.35rem 0.45rem 0.6rem;
       align-items: start;
     }
 
@@ -230,12 +230,15 @@
 
     .label {
       display: block;
+      width: auto;
+      padding-right: 0;
+      white-space: nowrap;
     }
 
     .list-rule-type,
     .list-rule-pattern {
       display: grid;
-      grid-template-columns: 3.2rem minmax(0, 1fr);
+      grid-template-columns: 3.5rem minmax(0, 1fr);
       align-items: center;
       gap: 0.35rem;
       padding: 0.05rem 0;

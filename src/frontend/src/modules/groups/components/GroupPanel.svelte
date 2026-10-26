@@ -370,6 +370,7 @@
               <div class="group-name-field">
                 <input
                   type="text"
+                  size="1"
                   placeholder={t("group name...")}
                   class="group-name"
                   class:search-text-hidden={hasGroupNameSearchHighlight}
@@ -595,10 +596,10 @@
               <div class="group-rules-header-column total">
                 #{totalRulesCount}
               </div>
-              <div class="group-rules-header-column">{t("Type")}</div>
+              <div class="group-rules-header-column type">{t("Type")}</div>
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="group-rules-header-column clickable" onclick={handleSort}>
+              <div class="group-rules-header-column pattern clickable" onclick={handleSort}>
                 {t("Pattern")}
                 <div class="sort-icon">
                   {#if sorted && sortDirection === "desc"}
@@ -649,7 +650,7 @@
             {#if listMatchedCount > 0}
               <div class="list-rules-header">
                 <div class="list-rules-header-column"></div>
-                <div class="list-rules-header-column">{t("Type")}</div>
+                <div class="list-rules-header-column type">{t("Type")}</div>
                 <div class="list-rules-header-column pattern">{t("Pattern")}</div>
                 <div class="list-rules-header-column">{t("Enabled")}</div>
               </div>
@@ -1035,6 +1036,15 @@
       width: 9.5rem;
     }
 
+    .iface-stack :global(.iface-select [data-select-trigger]),
+    .iface-stack :global(.iface-select .selected) {
+      width: 100%;
+    }
+
+    .iface-stack :global(.iface-select .selected) {
+      justify-content: space-between;
+    }
+
     .iface-stack.block :global(.iface-select) {
       width: max-content;
       min-width: 9.5rem;
@@ -1050,10 +1060,12 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    padding: 0.6rem 0.1rem 0.2rem;
+    padding: 0.6rem 0.6rem 0.2rem;
   }
 
   .rules-section-header h3 {
+    flex: none;
+    white-space: nowrap;
     margin: 0;
     font-size: 0.95rem;
     font-weight: 600;
@@ -1085,13 +1097,19 @@
     justify-content: center;
   }
 
+  .list-rules-header-column.type {
+    justify-content: flex-start;
+    padding-left: 1.1rem;
+  }
+
   .list-rules-header-column.pattern {
     justify-content: flex-start;
+    padding-left: 0.5rem;
   }
 
   .group-rules-header {
     display: grid;
-    grid-template-columns: minmax(1.1rem, max-content) 1fr 4fr 1fr;
+    grid-template-columns: 1.1rem minmax(8rem, 1fr) minmax(0, 4fr) 10rem;
     gap: 0.5rem;
     padding-inline: 0.1rem;
     justify-content: center;
@@ -1112,9 +1130,17 @@
     }
 
     &.total {
-      justify-content: start;
-      margin-left: 0.5rem;
       white-space: nowrap;
+    }
+
+    &.type {
+      justify-content: flex-start;
+      padding-left: 0.7rem;
+    }
+
+    &.pattern {
+      justify-content: flex-start;
+      padding-left: 0.1rem;
     }
 
     &.enabled {
@@ -1208,6 +1234,10 @@
       width: 100%;
       justify-content: stretch;
       gap: 0.25rem;
+    }
+
+    .iface-stack :global(.iface-select [data-select-trigger]) {
+      min-height: 2rem;
     }
 
     :global(.group-actions > *:nth-child(1)) {

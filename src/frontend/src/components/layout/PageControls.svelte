@@ -135,6 +135,7 @@
       --gap: 10px;
       --actions-top: 0px;
       --actions-reserve: var(--actions-reserve-size);
+      min-height: var(--row-h);
     }
 
     .page-controls-search {

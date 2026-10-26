@@ -458,7 +458,7 @@ for (let i = 0; i < 20; i++) pushLogLine();
 setInterval(pushLogLine, 2000);
 setInterval(pushDnsEvent, 1000);
 
-const PORT = 6969;
+const PORT = Number(Deno.env.get("MOCK_PORT") ?? 6969);
 const STATIC_TOKEN = "firc_mock_token_2026";
 const AUTH_ENABLED = true;
 

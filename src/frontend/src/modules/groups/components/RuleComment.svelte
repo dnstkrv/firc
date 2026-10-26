@@ -37,7 +37,20 @@
     cut = false;
   }
 
-  function onInput(event: Event & { currentTarget: HTMLInputElement }) {
+  let field = $state<HTMLTextAreaElement>();
+
+  function grow() {
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight + field.offsetHeight - field.clientHeight}px`;
+  }
+
+  $effect(() => {
+    void draft;
+    grow();
+  });
+
+  function onInput(event: Event & { currentTarget: HTMLTextAreaElement }) {
     const value = event.currentTarget.value;
     if (utf8Length(value) > COMMENT_MAX_BYTES) {
       draft = cutToBytes(value);
@@ -79,17 +92,18 @@
       collisionPadding={8}
       onEscapeKeydown={() => apply(original)}
     >
-      <input
-        type="text"
+      <textarea
+        rows="1"
         class="rule-comment-input"
         aria-label={t("Comment")}
         placeholder={t("Comment")}
         enterkeyhint="done"
         aria-describedby={cut ? hintId : undefined}
+        bind:this={field}
         value={draft}
         oninput={onInput}
         onkeydown={onKeydown}
-      />
+      ></textarea>
       {#if cut}
         <div class="rule-comment-hint" id={hintId} role="status">{t("Up to 256 bytes")}</div>
       {/if}
@@ -143,8 +157,13 @@
   }
 
   .rule-comment-input {
+    display: block;
     width: 100%;
+    max-height: 10rem;
     box-sizing: border-box;
+    resize: none;
+    overflow-y: auto;
+    line-height: 1.35;
     padding: 0.2rem 0;
     border: none;
     border-bottom: 1px solid var(--bg-light-extra);

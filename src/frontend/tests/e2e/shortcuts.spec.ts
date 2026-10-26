@@ -169,3 +169,16 @@ test.describe("Keyboard shortcut hints on a phone", () => {
     await expect(keys).toBeHidden();
   });
 });
+
+test.describe("Keyboard shortcut hints on a narrow window", () => {
+  test.use({ viewport: { width: 360, height: 760 } });
+
+  // Catches the Ctrl F key-caps taking room in the phone-width search field.
+  test("the search key-caps are hidden", async ({ page }) => {
+    await setup(page);
+    await page.locator(".search-container").click();
+    await expect(page.locator(".search-input")).toBeFocused();
+    await expect(searchKeys(page)).toHaveCount(1);
+    await expect(searchKeys(page)).toBeHidden();
+  });
+});

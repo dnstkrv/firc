@@ -226,6 +226,10 @@
 />
 
 <style>
+  :global([data-select-content]:has(.iface-dot)) {
+    max-height: min(24rem, var(--bits-select-content-available-height, 24rem));
+  }
+
   .iface-circle {
     width: 20px;
     height: 20px;

@@ -88,4 +88,78 @@ test.describe("Header Settings", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).not.toBeVisible();
   });
+
+  for (const width of [360, 390]) {
+    test(`the version reads whole beside the Russian Settings title at ${width} px`, async ({
+      page,
+    }) => {
+      // Catches the version squeezed to an ellipsis by the longest phone title.
+      await page.evaluate(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));
+      await page.setViewportSize({ width, height: 760 });
+      await page.goto("/settings");
+      await expect(page.locator(".mobile-title")).toHaveText("Настройки");
+      const version = page.locator(".version .version-text");
+      await expect(version).toBeVisible();
+      const fit = await version.evaluate((el) => el.scrollWidth <= el.clientWidth);
+      expect(fit).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        width,
+      );
+    });
+
+    test(`the version and About buttons are big enough to tap at ${width} px`, async ({ page }) => {
+      // Catches header buttons shrunk below a 32 px tap target on a phone.
+      await page.setViewportSize({ width, height: 760 });
+      for (const selector of [".version-button", ".info button"]) {
+        const box = (await page.locator(selector).boundingBox())!;
+        expect(box.width, selector).toBeGreaterThanOrEqual(32);
+        expect(box.height, selector).toBeGreaterThanOrEqual(32);
+      }
+    });
+
+    test(`the shortcuts button is hidden alike at ${width} px`, async ({ page }) => {
+      // Catches the shortcuts button shown on one phone width and hidden on another.
+      await page.setViewportSize({ width, height: 760 });
+      await expect(page.locator(".keys button")).toHaveCount(1);
+      await expect(page.locator(".keys button")).toBeHidden();
+    });
+
+    test(`the page keeps a gutter from the screen edge at ${width} px`, async ({ page }) => {
+      // Catches the header and the page bar drawn a few pixels from the edge of a phone.
+      await page.setViewportSize({ width, height: 760 });
+      const nav = (await page.locator("nav").boundingBox())!;
+      const article = (await page.locator("article").boundingBox())!;
+      expect(nav.x).toBeGreaterThanOrEqual(8);
+      expect(article.x).toBeGreaterThanOrEqual(8);
+      expect(width - (article.x + article.width)).toBeGreaterThanOrEqual(8);
+    });
+  }
+
+  // Catches a phone menu that ignores Escape.
+  test("Escape closes the phone menu", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 760 });
+    const button = page.locator(".mobile-dropdown-btn");
+    await button.click();
+    await expect(button).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Escape");
+    await expect(button).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".menu-backdrop")).toHaveCount(0);
+  });
+
+  // Catches the update popover or the About dialog opened over a menu left open under it.
+  for (const [name, selector, opened] of [
+    ["update popover", ".version-button", ".update-popover"],
+    ["About dialog", ".info button", "[data-dialog-content]"],
+  ]) {
+    test(`opening the ${name} closes the phone menu`, async ({ page }) => {
+      await page.setViewportSize({ width: 360, height: 760 });
+      const button = page.locator(".mobile-dropdown-btn");
+      await button.click();
+      await expect(button).toHaveAttribute("aria-expanded", "true");
+      await page.locator(selector).click();
+      await expect(page.locator(opened)).toBeVisible();
+      await expect(button).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".tabs-panel")).toBeHidden();
+    });
+  }
 });

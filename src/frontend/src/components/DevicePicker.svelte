@@ -365,7 +365,7 @@
 
   .seg {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
     background: var(--bg-dark);
     border: 1px solid var(--bg-light-extra);
     border-radius: 0.5rem;
@@ -527,6 +527,12 @@
 
   .ip {
     color: var(--grey);
+  }
+
+  .ip,
+  .mac {
+    display: inline-block;
+    max-width: 100%;
   }
 
   @container (min-width: 520px) {

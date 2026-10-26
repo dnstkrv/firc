@@ -430,6 +430,7 @@
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
     color: var(--text-2);
+    text-wrap: pretty;
   }
 
   .group-list {

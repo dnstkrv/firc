@@ -3,8 +3,11 @@ import { t } from "../data/locale.svelte";
 
 import { toast } from "./events";
 
-const viteEnv = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env;
-export const API_BASE = viteEnv?.DEV ? `http://${location.hostname}:6969/api/v1` : "/api/v1";
+const viteEnv = (import.meta as ImportMeta & { env?: { DEV?: boolean; VITE_MOCK_PORT?: string } })
+  .env;
+export const API_BASE = viteEnv?.DEV
+  ? `http://${location.hostname}:${viteEnv.VITE_MOCK_PORT ?? "6969"}/api/v1`
+  : "/api/v1";
 
 export class HttpError extends Error {
   status: number;

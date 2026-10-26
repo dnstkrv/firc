@@ -158,44 +158,46 @@
     {/if}
     <span class="sp"></span>
     {#if !folded}
-      <Tooltip value={t(saved ? "Check every node now" : "Save the tunnel first")}>
-        <Button small class="text-btn" inactive={probing || !saved} onclick={() => void probe()}>
-          {#if probing}
-            <span class="spin"><LoaderCircle size={15} /></span>
-          {:else}
-            <Activity size={15} />
-          {/if}
-          {t("Check nodes")}
-        </Button>
-      </Tooltip>
-      <Tooltip value={t(measured ? "Sort by the measured latency" : "Check the nodes first")}>
-        <Button
-          small
-          class="text-btn"
-          inactive={!measured}
-          onclick={() => reorder(orderByLatency(visible, probes))}
+      <div class="tools">
+        <Tooltip value={t(saved ? "Check every node now" : "Save the tunnel first")}>
+          <Button small class="text-btn" inactive={probing || !saved} onclick={() => void probe()}>
+            {#if probing}
+              <span class="spin"><LoaderCircle size={15} /></span>
+            {:else}
+              <Activity size={15} />
+            {/if}
+            {t("Check nodes")}
+          </Button>
+        </Tooltip>
+        <Tooltip value={t(measured ? "Sort by the measured latency" : "Check the nodes first")}>
+          <Button
+            small
+            class="text-btn"
+            inactive={!measured}
+            onclick={() => reorder(orderByLatency(visible, probes))}
+          >
+            <SortByLatency size={15} />
+            {t("By latency")}
+          </Button>
+        </Tooltip>
+        <Tooltip
+          value={t(
+            tunnel.order.length > 0
+              ? "Drop the saved order: nodes go as the sources list them"
+              : "The nodes already go as the sources list them",
+          )}
         >
-          <SortByLatency size={15} />
-          {t("By latency")}
-        </Button>
-      </Tooltip>
-      <Tooltip
-        value={t(
-          tunnel.order.length > 0
-            ? "Drop the saved order: nodes go as the sources list them"
-            : "The nodes already go as the sources list them",
-        )}
-      >
-        <Button
-          small
-          class="text-btn"
-          inactive={tunnel.order.length === 0}
-          onclick={() => (tunnel.order = [])}
-        >
-          <SortBySource size={15} />
-          {t("As in the subscription")}
-        </Button>
-      </Tooltip>
+          <Button
+            small
+            class="text-btn"
+            inactive={tunnel.order.length === 0}
+            onclick={() => (tunnel.order = [])}
+          >
+            <SortBySource size={15} />
+            {t("As in the subscription")}
+          </Button>
+        </Tooltip>
+      </div>
     {/if}
     <Tooltip value={t(folded ? "Show the nodes" : "Hide the nodes")}>
       <Button
@@ -307,6 +309,12 @@
     padding: 0.25rem 0.6rem;
     white-space: nowrap;
   }
+  .tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
   .spin {
     display: inline-flex;
     animation: spin 1s linear infinite;
@@ -386,6 +394,12 @@
     }
     .head {
       display: none;
+    }
+    .tools {
+      display: contents;
+    }
+    .tools > :global(:not(:first-child)) {
+      order: 1;
     }
   }
 </style>

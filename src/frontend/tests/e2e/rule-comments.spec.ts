@@ -69,7 +69,7 @@ test.describe("A rule's comment", () => {
     await expect(icon(page)).toHaveAttribute("aria-label", "Comment");
     await expect(icon(page)).not.toHaveClass(/\bset\b/);
     await icon(page).click();
-    const input = editor(page).locator("input");
+    const input = editor(page).locator(".rule-comment-input");
     await expect(input).toBeFocused();
     await input.fill(TEXT);
     await input.press("Enter");
@@ -101,7 +101,7 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    const input = editor(page).locator("input");
+    const input = editor(page).locator(".rule-comment-input");
     await expect(input).toHaveValue("kept");
     await input.fill("changed");
     await input.press("Escape");
@@ -120,13 +120,13 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    await editor(page).locator("input").fill("x");
-    await editor(page).locator("input").press("Enter");
+    await editor(page).locator(".rule-comment-input").fill("x");
+    await editor(page).locator(".rule-comment-input").press("Enter");
     await expect(status(page)).toHaveAttribute("data-kind", "unsaved");
 
     await icon(page).click();
-    await editor(page).locator("input").fill("  ");
-    await editor(page).locator("input").press("Enter");
+    await editor(page).locator(".rule-comment-input").fill("  ");
+    await editor(page).locator(".rule-comment-input").press("Enter");
     await expect(icon(page)).not.toHaveClass(/\bset\b/);
     await expect(status(page)).toHaveAttribute("data-kind", "live");
   });
@@ -139,8 +139,8 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    await editor(page).locator("input").fill("");
-    await editor(page).locator("input").press("Enter");
+    await editor(page).locator(".rule-comment-input").fill("");
+    await editor(page).locator(".rule-comment-input").press("Enter");
     await expect(icon(page)).toHaveAttribute("aria-label", "Comment");
 
     await groupsPage.save();
@@ -156,7 +156,7 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    await editor(page).locator("input").fill("typed");
+    await editor(page).locator(".rule-comment-input").fill("typed");
     await groupsPage.save();
 
     await expect.poll(() => daemon.puts.length).toBe(1);
@@ -172,8 +172,8 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    await expect(editor(page).locator("input")).toHaveValue("a  b");
-    await editor(page).locator("input").press("Enter");
+    await expect(editor(page).locator(".rule-comment-input")).toHaveValue("a  b");
+    await editor(page).locator(".rule-comment-input").press("Enter");
     await expect(editor(page)).toBeHidden();
     await expect(icon(page)).toHaveAttribute("aria-label", "Comment: a  b");
     await expect(status(page)).toHaveAttribute("data-kind", "live");
@@ -187,7 +187,7 @@ test.describe("A rule's comment", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).click();
-    const input = editor(page).locator("input");
+    const input = editor(page).locator(".rule-comment-input");
     await input.fill("にほん");
     await input.dispatchEvent("keydown", { key: "Enter", isComposing: true, bubbles: true });
     await expect(editor(page)).toBeVisible();
@@ -207,11 +207,13 @@ test.describe("A rule's comment", () => {
     await icon(page).click();
     const hint = editor(page).getByText("Up to 256 bytes");
     await expect(hint).toHaveCount(0);
-    await editor(page).locator("input").fill("я".repeat(130));
-    await expect(editor(page).locator("input")).toHaveValue("я".repeat(128));
+    await editor(page).locator(".rule-comment-input").fill("я".repeat(130));
+    await expect(editor(page).locator(".rule-comment-input")).toHaveValue("я".repeat(128));
     await expect(hint).toBeVisible();
     await expect(hint).toHaveAttribute("role", "status");
-    const described = await editor(page).locator("input").getAttribute("aria-describedby");
+    const described = await editor(page)
+      .locator(".rule-comment-input")
+      .getAttribute("aria-describedby");
     expect(described).toBeTruthy();
     await expect(page.locator(`#${described}`)).toHaveText("Up to 256 bytes");
   });
@@ -250,8 +252,8 @@ test.describe("A rule's comment", () => {
     await expect(page.locator(".group-wrapper:visible .rule")).toHaveCount(2);
 
     await icon(page, 1).click();
-    await editor(page).locator("input").fill("Zeta");
-    await editor(page).locator("input").press("Enter");
+    await editor(page).locator(".rule-comment-input").fill("Zeta");
+    await editor(page).locator(".rule-comment-input").press("Enter");
 
     await groupsPage.search("zeta");
     const rows = page.locator(".group-wrapper:visible .rule");
@@ -271,7 +273,7 @@ test.describe("A rule's comment on a phone", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).tap();
-    await expect(editor(page).locator("input")).toHaveValue("Meta: CDN");
+    await expect(editor(page).locator(".rule-comment-input")).toHaveValue("Meta: CDN");
     const box = await editor(page).boundingBox();
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(390);
@@ -288,10 +290,31 @@ test.describe("A rule's comment on a phone", () => {
     await groupsPage.expandGroup(0);
 
     await icon(page).tap();
-    await expect(editor(page).locator("input")).toBeFocused();
+    await expect(editor(page).locator(".rule-comment-input")).toBeFocused();
     await page.keyboard.type("on the go");
     await page.locator(".group-header input.group-name").first().tap();
     await expect(icon(page)).toHaveAttribute("aria-label", "Comment: on the go");
     await expect(status(page)).toHaveAttribute("data-kind", "unsaved");
   });
+});
+
+// Catches the editor as one line that scrolls, so a long comment shows only its tail.
+test("a long comment is shown whole in its editor on a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  const long = "Через туннель: видео и картинки CDN, проверено вручную 26.10, не трогать без нужды";
+  const { groupsPage } = await setup(page, [
+    group("0a000001", "Meta", [rule("0b000001", "a.example.com", long)]),
+  ]);
+  await groupsPage.expandGroup(0);
+  await icon(page).click();
+  const input = editor(page).locator(".rule-comment-input");
+  await expect(input).toHaveValue(long);
+  const m = await input.evaluate((el) => ({
+    sw: el.scrollWidth,
+    cw: el.clientWidth,
+    sh: el.scrollHeight,
+    ch: el.clientHeight,
+  }));
+  expect(m.sw).toBeLessThanOrEqual(m.cw);
+  expect(m.sh).toBeLessThanOrEqual(m.ch);
 });

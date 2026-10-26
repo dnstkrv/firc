@@ -536,6 +536,7 @@
     all: unset;
     flex: 1;
     min-width: 0;
+    text-overflow: ellipsis;
     color: var(--text);
     font-size: 0.92rem;
   }
@@ -931,6 +932,9 @@
     }
     .row .msg {
       grid-column: 1 / -1;
+    }
+    .pick {
+      padding: 0.6rem 0 0.3rem;
     }
   }
   @media (prefers-reduced-motion: reduce) {

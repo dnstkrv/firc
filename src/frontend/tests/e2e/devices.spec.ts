@@ -434,6 +434,45 @@ test.describe("Device dialog", () => {
     for (const width of inner.names) expect(width).toBeGreaterThan(0);
   });
 
+  for (const lang of ["ru", "en"]) {
+    for (const width of [360, 390]) {
+      // Catches a mode label wrapping inside its button or a MAC broken across lines on a phone.
+      test(`at ${width} px in ${lang} the mode labels and MACs keep one line`, async ({ page }) => {
+        await page.addInitScript(
+          (l) => localStorage.setItem("locale", JSON.stringify({ value: l })),
+          lang,
+        );
+        await stub(page, { allow: [], deny: [] });
+        await page.goto("/");
+        await openDevices(page);
+        await page.setViewportSize({ width, height: 800 });
+        const lines = await page.evaluate(() =>
+          [...document.querySelectorAll(".seg button, li.host .mac, li.host .ip")].map((el) => {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+          }),
+        );
+        expect(lines.length).toBe(8);
+        expect(lines).toEqual(lines.map(() => 1));
+      });
+    }
+  }
+
+  // Catches the empty-selection hint squeezed into a narrow column beside the buttons on a phone.
+  test("at 360 px the «Готово» hint takes the footer's width", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));
+    await stub(page, { allow: [], deny: [] });
+    await page.goto("/");
+    await openDevices(page);
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.locator(".seg .mode-only").click();
+    const hint = await page.locator(".done-hint").boundingBox();
+    const footer = await page.locator(".devices-actions").boundingBox();
+    expect(hint!.width).toBeGreaterThan(footer!.width - 2);
+    expect(hint!.height).toBeLessThan(80);
+  });
+
   test("rows keep a gap from the scrollbar of a scrolling list", async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 600 });
     const many = Array.from({ length: 14 }, (_, i) => ({

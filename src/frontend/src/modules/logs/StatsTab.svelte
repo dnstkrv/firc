@@ -174,7 +174,7 @@
         "While off, the daemon counts nothing and holds no memory for it. Turning it on starts a new 24 h window.",
       )}
     </p>
-    <Button onclick={() => void turnOn()} inactive={turning}>{t("Turn on")}</Button>
+    <Button class="primary" onclick={() => void turnOn()} inactive={turning}>{t("Turn on")}</Button>
   </div>
 {:else}
   <div class="st-bar">
@@ -234,19 +234,19 @@
     {#if data}
       <div class="stats-sum">
         <span
-          >{data.since > now - data.window
+          ><span class="lead"></span>{data.since > now - data.window
             ? t("since {time}").replace("{time}", stamp(data.since))
-            : t("in 24 h")}:</span
-        >
-        <span
-          ><b>{fmt(data.queries)}</b>
+            : t("in 24 h")}: <b>{fmt(data.queries)}</b>
           {word(data.queries, t("query"), t("queries (2-4)"), t("queries"))}</span
         >
         <span
-          >· <b>{fmt(data.domains)}</b>
+          ><span class="lead">{" · "}</span><b>{fmt(data.domains)}</b>
           {word(data.domains, t("domain"), t("domains (2-4)"), t("domains"))}</span
         >
-        <span>· {t("blocked")} <b class="red">{share(data.blocked, data.queries)}</b></span>
+        <span
+          ><span class="lead">{" · "}</span>{t("blocked")}
+          <b class="red">{share(data.blocked, data.queries)}</b></span
+        >
       </div>
     {/if}
     {#if dnsStats.failed}
@@ -357,13 +357,20 @@
   .stats-sum {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.1rem 0.3rem;
-    margin-top: 0.55rem;
+    row-gap: 0.1rem;
+    margin: 0.55rem 0 0 -0.9em;
+    clip-path: inset(0 0 0 0.9em);
     font-size: 0.82rem;
     color: var(--text-2);
   }
   .stats-sum span {
     white-space: nowrap;
+  }
+  .stats-sum .lead {
+    display: inline-block;
+    width: 0.9em;
+    text-align: center;
+    white-space: pre;
   }
   .stats-sum b {
     color: var(--text);

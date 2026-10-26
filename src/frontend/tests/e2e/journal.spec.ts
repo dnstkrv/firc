@@ -1177,3 +1177,55 @@ test("after Clear view new events show and the lost notice is gone", async ({ pa
   await expect(rows.nth(0)).toContainText("fresh one");
   await expect(page.getByText("Events were lost before this page asked for them")).toHaveCount(0);
 });
+
+// Catches the search placeholder cut mid-word with no ellipsis on a phone.
+test("at 360 px the search placeholder ends in an ellipsis", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));
+  await shell(page, MIXED);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/journal");
+  const input = page.getByRole("searchbox", { name: "клиент, имя или туннель" });
+  const look = await input.evaluate((el: HTMLInputElement) => {
+    const cs = getComputedStyle(el);
+    const ctx = document.createElement("canvas").getContext("2d")!;
+    ctx.font = cs.font;
+    return {
+      text: ctx.measureText(el.placeholder).width,
+      box: el.clientWidth,
+      overflow: cs.textOverflow,
+    };
+  });
+  expect(look.text).toBeGreaterThan(look.box);
+  expect(look.overflow).toBe("ellipsis");
+});
+
+// Catches the client and name links of a DNS row left as 18 px tap targets on a phone.
+test("at 360 px a DNS row's links are at least 32 px tall to a tap", async ({ page }) => {
+  const dns = Array.from({ length: 4 }, (_, i) => ({
+    ...MIXED[4],
+    seq: 20 + i,
+    at: 1790000010 + i,
+  }));
+  await shell(page, dns);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/journal");
+  await expect(page.locator(".pane .row")).toHaveCount(4);
+  const heights = await page
+    .locator(".pane .row")
+    .nth(1)
+    .locator(".pick")
+    .evaluateAll((els) =>
+      els.map((el) => {
+        const r = el.getClientRects()[0];
+        const x = r.left + Math.min(r.width / 2, 20);
+        let hits = 0;
+        for (let y = Math.floor(r.top) - 40; y < r.bottom + 40; y++) {
+          const at = document.elementFromPoint(x, y);
+          if (at && el.contains(at)) hits++;
+        }
+        return hits;
+      }),
+    );
+  expect(heights.length).toBe(2);
+  for (const h of heights) expect(h).toBeGreaterThanOrEqual(32);
+});

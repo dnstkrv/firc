@@ -65,8 +65,8 @@
     onclick={handleContainerClick}
     onpointerdown={handleContainerPointerDown}
     onpointerenter={showHint}
-    onpointerleave={hide}
-    onfocusin={hide}
+    onpointerleave={() => hide()}
+    onfocusin={() => hide()}
   >
     <span class="icon-wrapper">
       <Search />
@@ -176,6 +176,7 @@
     min-width: 0;
     flex: 1;
     margin-left: 0.8rem;
+    text-overflow: ellipsis;
     opacity: 0;
     transition: opacity 0.2s ease;
   }
@@ -212,6 +213,10 @@
   }
 
   @media (max-width: 570px) {
+    .search-keys {
+      display: none;
+    }
+
     .group-controls-search {
       flex: 1 1 auto;
       min-width: 0;

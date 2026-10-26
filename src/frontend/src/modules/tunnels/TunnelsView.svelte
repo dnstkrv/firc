@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
 
   import PageControls from "../../components/layout/PageControls.svelte";
   import Placeholder from "../../components/ui/Placeholder.svelte";
@@ -14,6 +14,7 @@
 
   const store = new TunnelsStore();
   let open = $state<Record<string, boolean>>({});
+  let pageEl = $state<HTMLElement>();
 
   const restarting = $derived(store.restarting);
 
@@ -28,11 +29,19 @@
     if (interfaces.list.length === 0) void fetchInterfaces();
   });
 
-  function addTunnel() {
+  async function addTunnel() {
     if (!store.canAdd) return;
     store.addTunnel();
     const added = store.data[store.data.length - 1];
-    if (added) open[added.id] = true;
+    if (!added) return;
+    open[added.id] = true;
+    await tick();
+    const card = document.querySelector<HTMLElement>(`[data-tunnel="${CSS.escape(added.id)}"]`);
+    if (!card) return;
+    const bar = pageEl?.querySelector<HTMLElement>(".page-controls");
+    card.style.scrollMarginTop = `${(bar?.offsetHeight ?? 0) + 8}px`;
+    card.scrollIntoView({ block: "start" });
+    card.querySelector<HTMLInputElement>("input.description")?.focus({ preventScroll: true });
   }
 
   onMount(() => window.addEventListener("keydown", store.handleSaveShortcut));
@@ -42,7 +51,7 @@
   });
 </script>
 
-<div class="tunnels-page">
+<div class="tunnels-page" bind:this={pageEl}>
   <PageControls
     addLabel={t("Add tunnel")}
     canSave={store.canSave}

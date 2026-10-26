@@ -133,22 +133,24 @@
             />
           </span>
         </div>
-        {@render reveal(index)}
-        <Tooltip value={t("Edit")}>
-          <Button small onclick={() => (dialog = { kind: "subscription", index })}>
-            <Pencil size={20} />
-          </Button>
-        </Tooltip>
-        <Tooltip value={t(saved ? "Refresh subscriptions" : "Save the tunnel first")}>
-          <Button small inactive={!saved} onclick={() => void store.refresh(tunnel.id)}>
-            <Refresh size={20} />
-          </Button>
-        </Tooltip>
-        <Tooltip value={t("Delete")}>
-          <Button small onclick={() => removeSource(index)}>
-            <Delete size={20} />
-          </Button>
-        </Tooltip>
+        <div class="acts">
+          {@render reveal(index)}
+          <Tooltip value={t("Edit")}>
+            <Button small onclick={() => (dialog = { kind: "subscription", index })}>
+              <Pencil size={20} />
+            </Button>
+          </Tooltip>
+          <Tooltip value={t(saved ? "Refresh subscriptions" : "Save the tunnel first")}>
+            <Button small inactive={!saved} onclick={() => void store.refresh(tunnel.id)}>
+              <Refresh size={20} />
+            </Button>
+          </Tooltip>
+          <Tooltip value={t("Delete")}>
+            <Button small onclick={() => removeSource(index)}>
+              <Delete size={20} />
+            </Button>
+          </Tooltip>
+        </div>
       </div>
     {:else}
       <div class="src">
@@ -158,17 +160,19 @@
           >
           <span class="mono">{shown[index] ? middleEllipsis(source.link ?? "", 96) : HIDDEN}</span>
         </div>
-        {@render reveal(index)}
-        <Tooltip value={t("Edit")}>
-          <Button small onclick={() => (dialog = { kind: "link", index })}>
-            <Pencil size={20} />
-          </Button>
-        </Tooltip>
-        <Tooltip value={t("Delete")}>
-          <Button small onclick={() => removeSource(index)}>
-            <Delete size={20} />
-          </Button>
-        </Tooltip>
+        <div class="acts">
+          {@render reveal(index)}
+          <Tooltip value={t("Edit")}>
+            <Button small onclick={() => (dialog = { kind: "link", index })}>
+              <Pencil size={20} />
+            </Button>
+          </Tooltip>
+          <Tooltip value={t("Delete")}>
+            <Button small onclick={() => removeSource(index)}>
+              <Delete size={20} />
+            </Button>
+          </Tooltip>
+        </div>
       </div>
     {/if}
   {/each}
@@ -287,6 +291,9 @@
     background: var(--bg-light-extra);
     color: var(--text-2);
   }
+  .badge:not(.red) {
+    white-space: nowrap;
+  }
   .badge.blue {
     background: color-mix(in oklab, var(--accent) 22%, transparent);
     color: var(--accent);
@@ -294,5 +301,23 @@
   .badge.red {
     background: color-mix(in oklab, var(--red) 18%, transparent);
     color: var(--red);
+  }
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  @media (max-width: 700px) {
+    .src {
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+    .main {
+      flex-basis: calc(100% - 32px);
+    }
+    .acts {
+      width: 100%;
+      justify-content: flex-end;
+    }
   }
 </style>

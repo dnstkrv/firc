@@ -127,6 +127,27 @@ test.describe("Group bulk actions", () => {
     await expect(region.getByRole("status")).toHaveText("5 выбрано");
   });
 
+  // Catches the bar growing wider than the page's column on a wide screen.
+  for (const locale of ["en", "ru"]) {
+    test(`the bar stays inside the content column at 1440 (${locale})`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 800 });
+      await page.addInitScript(
+        (value) => localStorage.setItem("locale", JSON.stringify({ value })),
+        locale,
+      );
+      await setup(page);
+      await page.locator(".group .place-number").nth(1).click();
+      await expect(page.locator(".bulk-bar")).toBeVisible();
+      const m = await page.evaluate(() => {
+        const bar = document.querySelector(".bulk-bar")!.getBoundingClientRect();
+        const column = document.querySelector(".group-list")!.getBoundingClientRect();
+        return { bar: [bar.left, bar.right], column: [column.left, column.right] };
+      });
+      expect(m.bar[0]).toBeGreaterThanOrEqual(m.column[0] - 0.5);
+      expect(m.bar[1]).toBeLessThanOrEqual(m.column[1] + 0.5);
+    });
+  }
+
   // Catches a bar whose buttons overlap, leave the bar or the window, or cut their labels at some width.
   for (const locale of ["en", "ru"]) {
     test(`the bar fits at every width (${locale})`, async ({ page }) => {

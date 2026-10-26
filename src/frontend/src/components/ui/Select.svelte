@@ -93,7 +93,8 @@
       class="option-label"
       class:danger={option.danger}
       class:warn={option.warn}
-      class:gone={option.missing}>{option.label}</span
+      class:gone={option.missing}
+      title={option.label}>{option.label}</span
     >
     {#if option.description}
       <span class="option-description" class:mono={option.mono}>{option.description}</span>
@@ -393,6 +394,7 @@
     text-overflow: ellipsis;
   }
   .option-description {
+    flex-shrink: 0;
     color: var(--text-2);
     font-size: 0.9em;
   }

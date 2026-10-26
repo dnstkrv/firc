@@ -24,13 +24,18 @@ const group = (id: string, name: string, iface: string) => ({
   live: true,
 });
 
-async function setup(page: Page, groups: Record<string, unknown>[], locale = "ru") {
+async function setup(
+  page: Page,
+  groups: Record<string, unknown>[],
+  locale = "ru",
+  ifaces: unknown[] = IFACES,
+) {
   await signedIn(page);
   await page.addInitScript(
     (l) => localStorage.setItem("locale", JSON.stringify({ value: l })),
     locale,
   );
-  await page.route("**/interfaces", (route) => route.fulfill({ json: { interfaces: IFACES } }));
+  await page.route("**/interfaces", (route) => route.fulfill({ json: { interfaces: ifaces } }));
   await page.route("**/system/resolvers", (route) => route.fulfill({ json: { resolvers: [] } }));
   await page.route("**/system/hosts", (route) => route.fulfill({ json: { hosts: [] } }));
   await page.route("**/system/policies", (route) => route.fulfill({ json: { policies: [] } }));
@@ -187,4 +192,47 @@ test("the bulk interface menu folds the rest the same way", async ({ page }) => 
     .getByRole("button", { name: "Interface" })
     .click();
   await expect(menu).toHaveCount(5);
+});
+
+const ROUTER = [
+  { id: "blackhole" },
+  { id: "block" },
+  { id: "nwg0", name: "WARP", role: "tunnel" },
+  { id: "nwg1", name: "AmneziaWG NL", role: "tunnel" },
+  { id: "nwg2", ndmsName: "Wireguard2", role: "tunnel" },
+  { id: "wg0", name: "WireGuard Interface", role: "tunnel" },
+  { id: "opkgtun10", name: "sing-box", role: "tunnel" },
+  { id: "tunvless0", name: "PRAW-1", role: "tunnel" },
+  { id: "ppp0", name: "Broadband connection", role: "wan" },
+  { id: "eth3", name: "GigabitEthernet1", role: "wan" },
+  { id: "br0", name: "Home network", role: "lan" },
+];
+
+for (const width of [360, 1440]) {
+  // Catches the folded list overflowing its box by a few pixels, so the footer hint is cut and the list barely scrolls.
+  test(`at ${width} the folded list shows its footer whole`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await setup(page, [group("0a000001", "YouTube", "nwg0")], "ru", ROUTER);
+    await openPicker(page);
+    const content = page.locator("[data-select-content]");
+    await expect(content.locator(".iface-foot")).toBeVisible();
+    const m = await content.evaluate((c) => ({ sh: c.scrollHeight, ch: c.clientHeight }));
+    expect(m.sh).toBeLessThanOrEqual(m.ch);
+  });
+}
+
+// Catches the interface id shrinking to "pp…" beside a long name in the open list, with nothing to read it from.
+test("at 360 a long name in the rest keeps its id whole", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 900 });
+  await setup(page, [group("0a000001", "YouTube", "nwg0")], "ru", ROUTER);
+  await openPicker(page);
+  await page.locator('[data-select-item][data-value="__more__"]').click();
+  const row = page.locator('[data-select-item][data-value="ppp0"]');
+  await expect(row).toBeVisible();
+  const m = await row.evaluate((r) => {
+    const sub = r.querySelector(".option-description") as HTMLElement;
+    const label = r.querySelector(".option-label") as HTMLElement;
+    return { subCut: sub.scrollWidth > sub.clientWidth, title: label.title };
+  });
+  expect(m).toEqual({ subCut: false, title: "Broadband connection" });
 });

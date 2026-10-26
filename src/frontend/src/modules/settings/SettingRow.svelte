@@ -110,6 +110,8 @@
     color: var(--text-2);
   }
   .pending {
+    display: inline-block;
+    white-space: nowrap;
     margin-left: 0.5rem;
     font-size: 0.85rem;
     color: var(--yellow-bright);

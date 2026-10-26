@@ -297,7 +297,7 @@
     align-items: center;
     gap: 0.5rem 1rem;
     width: max-content;
-    max-width: calc(100vw - 2rem);
+    max-width: min(calc(100vw - 2rem), 1000px);
     box-sizing: border-box;
     padding: 0.55rem 0.6rem;
     border: 1px solid color-mix(in oklab, var(--accent) 55%, transparent);

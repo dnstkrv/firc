@@ -474,4 +474,41 @@ test.describe("Tunnels page", () => {
     await expect(tunnels.card("a")).not.toContainText("not used by groups");
     await expect(tunnels.card("b")).toContainText("not used by groups");
   });
+
+  // Catches the Save and Add buttons drawn over the hint on a phone, where the page has no search to give their row a height.
+  test("on a phone the hint sits below Save and Add", async ({ page }) => {
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0")],
+      states: [state("a", "tunvless0")],
+    });
+    await page.setViewportSize({ width: 398, height: 880 });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.openOnPhone();
+    const add = (await page.getByRole("button", { name: "Add tunnel" }).boundingBox())!;
+    const hint = (await page.locator("p.hint").boundingBox())!;
+    expect(hint.y).toBeGreaterThanOrEqual(add.y + add.height);
+  });
+
+  // Catches a new tunnel card added below the fold on a phone with nothing bringing it into view.
+  test("on a phone a new tunnel scrolls into view", async ({ page }) => {
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0"), tunnel("b", "tunvless1"), tunnel("c", "tunvless2")],
+      states: [state("a", "tunvless0"), state("b", "tunvless1"), state("c", "tunvless2")],
+    });
+    await page.setViewportSize({ width: 360, height: 640 });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.openOnPhone();
+    await tunnels.expand("a");
+    await tunnels.addTunnel();
+    const card = page.locator("[data-tunnel]").last();
+    await expect(card.getByRole("textbox", { name: "Description" })).toBeFocused();
+    const bar = page.locator('[data-tabs-content][data-state="active"] .page-controls');
+    await expect
+      .poll(async () => {
+        const box = (await card.boundingBox())!;
+        const top = (await bar.boundingBox())!;
+        return box.y >= top.y + top.height && box.y < 640 / 2;
+      })
+      .toBe(true);
+  });
 });

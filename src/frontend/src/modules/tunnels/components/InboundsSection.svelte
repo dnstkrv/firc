@@ -236,7 +236,7 @@
   .inb {
     display: grid;
     grid-template-columns:
-      6rem minmax(0, 1.2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.4fr)
+      6rem minmax(0, 1.5fr) minmax(0, 1.7fr) minmax(0, 1fr) minmax(0, 1.4fr)
       2.5rem;
     align-items: center;
     gap: 0.5rem;
@@ -287,6 +287,11 @@
   .cell {
     min-width: 0;
   }
+  .cell :global(.select-wrap),
+  .inb :global([data-select-trigger]) {
+    max-width: 100%;
+    min-width: 0;
+  }
   .lab {
     display: none;
   }
@@ -314,10 +319,6 @@
     .cell.del {
       grid-column: 3;
       align-self: end;
-    }
-    .inb :global([data-select-trigger]) {
-      max-width: 100%;
-      min-width: 0;
     }
   }
 </style>

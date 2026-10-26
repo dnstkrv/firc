@@ -123,7 +123,7 @@
   .head,
   .stats-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 4.5rem 8.5rem 19.5rem 6.5rem 8.5rem;
+    grid-template-columns: minmax(0, 1fr) 4.5rem 7rem 19rem 5.5rem 7.5rem;
     gap: 0.8rem;
     align-items: center;
     padding: 0.45rem 0.9rem;
@@ -202,7 +202,7 @@
   }
   .devs {
     display: grid;
-    grid-template-columns: 7rem 7rem auto;
+    grid-template-columns: 6.5rem 6.5rem auto;
     gap: 0.6rem;
     align-items: start;
     min-width: 0;
@@ -309,6 +309,11 @@
         "last act";
       gap: 0.35rem 0.6rem;
       padding: 0.6rem 0.8rem;
+    }
+    .pane {
+      height: auto;
+      min-height: 0;
+      overflow: visible;
     }
     .dom {
       grid-area: dom;

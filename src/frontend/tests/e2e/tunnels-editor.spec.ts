@@ -320,7 +320,9 @@ test.describe("Tunnel editor", () => {
         },
       });
     await tunnels.card("a").locator("button", { hasText: "Check nodes" }).click();
-    await tunnels.nodeRows("a").nth(0).getByText("to the node 18 ms").hover();
+    const number = tunnels.nodeRows("a").nth(0).getByText("to the node 18 ms");
+    await number.scrollIntoViewIfNeeded();
+    await number.hover();
     const bubble = page.locator("#global-tooltip");
     await expect(bubble).toBeVisible();
     await expect(bubble).toContainText("first byte through the node");
@@ -671,5 +673,102 @@ test.describe("Tunnel editor", () => {
     await tunnels.open();
     await tunnels.expand("a");
     await expect(tunnels.nodeRows("a")).toHaveCount(20);
+  });
+
+  // Catches the source's action buttons squeezing its text into a narrow column on a phone.
+  test("on a phone a subscription's text spans the row and its badges stay one line", async ({
+    page,
+  }) => {
+    const sub = { ...SUB, headers: { "X-Token": "t" } };
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [sub, LINK] })],
+      states: [
+        state("a", "tunvless0", {
+          subscriptions: [
+            {
+              name: "Provider",
+              nodes: 2,
+              fetching: false,
+              lastOk: 1790000000,
+              lastTry: 1790000000,
+              error: "the server answered: Please turn on HWID in your app, or find the new one",
+            },
+          ],
+        }),
+      ],
+    });
+    await page.setViewportSize({ width: 360, height: 800 });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.openOnPhone();
+    await tunnels.expand("a");
+    const row = tunnels.sourceRow("a", "Provider");
+    const box = (await row.boundingBox())!;
+    const main = (await row.locator(".main").boundingBox())!;
+    expect(main.width).toBeGreaterThanOrEqual(box.width - 70);
+    const own = (await row.getByText("own headers").boundingBox())!;
+    expect(own.height).toBeLessThan(24);
+    const error = (await row.locator(".badge.red").boundingBox())!;
+    expect(error.height).toBeLessThan(60);
+  });
+
+  // Catches the node name squeezed to nothing by its port badges and the latency column on a phone.
+  test("on a phone a checked node with ports still shows its name", async ({ page }) => {
+    const inbound = (port: number) => ({
+      port,
+      listen: "br0",
+      node: "0000000a:A",
+      user: "",
+      password: "",
+    });
+    const daemon = await stubDaemon(page, {
+      tunnels: [
+        tunnel("a", "tunvless0", { sources: [SUB], inbounds: [inbound(1080), inbound(1081)] }),
+      ],
+      states: [state("a", "tunvless0")],
+      nodes: [{ key: "0000000a:A", name: "Netherlands", source: "Provider" }],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    await page.setViewportSize({ width: 360, height: 800 });
+    daemon.probeAnswer = (_body, route) =>
+      route.fulfill({
+        json: {
+          nodes: [{ key: "0000000a:A", ok: true, handshakeMs: 40, firstByteMs: 60, why: "" }],
+        },
+      });
+    await tunnels.card("a").locator("button", { hasText: "Check nodes" }).click();
+    const row = tunnels.nodeRows("a").nth(0);
+    await expect(row.locator(".lat")).toContainText("60 ms");
+    const name = row.locator(".name");
+    const width = await name.evaluate((el) => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+    expect(width.client).toBeGreaterThan(0);
+    expect(width.scroll).toBeLessThanOrEqual(width.client);
+  });
+
+  // Catches the fold chevron dropping off the Nodes heading onto the buttons' second line on a phone.
+  test("on a phone the nodes fold button stays on the heading line", async ({ page }) => {
+    const { tunnels } = await saved(page);
+    await page.setViewportSize({ width: 360, height: 800 });
+    const head = tunnels.card("a").locator(".sec-h", { hasText: "Check nodes" });
+    const title = (await head.getByText("Nodes", { exact: true }).boundingBox())!;
+    const fold = (await head.getByRole("button", { name: "Hide the nodes" }).boundingBox())!;
+    expect(Math.abs(fold.y + fold.height / 2 - (title.y + title.height / 2))).toBeLessThanOrEqual(
+      4,
+    );
+    const reset = (await head
+      .locator("button", { hasText: "As in the subscription" })
+      .boundingBox())!;
+    expect(reset.x + reset.width).toBeLessThanOrEqual(360);
+  });
+
+  // Catches the More disclosure's chevron shrunk to a dot by its long wrapped text on a phone.
+  test("on a phone the More chevron keeps its size", async ({ page }) => {
+    const { tunnels } = await saved(page);
+    await page.setViewportSize({ width: 360, height: 800 });
+    const more = tunnels.card("a").locator(".more");
+    await more.scrollIntoViewIfNeeded();
+    const icon = (await more.locator("svg").boundingBox())!;
+    expect(icon.width).toBeGreaterThanOrEqual(14);
   });
 });

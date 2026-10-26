@@ -108,14 +108,14 @@
         <span class="spacer"></span>
         {#if changed.length > 0}
           <Tooltip value={t("Save or reset your changes first")}>
-            <Button small general inactive aria-label={t("Restart")}>{t("Restart")}</Button>
+            <Button inactive aria-label={t("Restart")}>{t("Restart")}</Button>
           </Tooltip>
         {:else if installing}
           <Tooltip value={t("An update is being installed")}>
-            <Button small general inactive aria-label={t("Restart")}>{t("Restart")}</Button>
+            <Button inactive aria-label={t("Restart")}>{t("Restart")}</Button>
           </Tooltip>
         {:else}
-          <Button small general onclick={() => void restartDaemon()}>{t("Restart")}</Button>
+          <Button onclick={() => void restartDaemon()}>{t("Restart")}</Button>
         {/if}
       </div>
     {/if}
@@ -217,8 +217,10 @@
   }
   header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 4px 12px;
     padding: 8px 12px;
     border-radius: 7px 7px 0 0;
     background: var(--bg-light);

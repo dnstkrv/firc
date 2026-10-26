@@ -59,7 +59,12 @@
 
   const toggleMenu = () => (isMenuOpen = !isMenuOpen);
   const closeMenu = () => (isMenuOpen = false);
+  const escapeMenu = (event: KeyboardEvent) => {
+    if (isMenuOpen && event.key === "Escape") closeMenu();
+  };
 </script>
+
+<svelte:window onkeydown={escapeMenu} />
 
 <Toast />
 <ConfirmDialog />
@@ -123,7 +128,7 @@
         </div>
       </div>
 
-      <div class="header-settings">
+      <div class="header-settings" onclickcapture={closeMenu}>
         <HeaderSettings />
       </div>
     </nav>
@@ -266,8 +271,13 @@
       -webkit-tap-highlight-color: transparent;
     }
 
+    main {
+      padding: 0.3rem 0.6rem;
+    }
+
     nav {
       z-index: 11;
+      gap: 0.4rem;
     }
 
     .mobile-title {

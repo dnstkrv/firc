@@ -9,13 +9,17 @@ export const tooltip = $state({
   opacity: 0,
 });
 
+let owner: HTMLElement | null = null;
+
 export async function show(anchor: HTMLElement, text: string, keys: string[] = []) {
+  owner = anchor;
   tooltip.text = text;
   tooltip.keys = keys;
   tooltip.visible = true;
   tooltip.opacity = 0;
 
   await tick();
+  if (owner !== anchor || !tooltip.visible) return;
 
   const tRect = anchor.getBoundingClientRect();
   const tooltipEl = document.getElementById("global-tooltip");
@@ -35,8 +39,10 @@ export async function show(anchor: HTMLElement, text: string, keys: string[] = [
   tooltip.opacity = 1;
 }
 
-export function hide() {
+export function hide(anchor?: HTMLElement) {
+  if (anchor && anchor !== owner) return;
+  owner = null;
   tooltip.visible = false;
 }
 
-globalThis.addEventListener("scroll", hide);
+globalThis.addEventListener("scroll", () => hide());

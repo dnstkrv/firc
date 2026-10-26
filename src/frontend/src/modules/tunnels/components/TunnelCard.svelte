@@ -174,23 +174,34 @@
         {#if descriptionBad}
           <div class="description-error">{descriptionBad}</div>
         {/if}
-        <div class="line">
-          {#if up && live}
-            <ArrowDownUp size={15} />
-            <span>↓ {formatRate(live.rxBps, t)} · ↑ {formatRate(live.txBps, t)}</span>
-            {#each listening as ib (ib.port)}
-              <span>·</span>
-              <span class="ib"
-                >:{ib.port} ↓ {formatRate(ib.rxBps, t)} · ↑ {formatRate(ib.txBps, t)}</span
+        <div class="line-clip">
+          <div class="line">
+            {#if up && live}
+              <span class="it"
+                ><span class="sep" aria-hidden="true">·</span><ArrowDownUp size={15} /><span
+                  >↓ {formatRate(live.rxBps, t)} · ↑ {formatRate(live.txBps, t)}</span
+                ></span
               >
-            {/each}
-          {:else if sourcesText}
-            {#if subscriptions.length > 0}<RSS size={15} />{:else}<Link size={15} />{/if}
-            <span>{sourcesText}</span>
-          {/if}
-          {#if (up && live) || sourcesText}<span>·</span>{/if}
-          <LayoutList size={15} />
-          <span>{groupsText}</span>
+              {#each listening as ib (ib.port)}
+                <span class="it"
+                  ><span class="sep" aria-hidden="true">·</span><span
+                    >:{ib.port} ↓ {formatRate(ib.rxBps, t)} · ↑ {formatRate(ib.txBps, t)}</span
+                  ></span
+                >
+              {/each}
+            {:else if sourcesText}
+              <span class="it wraps"
+                ><span class="sep" aria-hidden="true">·</span>{#if subscriptions.length > 0}<RSS
+                    size={15}
+                  />{:else}<Link size={15} />{/if}<span>{sourcesText}</span></span
+              >
+            {/if}
+            <span class="it wraps"
+              ><span class="sep" aria-hidden="true">·</span><LayoutList size={15} /><span
+                >{groupsText}</span
+              ></span
+            >
+          </div>
         </div>
       </div>
       <div class="acts">
@@ -302,8 +313,10 @@
     font-weight: 600;
   }
   .description {
-    flex: 0 1 16rem;
+    flex: 0 1 auto;
+    field-sizing: content;
     min-width: 6rem;
+    max-width: 16rem;
     font: 400 1rem var(--font);
     color: var(--text-2);
     background: transparent;
@@ -324,16 +337,37 @@
     color: var(--red);
     font-size: 0.8rem;
   }
+  .line-clip {
+    overflow: hidden;
+  }
   .line {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 6px;
+    row-gap: 3px;
+    margin-left: -16px;
     color: var(--text-2);
     font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
   }
   .line :global(svg) {
     flex: none;
+  }
+  .it {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .it.wraps {
+    white-space: normal;
+  }
+  .sep {
+    flex: none;
+    width: 4px;
+    padding-left: 6px;
+    text-align: center;
   }
   .badge {
     font-size: 0.75rem;
@@ -350,9 +384,6 @@
   .badge.toned {
     background: color-mix(in oklab, var(--tone) 18%, transparent);
     color: var(--tone);
-  }
-  .ib {
-    font-family: Monaco, monospace;
   }
   .acts {
     display: flex;

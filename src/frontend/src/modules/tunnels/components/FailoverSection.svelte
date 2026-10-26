@@ -208,6 +208,9 @@
     cursor: pointer;
     text-align: left;
   }
+  .sec :global(.more svg) {
+    flex: none;
+  }
   .sec :global(.more:hover) {
     color: var(--text);
     background: transparent;

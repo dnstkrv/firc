@@ -33,6 +33,67 @@ test.describe("Feedback Components", () => {
     await expect(toast).toBeVisible();
   });
 
+  // Catches a toast squeezed to half the phone width, leaving a word alone on its last line.
+  test("a short toast keeps one line on a 360 px phone", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 760 });
+    await page.evaluate(() =>
+      dispatchEvent(
+        new CustomEvent("toast", {
+          detail: { content: "Конфиг импортирован: 1", type: "success" },
+        }),
+      ),
+    );
+    const content = page.locator(".toast .content");
+    await expect(content).toBeVisible();
+    const lines = await content.evaluate((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+    });
+    expect(lines).toBe(1);
+    const box = (await page.locator(".toast").boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(8);
+    expect(box.x + box.width).toBeLessThanOrEqual(352);
+  });
+
+  // Catches a toast that can only wait out its timer: a tap, a sideways or an upward swipe must take it away, a short drag must not.
+  test("a toast goes away on a tap or a swipe", async ({ page }) => {
+    await page.clock.install();
+    await groupsPage.goto();
+    await page.clock.pauseAt(Date.now() + 1000);
+    const show = (content: string) =>
+      page.evaluate(
+        (c) => dispatchEvent(new CustomEvent("toast", { detail: { content: c, type: "info" } })),
+        content,
+      );
+    const toast = page.locator(".toast");
+    const drag = async (dx: number, dy: number) => {
+      const box = (await toast.boundingBox())!;
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + dx / 2, y + dy / 2);
+      await page.mouse.move(x + dx, y + dy);
+      await page.mouse.up();
+    };
+    await show("one");
+    await expect(toast).toHaveCount(1);
+    await toast.click();
+    await expect(toast).toHaveCount(0);
+    await show("two");
+    await drag(120, 0);
+    await expect(toast).toHaveCount(0);
+    await show("three");
+    await drag(0, -80);
+    await expect(toast).toHaveCount(0);
+    await show("four");
+    await drag(20, 0);
+    await expect(toast).toHaveCount(1);
+    await page.clock.runFor(3500);
+    await expect(toast).toHaveCount(0);
+  });
+
   test("should show overlay on loading", async ({ page }) => {
     await groupsPage.createGroup();
     await groupsPage.addRuleToGroup(0);

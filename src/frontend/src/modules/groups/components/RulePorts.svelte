@@ -155,6 +155,7 @@
   <Popover.Trigger
     class={invalid ? "rule-ports invalid" : "rule-ports"}
     aria-label={summary}
+    title={summary}
     aria-invalid={invalid}
   >
     <span class="rule-ports-summary">{summary}</span>

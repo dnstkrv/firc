@@ -148,8 +148,8 @@ test.describe("Group dialog: adding a group", () => {
 });
 
 test.describe("Group dialog on a phone", () => {
-  async function tallDialog(page: Page) {
-    await page.setViewportSize({ width: 400, height: 700 });
+  async function tallDialog(page: Page, width = 400) {
+    await page.setViewportSize({ width, height: 700 });
     await signedIn(page);
     await page.addInitScript(() => {
       localStorage.setItem("locale", JSON.stringify({ value: "ru" }));
@@ -186,25 +186,27 @@ test.describe("Group dialog on a phone", () => {
   });
 
   // Catches a field, hint or button wider than the dialog, or the preview hint squeezed beside its button.
-  test("nothing in it is wider than the screen at 400 px", async ({ page }) => {
-    const dialog = await tallDialog(page);
-    const hintLines = await dialog.locator(".preview-hint").evaluate((el) => {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+  for (const width of [360, 400]) {
+    test(`nothing in it is wider than the screen at ${width} px`, async ({ page }) => {
+      const dialog = await tallDialog(page, width);
+      const hintLines = await dialog.locator(".preview-hint").evaluate((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+      });
+      expect(hintLines).toBeLessThanOrEqual(2);
+      const widest = await dialog.evaluate((el) => {
+        let right = 0;
+        for (const node of el.querySelectorAll("*")) {
+          const r = node.getBoundingClientRect();
+          if (r.width > 0) right = Math.max(right, r.right);
+        }
+        return { right, scroll: el.scrollWidth, client: el.clientWidth };
+      });
+      expect(widest.right).toBeLessThanOrEqual(width);
+      expect(widest.scroll).toBeLessThanOrEqual(widest.client);
     });
-    expect(hintLines).toBeLessThanOrEqual(2);
-    const widest = await dialog.evaluate((el) => {
-      let right = 0;
-      for (const node of el.querySelectorAll("*")) {
-        const r = node.getBoundingClientRect();
-        if (r.width > 0) right = Math.max(right, r.right);
-      }
-      return { right, scroll: el.scrollWidth, client: el.clientWidth };
-    });
-    expect(widest.right).toBeLessThanOrEqual(400);
-    expect(widest.scroll).toBeLessThanOrEqual(widest.client);
-  });
+  }
 });
 
 const SAGERNET = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{}.srs";

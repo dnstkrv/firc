@@ -77,6 +77,7 @@
 
 <style>
   :global(.block-answer) {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: 0.15rem;
@@ -105,6 +106,14 @@
 
   :global(.block-answer svg) {
     color: var(--text-2);
+  }
+
+  @media (max-width: 700px) {
+    :global(.block-answer::after) {
+      content: "";
+      position: absolute;
+      inset: 0 -8px -16px;
+    }
   }
 
   :global(.block-answer-editor) {

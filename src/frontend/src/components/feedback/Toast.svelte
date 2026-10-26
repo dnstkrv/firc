@@ -13,6 +13,10 @@
   };
 
   const MAX_TOASTS = 3;
+  const SWIPE_PX = 40;
+  const TAP_PX = 6;
+
+  let drag = $state<{ id: string; x: number; y: number; dx: number; dy: number } | null>(null);
 
   let toasts = $state<ToastItem[]>([]);
   const timers = new Map<string, number>();
@@ -111,6 +115,27 @@
     scheduleToastRemoval(nextToast.id);
   }
 
+  function dragStart(event: PointerEvent, id: string) {
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    clearToastTimer(id);
+    drag = { id, x: event.clientX, y: event.clientY, dx: 0, dy: 0 };
+  }
+
+  function dragMove(event: PointerEvent) {
+    if (!drag) return;
+    drag.dx = event.clientX - drag.x;
+    drag.dy = Math.min(0, event.clientY - drag.y);
+  }
+
+  function dragEnd() {
+    if (!drag) return;
+    const { id, dx, dy } = drag;
+    drag = null;
+    const moved = Math.hypot(dx, dy);
+    if (moved < TAP_PX || Math.abs(dx) > SWIPE_PX || -dy > SWIPE_PX) removeToast(id);
+    else scheduleToastRemoval(id);
+  }
+
   onMount(() => {
     window.addEventListener("toast", onToastEvent);
   });
@@ -127,8 +152,17 @@
     <div class="toast-slot" animate:flip={{ duration: 240, easing: cubicInOut }}>
       <div
         class="toast"
+        role="status"
         data-last={index === toasts.length - 1}
         style={`--toast-accent: ${toastAccent(toast.type)};`}
+        style:translate={drag?.id === toast.id ? `${drag.dx}px ${drag.dy}px` : null}
+        style:opacity={drag?.id === toast.id
+          ? 1 - Math.min(1, Math.hypot(drag.dx, drag.dy) / (SWIPE_PX * 3))
+          : null}
+        onpointerdown={(e) => dragStart(e, toast.id)}
+        onpointermove={dragMove}
+        onpointerup={dragEnd}
+        onpointercancel={dragEnd}
         in:toastEnter
         out:toastLeave
       >
@@ -155,6 +189,8 @@
     top: 50px;
     left: 50%;
     transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100vw - 1rem);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -172,8 +208,9 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    min-width: 200px;
-    max-width: 400px;
+    box-sizing: border-box;
+    min-width: min(200px, 100%);
+    max-width: min(400px, 100%);
     padding: 15px;
     border-radius: 10px;
     border: 1px solid var(--bg-light-extra);
@@ -182,6 +219,9 @@
     background: var(--bg-light);
     backdrop-filter: blur(6px);
     will-change: transform, opacity, filter;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
   }
 
   .content {

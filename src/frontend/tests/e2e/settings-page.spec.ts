@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 import { answer, CLASSES, openSettings } from "./pages/settings";
 
@@ -407,5 +407,80 @@ for (const width of [320, 360, 390, 414, 768, 1024, 1280, 1920]) {
     }
     const scroll = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(scroll).toBeLessThanOrEqual(width);
+  });
+}
+
+const lineCounts = (items: Locator) =>
+  items.evaluateAll((els) =>
+    els.map((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+    }),
+  );
+
+for (const locale of ["ru", "en"]) {
+  for (const width of [360, 390]) {
+    test(`section titles keep one line and clear the restart note at ${width} px in ${locale}`, async ({
+      page,
+    }) => {
+      // Catches a title wrapped beside the whole-section note, or the note's icon touching the title.
+      await openSettings(page, (r) => r.fulfill({ json: answer() }), { locale });
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.locator('[data-section="pool"] header .whole')).toBeVisible();
+      expect(await lineCounts(page.locator("section.panel header .title"))).toEqual([
+        1, 1, 1, 1, 1, 1,
+      ]);
+      const clear = await page.locator("section.panel header:has(.whole)").evaluateAll((els) =>
+        els.map((h) => {
+          const t = h.querySelector(".title")!.getBoundingClientRect();
+          const w = h.querySelector(".whole")!.getBoundingClientRect();
+          return w.top >= t.bottom - 1 || w.left - t.right >= 6;
+        }),
+      );
+      expect(clear).toEqual([true, true, true]);
+    });
+  }
+}
+
+for (const width of [360, 768, 1440]) {
+  test(`the restart banner keeps its button at the end at ${width} px`, async ({ page }) => {
+    // Catches the Restart button stretched over the banner, squeezing the text and losing its look.
+    await openSettings(
+      page,
+      (r) => r.fulfill({ json: answer({}, ["app.addressPool.maxNames", "app.link"]) }),
+      { locale: "ru" },
+    );
+    await page.setViewportSize({ width, height: 900 });
+    const banner = page.getByTestId("settings-banner");
+    const button = banner.getByRole("button", { name: "Перезапустить" });
+    await expect(button).toBeVisible();
+    const b = (await banner.boundingBox())!;
+    const k = (await button.boundingBox())!;
+    expect(b.x + b.width - (k.x + k.width)).toBeLessThanOrEqual(16);
+    expect(k.width).toBeLessThan(b.width / 2);
+    const look = await button.evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(look).not.toBe("rgba(0, 0, 0, 0)");
+    if (width >= 768) {
+      expect(await lineCounts(banner.getByText("2 настройки ждут перезапуска"))).toEqual([1]);
+    }
+  });
+}
+
+for (const width of [360, 390]) {
+  test(`the waiting mark stays whole at ${width} px`, async ({ page }) => {
+    // Catches the waiting mark torn across two lines beside the row's label.
+    await openSettings(
+      page,
+      (r) =>
+        r.fulfill({
+          json: answer({}, ["app.dnsProxy.maxConcurrent", "app.addressPool.v4.pool"]),
+        }),
+      { locale: "ru" },
+    );
+    await page.setViewportSize({ width, height: 900 });
+    const marks = page.locator(".pending");
+    await expect(marks).toHaveCount(2);
+    expect(await lineCounts(marks)).toEqual([1, 1]);
   });
 }
