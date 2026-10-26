@@ -650,6 +650,7 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
     c->dns_proxy.upstream.port = 53;
     c->dns_proxy.disable_remap53 = false;
     c->dns_proxy.disable_drop_aaaa = false;
+    c->dns_proxy.disable_stats = false;
     c->dns_proxy.max_idle_conns = 10;
     c->dns_proxy.max_concurrent = 100;
     c->dns_proxy.timeout = 5000 * FIRC_DURATION_MS;

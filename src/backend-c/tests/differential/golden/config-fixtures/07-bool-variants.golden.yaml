@@ -14,6 +14,7 @@ app:
       port: 53
     disableRemap53: false
     disableDropAAAA: false
+    disableStats: false
     unmatchedTtl: 1m0s
     maxIdleConns: 10
     maxConcurrent: 100

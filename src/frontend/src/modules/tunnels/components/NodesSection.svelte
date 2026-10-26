@@ -4,11 +4,14 @@
   import Button from "../../../components/ui/Button.svelte";
   import Tooltip from "../../../components/ui/Tooltip.svelte";
   import { t } from "../../../data/locale.svelte";
+  import { persistedState } from "../../../utils/persisted-state.svelte";
   import type { TunnelsStore } from "../tunnels.svelte";
   import NodeRow from "./NodeRow.svelte";
 
   import {
     Activity,
+    GroupCollapse,
+    GroupExpand,
     LoaderCircle,
     SortByLatency,
     SortBySource,
@@ -29,6 +32,7 @@
   let { store, tunnel = $bindable() }: { store: TunnelsStore; tunnel: ClientTunnel } = $props();
 
   const PREVIEW_DEBOUNCE_MS = 300;
+  const FOLD_FROM = 20;
 
   let preview = $state<TunnelPreview | null>(null);
   let previewError = $state("");
@@ -49,6 +53,10 @@
   const saved = $derived(store.isSaved(tunnel.id));
   const sourcesShape = $derived(JSON.stringify($state.snapshot(tunnel.sources)));
   let probedSources = "";
+  const foldKey = $derived(tunnel.id || tunnel.key);
+  const folds = persistedState<Record<string, boolean>>("nodes_folded", {});
+  const folded = $derived(folds.current[foldKey] ?? rows.length > FOLD_FROM);
+  const activeNames = $derived(live?.active ?? []);
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inflight: AbortController | null = null;
@@ -136,109 +144,138 @@
 <section class="sec">
   <div class="sec-h">
     <span>{t("Nodes")}</span>
-    <span class="sp"></span>
-    <Tooltip value={t(saved ? "Check every node now" : "Save the tunnel first")}>
-      <Button small class="text-btn" inactive={probing || !saved} onclick={() => void probe()}>
-        {#if probing}
-          <span class="spin"><LoaderCircle size={15} /></span>
-        {:else}
-          <Activity size={15} />
-        {/if}
-        {t("Check nodes")}
-      </Button>
-    </Tooltip>
-    <Tooltip value={t(measured ? "Sort by the measured latency" : "Check the nodes first")}>
-      <Button
-        small
-        class="text-btn"
-        inactive={!measured}
-        onclick={() => reorder(orderByLatency(visible, probes))}
-      >
-        <SortByLatency size={15} />
-        {t("By latency")}
-      </Button>
-    </Tooltip>
-    <Tooltip
-      value={t(
-        tunnel.order.length > 0
-          ? "Drop the saved order: nodes go as the sources list them"
-          : "The nodes already go as the sources list them",
-      )}
-    >
-      <Button
-        small
-        class="text-btn"
-        inactive={tunnel.order.length === 0}
-        onclick={() => (tunnel.order = [])}
-      >
-        <SortBySource size={15} />
-        {t("As in the subscription")}
-      </Button>
-    </Tooltip>
-  </div>
-
-  {#if previewError && !filterRefused}
-    <div class="problem top" role="alert">{previewError}</div>
-  {/if}
-
-  <div class="row">
-    <div class="label">
-      <div class="name">{t("Filter by name")}</div>
-      <div class="hint">{t("New subscription nodes that match the filter join by themselves")}</div>
-    </div>
-    <div class="controls">
-      <input
-        type="text"
-        aria-label={t("Filter by name")}
-        placeholder="NL|Netherlands"
-        class:invalid={filterRefused}
-        bind:value={tunnel.filter}
-      />
-      {#if preview}
-        <span class="unit">
-          {t("{n} of {m} match")
+    {#if folded && preview}
+      <span class="fold-sum">
+        {[
+          t("{n} of {m} match")
             .replace("{n}", String(preview.matched))
-            .replace("{m}", String(preview.total))}
-        </span>
-      {/if}
-    </div>
+            .replace("{m}", String(preview.total)),
+          ...(activeNames.length > 0
+            ? [t("active: {names}").replace("{names}", activeNames.join(", "))]
+            : []),
+        ].join(" · ")}
+      </span>
+    {/if}
+    <span class="sp"></span>
+    {#if !folded}
+      <Tooltip value={t(saved ? "Check every node now" : "Save the tunnel first")}>
+        <Button small class="text-btn" inactive={probing || !saved} onclick={() => void probe()}>
+          {#if probing}
+            <span class="spin"><LoaderCircle size={15} /></span>
+          {:else}
+            <Activity size={15} />
+          {/if}
+          {t("Check nodes")}
+        </Button>
+      </Tooltip>
+      <Tooltip value={t(measured ? "Sort by the measured latency" : "Check the nodes first")}>
+        <Button
+          small
+          class="text-btn"
+          inactive={!measured}
+          onclick={() => reorder(orderByLatency(visible, probes))}
+        >
+          <SortByLatency size={15} />
+          {t("By latency")}
+        </Button>
+      </Tooltip>
+      <Tooltip
+        value={t(
+          tunnel.order.length > 0
+            ? "Drop the saved order: nodes go as the sources list them"
+            : "The nodes already go as the sources list them",
+        )}
+      >
+        <Button
+          small
+          class="text-btn"
+          inactive={tunnel.order.length === 0}
+          onclick={() => (tunnel.order = [])}
+        >
+          <SortBySource size={15} />
+          {t("As in the subscription")}
+        </Button>
+      </Tooltip>
+    {/if}
+    <Tooltip value={t(folded ? "Show the nodes" : "Hide the nodes")}>
+      <Button
+        small
+        class="fold-btn"
+        aria-expanded={!folded}
+        aria-label={t(folded ? "Show the nodes" : "Hide the nodes")}
+        onclick={() => (folds.current = { ...folds.current, [foldKey]: !folded })}
+      >
+        {#if folded}<GroupExpand size={18} />{:else}<GroupCollapse size={18} />{/if}
+      </Button>
+    </Tooltip>
   </div>
-  {#if previewError && filterRefused}
-    <div class="problem" role="alert">{previewError}</div>
-  {/if}
 
-  {#if rows.length > 0}
-    <div class="table" role="list">
-      <div class="head" aria-hidden="true">
-        <span></span>
-        <span>{t("Node")}</span>
-        <span>{t("Source")}</span>
-        <span>{t("State")}</span>
-        <span class="r">{t("Latency")}</span>
-        <span class="r">{t("Enabled")}</span>
+  {#if !folded}
+    {#if previewError && !filterRefused}
+      <div class="problem top" role="alert">{previewError}</div>
+    {/if}
+
+    <div class="row">
+      <div class="label">
+        <div class="name">{t("Filter by name")}</div>
+        <div class="hint">
+          {t("New subscription nodes that match the filter join by themselves")}
+        </div>
       </div>
-      {#each rows as row (row.key)}
-        <NodeRow
-          {row}
-          scope={tunnel.key}
-          excluded={tunnel.exclude.includes(row.key)}
-          live={live?.nodes.find((n) => n.key === row.key)}
-          probe={probes[row.key]}
-          {now}
-          ports={ports.get(row.key) ?? []}
-          onToggle={() => (tunnel.exclude = toggleExclude(tunnel.exclude, row.key))}
-          onDrop={drop}
+      <div class="controls">
+        <input
+          type="text"
+          aria-label={t("Filter by name")}
+          placeholder="NL|Netherlands"
+          class:invalid={filterRefused}
+          bind:value={tunnel.filter}
         />
-      {/each}
+        {#if preview}
+          <span class="unit">
+            {t("{n} of {m} match")
+              .replace("{n}", String(preview.matched))
+              .replace("{m}", String(preview.total))}
+          </span>
+        {/if}
+      </div>
     </div>
-  {:else if preview}
-    <div class="empty">
-      {t(
-        tunnel.sources.length === 0
-          ? "Add a source to see its nodes"
-          : "No nodes yet: a new subscription is fetched after saving",
-      )}
-    </div>
+    {#if previewError && filterRefused}
+      <div class="problem" role="alert">{previewError}</div>
+    {/if}
+
+    {#if rows.length > 0}
+      <div class="table" role="list">
+        <div class="head" aria-hidden="true">
+          <span></span>
+          <span>{t("Node")}</span>
+          <span>{t("Source")}</span>
+          <span>{t("State")}</span>
+          <span class="r">{t("Latency")}</span>
+          <span class="r">{t("Enabled")}</span>
+        </div>
+        {#each rows as row (row.key)}
+          <NodeRow
+            {row}
+            scope={tunnel.key}
+            excluded={tunnel.exclude.includes(row.key)}
+            live={live?.nodes.find((n) => n.key === row.key)}
+            probe={probes[row.key]}
+            {now}
+            ports={ports.get(row.key) ?? []}
+            onToggle={() => (tunnel.exclude = toggleExclude(tunnel.exclude, row.key))}
+            onDrop={drop}
+          />
+        {/each}
+      </div>
+    {:else if preview}
+      <div class="empty">
+        {t(
+          tunnel.sources.length === 0
+            ? "Add a source to see its nodes"
+            : "No nodes yet: a new subscription is fetched after saving",
+        )}
+      </div>
+    {/if}
   {/if}
 </section>
 
@@ -255,6 +292,11 @@
   }
   .sp {
     flex: 1;
+  }
+  .fold-sum {
+    color: var(--text-2);
+    font-size: 0.85rem;
+    font-weight: 400;
   }
   .sec-h :global(.text-btn) {
     font-size: 0.85rem;

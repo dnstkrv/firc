@@ -371,6 +371,8 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
                              &c->dns_proxy.disable_remap53, &err));
         GET_OR_FAIL(get_bool(map_get(doc, dp, "disableDropAAAA"),
                              &c->dns_proxy.disable_drop_aaaa, &err));
+        GET_OR_FAIL(get_bool(map_get(doc, dp, "disableStats"),
+                             &c->dns_proxy.disable_stats, &err));
         GET_OR_FAIL(get_duration(map_get(doc, dp, "unmatchedTtl"),
                                  &c->dns_proxy.unmatched_ttl, &err));
         GET_OR_FAIL(get_uint64(map_get(doc, dp, "maxIdleConns"), UINT64_MAX,

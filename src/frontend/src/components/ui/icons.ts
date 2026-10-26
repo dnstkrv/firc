@@ -79,3 +79,4 @@ export { default as SortBySource } from "@lucide/svelte/icons/list-restart";
 export { default as Pencil } from "@lucide/svelte/icons/pencil";
 export { default as CloudDownload } from "@lucide/svelte/icons/cloud-download";
 export { default as Comment } from "@lucide/svelte/icons/message-square";
+export { default as BookOpen } from "@lucide/svelte/icons/book-open";

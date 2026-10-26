@@ -120,7 +120,6 @@ struct daemon {
     firc_ifwatch_t *ifwatch;
     firc_httpd_t *http_tcp;
     firc_httpd_t *http_unix;
-    firc_dnsstat_t *dnsstat;
 
     /* Not owned by daemon_teardown: borrowed so the SIGHUP handler can reach them. */
     firc_config_t *cfg;
@@ -368,8 +367,6 @@ static void daemon_teardown(struct daemon *d)
     firc_stable_fields_release(&d->fields);
     firc_dnsproxy_destroy(d->proxy);
     d->proxy = NULL;
-    firc_dnsstat_free(d->dnsstat);
-    d->dnsstat = NULL;
     firc_resolve_router_free(d->router);
     d->router = NULL;
     firc_dns_pipeline_destroy(d->pipeline);
@@ -733,16 +730,17 @@ static int64_t mono_s(void)
 static void on_tally(void *ud, const firc_dns_msg_t *query, const firc_ip_t *client, firc_id_t owner, bool blocked)
 {
     struct daemon *d = ud;
+    if (d->system_ctx == NULL || d->system_ctx->dnsstat == NULL) { return; }
     char name[FIRC_DNS_MAX_NAME + 1];
     if (!firc_dns_msg_queried_name(query, name, sizeof(name))) { return; }
-    firc_dnsstat_note(d->dnsstat, name, client, owner, blocked, mono_s());
+    firc_dnsstat_note(d->system_ctx->dnsstat, name, client, owner, blocked, mono_s());
 }
 
 static void on_dnsstat_sweep(firc_loop_t *loop, void *ud)
 {
     (void)loop;
     struct daemon *d = ud;
-    firc_dnsstat_sweep(d->dnsstat, mono_s());
+    if (d->system_ctx != NULL) { firc_dnsstat_sweep(d->system_ctx->dnsstat, mono_s()); }
 }
 
 static void on_iface_event(void *ud, const char *iface)
@@ -1465,12 +1463,8 @@ int main(int argc, char **argv)
     }
     firc_dnsproxy_set_router(d.proxy, firc_resolve_router_decide, d.router);
     firc_dnsproxy_set_blocked(d.proxy, on_blocked, &d);
-    int64_t dnsstat_since = mono_s();
-    d.dnsstat = firc_dnsstat_new(FIRC_DNSSTAT_KEYS);
-    if (d.dnsstat == NULL) {
-        FIRC_WARN("dns stats: no memory for the store, nothing is counted");
-    } else {
-        firc_dnsproxy_set_tally(d.proxy, on_tally, &d);
+    firc_dnsproxy_set_tally(d.proxy, on_tally, &d);
+    {
         const uint64_t hour_ms = (uint64_t)FIRC_DNSSTAT_HOUR * 1000u;
         uint64_t into = (uint64_t)mono_ms() % hour_ms;
         int dnsstat_timer = 0;
@@ -1666,8 +1660,6 @@ int main(int argc, char **argv)
         .tunnels = firc_tunrun_config(d.tunrun),
         .iface_event = on_iface_event,
         .iface_event_ud = &d,
-        .dnsstat = d.dnsstat,
-        .dnsstat_since_mono = dnsstat_since,
     };
 #ifdef FIRC_ENTWARE_KN
     system_ctx.policies = d.policies;
@@ -1675,6 +1667,7 @@ int main(int argc, char **argv)
 #endif
     d.groups_ctx = &groups_ctx;
     d.system_ctx = &system_ctx;
+    (void)firc_system_dnsstats_start(&system_ctx);
     firc_tunnels_ctx_t tunnels_ctx = {
         .run = d.tunrun,
         .subs = d.tunsubs,

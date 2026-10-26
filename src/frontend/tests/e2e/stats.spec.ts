@@ -100,6 +100,7 @@ function answerStats(url: URL, extra: Key[] = []) {
     .filter((r) => r.name.includes(q))
     .sort((a, b) => b.queries - a.queries || a.name.localeCompare(b.name));
   return {
+    enabled: true,
     window: 86400,
     now: DAEMON_NOW,
     since: DAEMON_NOW - 3 * 86400,
@@ -146,6 +147,8 @@ async function setup(page: Page, groups: Record<string, unknown>[], extra: Key[]
     groups: structuredClone(groups),
     puts: [] as any[],
     stats: [] as URL[],
+    enabled: true,
+    settings: [] as any[],
   };
   await signedIn(page);
   await page.addInitScript(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));
@@ -171,7 +174,29 @@ async function setup(page: Page, groups: Record<string, unknown>[], extra: Key[]
   await page.route(/\/system\/dnsstats(\?.*)?$/, (route) => {
     const url = new URL(route.request().url());
     daemon.stats.push(url);
+    if (!daemon.enabled) {
+      return route.fulfill({
+        json: {
+          enabled: false,
+          window: 86400,
+          now: DAEMON_NOW,
+          since: DAEMON_NOW,
+          queries: 0,
+          blocked: 0,
+          domains: 0,
+          rows: [],
+          matched: 0,
+          offset: 0,
+        },
+      });
+    }
     return route.fulfill({ json: answerStats(url, extra) });
+  });
+  await page.route("**/system/settings", async (route) => {
+    const body = route.request().postDataJSON();
+    daemon.settings.push(body);
+    if (body?.settings?.["app.dnsProxy.disableStats"] === false) daemon.enabled = true;
+    await route.fulfill({ json: { settings: {}, applied: [], pendingRestart: [] } });
   });
   await page.route(/\/groups(\?.*)?$/, async (route) => {
     const request = route.request();
@@ -522,5 +547,38 @@ test.describe("DNS stats", () => {
     await page.clock.runFor(30_000);
     await page.waitForTimeout(200);
     expect(daemon.stats.length).toBe(asked + 2);
+  });
+
+  // Catches the hidden devices of a row left unreachable, merged wrongly, or the uncounted rest dropped.
+  test("«и ещё N» lists every device of the row", async ({ page }) => {
+    await setup(page, [ADS_GROUP]);
+    await page.route(/\/system\/dnsstats(\?.*)?$/, async (route) => {
+      const answer = answerStats(new URL(route.request().url()), []);
+      for (const r of answer.rows) if (r.name === "googlevideo.com") r.clientsTotal += 20;
+      await route.fulfill({ json: answer });
+    });
+    await page.reload();
+    const more = row(page, "googlevideo.com").getByRole("button", { name: "и ещё 21" });
+    await more.click();
+    const panel = page.locator(".more-panel");
+    await expect(panel.locator(".mp-row .dn")).toHaveText(["Living room TV", "Phone", "Desktop"]);
+    await expect(panel.locator(".mp-q")).toHaveText(["170", "41", "10"]);
+    await expect(panel.locator(".mp-rest")).toHaveText("ещё адресов, спрашивавших реже: 20");
+  });
+
+  // Catches the off answer drawn as an empty day, a count left on the tab, or Turn on writing the wrong key.
+  test("stats switched off say so and turn on from the tab", async ({ page }) => {
+    const daemon = await setup(page, [ADS_GROUP]);
+    daemon.enabled = false;
+    await page.reload();
+    await expect(page.getByText("Статистика запросов выключена")).toBeVisible();
+    await expect(page.locator(".stats-row")).toHaveCount(0);
+    await expect(
+      page.getByRole("tab", { name: /Статистика запросов/ }).locator(".mct"),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Включить" }).click();
+    await expect(page.locator(".stats-row").first()).toBeVisible();
+    expect(daemon.settings).toEqual([{ settings: { "app.dnsProxy.disableStats": false } }]);
+    await expect(page.getByRole("tab", { name: /Статистика запросов/ })).toContainText("7");
   });
 });

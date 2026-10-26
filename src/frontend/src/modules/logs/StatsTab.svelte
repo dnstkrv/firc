@@ -2,6 +2,7 @@
   import { Popover } from "bits-ui";
   import { untrack } from "svelte";
 
+  import Button from "../../components/ui/Button.svelte";
   import Checkbox from "../../components/ui/Checkbox.svelte";
   import Select from "../../components/ui/Select.svelte";
   import {
@@ -26,6 +27,7 @@
 
   import { Ban, Filter, Search } from "../../components/ui/icons";
   import type { Group } from "../../types";
+  import { fetcher } from "../../utils/fetcher";
   import { pluralForm } from "../../utils/plural";
   import { isValidDomain } from "../../utils/rule-validators";
 
@@ -76,6 +78,22 @@
     for (const r of data.rows) for (const c of r.clients) known.add(c.address.toLowerCase());
     if (known.size > before) statsFilter.seen = [...known];
   });
+
+  let turning = $state(false);
+
+  async function turnOn() {
+    turning = true;
+    try {
+      await fetcher.put("/system/settings", { settings: { "app.dnsProxy.disableStats": false } });
+      await fetchDnsStats({
+        addresses: addressKey ? addressKey.split(",") : [],
+        q: statsFilter.q,
+        arpa: statsFilter.arpa,
+      });
+    } finally {
+      turning = false;
+    }
+  }
 
   function word(n: number, one: string, few: string, many: string): string {
     const form = pluralForm(n, locale.current);
@@ -148,95 +166,132 @@
   {/if}
 {/snippet}
 
-<div class="st-bar">
-  <div class="st-row">
-    <label class="field search">
-      <Search size={18} aria-hidden="true" />
-      <input type="search" bind:value={query} placeholder={t("domain")} aria-label={t("domain")} />
-    </label>
-    <div class="field sel stats-device">
-      <Select
-        options={deviceOptions}
-        selected={statsFilter.device}
-        onValueChange={(v) => (statsFilter.device = v)}
-        ariaLabel={t("Device")}
-        showSelectedDescription={false}
-      />
-    </div>
-    <Popover.Root>
-      <Popover.Trigger
-        class="jh-filter"
-        aria-label={statsFilter.arpa
-          ? `${t("Filter")}, ${t("{n} active").replace("{n}", "1")}`
-          : t("Filter")}
-      >
-        <Filter size={18} aria-hidden="true" />
-        <span class="st-filter-label" aria-hidden="true">{t("Filter")}</span>
-        {#if statsFilter.arpa}<span class="st-badge" aria-hidden="true">1</span>{/if}
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          class="jh-panel"
-          side="bottom"
-          align="end"
-          sideOffset={6}
-          collisionPadding={8}
-        >
-          <label class="st-check">
-            <Checkbox bind:checked={statsFilter.arpa} ariaLabelledby="{uid}-arpa-label" />
-            <span id="{uid}-arpa-label">{t("show service names")}</span>
-          </label>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+{#if data && !data.enabled}
+  <div class="st-off">
+    <div class="st-off-title">{t("DNS stats are off")}</div>
+    <p>
+      {t(
+        "While off, the daemon counts nothing and holds no memory for it. Turning it on starts a new 24 h window.",
+      )}
+    </p>
+    <Button onclick={() => void turnOn()} inactive={turning}>{t("Turn on")}</Button>
   </div>
-  {#if device && device.addresses.length > DEVICE_ADDRESSES_MAX}
-    <div class="st-note">
-      {t("Counts {max} of this device's {n} addresses, those seen asking first")
-        .replace("{max}", String(DEVICE_ADDRESSES_MAX))
-        .replace("{n}", String(device.addresses.length))}
+{:else}
+  <div class="st-bar">
+    <div class="st-row">
+      <label class="field search">
+        <Search size={18} aria-hidden="true" />
+        <input
+          type="search"
+          bind:value={query}
+          placeholder={t("domain")}
+          aria-label={t("domain")}
+        />
+      </label>
+      <div class="field sel stats-device">
+        <Select
+          options={deviceOptions}
+          selected={statsFilter.device}
+          onValueChange={(v) => (statsFilter.device = v)}
+          ariaLabel={t("Device")}
+          showSelectedDescription={false}
+        />
+      </div>
+      <Popover.Root>
+        <Popover.Trigger
+          class="jh-filter"
+          aria-label={statsFilter.arpa
+            ? `${t("Filter")}, ${t("{n} active").replace("{n}", "1")}`
+            : t("Filter")}
+        >
+          <Filter size={18} aria-hidden="true" />
+          <span class="st-filter-label" aria-hidden="true">{t("Filter")}</span>
+          <span class="st-badge" class:none={!statsFilter.arpa} aria-hidden="true">1</span>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content
+            class="jh-panel"
+            side="bottom"
+            align="end"
+            sideOffset={6}
+            collisionPadding={8}
+          >
+            <label class="st-check">
+              <Checkbox bind:checked={statsFilter.arpa} ariaLabelledby="{uid}-arpa-label" />
+              <span id="{uid}-arpa-label">{t("show service names")}</span>
+            </label>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
     </div>
-  {/if}
-  {#if data}
-    <div class="stats-sum">
-      <span
-        >{data.since > now - data.window
-          ? t("since {time}").replace("{time}", stamp(data.since))
-          : t("in 24 h")}:</span
-      >
-      <span
-        ><b>{fmt(data.queries)}</b>
-        {word(data.queries, t("query"), t("queries (2-4)"), t("queries"))}</span
-      >
-      <span
-        >· <b>{fmt(data.domains)}</b>
-        {word(data.domains, t("domain"), t("domains (2-4)"), t("domains"))}</span
-      >
-      <span>· {t("blocked")} <b class="red">{share(data.blocked, data.queries)}</b></span>
-    </div>
-  {/if}
-  {#if dnsStats.failed}
-    <div class="st-err">{t("The daemon did not answer for the stats.")}</div>
-  {/if}
-</div>
+    {#if device && device.addresses.length > DEVICE_ADDRESSES_MAX}
+      <div class="st-note">
+        {t("Counts {max} of this device's {n} addresses, those seen asking first")
+          .replace("{max}", String(DEVICE_ADDRESSES_MAX))
+          .replace("{n}", String(device.addresses.length))}
+      </div>
+    {/if}
+    {#if data}
+      <div class="stats-sum">
+        <span
+          >{data.since > now - data.window
+            ? t("since {time}").replace("{time}", stamp(data.since))
+            : t("in 24 h")}:</span
+        >
+        <span
+          ><b>{fmt(data.queries)}</b>
+          {word(data.queries, t("query"), t("queries (2-4)"), t("queries"))}</span
+        >
+        <span
+          >· <b>{fmt(data.domains)}</b>
+          {word(data.domains, t("domain"), t("domains (2-4)"), t("domains"))}</span
+        >
+        <span>· {t("blocked")} <b class="red">{share(data.blocked, data.queries)}</b></span>
+      </div>
+    {/if}
+    {#if dnsStats.failed}
+      <div class="st-err">{t("The daemon did not answer for the stats.")}</div>
+    {/if}
+  </div>
 
-<DomainsTable
-  rows={data?.rows ?? []}
-  {devices}
-  {now}
-  empty={t("No queries in the last day match these filters.")}
-  onpick={(name) => (query = name)}
-  {action}
-/>
-{#if data && data.matched > data.rows.length}
-  <p class="st-more">
-    {t("The {n} busiest of {m} names are shown; search finds the rest.")
-      .replace("{n}", String(data.rows.length))
-      .replace("{m}", String(data.matched))}
-  </p>
+  <DomainsTable
+    rows={data?.rows ?? []}
+    {devices}
+    {now}
+    empty={t("No queries in the last day match these filters.")}
+    onpick={(name) => (query = name)}
+    {action}
+  />
+  {#if data && data.matched > data.rows.length}
+    <p class="st-more">
+      {t("The {n} busiest of {m} names are shown; search finds the rest.")
+        .replace("{n}", String(data.rows.length))
+        .replace("{m}", String(data.matched))}
+    </p>
+  {/if}
 {/if}
 
 <style>
+  .st-off {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.6rem;
+    max-width: 36rem;
+    margin: 1.5rem auto;
+    padding: 1.25rem;
+    border: 1px solid var(--bg-light-extra);
+    border-radius: 0.5rem;
+    background: var(--bg-light);
+  }
+  .st-off-title {
+    font-size: 1.05rem;
+  }
+  .st-off p {
+    margin: 0;
+    color: var(--text-2);
+    font-size: 0.9rem;
+  }
   .st-bar {
     container-type: inline-size;
     margin: -0.5rem 0 0.5rem;
@@ -288,6 +343,9 @@
     font-weight: 700;
     line-height: 1.2rem;
     text-align: center;
+  }
+  .st-badge.none {
+    visibility: hidden;
   }
   .st-check {
     display: flex;

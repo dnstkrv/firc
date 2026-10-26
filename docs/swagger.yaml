@@ -75,10 +75,14 @@ definitions:
         description: >-
           YAML path -> saved value. Numbers as numbers; timeout in
           milliseconds, ttlClamp in seconds; link is an
-          array of strings; startMarkTableIndex is a string like 0x66697263
+          array of strings; startMarkTableIndex is a string like 0x66697263.
+          app.dnsProxy.disableStats (live, false by default) turns the DNS
+          stats off: nothing is counted and the counts are dropped; turned on
+          again, they start empty.
         example:
           app.dnsProxy.upstream.address: 127.0.0.1
           app.dnsProxy.upstream.port: 53
+          app.dnsProxy.disableStats: false
           app.dnsProxy.timeout: 5000
           app.check.url: http://cp.cloudflare.com/generate_204
           app.check.wanUrl: ""
@@ -643,6 +647,13 @@ definitions:
     type: object
   types.DnsStatsRes:
     properties:
+      enabled:
+        description: >-
+          False while app.dnsProxy.disableStats is on: nothing is counted,
+          `since` is `now`, the totals are 0, `rows` is empty and `offset` is
+          the one asked
+        example: true
+        type: boolean
       window:
         description: 'Seconds the counts cover'
         example: 86400
@@ -3003,7 +3014,9 @@ paths:
         counts move between pages, so paging may repeat or skip a row. Names
         under `.arpa` are counted but left out of the rows, `domains` and the
         totals unless `arpa=1`. The answer holds names clients asked for, so
-        the route is available only after a WebUI login.
+        the route is available only after a WebUI login. With the stats
+        switched off (app.dnsProxy.disableStats) it answers `enabled: false`
+        and an empty day; the parameters are checked as always.
       parameters:
       - description: 'At most 12 addresses, comma-separated; any that does not parse is a 400'
         in: query

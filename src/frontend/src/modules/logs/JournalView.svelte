@@ -302,8 +302,9 @@
         onclick={() => (view = v)}
         >{viewLabel(v)}{#if v === "events" && !narrow}<span class="mct" aria-hidden="true"
             >{rendered.length}</span
-          >{:else if v === "stats" && !narrow && dnsStats.data}<span class="mct" aria-hidden="true"
-            >{dnsStats.data.domains}</span
+          >{:else if v === "stats" && !narrow && dnsStats.data?.enabled}<span
+            class="mct"
+            aria-hidden="true">{dnsStats.data.domains}</span
           >{:else if v === "capture" && capture.running}<span class="tab-clock" aria-hidden="true"
             ><span class="cdot"></span>{captureClock}</span
           >{:else if v === "capture" && capture.last && !narrow}<span class="mct" aria-hidden="true"
@@ -332,7 +333,7 @@
         >
           <Filter size={18} aria-hidden="true" />
           <span class="jh-filter-label" aria-hidden="true">{t("Filter")}</span>
-          {#if hiding > 0}<span class="jh-badge" aria-hidden="true">{hiding}</span>{/if}
+          <span class="jh-badge" class:none={hiding === 0} aria-hidden="true">{hiding || 1}</span>
         </Popover.Trigger>
         <Popover.Portal>
           <Popover.Content
@@ -577,6 +578,9 @@
     font-weight: 700;
     line-height: 1.2rem;
     text-align: center;
+  }
+  .jh-badge.none {
+    visibility: hidden;
   }
   :global(.jh-panel) {
     display: flex;

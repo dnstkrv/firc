@@ -199,6 +199,7 @@ typedef struct firc_app_config {
         } host, upstream;
         bool disable_remap53;
         bool disable_drop_aaaa;
+        bool disable_stats;
         uint64_t max_idle_conns;
         uint64_t max_concurrent;
         firc_duration_t timeout;

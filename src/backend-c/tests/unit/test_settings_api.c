@@ -243,7 +243,7 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT_EQ(200, do_request("GET", "/api/v1/system/settings", NULL, &out));
     ASSERT(out != NULL);
     const cJSON *s = item(out, "settings"), *c = item(out, "classes");
-    ASSERT_EQ(28, cJSON_GetArraySize(s));
+    ASSERT_EQ(29, cJSON_GetArraySize(s));
     ASSERT_EQ(NULL, item(s, "app.logLevel"));
     ASSERT_EQ(NULL, item(s, "app.showAllInterfaces"));
     ASSERT(cJSON_IsFalse(item(s, "app.update.check")));
@@ -263,12 +263,14 @@ TEST get_answers_every_setting_typed(void) {
     ASSERT(strings_are(item(s, "app.link"), br0, 1));
     ASSERT_STR_EQ("live", item(c, "app.dnsProxy.upstream.address")->valuestring);
     ASSERT_STR_EQ("live", item(c, "app.dnsProxy.unmatchedTtl")->valuestring);
+    ASSERT(cJSON_IsFalse(item(s, "app.dnsProxy.disableStats")));
+    ASSERT_STR_EQ("live", item(c, "app.dnsProxy.disableStats")->valuestring);
     ASSERT_STR_EQ("restart", item(c, "app.link")->valuestring);
     ASSERT_STR_EQ("restart", item(c, "app.dnsProxy.timeout")->valuestring);
     int live = 0;
     const cJSON *e;
     cJSON_ArrayForEach(e, c) { live += strcmp(e->valuestring, "live") == 0; }
-    ASSERT_EQ(9, live);
+    ASSERT_EQ(10, live);
     ASSERT(strings_are(item(out, "pendingRestart"), NONE, 0));
     cJSON_Delete(out);
     harness_stop(h);

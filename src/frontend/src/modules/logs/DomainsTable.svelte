@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Popover } from "bits-ui";
   import type { Snippet } from "svelte";
 
   import {
@@ -63,7 +64,39 @@
             </span>
           {/each}
           {#if more > 0}
-            <span class="more">{t("and {n} more").replace("{n}", String(more))}</span>
+            <Popover.Root>
+              <Popover.Trigger class="more"
+                >{t("and {n} more").replace("{n}", String(more))}</Popover.Trigger
+              >
+              <Popover.Portal>
+                <Popover.Content
+                  class="more-panel"
+                  side="bottom"
+                  align="start"
+                  sideOffset={4}
+                  collisionPadding={8}
+                >
+                  <div class="mp-title">{r.name}</div>
+                  {#each devs as d (d.key)}
+                    <div class="mp-row">
+                      <span class="dev">
+                        <span class="dn">{d.label}</span>
+                        {#if d.label !== d.address}<span class="da">{d.address}</span>{/if}
+                      </span>
+                      <span class="mp-q">{d.queries}</span>
+                    </div>
+                  {/each}
+                  {#if r.clientsTotal > r.clients.length}
+                    <div class="mp-rest">
+                      {t("{n} more addresses asked less often").replace(
+                        "{n}",
+                        String(r.clientsTotal - r.clients.length),
+                      )}
+                    </div>
+                  {/if}
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
           {/if}
         </span>
         <span class="last">{relativeTime(r.last, now, t)}</span>
@@ -194,11 +227,60 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .more {
+  .devs :global(.more) {
     align-self: center;
+    padding: 0.15rem 0.35rem;
+    border: 0;
+    border-radius: 0.3rem;
+    background: none;
+    font: inherit;
+    font-size: 0.76rem;
+    color: var(--accent);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .devs :global(.more:hover) {
+    background: var(--bg-light-extra);
+  }
+  :global(.more-panel) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 18rem;
+    max-width: calc(100vw - 1rem);
+    max-height: 22rem;
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 0.6rem 0.75rem;
+    background-color: var(--bg-dark-extra);
+    border: 1px solid var(--bg-light-extra);
+    border-radius: 0.5rem;
+    box-shadow: var(--shadow-popover);
+    color: var(--text);
+    z-index: 30;
+    outline: none;
+  }
+  .mp-title {
+    font-size: 0.8rem;
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mp-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .mp-q {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-2);
+  }
+  .mp-rest {
     font-size: 0.76rem;
     color: var(--text-2);
-    white-space: nowrap;
   }
   .last {
     color: var(--text-2);

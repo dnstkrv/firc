@@ -625,4 +625,51 @@ test.describe("Tunnel editor", () => {
     expect(value).not.toBeNull();
     expect(value!.y).toBeGreaterThanOrEqual(name!.y + name!.height - 1);
   });
+
+  // Catches the fold losing the nodes for good, the summary missing the active node, or the choice forgotten on reload.
+  test("Hide the nodes folds the table to a summary and is remembered", async ({ page }) => {
+    const daemon = await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB, LINK] })],
+      states: [state("a", "tunvless0", { active: ["A"] })],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    await expect(tunnels.nodeRows("a")).toHaveCount(3);
+    await page.getByRole("button", { name: "Hide the nodes" }).click();
+    await expect(tunnels.nodeRows("a")).toHaveCount(0);
+    await expect(page.locator(".fold-sum")).toHaveText("3 of 3 match · active: A");
+    await expect(page.getByRole("button", { name: "Check nodes" })).toHaveCount(0);
+    await tunnels.open();
+    await tunnels.card("a").getByRole("button", { name: "Expand", exact: true }).click();
+    await expect(page.locator(".fold-sum")).toBeVisible();
+    await expect(tunnels.nodeRows("a")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show the nodes" }).click();
+    await expect(tunnels.nodeRows("a")).toHaveCount(3);
+    expect(daemon.puts).toHaveLength(0);
+  });
+
+  // Catches a long node list opened unfolded, or the fold threshold off by one.
+  test("more than 20 nodes open folded, 20 open unfolded", async ({ page }) => {
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        key: `0000000a:N${i}`,
+        name: `N${i}`,
+        source: "Provider",
+      }));
+    const daemon = await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB] })],
+      states: [state("a", "tunvless0")],
+      nodes: many(21),
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.card("a").getByRole("button", { name: "Expand", exact: true }).click();
+    await expect(page.locator(".fold-sum")).toHaveText("21 of 21 match");
+    await expect(tunnels.nodeRows("a")).toHaveCount(0);
+    daemon.nodes = many(20);
+    await tunnels.open();
+    await tunnels.expand("a");
+    await expect(tunnels.nodeRows("a")).toHaveCount(20);
+  });
 });

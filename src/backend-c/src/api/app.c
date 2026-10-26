@@ -172,6 +172,8 @@ struct firc_app {
     firc_app_tunnel_down_fn tunnel_down;
     void *tunnel_down_ud;
     firc_app_ifaces_t ifaces;
+    firc_app_dnsstats_fn dnsstats;
+    void *dnsstats_ud;
     firc_ruleset_lookup_t lookup; /* filled after the rulesets exist; read on the loop thread when a selector renders */
 
     bool pass_refused;
@@ -2518,13 +2520,14 @@ static firc_err_t apply_live(firc_app_t *app, bool applied[FIRC_SETTINGS_COUNT])
     firc_app_config_t *run = &app->cfg->app;
     const firc_app_config_t *sav = &app->saved;
     bool differ[FIRC_SETTINGS_COUNT];
-    bool upstream = false, flags = false, check = false;
+    bool upstream = false, flags = false, check = false, stats = false;
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
         const firc_setting_t *s = &firc_settings[i];
         differ[i] = s->cls == FIRC_SETTING_LIVE && !firc_setting_equal(s, sav, run);
         if (!differ[i]) { continue; }
         if (s->apply == FIRC_APPLY_UPSTREAM) { upstream = true; }
         if (s->apply == FIRC_APPLY_PROXY_FLAGS) { flags = true; }
+        if (s->apply == FIRC_APPLY_DNS_STATS) { stats = true; }
         if (s->apply == FIRC_APPLY_CHECK || s->apply == FIRC_APPLY_UPSTREAM) { check = true; }
     }
     if (upstream && app->proxy != NULL) {
@@ -2541,6 +2544,15 @@ static firc_err_t apply_live(firc_app_t *app, bool applied[FIRC_SETTINGS_COUNT])
     }
     if (flags && app->proxy != NULL) {
         firc_dnsproxy_set_disable_drop_aaaa(app->proxy, sav->dns_proxy.disable_drop_aaaa);
+    }
+    if (stats && app->dnsstats != NULL) {
+        firc_err_t err = app->dnsstats(app->dnsstats_ud, !sav->dns_proxy.disable_stats);
+        if (err != FIRC_OK) {
+            if (first == FIRC_OK) { first = err; }
+            for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
+                if (firc_settings[i].apply == FIRC_APPLY_DNS_STATS) { differ[i] = false; }
+            }
+        }
     }
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
         if (applied != NULL) { applied[i] = false; }
@@ -2582,6 +2594,8 @@ firc_err_t firc_app_put_settings(firc_app_t *app, firc_app_config_t *next, const
     }
     if (!changed) {
         firc_app_config_clear(next);
+        firc_err_t lerr = apply_live(app, applied);
+        if (live_err != NULL) { *live_err = lerr; }
         return FIRC_OK;
     }
     if (conf_path != NULL) {
@@ -3079,6 +3093,16 @@ void firc_app_set_ifaces(firc_app_t *app, const firc_app_ifaces_t *h) {
         return;
     }
     app->ifaces = *h;
+}
+
+firc_err_t firc_app_set_dnsstats(firc_app_t *app, firc_app_dnsstats_fn fn, void *ud) {
+    if (app == NULL) { return FIRC_OK; }
+    app->dnsstats = fn;
+    app->dnsstats_ud = ud;
+    if (fn == NULL) { return FIRC_OK; }
+    firc_err_t err = fn(ud, !app->cfg->app.dns_proxy.disable_stats);
+    if (err != FIRC_OK) { app->cfg->app.dns_proxy.disable_stats = true; }
+    return err;
 }
 
 bool firc_app_iface_view(const firc_app_t *app, const char *name, firc_if_view_t *out) {

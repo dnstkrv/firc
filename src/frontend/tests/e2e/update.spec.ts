@@ -3,8 +3,6 @@ import { expect, test, type Page } from "@playwright/test";
 import { signedIn } from "./pages/session";
 import { answer, openSettings, upToDate } from "./pages/settings";
 
-const NOTES = "добавлена сборка для mips\nисправлен журнал";
-
 const newer = {
   ...upToDate,
   check: {
@@ -15,7 +13,6 @@ const newer = {
       version: "0.3.0",
       tag: "0.3.0",
       publishedAt: "2026-10-12T10:00:00Z",
-      notes: NOTES,
       asset: { name: "firc_0.3.0-1_entware_mipsel-3.4_kn.ipk", size: 830000 },
     },
     newer: true,
@@ -27,15 +24,21 @@ const unchecked = { ...upToDate, check: null };
 const settingsAnswer = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) =>
   route.fulfill({ json: answer() });
 
-const lineTops = (page: Page) =>
-  page.locator("pre.notes").evaluate((el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
-  });
+const popover = (page: Page) => page.locator(".update-popover");
 
-// Catches a page that shows nothing until somebody presses Check, or notes collapsed onto one line.
-test("opening settings with nothing cached checks and shows the notes", async ({ page }) => {
+async function openPopover(page: Page) {
+  if ((await popover(page).count()) === 0) await page.locator(".version-button").click();
+  await expect(popover(page)).toBeVisible();
+  return page.getByTestId("update-status");
+}
+
+async function closePopover(page: Page) {
+  await page.keyboard.press("Escape");
+  await expect(popover(page)).toHaveCount(0);
+}
+
+// Catches a popover that shows nothing until somebody presses Check, or a check spent on loading the page.
+test("opening the popover with nothing cached checks", async ({ page }) => {
   let posts = 0;
   await openSettings(page, settingsAnswer, {
     onUpdate: (r) => r.fulfill({ json: unchecked }),
@@ -44,42 +47,28 @@ test("opening settings with nothing cached checks and shows the notes", async ({
       return r.fulfill({ json: newer });
     },
   });
-  const block = page.getByTestId("update-block");
-  await expect(block).toContainText("0.2.0");
-  await expect(block).toContainText("mipsel-3.4_kn");
-  await expect(block).toContainText("0.3.0");
-  await expect(page.locator("pre.notes")).toHaveText(NOTES);
-  expect(await lineTops(page)).toBe(2);
+  await expect(page.locator('[data-section="updates"]')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(posts).toBe(0);
+  const status = await openPopover(page);
+  await expect(status).toHaveText(/Install 0\.3\.0/);
   await page.waitForTimeout(300);
   expect(posts).toBe(1);
 });
 
-// Catches long notes running past the block instead of wrapping inside it.
-test("long notes wrap inside the block", async ({ page }) => {
-  const long = { ...newer.check.latest, notes: "исправлено ".repeat(40).trim() };
+// Catches the installed build's target missing from the popover, or a separator left for an empty one.
+test("the popover names the installed build and its target", async ({ page }) => {
+  let target = "mipsel-3.4_kn";
   await openSettings(page, settingsAnswer, {
-    onUpdate: (r) => r.fulfill({ json: { ...newer, check: { ...newer.check, latest: long } } }),
+    onUpdate: (r) =>
+      r.fulfill({ json: { ...upToDate, installed: { ...upToDate.installed, target } } }),
   });
-  const notes = page.locator("pre.notes");
-  await expect(notes).toBeVisible();
-  const fits = await notes.evaluate((el) => el.scrollWidth <= el.clientWidth);
-  expect(fits).toBe(true);
-});
-
-// Catches the Check button squeezing the installed version into a narrow column.
-test("the installed version keeps one line beside the Check button", async ({ page }) => {
-  await openSettings(page, settingsAnswer);
-  const block = page.getByTestId("update-block");
-  await expect(block).toContainText("Up to date");
-  const head = await block.locator(".installed").boundingBox();
-  const button = await block.getByRole("button", { name: "Check" }).boundingBox();
-  const lines = await block.locator(".installed").evaluate((el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
-  });
-  expect(lines).toBe(1);
-  expect(button!.x).toBeGreaterThan(head!.x + head!.width);
+  await openPopover(page);
+  await expect(page.getByTestId("update-build")).toHaveText("0.2.0 · mipsel-3.4_kn");
+  await closePopover(page);
+  target = "";
+  await openPopover(page);
+  await expect(page.getByTestId("update-build")).toHaveText("0.2.0");
 });
 
 // Catches a status read started during a check landing after it and putting the old answer back.
@@ -98,22 +87,22 @@ test("a status read during a check does not undo its result", async ({ page }) =
       await r.fulfill({ json: newer });
     },
   });
+  await expect.poll(() => gets).toBe(1);
+  const status = await openPopover(page);
   await expect.poll(() => posts).toBe(1);
-  await expect(page.getByTestId("update-block").getByRole("button", { name: "Check" })).toHaveClass(
-    /inactive/,
-  );
-  await page.getByRole("tab", { name: "Groups" }).click();
-  await page.getByRole("tab", { name: "Settings" }).click();
-  await expect(page.getByTestId("update-block")).toContainText("0.3.0");
+  await expect(page.getByTestId("update-check")).toBeDisabled();
+  await closePopover(page);
+  await openPopover(page);
+  await expect(status).toHaveText(/Install 0\.3\.0/);
   await expect.poll(() => gets).toBe(3);
   await page.waitForTimeout(1800);
-  await expect(page.getByTestId("update-block")).toContainText("0.3.0");
+  await expect(status).toHaveText(/Install 0\.3\.0/);
   await expect(page.getByTestId("update-dot")).toBeVisible();
   expect(posts).toBe(1);
 });
 
-// Catches a second check started when the tab is opened again while one is under way.
-test("re-opening settings during a check does not start a second one", async ({ page }) => {
+// Catches a second check started when the popover is opened again while one is under way.
+test("re-opening the popover during a check does not start a second one", async ({ page }) => {
   let posts = 0;
   let answered = 0;
   await openSettings(page, settingsAnswer, {
@@ -125,17 +114,18 @@ test("re-opening settings during a check does not start a second one", async ({ 
       answered++;
     },
   });
+  await openPopover(page);
   await expect.poll(() => posts).toBe(1);
-  await page.getByRole("tab", { name: "Groups" }).click();
-  await page.getByRole("tab", { name: "Settings" }).click();
+  await closePopover(page);
+  const status = await openPopover(page);
   await expect.poll(() => answered).toBe(1);
-  await expect(page.getByTestId("update-block")).toContainText("0.3.0");
+  await expect(status).toHaveText(/Install 0\.3\.0/);
   await page.waitForTimeout(300);
   expect(posts).toBe(1);
 });
 
-// Catches every open of the tab spending one of GitHub's 60 requests an hour.
-test("a fresh check is not repeated on opening settings", async ({ page }) => {
+// Catches every open of the popover spending one of GitHub's 60 requests an hour.
+test("a fresh check is not repeated on opening the popover", async ({ page }) => {
   let posts = 0;
   await openSettings(page, settingsAnswer, {
     onCheck: (r) => {
@@ -143,10 +133,11 @@ test("a fresh check is not repeated on opening settings", async ({ page }) => {
       return r.fulfill({ json: upToDate });
     },
   });
-  await expect(page.getByTestId("update-block")).toContainText("Up to date, checked 0 min ago");
-  await page.getByRole("tab", { name: "Groups" }).click();
-  await page.getByRole("tab", { name: "Settings" }).click();
-  await expect(page.getByTestId("update-block")).toBeVisible();
+  const status = await openPopover(page);
+  await expect(status).toContainText("checked 0 min ago");
+  await closePopover(page);
+  await openPopover(page);
+  await expect(status).toContainText("Latest version");
   await page.waitForTimeout(300);
   expect(posts).toBe(0);
 });
@@ -167,12 +158,14 @@ test.describe("rate limit", () => {
           },
         }),
     });
-    await expect(page.getByTestId("update-error")).toContainText("try again after 19:01");
+    const status = await openPopover(page);
+    await expect(status).toContainText("Check failed");
+    await expect(status).toContainText("try again after 19:01");
     expect(await page.locator(".toast").count()).toBe(0);
   });
 });
 
-// Catches a 502 shown without GitHub's reason, or the Check button left inactive after a failure.
+// Catches a 502 shown without GitHub's reason, or Check left disabled after a failure.
 test("a failed check shows the daemon's reason and can be repeated", async ({ page }) => {
   let posts = 0;
   await openSettings(page, settingsAnswer, {
@@ -182,10 +175,9 @@ test("a failed check shows the daemon's reason and can be repeated", async ({ pa
       return r.fulfill({ status: 502, json: { error: "Could not resolve host: api.github.com" } });
     },
   });
-  await expect(page.getByTestId("update-error")).toHaveText(
-    "Could not resolve host: api.github.com",
-  );
-  await page.getByTestId("update-block").getByRole("button", { name: "Check" }).click();
+  const status = await openPopover(page);
+  await expect(status.locator(".sub")).toHaveText("Could not resolve host: api.github.com");
+  await page.getByTestId("update-check").click();
   await expect.poll(() => posts).toBe(2);
 });
 
@@ -199,8 +191,10 @@ test("an update checker that is not running stays quiet", async ({ page }) => {
     },
   });
   await expect(page.locator('[data-section="updates"]')).toBeVisible();
+  await page.locator(".version-button").click();
+  await expect(popover(page)).toContainText("No answer from the daemon");
   await expect.poll(() => gets).toBeGreaterThanOrEqual(2);
-  await expect(page.getByTestId("update-block")).toHaveCount(0);
+  await expect(page.getByTestId("update-status")).toHaveCount(0);
   expect(await page.locator(".toast").count()).toBe(0);
 });
 
@@ -218,7 +212,8 @@ test("the header dot shows a newer release", async ({ page }) => {
 // Catches the dot shown for a build that is up to date.
 test("the header dot stays away when the build is up to date", async ({ page }) => {
   await openSettings(page, settingsAnswer);
-  await expect(page.getByTestId("update-block")).toContainText("Up to date");
+  const status = await openPopover(page);
+  await expect(status).toContainText("Latest version");
   await expect(page.getByTestId("update-dot")).toHaveCount(0);
 });
 
@@ -326,10 +321,13 @@ async function offerInstall(
     onInstall,
     onRestart: opts.onRestart,
   });
-  const install = page.getByTestId("update-block").getByRole("button", { name: "Install" });
-  await expect(install).toBeVisible();
+  const install = await openPopover(page);
+  await expect(install).toHaveAttribute("data-state", "action");
   return install;
 }
+
+const confirmInstall = (page: Page) =>
+  page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
 
 const accept = (mode: { value: Mode }, next: Mode, bodies: unknown[] = []) => {
   return (r: Parameters<Parameters<Page["route"]>[1]>[0]) => {
@@ -379,12 +377,13 @@ test("install_shows_progress_then_the_overlay_then_reloads_on_the_new_version", 
   const mode = { value: "offer" as Mode };
   const install = await offerInstall(page, mode, accept(mode, "downloading"));
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
+  await confirmInstall(page);
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
   await expect(page.getByTestId("restart-overlay")).toHaveCount(0);
-  const block = page.getByTestId("update-block");
-  await expect(block.getByRole("button", { name: "Check" })).toHaveClass(/inactive/);
-  await expect(block.getByRole("button", { name: "Install" })).toHaveClass(/inactive/);
+  await expect(page.getByTestId("update-check")).toBeDisabled();
+  await expect(status).toBeDisabled();
+  await expect(status).toHaveAttribute("data-state", "busy");
   mode.value = "installing";
   const overlay = page.getByTestId("restart-overlay");
   await expect(overlay).toBeVisible({ timeout: 5000 });
@@ -405,7 +404,7 @@ test("an_install_that_did_not_land_says_opkgs_exit", async ({ page }) => {
   const install = await offerInstall(page, mode, accept(mode, "installing"));
   page.on("load", () => loads++);
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  await confirmInstall(page);
   const overlay = page.getByTestId("restart-overlay");
   await expect(overlay).toBeVisible({ timeout: 5000 });
   mode.value = "not-landed";
@@ -416,18 +415,48 @@ test("an_install_that_did_not_land_says_opkgs_exit", async ({ page }) => {
   await expect(overlay).toBeVisible();
 });
 
-// Catches a failed download hidden, or taken for a restart.
+// Catches a failed download hidden, taken for a restart, or the install not offered again.
 test("a_failed_download_shows_its_error_and_no_overlay", async ({ page }) => {
   const mode = { value: "offer" as Mode };
-  const install = await offerInstall(page, mode, accept(mode, "failed"));
+  const bodies: unknown[] = [];
+  const install = await offerInstall(page, mode, accept(mode, "failed", bodies));
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
-  await expect(page.getByTestId("update-install-error")).toContainText(
-    "checksum: the package does not match the release",
-  );
+  await confirmInstall(page);
+  const status = await openPopover(page);
+  await expect(status).toContainText("The install failed");
+  await expect(status).toContainText("checksum: the package does not match the release");
   await page.waitForTimeout(1500);
   await expect(page.getByTestId("restart-overlay")).toHaveCount(0);
-  await expect(install).not.toHaveClass(/inactive/);
+  await expect(status).toHaveAttribute("data-state", "failed");
+  await expect(page.getByTestId("update-check")).toBeEnabled();
+  const retry = page.getByTestId("update-retry");
+  await expect(retry).toHaveText("Install 0.3.0");
+  await expect(retry).toBeEnabled();
+  await retry.click();
+  await expect(page.getByRole("alertdialog")).toContainText("Install 0.3.0?");
+  await confirmInstall(page);
+  await expect.poll(() => bodies).toEqual([{ version: "0.3.0" }, { version: "0.3.0" }]);
+});
+
+// Catches the overlay drawn only on the Settings tab, so an install from another tab never shows its restart.
+test("an_install_from_the_groups_tab_shows_the_overlay_and_reloads", async ({ page }) => {
+  const mode = { value: "offer" as Mode };
+  await signedIn(page);
+  await page.route("**/groups?with_rules=true", (r) => r.fulfill({ json: { groups: [] } }));
+  await page.route("**/interfaces", (r) => r.fulfill({ json: { interfaces: [] } }));
+  await page.route("**/system/update", serveUpdate(mode));
+  await page.route("**/system/update/install", accept(mode, "installing"));
+  await page.goto("/");
+  await expect(page.getByRole("tab", { name: "Groups" })).toHaveAttribute("data-state", "active");
+  const install = await openPopover(page);
+  await install.click();
+  await confirmInstall(page);
+  const overlay = page.getByTestId("restart-overlay");
+  await expect(overlay).toBeVisible({ timeout: 5000 });
+  await expect(page.getByRole("tab", { name: "Groups" })).toHaveAttribute("data-state", "active");
+  const load = page.waitForEvent("load", { timeout: 5000 });
+  mode.value = "new";
+  await load;
 });
 
 // Catches Install offered to a build the daemon says cannot install.
@@ -435,10 +464,11 @@ test("a_dev_build_offers_no_install", async ({ page }) => {
   await openSettings(page, settingsAnswer, {
     onUpdate: (r) => r.fulfill({ json: { ...newer, canInstall: false, reason: "dev-build" } }),
   });
-  const block = page.getByTestId("update-block");
-  await expect(block).toContainText("A development build does not update itself");
-  await expect(block.getByRole("button", { name: "Check" })).toBeVisible();
-  await expect(block.getByRole("button", { name: "Install" })).toHaveCount(0);
+  const status = await openPopover(page);
+  await expect(status).toContainText("A development build does not update itself");
+  await expect(page.getByTestId("update-check")).toBeVisible();
+  await expect(status).toHaveAttribute("data-state", "idle");
+  await expect(status).toBeDisabled();
 });
 
 // Catches a refused install that says nothing, or shows the overlay anyway.
@@ -448,10 +478,12 @@ test("a_409_from_install_says_why", async ({ page }) => {
     r.fulfill({ status: 409, json: { error: "a restart is under way" } }),
   );
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  await confirmInstall(page);
   await expect(page.locator(".toast")).toContainText("a restart is under way");
   await expect(page.getByTestId("restart-overlay")).toHaveCount(0);
-  await expect(install).not.toHaveClass(/inactive/);
+  const status = await openPopover(page);
+  await expect(status).toHaveAttribute("data-state", "action");
+  await expect(status).toBeEnabled();
 });
 
 // Catches an install sent mid-check, which the daemon refuses with 409.
@@ -467,16 +499,16 @@ test("install_waits_while_a_check_runs", async ({ page }) => {
       await r.fulfill({ json: newer });
     },
   });
-  const block = page.getByTestId("update-block");
-  const install = block.getByRole("button", { name: "Install" });
-  await expect(install).not.toHaveClass(/inactive/);
-  await block.getByRole("button", { name: "Check" }).click();
+  const install = await openPopover(page);
+  await expect(install).toHaveAttribute("data-state", "action");
+  await page.getByTestId("update-check").click();
   await expect.poll(() => checks).toBe(1);
-  await expect(install).toHaveClass(/inactive/);
-  await install.click();
+  await expect(install).toBeDisabled();
+  await install.click({ force: true });
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
   release();
-  await expect(install).not.toHaveClass(/inactive/);
+  await expect(install).toHaveAttribute("data-state", "action");
+  await expect(install).toBeEnabled();
 });
 
 // Catches one dropped poll mid-download ending in "Not installed" while the download goes on.
@@ -485,14 +517,19 @@ test("a_dropped_poll_mid_download_keeps_following", async ({ page }) => {
   const served: Mode[] = [];
   const install = await offerInstall(page, mode, accept(mode, "downloading"), { served });
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
-  const before = served.length;
+  await confirmInstall(page);
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
   mode.value = "drop";
-  await expect.poll(() => served.slice(before)).toEqual(["drop", "downloading", "downloading"]);
+  await expect
+    .poll(() => {
+      const at = served.indexOf("drop");
+      return at < 0 ? [] : served.slice(at);
+    })
+    .toEqual(["drop", "downloading", "downloading"]);
   await expect(page.getByTestId("restart-overlay")).toHaveCount(0);
   await expect(page.getByText("Not installed")).toHaveCount(0);
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
+  await expect(status).toContainText("49 %");
   mode.value = "installing";
   await expect(page.getByTestId("restart-overlay")).toBeVisible({ timeout: 5000 });
   await expect(page.getByTestId("restart-overlay")).toHaveAttribute("data-failed", "false");
@@ -503,7 +540,7 @@ test("an_older_result_is_not_this_installs_exit", async ({ page }) => {
   const mode = { value: "offer" as Mode };
   const install = await offerInstall(page, mode, accept(mode, "installing"));
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  await confirmInstall(page);
   const overlay = page.getByTestId("restart-overlay");
   await expect(overlay).toBeVisible({ timeout: 5000 });
   mode.value = "stale";
@@ -521,7 +558,7 @@ for (const [name, status] of [
     const mode = { value: "offer" as Mode };
     const install = await offerInstall(page, mode, accept(mode, "installing"));
     await install.click();
-    await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+    await confirmInstall(page);
     await expect(page.getByTestId("restart-overlay")).toBeVisible({ timeout: 5000 });
     const load = page.waitForEvent("load", { timeout: 5000 });
     mode.value = status;
@@ -529,42 +566,7 @@ for (const [name, status] of [
   });
 }
 
-for (const [installed, tag] of [
-  [{ version: "0.3.0", revision: 2 }, "0.3.0-rev2"],
-  [{ version: "0.3.0", revision: 1 }, "v0.3.0"],
-] as const) {
-  // Catches the tag compared with the bare installed version, so a good install reads as failed.
-  test(`the_result_line_says_${tag}_installed`, async ({ page }) => {
-    await openSettings(page, settingsAnswer, {
-      onUpdate: (r) =>
-        r.fulfill({
-          json: {
-            ...installed030,
-            installed: { ...installed030.installed, ...installed },
-            result: { version: tag, opkgExit: 0, finishedAt: 1791832000, log: "" },
-          },
-        }),
-    });
-    const line = page.getByTestId("update-result");
-    await expect(line).toHaveText(`${tag} installed, opkg exit 0`);
-    await expect(line).not.toHaveClass(/error/);
-  });
-}
-
-// Catches an install that did not land shown as done.
-test("the_result_line_says_an_install_did_not_land", async ({ page }) => {
-  await openSettings(page, settingsAnswer, {
-    onUpdate: (r) => r.fulfill({ json: answers["not-landed"] }),
-  });
-  const line = page.getByTestId("update-result");
-  await expect(line).toHaveText("0.3.0 not installed, opkg exit 255 What opkg printed");
-  await expect(line).toHaveClass(/error/);
-  await line.getByRole("button", { name: "What opkg printed" }).click();
-  const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
-  await expect(dialog.getByTestId("update-log")).toHaveText("opkg: cannot install firc");
-});
-
-// Catches a failed install of an older release kept on screen after a newer one was installed by hand.
+// Catches a failed install of an older release named as failed after a newer one was installed by hand.
 test("an_older_releases_result_is_not_shown", async ({ page }) => {
   await openSettings(page, settingsAnswer, {
     onUpdate: (r) =>
@@ -575,17 +577,21 @@ test("an_older_releases_result_is_not_shown", async ({ page }) => {
         },
       }),
   });
-  await expect(page.getByTestId("update-block")).toContainText("0.3.0");
-  await expect(page.getByTestId("update-result")).toHaveCount(0);
+  const status = await openPopover(page);
+  await expect(page.getByTestId("update-build")).toContainText("0.3.0");
+  await expect(status).toContainText("Latest version");
+  await expect(status).not.toContainText("not installed");
+  await expect(page.getByTestId("update-dot")).toHaveCount(0);
 });
 
 // Catches a page opened mid-install that freezes its progress and offers Install again.
 test("a_page_opened_mid_install_follows_it", async ({ page }) => {
   const mode = { value: "downloading" as Mode };
   await openSettings(page, settingsAnswer, { onUpdate: serveUpdate(mode) });
-  const block = page.getByTestId("update-block");
-  await expect(block.getByTestId("update-progress")).toContainText("49 %");
-  await expect(block.getByRole("button", { name: "Install" })).toHaveClass(/inactive/);
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
+  await expect(status).toHaveAttribute("data-state", "busy");
+  await expect(status).toBeDisabled();
   mode.value = "installing";
   await expect(page.getByTestId("restart-overlay")).toBeVisible({ timeout: 5000 });
   const load = page.waitForEvent("load", { timeout: 5000 });
@@ -599,7 +605,9 @@ test("restart_waits_while_an_install_runs", async ({ page }) => {
   await openSettings(page, (r) => r.fulfill({ json: answer({}, ["app.link"]) }), {
     onUpdate: serveUpdate(mode),
   });
-  await expect(page.getByTestId("update-progress")).toBeVisible();
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
+  await closePopover(page);
   await expect(
     page.getByTestId("settings-banner").getByRole("button", { name: "Restart" }),
   ).toHaveClass(/inactive/);
@@ -640,15 +648,16 @@ test("check_waits_once_an_install_is_accepted", async ({ page }) => {
       return r.fulfill({ status: 202, json: { version: "0.3.0", asset: "x.ipk", size: 829104 } });
     },
   });
-  const block = page.getByTestId("update-block");
-  await block.getByRole("button", { name: "Install" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  const install = await openPopover(page);
+  await install.click();
+  await confirmInstall(page);
   await expect.poll(() => accepted).toBe(true);
-  const check = block.getByRole("button", { name: "Check" });
-  await expect(check).toHaveClass(/inactive/);
-  await check.click();
+  const status = await openPopover(page);
+  const check = page.getByTestId("update-check");
+  await expect(check).toBeDisabled();
+  await check.click({ force: true });
   release();
-  await expect(block.getByTestId("update-progress")).toContainText("49 %");
+  await expect(status).toContainText("49 %");
   expect(checks).toBe(0);
 });
 
@@ -657,8 +666,9 @@ test("a_poll_that_misses_installing_still_reloads", async ({ page }) => {
   const mode = { value: "offer" as Mode };
   const install = await offerInstall(page, mode, accept(mode, "downloading"));
   await install.click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
+  await confirmInstall(page);
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
   const load = page.waitForEvent("load", { timeout: 5000 });
   mode.value = "new";
   await load;
@@ -683,8 +693,9 @@ async function scripted(page: Page, steps: Step[], after: Step) {
       return r.fulfill({ status: 202, json: { version: "0.3.0", asset: "x.ipk", size: 829104 } });
     },
   });
-  await page.getByTestId("update-block").getByRole("button", { name: "Install" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  const install = await openPopover(page);
+  await install.click();
+  await confirmInstall(page);
   return served;
 }
 
@@ -702,7 +713,8 @@ test("failures_between_answers_do_not_hand_over", async ({ page }) => {
   const served = await scripted(page, ["502", "downloading", "502", "502"], "downloading");
   await expect.poll(() => served.length, { timeout: 8000 }).toBeGreaterThanOrEqual(6);
   await expect(page.getByTestId("restart-overlay")).toHaveCount(0);
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
 });
 
 for (const [name, before] of [
@@ -722,7 +734,7 @@ for (const [name, before] of [
 }
 
 // Catches a second follow loop started by a status read during an install, doubling the polls.
-test("reopening_settings_mid_install_follows_once", async ({ page }) => {
+test("reopening_the_popover_mid_install_follows_once", async ({ page }) => {
   let gets = 0;
   await openSettings(page, settingsAnswer, {
     onUpdate: (r) => {
@@ -730,10 +742,11 @@ test("reopening_settings_mid_install_follows_once", async ({ page }) => {
       return r.fulfill({ json: answers.downloading });
     },
   });
-  await expect(page.getByTestId("update-progress")).toContainText("49 %");
+  const status = await openPopover(page);
+  await expect(status).toContainText("49 %");
   for (let i = 0; i < 3; i++) {
-    await page.getByRole("tab", { name: "Groups" }).click();
-    await page.getByRole("tab", { name: "Settings" }).click();
+    await closePopover(page);
+    await openPopover(page);
   }
   await page.waitForTimeout(500);
   const start = gets;
@@ -741,7 +754,7 @@ test("reopening_settings_mid_install_follows_once", async ({ page }) => {
   expect(gets - start).toBeLessThanOrEqual(5);
 });
 
-// Catches the reloaded page left on "Installing…" when the new daemon first answers mid-install.
+// Catches the reloaded page left on "Installing…", or the stale check not run once it settles.
 test("a_reloaded_page_that_lands_mid_install_settles", async ({ page }) => {
   const settled = { ...installed030, check: null };
   let state = "installing";
@@ -753,12 +766,12 @@ test("a_reloaded_page_that_lands_mid_install_settles", async ({ page }) => {
       return r.fulfill({ json: installed030 });
     },
   });
-  const block = page.getByTestId("update-block");
   const restart = page.getByTestId("settings-banner").getByRole("button", { name: "Restart" });
-  await expect(block).toContainText("Installing…");
+  const status = await openPopover(page);
+  await expect(status).toContainText("Installing…");
   await expect(restart).toHaveClass(/inactive/);
   state = "idle";
-  await expect(block).toContainText("Up to date", { timeout: 5000 });
+  await expect(status).toContainText("Latest version", { timeout: 5000 });
   await expect(restart).not.toHaveClass(/inactive/);
   expect(checks).toBe(1);
 });

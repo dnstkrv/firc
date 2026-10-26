@@ -71,6 +71,20 @@ export const SECTIONS: Section[] = [
         ],
       ),
       row(
+        () => t("DNS stats"),
+        () =>
+          t(
+            "Count the devices' queries over the last day for the Journal; off, it holds no memory",
+          ),
+        [
+          {
+            key: "app.dnsProxy.disableStats",
+            label: () => t("DNS stats"),
+            control: { kind: "switch", invert: true },
+          },
+        ],
+      ),
+      row(
         () => t("Query timeout"),
         () => t("How long to wait for the upstream DNS"),
         [

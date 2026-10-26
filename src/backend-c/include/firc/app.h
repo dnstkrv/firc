@@ -148,6 +148,11 @@ typedef struct firc_app_ifaces {
 /* The interface-list watcher's hooks, copied; NULL detaches. pick is asked at every enable, settings after every
  * live apply. */
 void firc_app_set_ifaces(firc_app_t *app, const firc_app_ifaces_t *h);
+/* on(ud, true) starts the DNS stats afresh, on(ud, false) frees them; a live apply calls it when disableStats differs
+ * between saved and running, and an error leaves the running value as it was. Setting fn switches once as the running
+ * copy says; its error marks the running copy off and is returned. NULL: nothing to switch. */
+typedef firc_err_t (*firc_app_dnsstats_fn)(void *ud, bool on);
+firc_err_t firc_app_set_dnsstats(firc_app_t *app, firc_app_dnsstats_fn fn, void *ud);
 /* The watcher's view of one interface; false when nothing watches it. */
 bool firc_app_iface_view(const firc_app_t *app, const char *name, firc_if_view_t *out);
 /* Moves a listed group back to its first entry: NOENT unknown group, INVAL one entry, NOSYS nothing checks it,

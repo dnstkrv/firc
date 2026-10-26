@@ -167,19 +167,41 @@ const notLanded = (log: string) => ({
   result: { version: "0.3.0", opkgExit: 255, finishedAt: 1791832000, log },
 });
 
-// Catches a failed install that cannot be opened, the popover left over the dialog, or a dialog that does not show what opkg printed.
+// Catches a failed install that cannot be opened, the popover left over the dialog, a dialog without what opkg printed, or a retry offered with no newer release.
 test("a failed install opens what opkg printed", async ({ page }) => {
   await shell(page, notLanded(OPKG_SAID));
   await expect(page.getByTestId("update-dot")).toHaveAttribute("data-tone", "failed");
   const status = await openPopover(page);
   await expect(status).toContainText("0.3.0 not installed, opkg exit 255");
   await expect(status).not.toContainText("logread");
+  await expect(page.getByTestId("update-check")).toBeVisible();
+  await expect(page.getByTestId("update-retry")).toHaveCount(0);
   await status.click();
   const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
   await expect(dialog).toBeVisible();
   await expect(page.locator(".update-popover")).toHaveCount(0);
   await expect(dialog).toContainText("opkg exit 255; firc 0.2.0 is still running.");
   expect(await dialog.getByTestId("update-log").textContent()).toBe(OPKG_SAID);
+});
+
+// Catches a failed install of a release still offered that cannot be retried, or the opkg log lost behind the retry.
+test("a failed install of a newer release offers it again and keeps the log", async ({ page }) => {
+  const calls = await shell(page, {
+    ...newer,
+    result: { version: "0.3.0", opkgExit: 255, finishedAt: 1791832000, log: OPKG_SAID },
+  });
+  const status = await openPopover(page);
+  await expect(status).toContainText("0.3.0 not installed, opkg exit 255");
+  await expect(page.getByTestId("update-retry")).toHaveText("Install 0.3.0");
+  await status.click();
+  const dialog = page.getByRole("dialog", { name: "Why 0.3.0 did not install" });
+  expect(await dialog.getByTestId("update-log").textContent()).toBe(OPKG_SAID);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await openPopover(page);
+  await page.getByTestId("update-retry").click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Install" }).click();
+  await expect.poll(() => calls.installs).toEqual([{ version: "0.3.0" }]);
 });
 
 // Catches an empty log shown as a blank box instead of saying opkg printed nothing.

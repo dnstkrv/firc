@@ -6,6 +6,8 @@
   import { t } from "../../data/locale.svelte";
   import GroupsView from "../../modules/groups/GroupsView.svelte";
   import JournalView from "../../modules/logs/JournalView.svelte";
+  import RestartOverlay from "../../modules/settings/RestartOverlay.svelte";
+  import { settings } from "../../modules/settings/settings.svelte";
   import SettingsView from "../../modules/settings/SettingsView.svelte";
   import TunnelsView from "../../modules/tunnels/TunnelsView.svelte";
   import ConfirmDialog from "../feedback/ConfirmDialog.svelte";
@@ -62,6 +64,9 @@
 <Toast />
 <ConfirmDialog />
 <Overlay />
+{#if settings.overlay}
+  <RestartOverlay />
+{/if}
 <ScrollToTop />
 {#if [11, 0, 1].includes(new Date().getMonth())}
   <SnowField visible={isRenderComplete} />

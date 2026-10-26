@@ -264,6 +264,168 @@ TEST save_config_writes_the_saved_settings(void) {
     PASS();
 }
 
+typedef struct {
+    int calls;
+    bool on;
+    firc_err_t answer;
+} stats_spy_t;
+
+static firc_err_t spy_stats(void *ud, bool on) {
+    stats_spy_t *spy = ud;
+    spy->calls++;
+    spy->on = on;
+    return spy->answer;
+}
+
+static firc_err_t stats_off(const firc_app_t *app, firc_app_config_t *next) {
+    memset(next, 0, sizeof(*next));
+    firc_err_t err = firc_app_config_copy(next, firc_app_saved_settings(app));
+    next->dns_proxy.disable_stats = true;
+    return err;
+}
+
+/* Catches: a PUT or a reload of disableStats not reaching the stats switch, or reaching it with the flag unnegated. */
+TEST a_put_and_a_reload_both_switch_the_stats(void) {
+    rig_t a, b;
+    ASSERT(rig_up(&a));
+    ASSERT(rig_up(&b));
+    stats_spy_t sa = {0}, sb = {0};
+    ASSERT_EQ(FIRC_OK, firc_app_set_dnsstats(a.app, spy_stats, &sa));
+    ASSERT_EQ(FIRC_OK, firc_app_set_dnsstats(b.app, spy_stats, &sb));
+    sa.calls = sb.calls = 0;
+    firc_app_config_t na, nb;
+    ASSERT_EQ(FIRC_OK, stats_off(a.app, &na));
+    ASSERT_EQ(FIRC_OK, stats_off(b.app, &nb));
+    bool by_put[FIRC_SETTINGS_COUNT], by_reload[FIRC_SETTINGS_COUNT];
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(a.app, &na, NULL, "0.7.0", by_put, NULL));
+    ASSERT_EQ(FIRC_OK, firc_app_reload_settings(b.app, &nb, by_reload));
+    firc_app_config_clear(&na);
+    firc_app_config_clear(&nb);
+    ASSERT_EQ(1, sa.calls);
+    ASSERT_FALSE(sa.on);
+    ASSERT_EQ(1, sb.calls);
+    ASSERT_FALSE(sb.on);
+    ASSERT(by_put[row("app.dnsProxy.disableStats")]);
+    ASSERT(by_reload[row("app.dnsProxy.disableStats")]);
+    ASSERT(firc_app_running_settings(a.app)->dns_proxy.disable_stats);
+    ASSERT(firc_app_running_settings(b.app)->dns_proxy.disable_stats);
+
+    firc_app_config_t again;
+    memset(&again, 0, sizeof(again));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&again, firc_app_saved_settings(a.app)));
+    again.dns_proxy.disable_drop_aaaa = true;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(a.app, &again, NULL, "0.7.0", NULL, NULL));
+    firc_app_config_clear(&again);
+    ASSERTm("a save that leaves the flag alone does not switch", sa.calls == 1);
+
+    memset(&again, 0, sizeof(again));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&again, firc_app_saved_settings(a.app)));
+    again.dns_proxy.disable_stats = false;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(a.app, &again, NULL, "0.7.0", NULL, NULL));
+    firc_app_config_clear(&again);
+    ASSERT_EQ(2, sa.calls);
+    ASSERT(sa.on);
+    rig_down(&b);
+    rig_down(&a);
+    PASS();
+}
+
+/* Catches: a switch-on that failed reported as applied, or the running copy saying on while nothing counts. */
+TEST a_failed_switch_on_stays_off_and_reports_nomem(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    stats_spy_t spy = {0};
+    ASSERT_EQ(FIRC_OK, firc_app_set_dnsstats(r.app, spy_stats, &spy));
+    spy.calls = 0;
+    firc_app_config_t next;
+    ASSERT_EQ(FIRC_OK, stats_off(r.app, &next));
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(r.app, &next, NULL, "0.7.0", NULL, NULL));
+    firc_app_config_clear(&next);
+
+    spy.answer = FIRC_ERR_NOMEM;
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(r.app)));
+    next.dns_proxy.disable_stats = false;
+    bool applied[FIRC_SETTINGS_COUNT];
+    firc_err_t live = FIRC_OK;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(r.app, &next, NULL, "0.7.0", applied, &live));
+    firc_app_config_clear(&next);
+    ASSERT_EQ(FIRC_ERR_NOMEM, live);
+    ASSERT_EQ(2, spy.calls);
+    ASSERT_FALSE(applied[row("app.dnsProxy.disableStats")]);
+    ASSERT(firc_app_running_settings(r.app)->dns_proxy.disable_stats);
+    ASSERT_FALSE(firc_app_saved_settings(r.app)->dns_proxy.disable_stats);
+
+    spy.answer = FIRC_OK;
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(r.app)));
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(r.app, &next, NULL, "0.7.0", applied, &live));
+    firc_app_config_clear(&next);
+    ASSERT_EQ(FIRC_OK, live);
+    ASSERT_EQm("the same PUT again retries the switch", 3, spy.calls);
+    ASSERT(spy.on);
+    ASSERT(applied[row("app.dnsProxy.disableStats")]);
+    ASSERT_FALSE(firc_app_running_settings(r.app)->dns_proxy.disable_stats);
+    rig_down(&r);
+    PASS();
+}
+
+/* Catches: a hook whose first switch failed leaving the running copy on, so no later save ever differs. */
+TEST a_failed_first_switch_marks_the_stats_off(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    stats_spy_t spy = {.answer = FIRC_ERR_NOMEM};
+    ASSERT_EQ(FIRC_ERR_NOMEM, firc_app_set_dnsstats(r.app, spy_stats, &spy));
+    ASSERT_EQ(1, spy.calls);
+    ASSERT(spy.on);
+    ASSERT(firc_app_running_settings(r.app)->dns_proxy.disable_stats);
+    ASSERT_FALSE(firc_app_saved_settings(r.app)->dns_proxy.disable_stats);
+
+    spy.answer = FIRC_OK;
+    ASSERT_EQ(FIRC_OK, firc_app_reload_settings(r.app, firc_app_saved_settings(r.app), NULL));
+    ASSERT_EQm("a SIGHUP retries it through the same apply", 2, spy.calls);
+    ASSERT(spy.on);
+    ASSERT_FALSE(firc_app_running_settings(r.app)->dns_proxy.disable_stats);
+    rig_down(&r);
+    PASS();
+}
+
+/* Catches: a PUT that changes nothing switching, marking a row applied, or logging, when nothing failed before. */
+TEST a_put_that_changes_nothing_applies_and_logs_nothing(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    stats_spy_t spy = {0};
+    ASSERT_EQ(FIRC_OK, firc_app_set_dnsstats(r.app, spy_stats, &spy));
+    ASSERT_EQ(1, spy.calls);
+    int fds[2];
+    ASSERT_EQ(0, pipe(fds));
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    firc_log_set_fd(fds[1]);
+    firc_app_config_t next;
+    memset(&next, 0, sizeof(next));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&next, firc_app_saved_settings(r.app)));
+    bool applied[FIRC_SETTINGS_COUNT];
+    firc_err_t live = FIRC_ERR_INVAL;
+    ASSERT_EQ(FIRC_OK, firc_app_put_settings(r.app, &next, NULL, "0.7.0", applied, &live));
+    FIRC_INFO("marker");
+    firc_log_set_fd(STDOUT_FILENO);
+    firc_log_set_output_floor(FIRC_LOG_INFO);
+    close(fds[1]);
+    static char buf[512];
+    ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    close(fds[0]);
+    firc_app_config_clear(&next);
+    ASSERT(n > 0);
+    buf[n] = '\0';
+    ASSERT_EQ(FIRC_OK, live);
+    ASSERT_EQ(1, spy.calls);
+    for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) { ASSERT_FALSEm(firc_settings[i].path, applied[i]); }
+    ASSERTm(buf, strstr(buf, "marker") != NULL && strstr(buf, "settings:") == NULL);
+    ASSERTm(buf, strchr(buf, '\n') == strrchr(buf, '\n'));
+    rig_down(&r);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -275,5 +437,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_put_whose_file_cannot_be_written_changes_nothing);
     RUN_TEST(a_reload_leaves_the_daemon_as_a_put_does);
     RUN_TEST(save_config_writes_the_saved_settings);
+    RUN_TEST(a_put_and_a_reload_both_switch_the_stats);
+    RUN_TEST(a_failed_switch_on_stays_off_and_reports_nomem);
+    RUN_TEST(a_failed_first_switch_marks_the_stats_off);
+    RUN_TEST(a_put_that_changes_nothing_applies_and_logs_nothing);
     GREATEST_MAIN_END();
 }

@@ -80,6 +80,10 @@ test.describe("Header Settings", () => {
     await expect(dialog.locator("text=Repository")).toBeVisible();
     await expect(dialog.locator("text=Bug Tracker")).toBeVisible();
     await expect(dialog.locator('a[href="https://github.com/hoaxisr/firc"]')).toBeVisible();
+    await expect(dialog.getByRole("link", { name: "https://firc.hoaxisr.ru" })).toHaveAttribute(
+      "href",
+      "https://firc.hoaxisr.ru",
+    );
 
     await page.keyboard.press("Escape");
     await expect(dialog).not.toBeVisible();

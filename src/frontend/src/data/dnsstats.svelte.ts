@@ -15,6 +15,7 @@ export type DnsStatsRow = {
 };
 
 export type DnsStatsRes = {
+  enabled: boolean;
   window: number;
   now: number;
   since: number;

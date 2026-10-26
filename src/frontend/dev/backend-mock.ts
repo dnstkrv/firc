@@ -1221,6 +1221,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.dnsProxy.host.address": "[::]",
   "app.dnsProxy.host.port": 3553,
   "app.dnsProxy.disableRemap53": false,
+  "app.dnsProxy.disableStats": false,
   "app.addressPool.ttlClamp": 300,
   "app.addressPool.maxNames": 65536,
   "app.addressPool.v4.pool": "198.18.0.0/15",
@@ -1245,6 +1246,7 @@ const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.port",
   "app.dnsProxy.disableDropAAAA",
   "app.dnsProxy.unmatchedTtl",
+  "app.dnsProxy.disableStats",
   "app.update.check",
   "app.check.url",
   "app.check.wanUrl",
@@ -1663,7 +1665,22 @@ app.get(`${API_BASE}/system/dnsstats`, (c) => {
   }
   const arpa = c.req.query("arpa") === "1";
   const q = (c.req.query("q") ?? "").toLowerCase();
-  return c.json(statsAnswer(device, q, arpa, offset, limit));
+  if (SAVED["app.dnsProxy.disableStats"]) {
+    const now = Math.floor(Date.now() / 1000);
+    return c.json({
+      enabled: false,
+      window: 86400,
+      now,
+      since: now,
+      queries: 0,
+      blocked: 0,
+      domains: 0,
+      rows: [],
+      matched: 0,
+      offset,
+    });
+  }
+  return c.json({ enabled: true, ...statsAnswer(device, q, arpa, offset, limit) });
 });
 
 app.get(`${API_BASE}/system/netfilter`, (c) => c.json(NETFILTER));

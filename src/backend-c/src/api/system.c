@@ -484,9 +484,16 @@ static void handle_list_interfaces(firc_http_req_t *req, firc_http_res_t *res, v
 
 static void stat_scratch_free(struct dnsstat_scratch *sc);
 
-void firc_system_close(firc_system_ctx_t *ctx) {
+static void stats_drop(firc_system_ctx_t *ctx) {
+    firc_dnsstat_free(ctx->dnsstat);
+    ctx->dnsstat = NULL;
     stat_scratch_free(ctx->dnsstat_scratch);
     ctx->dnsstat_scratch = NULL;
+}
+
+void firc_system_close(firc_system_ctx_t *ctx) {
+    (void)firc_app_set_dnsstats(ctx->app, NULL, NULL);
+    stats_drop(ctx);
     ifaces_read_t *r = ctx->ifaces_read;
     if (r == NULL) { return; }
     ctx->ifaces_read = NULL;
@@ -988,6 +995,18 @@ static void handle_dnsstats(firc_http_req_t *req, firc_http_res_t *res, void *ud
 
     int64_t now_mono = mono_s();
     int64_t to_unix = (int64_t)time(NULL) - now_mono;
+    if (ctx->dnsstat == NULL) {
+        char off[224];
+        snprintf(off, sizeof(off),
+                 "{\"enabled\":false,\"window\":%d,\"now\":%lld,\"since\":%lld,\"queries\":0,\"blocked\":0,"
+                 "\"domains\":0,\"rows\":[],\"matched\":0,\"offset\":%zu}",
+                 FIRC_DNSSTAT_HOUR * FIRC_DNSSTAT_HOURS, (long long)(now_mono + to_unix),
+                 (long long)(now_mono + to_unix), offset);
+        firc_bytebuf_t b;
+        firc_bytebuf_init(&b);
+        firc_http_res_take_json(res, &b, firc_bytebuf_append_str(&b, off));
+        return;
+    }
     size_t slots = firc_dnsstat_name_slots(ctx->dnsstat);
     struct dnsstat_scratch *sc = stat_scratch(ctx, slots);
     if (sc == NULL) {
@@ -1013,12 +1032,12 @@ static void handle_dnsstats(firc_http_req_t *req, firc_http_res_t *res, void *ud
         queries = t.queries > a.queries ? t.queries - a.queries : 0;
         blocked = t.blocked > a.blocked ? t.blocked - a.blocked : 0;
     }
-    int64_t since = ctx->dnsstat != NULL ? ctx->dnsstat_since_mono + to_unix : now_mono + to_unix;
+    int64_t since = ctx->dnsstat_since_mono + to_unix;
     firc_bytebuf_t b;
     firc_bytebuf_init(&b);
     char head[224];
     snprintf(head, sizeof(head),
-             "{\"window\":%d,\"now\":%lld,\"since\":%lld,\"queries\":%llu,\"blocked\":%llu,\"domains\":%zu,"
+             "{\"enabled\":true,\"window\":%d,\"now\":%lld,\"since\":%lld,\"queries\":%llu,\"blocked\":%llu,\"domains\":%zu,"
              "\"rows\":[",
              FIRC_DNSSTAT_HOUR * FIRC_DNSSTAT_HOURS, (long long)(now_mono + to_unix), (long long)since,
              (unsigned long long)queries, (unsigned long long)blocked, w.domains);
@@ -1033,6 +1052,27 @@ static void handle_dnsstats(firc_http_req_t *req, firc_http_res_t *res, void *ud
         err = firc_bytebuf_append_str(&b, tail);
     }
     firc_http_res_take_json(res, &b, err);
+}
+
+static firc_err_t stats_switch(void *ud, bool on) {
+    firc_system_ctx_t *ctx = ud;
+    if (!on) {
+        if (ctx->dnsstat != NULL) { FIRC_INFO("dns stats: off, the counts are dropped"); }
+        stats_drop(ctx);
+        return FIRC_OK;
+    }
+    if (ctx->dnsstat != NULL) { return FIRC_OK; }
+    ctx->dnsstat = firc_dnsstat_new(FIRC_DNSSTAT_KEYS);
+    if (ctx->dnsstat == NULL) {
+        FIRC_ERROR("dns stats: no memory for the store, nothing is counted");
+        return FIRC_ERR_NOMEM;
+    }
+    ctx->dnsstat_since_mono = mono_s();
+    return FIRC_OK;
+}
+
+firc_err_t firc_system_dnsstats_start(firc_system_ctx_t *ctx) {
+    return firc_app_set_dnsstats(ctx->app, stats_switch, ctx);
 }
 
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx) {

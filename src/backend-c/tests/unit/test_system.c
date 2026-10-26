@@ -31,6 +31,8 @@ typedef struct harness harness_t;
 
 static firc_dnsstat_t *g_dnsstat;
 static int64_t g_dnsstat_since;
+static bool g_dnsstat_new_fails;
+static bool g_stats_off;
 static void (*g_before_loop)(harness_t *h);
 static harness_t *g_harness;
 static void harness_stop(harness_t *h);
@@ -67,6 +69,12 @@ firc_err_t __wrap_firc_kn_get_iface_aliases(firc_kn_aliases_t *out) {
         out->items[i].inet = g_kn[i].inet;
     }
     return FIRC_OK;
+}
+
+firc_dnsstat_t *__real_firc_dnsstat_new(size_t max_keys);
+firc_dnsstat_t *__wrap_firc_dnsstat_new(size_t max_keys);
+firc_dnsstat_t *__wrap_firc_dnsstat_new(size_t max_keys) {
+    return g_dnsstat_new_fails ? NULL : __real_firc_dnsstat_new(max_keys);
 }
 
 typedef struct stub_if {
@@ -109,6 +117,8 @@ static void reset_stubs(void *ud) {
     firc_dnsstat_free(g_dnsstat);
     g_dnsstat = NULL;
     g_dnsstat_since = 0;
+    g_dnsstat_new_fails = false;
+    g_stats_off = false;
     g_before_loop = NULL;
 }
 
@@ -141,6 +151,7 @@ static void *loop_thread(void *ud) {
 static harness_t *harness_start(bool with_config_path) {
     harness_t *h = calloc(1, sizeof(*h));
     firc_config_init_defaults(&h->cfg);
+    h->cfg.app.dns_proxy.disable_stats = g_stats_off;
     firc_app_deps_t deps = {.cfg = &h->cfg};
     h->app = firc_app_create(&deps);
     h->ctx.app = h->app;
@@ -171,6 +182,7 @@ static void harness_stop(harness_t *h) {
     firc_loop_stop(h->loop);
     pthread_join(h->thread, NULL);
     firc_system_close(&h->ctx);
+    g_dnsstat = NULL;
     firc_httpd_destroy(h->tcp);
     firc_loop_destroy(h->loop);
     firc_app_destroy(h->app);
@@ -1393,7 +1405,7 @@ TEST dnsstats_answers_the_exact_bytes(void) {
     ASSERT(at != NULL);
     long long now = strtoll(at + 6, NULL, 10), to_unix = now - (long long)before;
     snprintf(want, sizeof(want),
-             "{\"window\":86400,\"now\":%lld,\"since\":%lld,\"queries\":6,\"blocked\":3,\"domains\":2,\"rows\":["
+             "{\"enabled\":true,\"window\":86400,\"now\":%lld,\"since\":%lld,\"queries\":6,\"blocked\":3,\"domains\":2,\"rows\":["
              "{\"name\":\"q\\\"b\\\\s\\u0001\\b\\f\\n\\r\\t\x7f\xc3\xa9.test\",\"queries\":5,\"blocked\":3,\"last\":%lld,"
              "\"owner\":{\"id\":\"01010101\",\"name\":\"g \\\"1\\\"\",\"interface\":\"nwg0\",\"blocked\":false},"
              "\"clients\":[{\"address\":\"fd00::5\",\"queries\":3},{\"address\":\"192.168.1.10\",\"queries\":2}],"
@@ -1662,6 +1674,175 @@ TEST dnsstats_requests_in_a_row_answer_apart(void) {
     PASS();
 }
 
+static void stats_switchable(harness_t *h) {
+    firc_settings_register_routes(h->tcp, &h->ctx);
+    (void)firc_system_dnsstats_start(&h->ctx);
+}
+
+static void note_in(harness_t *h, const char *name, int64_t at) {
+    firc_ip_t c = v4("192.168.1.10");
+    firc_dnsstat_note(h->ctx.dnsstat, name, &c, NO_OWNER, false, at);
+}
+
+static int put_stats_off(bool off) {
+    char body[96];
+    snprintf(body, sizeof(body), "{\"settings\":{\"app.dnsProxy.disableStats\":%s}}", off ? "true" : "false");
+    return do_request("PUT", "/api/v1/system/settings", body, NULL);
+}
+
+static bool off_body_is(const char *body, size_t offset) {
+    const char *at = strstr(body, "\"now\":");
+    if (at == NULL) { return false; }
+    long long now = strtoll(at + 6, NULL, 10);
+    char want[256];
+    snprintf(want, sizeof(want),
+             "{\"enabled\":false,\"window\":86400,\"now\":%lld,\"since\":%lld,\"queries\":0,\"blocked\":0,"
+             "\"domains\":0,\"rows\":[],\"matched\":0,\"offset\":%zu}",
+             now, now, offset);
+    long long wall = (long long)time(NULL);
+    return strcmp(want, body) == 0 && now <= wall && now >= wall - 5;
+}
+
+/* Catches: a switch-off that keeps the store or the route's scratch, or an off answer with other keys or counts. */
+TEST switching_the_stats_off_frees_them_and_answers_zeros(void) {
+    g_before_loop = stats_switchable;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    ASSERT(h->ctx.dnsstat != NULL);
+    note_in(h, "a.test", mono_s());
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(out, "enabled")));
+    ASSERT_EQ(1, (int)num(out, "queries"));
+    cJSON_Delete(out);
+    ASSERT(h->ctx.dnsstat_scratch != NULL);
+
+    ASSERT_EQ(200, put_stats_off(true));
+    ASSERT_EQ(NULL, h->ctx.dnsstat);
+    ASSERT_EQ(NULL, h->ctx.dnsstat_scratch);
+    char body[512];
+    ASSERT_EQ(200, get_body("/api/v1/system/dnsstats?offset=3&limit=2&device=192.168.1.10", body, sizeof(body)));
+    ASSERTm(body, off_body_is(body, 3));
+    ASSERT_EQ(NULL, h->ctx.dnsstat_scratch);
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?offset=501&limit=50", NULL, NULL));
+    ASSERT_EQ(400, do_request("GET", "/api/v1/system/dnsstats?device=nope", NULL, NULL));
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a switch-on that brings the old counts back, keeps the old since, or a reload that does not switch. */
+TEST switching_the_stats_on_by_reload_starts_an_empty_day(void) {
+    g_before_loop = stats_switchable;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    int64_t first_since = h->ctx.dnsstat_since_mono;
+    note_in(h, "before.test", mono_s());
+    ASSERT_EQ(200, put_stats_off(true));
+    note_in(h, "while-off.test", mono_s());
+    struct timespec pause = {1, 100000000};
+    nanosleep(&pause, NULL);
+
+    firc_app_config_t file;
+    memset(&file, 0, sizeof(file));
+    ASSERT_EQ(FIRC_OK, firc_app_config_copy(&file, firc_app_saved_settings(h->app)));
+    file.dns_proxy.disable_stats = false;
+    int64_t before = mono_s();
+    ASSERT_EQ(FIRC_OK, firc_app_reload_settings(h->app, &file, NULL));
+    int64_t after = mono_s();
+    firc_app_config_clear(&file);
+    ASSERT(h->ctx.dnsstat != NULL);
+    ASSERT(h->ctx.dnsstat_since_mono >= before && h->ctx.dnsstat_since_mono <= after);
+    ASSERT(h->ctx.dnsstat_since_mono > first_since);
+
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(out, "enabled")));
+    ASSERT_EQ(0, (int)num(out, "queries"));
+    ASSERT_EQ(0, cJSON_GetArraySize(rows_of(out)));
+    double since_want = (double)(h->ctx.dnsstat_since_mono + ((int64_t)num(out, "now") - mono_s()));
+    ASSERT(num(out, "since") >= since_want - 1 && num(out, "since") <= since_want + 1);
+    cJSON_Delete(out);
+
+    note_in(h, "after.test", mono_s());
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT_EQ(1, (int)num(out, "queries"));
+    ASSERT_EQ(1, cJSON_GetArraySize(rows_of(out)));
+    ASSERT_STR_EQ("after.test", str(row(out, 0), "name"));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a start with disableStats that still allocates the store, or a route that allocates scratch while off. */
+TEST a_start_with_the_stats_off_allocates_nothing(void) {
+    g_stats_off = true;
+    g_before_loop = stats_switchable;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    ASSERT_EQ(NULL, h->ctx.dnsstat);
+    char body[512];
+    ASSERT_EQ(200, get_body("/api/v1/system/dnsstats", body, sizeof(body)));
+    ASSERTm(body, off_body_is(body, 0));
+    ASSERT_EQ(NULL, h->ctx.dnsstat_scratch);
+
+    ASSERT_EQ(200, put_stats_off(false));
+    ASSERT(h->ctx.dnsstat != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(out, "enabled")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a store that could not be had answered as on, the PUT claiming it applied, or the same PUT not retrying. */
+TEST a_switch_on_without_memory_stays_off(void) {
+    g_stats_off = true;
+    g_before_loop = stats_switchable;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    g_dnsstat_new_fails = true;
+    ASSERT_EQ(500, put_stats_off(false));
+    ASSERT_EQ(NULL, h->ctx.dnsstat);
+    ASSERT(firc_app_running_settings(h->app)->dns_proxy.disable_stats);
+    char body[512];
+    ASSERT_EQ(200, get_body("/api/v1/system/dnsstats", body, sizeof(body)));
+    ASSERTm(body, off_body_is(body, 0));
+
+    g_dnsstat_new_fails = false;
+    ASSERT_EQ(200, put_stats_off(false));
+    ASSERT(h->ctx.dnsstat != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(out, "enabled")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+/* Catches: a start whose store could not be had leaving the running copy on, so the turn-on PUT changes nothing. */
+TEST a_start_without_memory_is_turned_on_by_a_later_put(void) {
+    g_dnsstat_new_fails = true;
+    g_before_loop = stats_switchable;
+    harness_t *h = harness_start(false);
+    ASSERT(h != NULL);
+    ASSERT_EQ(NULL, h->ctx.dnsstat);
+    ASSERT(firc_app_running_settings(h->app)->dns_proxy.disable_stats);
+    char body[512];
+    ASSERT_EQ(200, get_body("/api/v1/system/dnsstats", body, sizeof(body)));
+    ASSERTm(body, off_body_is(body, 0));
+
+    g_dnsstat_new_fails = false;
+    ASSERT_EQ(200, put_stats_off(false));
+    ASSERT(h->ctx.dnsstat != NULL);
+    cJSON *out = NULL;
+    ASSERT_EQ(200, do_request("GET", "/api/v1/system/dnsstats", NULL, &out));
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(out, "enabled")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1706,5 +1887,10 @@ int main(int argc, char **argv) {
     RUN_TEST(dnsstats_hides_arpa_unless_asked);
     RUN_TEST(dnsstats_totals_keep_what_eviction_dropped);
     RUN_TEST(dnsstats_default_totals_exclude_evicted_arpa);
+    RUN_TEST(switching_the_stats_off_frees_them_and_answers_zeros);
+    RUN_TEST(switching_the_stats_on_by_reload_starts_an_empty_day);
+    RUN_TEST(a_start_with_the_stats_off_allocates_nothing);
+    RUN_TEST(a_switch_on_without_memory_stays_off);
+    RUN_TEST(a_start_without_memory_is_turned_on_by_a_later_put);
     GREATEST_MAIN_END();
 }

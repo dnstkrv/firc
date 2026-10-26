@@ -28,6 +28,7 @@ const firc_setting_t firc_settings[] = {
      FIRC_APPLY_UPSTREAM},
     {"app.dnsProxy.disableDropAAAA", FIRC_SK_BOOL, LIVE, AT(dns_proxy.disable_drop_aaaa), 0,
      FIRC_APPLY_PROXY_FLAGS},
+    {"app.dnsProxy.disableStats", FIRC_SK_BOOL, LIVE, AT(dns_proxy.disable_stats), 0, FIRC_APPLY_DNS_STATS},
     {"app.dnsProxy.unmatchedTtl", FIRC_SK_SEC, LIVE, AT(dns_proxy.unmatched_ttl), 0,
      FIRC_APPLY_UNMATCHED_TTL},
     {"app.dnsProxy.timeout", FIRC_SK_MS, RESTART, AT(dns_proxy.timeout), 0, FIRC_APPLY_NONE},

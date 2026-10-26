@@ -468,6 +468,7 @@ TEST save_shape_matches_committed_fixture(void)
         "      port: 53\n"
         "    disableRemap53: false\n"
         "    disableDropAAAA: false\n"
+        "    disableStats: false\n"
         "    unmatchedTtl: 1m0s\n"
         "    maxIdleConns: 10\n"
         "    maxConcurrent: 100\n"

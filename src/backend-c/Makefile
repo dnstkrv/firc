@@ -331,7 +331,7 @@ $(BUILDDIR)/tests/test_listen: tests/unit/test_listen.c $(LIB_OBJS) $(TEST_SUPPO
 	$(CC) $(CFLAGS) -Itests/vendor -Itests/unit $(LDFLAGS) $(LISTEN_WRAP) -o $@ $< \
 	    $(LIB_OBJS) $(TEST_SUPPORT_OBJS) $(LDLIBS) $(DEP_LIBS)
 
-SYSTEM_WRAP := -Wl,--wrap=firc_app_netfilter_health,--wrap=firc_kn_get_iface_aliases,--wrap=getifaddrs,--wrap=freeifaddrs
+SYSTEM_WRAP := -Wl,--wrap=firc_app_netfilter_health,--wrap=firc_dnsstat_new,--wrap=firc_kn_get_iface_aliases,--wrap=getifaddrs,--wrap=freeifaddrs
 
 $(BUILDDIR)/tests/test_system: tests/unit/test_system.c $(LIB_OBJS) $(TEST_SUPPORT_OBJS)
 	@mkdir -p $(dir $@)

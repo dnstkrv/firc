@@ -1028,8 +1028,9 @@ test("Фильтр shows how many filters hide something and holds sources, leve
   await expect(panel.getByRole("button", { name: "Группа" })).toHaveText("любая группа");
 
   await panel.getByRole("button", { name: "Показать всё" }).click();
-  await expect(badge).toHaveCount(0);
+  await expect(badge).toBeHidden();
   await expect(trigger).toHaveAttribute("aria-label", "Фильтр");
+  const at = await panel.boundingBox();
   await expect(levels.nth(0)).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".pane .row")).toHaveCount(5);
   await expect(panel.getByRole("button", { name: "Показать всё" })).toBeDisabled();
@@ -1039,6 +1040,7 @@ test("Фильтр shows how many filters hide something and holds sources, leve
     .getByRole("button", { name: /DNS/ })
     .click();
   await expect(badge).toHaveText("1");
+  expect((await panel.boundingBox())?.x).toBe(at?.x);
   await panel.getByRole("button", { name: "Группа" }).click();
   await page.getByRole("option", { name: "media" }).click();
   await expect(badge).toHaveText("2");

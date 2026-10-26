@@ -5,7 +5,6 @@
   import Placeholder from "../../components/ui/Placeholder.svelte";
   import Tooltip from "../../components/ui/Tooltip.svelte";
   import { locale, t } from "../../data/locale.svelte";
-  import RestartOverlay from "./RestartOverlay.svelte";
   import SaveDialog from "./SaveDialog.svelte";
   import SettingRow from "./SettingRow.svelte";
   import {
@@ -15,14 +14,13 @@
     saveSettings,
     settings,
   } from "./settings.svelte";
-  import { checkUpdate, loadUpdate, update } from "./update.svelte";
-  import UpdateBlock from "./UpdateBlock.svelte";
+  import { update } from "./update.svelte";
 
   import { CircleCheck, RotateCw, Save, Undo2 } from "../../components/ui/icons";
   import { counted as countedIn } from "../../utils/plural";
   import { SECTIONS, type Row, type Section } from "./catalogue";
   import { changedKeys, groupChanges } from "./settings";
-  import { needsCheck, running } from "./update";
+  import { running } from "./update";
 
   let { active }: { active: boolean } = $props();
 
@@ -31,15 +29,6 @@
       void loadSettings();
     }
   });
-
-  $effect(() => {
-    if (active) void untrack(openUpdate);
-  });
-
-  async function openUpdate() {
-    await loadUpdate();
-    if (needsCheck(update.res)) void checkUpdate();
-  }
 
   const changed = $derived(changedKeys(settings.saved, settings.draft));
   const grouped = $derived(groupChanges(changed, settings.classes));
@@ -112,10 +101,6 @@
       </div>
     </div>
 
-    {#if settings.overlay}
-      <RestartOverlay />
-    {/if}
-
     {#if !settings.restarting && settings.pendingRestart.length > 0}
       <div class="banner" role="status" data-testid="settings-banner">
         <RotateCw size={18} />
@@ -134,8 +119,6 @@
         {/if}
       </div>
     {/if}
-
-    <UpdateBlock />
 
     {#each SECTIONS as section (section.id)}
       <section class="panel" data-section={section.id}>

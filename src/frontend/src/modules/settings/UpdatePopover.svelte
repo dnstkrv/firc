@@ -1,13 +1,16 @@
 <script lang="ts">
   import { Popover } from "bits-ui";
+  import { untrack } from "svelte";
 
   import { t } from "../../data/locale.svelte";
-  import { checkUpdate, installUpdate, update } from "./update.svelte";
+  import { checkUpdate, installUpdate, loadUpdate, update } from "./update.svelte";
   import UpdateLogDialog from "./UpdateLogDialog.svelte";
 
   import { Refresh } from "../../components/ui/icons";
   import {
     hasNewer,
+    needsCheck,
+    offered,
     reasonText,
     releaseLinkText,
     releaseUrl,
@@ -30,8 +33,22 @@
   const action = $derived(status?.kind === "newer" && status.offered);
   const look = $derived(busy ? "busy" : action ? "action" : failed ? "failed" : "idle");
   const explained = $derived(status?.kind === "not-installed");
+  const retry = $derived(
+    !busy &&
+      (status?.kind === "install-failed" || status?.kind === "not-installed") &&
+      offered(res),
+  );
   let logOpen = $state(false);
   let popOpen = $state(false);
+
+  $effect(() => {
+    if (popOpen) void untrack(openUpdate);
+  });
+
+  async function openUpdate() {
+    await loadUpdate();
+    if (needsCheck(update.res)) void checkUpdate();
+  }
 </script>
 
 <Popover.Root bind:open={popOpen}>
@@ -49,6 +66,11 @@
   <Popover.Portal>
     <Popover.Content class="update-popover" align="start" sideOffset={6} collisionPadding={8}>
       {#if res && status}
+        <div class="build" data-testid="update-build">
+          {res.installed.target
+            ? `${res.installed.version} · ${res.installed.target}`
+            : res.installed.version}
+        </div>
         <button
           type="button"
           class="status"
@@ -107,6 +129,16 @@
             <span class="title">{t("Not checked yet")}</span>
           {/if}
         </button>
+        {#if retry && res.check?.latest}
+          <button
+            type="button"
+            class="retry"
+            data-testid="update-retry"
+            onclick={() => void installUpdate()}
+          >
+            {t("Install {version}").replace("{version}", () => res.check?.latest?.version ?? "")}
+          </button>
+        {/if}
         <div class="row">
           <a href={releaseUrl(res)} target="_blank" rel="noopener noreferrer">
             {releaseLinkText(res, t)}
@@ -179,6 +211,11 @@
     color: var(--text);
     z-index: 30;
     outline: none;
+  }
+  .build {
+    font-size: 0.8rem;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
   }
   .status {
     all: unset;
@@ -296,6 +333,22 @@
     background: var(--bg-light);
     color: var(--text);
     cursor: pointer;
+  }
+  .retry {
+    all: unset;
+    box-sizing: border-box;
+    width: 100%;
+    padding: 0.55rem 0.6rem;
+    border-radius: 0.5rem;
+    background: var(--accent);
+    color: var(--bg-dark-extra);
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+  }
+  .retry:focus-visible {
+    outline: 2px solid var(--text);
+    outline-offset: 2px;
   }
   .check:disabled {
     opacity: 0.5;

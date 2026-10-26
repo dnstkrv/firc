@@ -345,6 +345,8 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     emit_bool(ctx, a->dns_proxy.disable_remap53);
     emit_plain(ctx, "disableDropAAAA");
     emit_bool(ctx, a->dns_proxy.disable_drop_aaaa);
+    emit_plain(ctx, "disableStats");
+    emit_bool(ctx, a->dns_proxy.disable_stats);
     emit_plain(ctx, "unmatchedTtl");
     emit_duration(ctx, a->dns_proxy.unmatched_ttl);
     emit_plain(ctx, "maxIdleConns");

@@ -28,14 +28,19 @@ typedef struct firc_system_ctx {
     struct ifaces_read *ifaces_read; /* the interface read in flight, NULL if none; loop thread only */
     void (*iface_event)(void *ud, const char *iface); /* an NDM layer event on iface; NULL ignores them */
     void *iface_event_ud;
-    firc_dnsstat_t *dnsstat; /* the day's DNS counts, loop thread only; NULL answers an empty day */
+    firc_dnsstat_t *dnsstat; /* the day's DNS counts, owned, loop thread only; NULL while the stats are off */
     int64_t dnsstat_since_mono; /* monotonic seconds the counts started */
-    struct dnsstat_scratch *dnsstat_scratch;
+    struct dnsstat_scratch *dnsstat_scratch; /* the stats route's, owned, freed with the store */
 } firc_system_ctx_t;
 
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx);
 
-/* waits out an interface read in flight and drops its callers; after the loop stops, before the servers go */
+/* the DNS stats on or off as the running settings say, and switched by every live apply after; loop thread.
+ * FIRC_ERR_NOMEM: no store, the stats stay off */
+firc_err_t firc_system_dnsstats_start(firc_system_ctx_t *ctx);
+
+/* waits out an interface read in flight and drops its callers, frees the DNS stats; after the loop stops, before the
+ * servers go */
 void firc_system_close(firc_system_ctx_t *ctx);
 
 /* names each tunnel device in ifaces by its tunnel's description, over any alias; ts NULL changes nothing */

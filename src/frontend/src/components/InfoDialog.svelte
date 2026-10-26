@@ -2,7 +2,7 @@
   import { t } from "../data/locale.svelte";
   import GenericDialog from "./ui/GenericDialog.svelte";
 
-  import { Bug, Globe } from "./ui/icons";
+  import { BookOpen, Bug, Globe } from "./ui/icons";
 
   const version = import.meta.env.VITE_PKG_VERSION || "0.0.0";
 
@@ -16,6 +16,17 @@
 <GenericDialog {open} title={t("About")} on:close={() => (open = false)} maxWidth={420}>
   <div slot="body">
     <div class="container">
+      <div class="block">
+        <div class="icon">
+          <BookOpen size={22} />
+        </div>
+        <div class="text">
+          {t("Documentation")}
+          <a target="_blank" rel="noopener noreferrer" href="https://firc.hoaxisr.ru"
+            >https://firc.hoaxisr.ru</a
+          >
+        </div>
+      </div>
       <div class="block">
         <div class="icon">
           <Globe size={22} />

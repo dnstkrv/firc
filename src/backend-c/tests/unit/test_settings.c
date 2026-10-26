@@ -19,6 +19,7 @@ static const char EVERY_FIELD[] =
     "    upstream: {address: 1.1.1.1, port: 5300}\n"
     "    disableRemap53: true\n"
     "    disableDropAAAA: true\n"
+    "    disableStats: true\n"
     "    unmatchedTtl: 90s\n"
     "    maxIdleConns: 3\n"
     "    maxConcurrent: 7\n"
@@ -341,6 +342,7 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.dnsProxy.upstream.address", FIRC_APPLY_UPSTREAM},
         {"app.dnsProxy.upstream.port", FIRC_APPLY_UPSTREAM},
         {"app.dnsProxy.disableDropAAAA", FIRC_APPLY_PROXY_FLAGS},
+        {"app.dnsProxy.disableStats", FIRC_APPLY_DNS_STATS},
         {"app.dnsProxy.unmatchedTtl", FIRC_APPLY_UNMATCHED_TTL},
         {"app.update.check", FIRC_APPLY_NONE},
         {"app.check.url", FIRC_APPLY_CHECK},
@@ -380,6 +382,31 @@ TEST the_update_check_is_live_off_by_default_and_applies_nothing(void) {
     PASS();
 }
 
+/* Catches: the stats off by default, the key read or written under another name, or a save dropping it. */
+TEST disable_stats_is_off_by_default_and_round_trips(void) {
+    const firc_setting_t *s = firc_setting_find("app.dnsProxy.disableStats");
+    ASSERT(s != NULL);
+    ASSERT_EQ(FIRC_SK_BOOL, s->kind);
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_FALSE(cfg.app.dns_proxy.disable_stats);
+    static const char text[] = "configVersion: 0.7.0\napp:\n  dnsProxy:\n    disableStats: true\n";
+    ASSERT_EQ(FIRC_OK, firc_config_load_buffer(&cfg, text, strlen(text)));
+    ASSERT(cfg.app.dns_proxy.disable_stats);
+    ASSERT_FALSE(cfg.app.dns_proxy.disable_drop_aaaa);
+    char *out = emit_settings(&cfg.app);
+    ASSERT(out != NULL);
+    ASSERT(strstr(out, "    disableStats: true\n") != NULL);
+    firc_config_t back;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&back));
+    ASSERT_EQ(FIRC_OK, firc_config_load_buffer(&back, out, strlen(out)));
+    ASSERT(back.app.dns_proxy.disable_stats);
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 typedef struct {
     const char *path;
     size_t off;
@@ -391,6 +418,7 @@ typedef struct {
 static const field_t NUMERIC[] = {
     FIELD("app.dnsProxy.upstream.port", dns_proxy.upstream.port),
     FIELD("app.dnsProxy.disableDropAAAA", dns_proxy.disable_drop_aaaa),
+    FIELD("app.dnsProxy.disableStats", dns_proxy.disable_stats),
     FIELD("app.dnsProxy.unmatchedTtl", dns_proxy.unmatched_ttl),
     FIELD("app.dnsProxy.timeout", dns_proxy.timeout),
     FIELD("app.dnsProxy.maxConcurrent", dns_proxy.max_concurrent),
@@ -452,6 +480,7 @@ GREATEST_MAIN_DEFS();
 int main(int argc, char **argv) {
     GREATEST_MAIN_BEGIN();
     RUN_TEST(the_table_covers_every_field_but_enabled);
+    RUN_TEST(disable_stats_is_off_by_default_and_round_trips);
     RUN_TEST(the_check_names_the_field_that_broke);
     RUN_TEST(the_check_passes_what_the_daemon_accepts);
     RUN_TEST(wan_url_defaults_empty);
