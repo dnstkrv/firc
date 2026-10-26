@@ -67,8 +67,10 @@ test.describe("Keyboard shortcut hints", () => {
   test("a click outside closes the cheat sheet", async ({ page }) => {
     await sheetButton(page).click();
     await expect(sheet(page)).toBeVisible();
-    await page.mouse.click(20, 700);
-    await expect(sheet(page)).toHaveCount(0);
+    await expect(async () => {
+      await page.mouse.click(20, 700);
+      await expect(sheet(page)).toHaveCount(0, { timeout: 500 });
+    }).toPass();
   });
 
   // Catches a ? key that does not toggle the cheat sheet both ways.

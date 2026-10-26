@@ -934,7 +934,16 @@
       grid-column: 1 / -1;
     }
     .pick {
-      padding: 0.6rem 0 0.3rem;
+      position: relative;
+    }
+    .pick::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 2.25rem;
+      transform: translateY(-50%);
     }
   }
   @media (prefers-reduced-motion: reduce) {

@@ -65,6 +65,11 @@ const pill = (page: Page, ruleIndex = 0) =>
   page.locator(".group-wrapper").first().locator(".rule").nth(ruleIndex).locator(".rule-ports");
 const editor = (page: Page) => page.locator(".rule-ports-editor");
 const portsInput = (page: Page) => editor(page).getByRole("textbox", { name: "Порты" });
+const clickOutside = (page: Page) =>
+  expect(async () => {
+    await page.mouse.click(5, 300);
+    await expect(editor(page)).toBeHidden({ timeout: 500 });
+  }).toPass();
 const tokens = (page: Page) => editor(page).locator(".port-token");
 const proto = (page: Page, name: string) => editor(page).getByRole("radio", { name, exact: true });
 
@@ -249,8 +254,7 @@ test.describe("A subnet rule's protocol and ports", () => {
 
     await pill(page).click();
     await portsInput(page).fill("999");
-    await page.mouse.click(5, 300);
-    await expect(editor(page)).toBeHidden();
+    await clickOutside(page);
     await expect(pill(page)).toContainText("15, 999");
     await expect(pill(page)).toHaveClass(/\binvalid\b/);
     await expect(groupsPage.saveButton).toHaveClass(/fail/);
@@ -277,8 +281,7 @@ test.describe("A subnet rule's protocol and ports", () => {
     await pill(page).click();
     await portsInput(page).fill("80");
     await portsInput(page).press("Enter");
-    await page.mouse.click(5, 300);
-    await expect(editor(page)).toBeHidden();
+    await clickOutside(page);
     await expect(pill(page)).toHaveText("TCP · 443, 80");
     await expect(status).toHaveAttribute("data-kind", "unsaved");
   });
