@@ -157,7 +157,7 @@ test("clicking a tunnel's badge shows that tunnel's lines", async ({ page }) => 
   await expect(rows.nth(0)).not.toContainText("tunnel tunvless0");
 });
 
-// Catches a toolbar or row wider than a phone, a toolbar that wraps, or popover segments not in one row of equal buttons.
+// Catches a toolbar or row wider than a phone, a toolbar that wraps, popover segments not in one row, or level buttons of unequal width.
 test("a phone-wide journal scrolls only down", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await shell(page, MIXED);
@@ -184,7 +184,7 @@ test("a phone-wide journal scrolls only down", async ({ page }) => {
     expect(boxes).toHaveLength(n);
     for (const b of boxes) {
       expect(Math.abs(b.top - boxes[0].top)).toBeLessThan(1);
-      expect(Math.abs(b.width - boxes[0].width)).toBeLessThan(1);
+      if (name === "Log levels") expect(Math.abs(b.width - boxes[0].width)).toBeLessThan(1);
       expect(b.right).toBeLessThanOrEqual(390);
     }
   }
@@ -937,7 +937,7 @@ for (const [locale, core] of [
   });
 }
 
-// Catches a source label that wraps or spills out of its equal-width button at phone width, the fircd label cut short, or a 4-digit count shown in full there.
+// Catches a source label that wraps or spills out of its button at phone width, the fircd label cut short, or a 4-digit count shown in full there.
 test("the source labels fit their buttons at 360 px", async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("locale", JSON.stringify({ value: "ru" }));
@@ -967,8 +967,26 @@ test("the source labels fit their buttons at 360 px", async ({ page }) => {
     })),
   );
   for (const b of boxes) expect(b.fits).toBe(true);
-  expect(new Set(boxes.map((b) => b.width)).size).toBe(1);
   expect(new Set(boxes.map((b) => b.height)).size).toBe(1);
+});
+
+// Catches a three-digit count pushing «Ядро firc» out of a fixed third of the panel.
+test("a three-digit count fits beside its source label", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("locale", JSON.stringify({ value: "ru" }));
+  });
+  const core = Array.from({ length: 111 }, (_, i) => ({ ...MIXED[0], seq: 9000 + i }));
+  await shell(page, [...MIXED, ...core]);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/journal");
+  const buttons = (await openFilter(page, "Фильтр"))
+    .getByRole("group", { name: "Источники" })
+    .getByRole("button");
+  await expect(buttons.nth(0)).toHaveText(/^Ядро firc1\d\d$/);
+  const fits = await buttons.evaluateAll((els) =>
+    els.map((el) => el.scrollWidth <= el.clientWidth),
+  );
+  expect(fits).toEqual([true, true, true]);
 });
 
 // Catches a second toolbar row, a control left out of it or out of order, or a source, level, group or capture control left in the header.

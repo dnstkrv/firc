@@ -342,6 +342,7 @@
             align="end"
             sideOffset={6}
             collisionPadding={8}
+            onOpenAutoFocus={(e) => e.preventDefault()}
           >
             <div class="fp-sec">
               <div class="fp-title" id="{uid}-sources">{t("Sources")}</div>
@@ -353,9 +354,9 @@
                     aria-pressed={sources.has(s)}
                     onclick={() => (sources = toggled(sources, s))}
                   >
-                    <span class="dot" aria-hidden="true"></span>{sourceLabel(s)}<span class="ct"
-                      >{compactCount(counts[s], locale.current)}</span
-                    >
+                    <span class="dot" aria-hidden="true"></span><span class="lbl"
+                      >{sourceLabel(s)}</span
+                    ><span class="ct">{compactCount(counts[s], locale.current)}</span>
                   </button>
                 {/each}
               </div>
@@ -586,7 +587,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    width: 22rem;
+    width: 24rem;
     max-width: calc(100vw - 1rem);
     box-sizing: border-box;
     padding: 0.75rem;
@@ -642,7 +643,11 @@
     gap: 0.2rem;
   }
   .seg.fp-sources {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .seg.fp-sources button {
+    flex: 1 0 auto;
   }
   .seg.levels {
     grid-template-columns: repeat(4, minmax(0, 1fr));
