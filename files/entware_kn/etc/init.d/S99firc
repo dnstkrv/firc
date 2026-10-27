@@ -104,7 +104,7 @@ daemon_age() {
 
 # The daemon reads SIGTERM on its event loop, so a stuck one needs KILL.
 kill_daemon() {
-  killall $PROC 2>/dev/null
+  kill `pidof $PROC` 2>/dev/null
   COUNTER=0
   while [ -n "`pidof $PROC`" -a "$COUNTER" -lt "$1" ]; do
     sleep 1
@@ -112,7 +112,7 @@ kill_daemon() {
   done
   if [ -n "`pidof $PROC`" ]; then
     logger "$DESC did not stop in $1 s; killing it."
-    killall -9 $PROC 2>/dev/null
+    kill -9 `pidof $PROC` 2>/dev/null
     sleep 1
   fi
   [ -z "`pidof $PROC`" ]
@@ -366,7 +366,7 @@ check() {
 reconfigure() {
   SIGNAL=SIGHUP
   echo -e "$ansi_white Sending $SIGNAL to $DESC... $ansi_std"
-  killall -$SIGNAL $PROC 2>/dev/null
+  kill -$SIGNAL `pidof $PROC` 2>/dev/null
 }
 
 for PROC in $PROCS; do
