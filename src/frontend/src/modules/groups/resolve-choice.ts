@@ -8,6 +8,7 @@ import {
   type GroupResolver,
   type SystemResolvers,
 } from "../../types";
+import type { ResolverListProblem } from "../../utils/resolver-validators";
 import { resolverNote } from "../logs/journal";
 import { ifaceList } from "./iface-list";
 import { clockMinutes } from "./live-state";
@@ -27,6 +28,37 @@ export function resolveOf(mode: DnsMode, server: string): GroupResolve {
   if (mode === "off") return { tunnel: false, server: "" };
   if (mode === "own") return { tunnel: true, server: server.trim() };
   return { tunnel: true, server: "" };
+}
+
+export function sharedResolve(
+  groups: readonly { interface: string | string[]; resolve: GroupResolve }[],
+): GroupResolve | null {
+  const open = groups.filter((g) => !ifaceList(g).some(isSink));
+  if (open.length === 0) return null;
+  const { tunnel, server } = open[0].resolve;
+  const same = open.every((g) => g.resolve.tunnel === tunnel && g.resolve.server === server);
+  return same ? { tunnel, server } : null;
+}
+
+export function serverProblemText(
+  check: { problem: ResolverListProblem; entry: string } | null,
+  raw: string,
+  t: (k: string) => string,
+): string {
+  const problem = check?.problem ?? null;
+  const entry = check?.entry ?? "";
+  const named = (text: string) => (raw.includes(",") ? `${entry}: ${text}` : text);
+  if (problem === "port") return named(t("The port must be between 1 and 65535"));
+  if (problem === "sink")
+    return named(t("This address cannot be a DNS server (0.0.0.0, 127.x, ::, ::1)"));
+  if (problem === "mapped") return named(t("Write the IPv4 address itself"));
+  if (problem === "duplicate") return t("{entry} is written twice").replace("{entry}", entry);
+  if (problem === "too-many") return t("At most four servers");
+  if (problem === "syntax" && entry.includes(" "))
+    return named(t("Separate the servers with commas"));
+  if (problem === "syntax" || problem === "empty")
+    return t("One to four addresses separated by commas: address, address:port or [IPv6]:port");
+  return "";
 }
 
 export function firmwareServersFor(list: SystemResolvers["resolvers"], iface: string): string[] {

@@ -35,6 +35,7 @@
     firmwareServersFor,
     isSavedAutoUnchanged,
     modeOf,
+    serverProblemText,
     serverSuggestions,
     submittedResolve,
     type DnsMode,
@@ -205,22 +206,7 @@
     dnsMode === "own" && !isSinkChoice ? resolverListProblem(dnsServer.trim()) : null,
   );
   let serverProblem = $derived(serverCheck?.problem ?? null);
-  let serverProblemText = $derived.by(() => {
-    const entry = serverCheck?.entry ?? "";
-    const named = (text: string) => (dnsServer.includes(",") ? `${entry}: ${text}` : text);
-    if (serverProblem === "port") return named(t("The port must be between 1 and 65535"));
-    if (serverProblem === "sink")
-      return named(t("This address cannot be a DNS server (0.0.0.0, 127.x, ::, ::1)"));
-    if (serverProblem === "mapped") return named(t("Write the IPv4 address itself"));
-    if (serverProblem === "duplicate")
-      return t("{entry} is written twice").replace("{entry}", entry);
-    if (serverProblem === "too-many") return t("At most four servers");
-    if (serverProblem === "syntax" && entry.includes(" "))
-      return named(t("Separate the servers with commas"));
-    if (serverProblem === "syntax" || serverProblem === "empty")
-      return t("One to four addresses separated by commas: address, address:port or [IPv6]:port");
-    return "";
-  });
+  let problemText = $derived(serverProblemText(serverCheck, dnsServer, t));
   let dnsServerHasError = $derived(
     serverErrorShown !== null || (dnsServer !== "" && serverProblem !== null),
   );
@@ -381,9 +367,7 @@
               >{serverErrorShown}</span
             >
           {:else if dnsServer !== "" && serverProblem !== null}
-            <span id="gd-dns-server-error" class="field-error dns-server-error"
-              >{serverProblemText}</span
-            >
+            <span id="gd-dns-server-error" class="field-error dns-server-error">{problemText}</span>
           {/if}
           <span id="gd-dns-hint" class="dns-hint">
             {t(

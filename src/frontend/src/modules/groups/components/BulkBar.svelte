@@ -1,29 +1,48 @@
 <script lang="ts">
   import { DropdownMenu } from "bits-ui";
-  import { getContext } from "svelte";
+  import { getContext, tick } from "svelte";
 
   import { hosts } from "../../../data/hosts.svelte";
   import { interfaces } from "../../../data/interfaces.svelte";
   import { locale, t } from "../../../data/locale.svelte";
   import { policies } from "../../../data/policies.svelte";
+  import { fetchResolvers, resolvers } from "../../../data/resolvers.svelte";
   import { ask } from "../../../utils/confirm.svelte";
   import BulkDevicesDialog from "../dialogs/BulkDevicesDialog.svelte";
   import { GROUPS_STORE_CONTEXT, groupTitle, type GroupsStore } from "../groups.svelte";
+  import IfaceCircle from "./IfaceCircle.svelte";
 
   import {
     Check,
     Delete,
     Devices,
+    Globe,
     Network,
     SelectOpen,
     ToggleLeft,
     ToggleRight,
     X,
   } from "../../../components/ui/icons";
-  import { groupChoices, ifaceTitle, moreText, type IfaceItem } from "../../../data/iface-choices";
+  import {
+    groupChoices,
+    ifaceTitle,
+    isSink,
+    moreText,
+    type IfaceItem,
+  } from "../../../data/iface-choices";
   import { replaceWith } from "../../../utils/device-bulk";
   import { coverageLabel } from "../../../utils/device-picker";
   import { counted } from "../../../utils/plural";
+  import { resolverListProblem } from "../../../utils/resolver-validators";
+  import { canBackup, entryNumber, ifaceList, sharedChain, toggleEntry } from "../iface-list";
+  import {
+    modeOf,
+    resolveOf,
+    serverProblemText,
+    serverSuggestions,
+    sharedResolve,
+    type DnsMode,
+  } from "../resolve-choice";
   import { selectionCountText } from "../selection";
 
   type Props = {
@@ -35,7 +54,6 @@
 
   let bar = $state<HTMLDivElement>();
   let restOpen = $state(false);
-  const choices = $derived(groupChoices(interfaces.list, []));
 
   const store = getContext<GroupsStore>(GROUPS_STORE_CONTEXT);
   if (!store) {
@@ -55,6 +73,82 @@
     const ids = new Set(store.selection);
     return store.data.filter((g) => ids.has(g.id));
   });
+  let base = $derived(sharedChain(selectedGroups));
+  const choices = $derived(groupChoices(interfaces.list, base ?? []));
+
+  function toggleBackup(id: string) {
+    store.setSelectedChain(toggleEntry(base ?? [], id));
+  }
+
+  function onMenuKey(e: KeyboardEvent) {
+    if (e.key !== "Enter" || !e.shiftKey) return;
+    const id = (document.activeElement as HTMLElement | null)?.dataset.iface;
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (canBackup(base ?? [], id)) toggleBackup(id);
+  }
+
+  let sinkCount = $derived(selectedGroups.filter((g) => ifaceList(g).some(isSink)).length);
+  let dnsMode = $state<DnsMode | "">("");
+  let dnsServer = $state("");
+  let dnsError = $state("");
+  let dnsInput = $state<HTMLInputElement>();
+  let typing = $state(false);
+  let dnsOpen = $state(false);
+  let settled = false;
+
+  function onDnsOpen(open: boolean) {
+    if (!open) return;
+    const shared = sharedResolve(selectedGroups);
+    dnsMode = shared ? modeOf(shared) : "";
+    dnsServer = shared && dnsMode === "own" ? shared.server : "";
+    dnsError = "";
+    typing = false;
+    settled = false;
+    void fetchResolvers();
+  }
+
+  async function pickOwn() {
+    await tick();
+    dnsInput?.focus();
+  }
+
+  function applyServer(): boolean {
+    const check = resolverListProblem(dnsServer.trim());
+    if (check !== null) {
+      dnsError = serverProblemText(check, dnsServer, t);
+      return false;
+    }
+    store.setSelectedResolve(resolveOf("own", dnsServer));
+    return true;
+  }
+
+  function onServerKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      settled = true;
+      return;
+    }
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (!applyServer()) return;
+      settled = true;
+      dnsOpen = false;
+    }
+  }
+
+  function onServerBlur() {
+    typing = false;
+    if (!settled) applyServer();
+  }
+
+  function unlessTyping(handler: unknown) {
+    return (e: PointerEvent) => {
+      if (!typing) (handler as ((e: PointerEvent) => void) | undefined)?.(e);
+    };
+  }
+
   let resetting = $derived(selectedGroups.filter((g) => replaceWith(g.devices, every) !== null));
 
   async function resetDevices() {
@@ -142,7 +236,7 @@
   <div class="bulk-row bulk-actions">
     <DropdownMenu.Root
       onOpenChange={(open) => {
-        if (open) restOpen = false;
+        if (open) restOpen = choices.expanded;
       }}
     >
       <DropdownMenu.Trigger class="bulk-button">
@@ -157,7 +251,11 @@
           align="start"
           sideOffset={8}
           collisionPadding={8}
+          onkeydowncapture={onMenuKey}
         >
+          {#if base === null}
+            <div class="bulk-menu-note">{t("The groups have different interfaces")}</div>
+          {/if}
           {#each choices.head as item (item.id)}
             {@render ifaceItem(item)}
           {/each}
@@ -165,7 +263,8 @@
             <DropdownMenu.Separator class="bulk-menu-separator" />
             <DropdownMenu.Item
               class="bulk-menu-item"
-              onSelect={() => store.setSelectedInterface("blackhole")}
+              data-iface="blackhole"
+              onSelect={() => store.setSelectedChain(["blackhole"])}
             >
               <span class="bulk-menu-label bulk-menu-danger">{t("Block")}</span>
             </DropdownMenu.Item>
@@ -174,7 +273,8 @@
             {#if !choices.blackhole}<DropdownMenu.Separator class="bulk-menu-separator" />{/if}
             <DropdownMenu.Item
               class="bulk-menu-item"
-              onSelect={() => store.setSelectedInterface("block")}
+              data-iface="block"
+              onSelect={() => store.setSelectedChain(["block"])}
             >
               <span class="bulk-menu-label bulk-menu-warn">{t("Block by DNS")}</span>
             </DropdownMenu.Item>
@@ -198,6 +298,67 @@
                 {@render ifaceItem(item)}
               {/each}
             {/if}
+          {/if}
+          <div class="bulk-menu-foot">{t("1 — first, 2–4 — backups in order")}</div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+
+    <DropdownMenu.Root bind:open={dnsOpen} onOpenChange={onDnsOpen}>
+      <DropdownMenu.Trigger class="bulk-button" disabled={sinkCount === selectedGroups.length}>
+        <Globe size={18} /><span class="bulk-label">{t("DNS")}</span><SelectOpen size={16} />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          class="bulk-menu"
+          side="top"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+        >
+          <DropdownMenu.RadioGroup bind:value={dnsMode}>
+            {@render dnsItem("auto", t("Through the tunnel — automatic"))}
+            {@render dnsItem("own", t("Through the tunnel — own server"))}
+            {#if dnsMode === "own"}
+              <div class="bulk-dns-server">
+                <label for="bulk-dns-server">{t("Server")}</label>
+                <input
+                  bind:this={dnsInput}
+                  id="bulk-dns-server"
+                  type="text"
+                  list="bulk-dns-servers"
+                  placeholder="9.9.9.9, 1.1.1.1"
+                  bind:value={dnsServer}
+                  class:invalid={dnsError !== ""}
+                  aria-invalid={dnsError !== ""}
+                  aria-describedby={dnsError !== "" ? "bulk-dns-server-error" : undefined}
+                  oninput={() => (dnsError = "")}
+                  onfocus={() => (typing = true)}
+                  onblur={onServerBlur}
+                  onkeydown={onServerKey}
+                />
+                <datalist id="bulk-dns-servers">
+                  {#each serverSuggestions(resolvers.list) as s}
+                    <option value={s}></option>
+                  {/each}
+                </datalist>
+                {#if dnsError !== ""}
+                  <span id="bulk-dns-server-error" class="bulk-dns-error">{dnsError}</span>
+                {/if}
+              </div>
+            {/if}
+            {@render dnsItem("off", t("Not through the tunnel"))}
+          </DropdownMenu.RadioGroup>
+          {#if sinkCount > 0}
+            <div class="bulk-menu-foot">
+              {counted(
+                sinkCount,
+                locale.current,
+                t("{n} group blocks, its DNS is unchanged"),
+                t("{n} groups block, their DNS is unchanged (2-4)"),
+                t("{n} groups block, their DNS is unchanged"),
+              )}
+            </div>
           {/if}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -285,16 +446,55 @@
 
 <BulkDevicesDialog bind:open={devicesOpen} bind:view={devicesView} />
 
+{#snippet dnsItem(mode: DnsMode, label: string)}
+  <DropdownMenu.RadioItem
+    class="bulk-menu-item"
+    value={mode}
+    closeOnSelect={mode !== "own"}
+    onSelect={() => {
+      if (mode === "own") void pickOwn();
+      else store.setSelectedResolve(resolveOf(mode, ""));
+    }}
+  >
+    {#snippet child({ props, checked })}
+      <div
+        {...props}
+        onpointermove={unlessTyping(props.onpointermove)}
+        onpointerleave={unlessTyping(props.onpointerleave)}
+      >
+        <span class="bulk-radio" class:checked></span>
+        <span class="bulk-menu-label">{label}</span>
+      </div>
+    {/snippet}
+  </DropdownMenu.RadioItem>
+{/snippet}
+
 {#snippet ifaceItem(item: IfaceItem)}
   {@const label = ifaceTitle(item)}
-  <DropdownMenu.Item class="bulk-menu-item" onSelect={() => store.setSelectedInterface(item.id)}>
+  <DropdownMenu.Item
+    class="bulk-menu-item"
+    data-iface={item.id}
+    onSelect={() => store.setSelectedChain([item.id])}
+  >
+    {#if canBackup(base ?? [], item.id)}
+      <IfaceCircle id={item.id} n={entryNumber(base ?? [], item.id)} ontoggle={toggleBackup} />
+    {:else if !(base ?? []).some(isSink)}
+      <span class="iface-gap"></span>
+    {/if}
     <span class="bulk-menu-label">{label.title}</span>
     {#if label.sub}<span class="bulk-menu-sub">{label.sub}</span>{/if}
     {#if item.role === "wan"}<span class="bulk-menu-tag">{t("provider")}</span>{/if}
+    {#if !interfaces.list.some((i) => i.id === item.id)}
+      <span class="bulk-menu-tag">{t("not on the router")}</span>
+    {/if}
   </DropdownMenu.Item>
 {/snippet}
 
 <style>
+  #bulk-dns-server::-webkit-calendar-picker-indicator {
+    display: none !important;
+  }
+
   .bulk-bar {
     position: fixed;
     left: 50%;
@@ -460,6 +660,63 @@
     height: 1px;
     margin: 0.25rem 0.2rem;
     background: var(--bg-light-extra);
+  }
+
+  .bulk-menu-note {
+    padding: 0.35rem 0.6rem 0.45rem;
+    color: var(--orange);
+    font-size: 0.75rem;
+  }
+
+  .bulk-menu-foot {
+    margin-top: 0.25rem;
+    padding: 0.4rem 0.6rem 0.2rem;
+    border-top: 1px solid var(--bg-light-extra);
+    color: var(--text-2);
+    font-size: 0.75rem;
+  }
+
+  .bulk-radio {
+    flex: none;
+    width: 0.9rem;
+    height: 0.9rem;
+    box-sizing: border-box;
+    border: 1.5px solid var(--text-2);
+    border-radius: 50%;
+  }
+
+  .bulk-radio.checked {
+    border: 0.3rem solid var(--accent);
+  }
+
+  .bulk-dns-server {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.2rem 0.6rem 0.5rem 2rem;
+    font-size: 0.75rem;
+    color: var(--text-2);
+  }
+
+  .bulk-dns-server input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--bg-light-extra);
+    border-radius: 0.4rem;
+    background: var(--bg-dark);
+    color: var(--text);
+    font: 400 0.875rem var(--font-mono);
+  }
+
+  .bulk-dns-server input.invalid {
+    border-color: var(--red);
+  }
+
+  .bulk-dns-error {
+    max-width: 16rem;
+    color: var(--red);
   }
 
   .bulk-menu-chevron {

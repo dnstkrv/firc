@@ -700,6 +700,7 @@
   "Replace in {n} group": "Заменить у {n} группы",
   "Replace in {n} groups (2-4)": "Заменить у {n} групп",
   "Replace in {n} groups": "Заменить у {n} групп",
+  "The groups have different interfaces": "У групп разные интерфейсы",
   "The groups have different settings now; they will be the same": "Сейчас у групп разные настройки — будут одинаковые",
   "Reset the devices of {n} group?": "Сбросить устройства у {n} группы?",
   "Reset the devices of {n} groups? (2-4)": "Сбросить устройства у {n} групп?",
@@ -804,5 +805,8 @@
   "Show the nodes": "Показать узлы",
   "Hide the nodes": "Скрыть узлы",
   "{n} more addresses asked less often": "ещё адресов, спрашивавших реже: {n}",
-  "Documentation": "Документация"
+  "Documentation": "Документация",
+  "{n} group blocks, its DNS is unchanged": "{n} группа блокирует, её DNS не меняется",
+  "{n} groups block, their DNS is unchanged (2-4)": "{n} группы блокируют, их DNS не меняется",
+  "{n} groups block, their DNS is unchanged": "{n} групп блокируют, их DNS не меняется"
 }

@@ -10,7 +10,9 @@ import {
   modeOf,
   resolveOf,
   resolverTag,
+  serverProblemText,
   serverSuggestions,
+  sharedResolve,
   submittedResolve,
 } from "../../src/modules/groups/resolve-choice.ts";
 
@@ -221,5 +223,49 @@ describe("the card's DNS health tag", () => {
       healthTag(firmware({ resting: true, fallbacks: 3, total: 3 }), id)?.kind,
       "red",
     );
+  });
+});
+
+describe("the bulk DNS choice", () => {
+  const auto = { tunnel: true, server: "" };
+  const g = (iface: string | string[], resolve: { tunnel: boolean; server: string }) => ({
+    interface: iface,
+    resolve,
+  });
+
+  // Catches groups with different servers reading as shared, or a blocking group's resolve counted.
+  it("shares the resolve of the groups that do not block", () => {
+    assert.deepStrictEqual(sharedResolve([g("wg0", auto), g("nwg0", auto)]), auto);
+    assert.strictEqual(
+      sharedResolve([g("wg0", auto), g("nwg0", { tunnel: true, server: "1.1.1.1" })]),
+      null,
+    );
+    assert.deepStrictEqual(
+      sharedResolve([g("wg0", auto), g("block", { tunnel: false, server: "" })]),
+      auto,
+    );
+    assert.strictEqual(
+      sharedResolve([g("block", auto), g(["blackhole"], { tunnel: false, server: "" })]),
+      null,
+    );
+    assert.strictEqual(sharedResolve([]), null);
+  });
+
+  // Catches an error text changed from the dialog's, a lone server prefixed, or a list's entry not named.
+  it("words a server problem as the dialog does", () => {
+    const en = (k: string) => k;
+    assert.strictEqual(
+      serverProblemText({ problem: "port", entry: "1.1.1.1:0" }, "1.1.1.1:0", en),
+      "The port must be between 1 and 65535",
+    );
+    assert.strictEqual(
+      serverProblemText({ problem: "port", entry: "1.1.1.1:0" }, "8.8.8.8, 1.1.1.1:0", en),
+      "1.1.1.1:0: The port must be between 1 and 65535",
+    );
+    assert.strictEqual(
+      serverProblemText({ problem: "duplicate", entry: "8.8.8.8" }, "8.8.8.8, 8.8.8.8", en),
+      "8.8.8.8 is written twice",
+    );
+    assert.strictEqual(serverProblemText(null, "1.1.1.1", en), "");
   });
 });

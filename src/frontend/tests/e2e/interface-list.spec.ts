@@ -102,6 +102,14 @@ async function save(page: Page, daemon: { puts: any[] }, count: number) {
 }
 
 test.describe("The interface picker in the card", () => {
+  // Catches an empty circle drawn only on the hovered or highlighted row.
+  test("an empty circle shows on a row nobody points at", async ({ page }) => {
+    await setup(page, [plain()]);
+    await openPicker(page);
+    await expect(row(page, "nwg2")).not.toHaveAttribute("data-highlighted", "");
+    await expect(circle(page, "nwg2")).toHaveCSS("border-top-color", "rgb(106, 109, 133)");
+  });
+
   test("a plain group offers a circle on every row but blackhole, and a row click picks it", async ({
     page,
   }) => {

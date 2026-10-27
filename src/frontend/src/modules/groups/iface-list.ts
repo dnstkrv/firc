@@ -18,6 +18,16 @@ export function ifaceValue(list: string[]): string | string[] {
   return list.length === 1 ? list[0] : [...list];
 }
 
+export function sharedChain(groups: readonly { interface: string | string[] }[]): string[] | null {
+  if (groups.length === 0) return null;
+  const first = ifaceList(groups[0]);
+  const same = groups.every((g) => {
+    const list = ifaceList(g);
+    return list.length === first.length && list.every((n, i) => n === first[i]);
+  });
+  return same ? first : null;
+}
+
 export function canBackup(list: string[], name: string): boolean {
   if (isSink(name) || list.some(isSink)) return false;
   return list.includes(name) || list.length < IFACES_MAX;

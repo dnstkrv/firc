@@ -6,6 +6,7 @@ import { ChangeTracker } from "../../utils/change-tracker.svelte";
 import { ask } from "../../utils/confirm.svelte";
 import { ListsController } from "./lists.svelte";
 
+import { isSink } from "../../data/iface-choices";
 import {
   DEFAULT_RESOLVE,
   ruleTakesPorts,
@@ -32,6 +33,7 @@ import {
   toConfigPayload as toConfigPayloadData,
   withoutStaleBlock,
 } from "./groups-data";
+import { ifaceList, ifaceValue, sharedChain } from "./iface-list";
 import { liveOfRecord, type GroupLive, type NetfilterState } from "./live-state";
 import {
   computeOverlaps,
@@ -40,7 +42,7 @@ import {
   type OverlapKind,
   type RuleOverlap,
 } from "./overlap";
-import { selectableIds, selectedInOrder, toggleId } from "./selection";
+import { moveBlock, rangeIds, selectableIds, selectedInOrder, toggleId } from "./selection";
 
 export const GROUPS_STORE_CONTEXT = Symbol("groups-store");
 
@@ -333,12 +335,25 @@ export class GroupsStore {
     return this.selectedIds.includes(id);
   }
 
+  anchorId = $state<string | null>(null);
+
   toggleSelected(id: string) {
     this.selectedIds = toggleId(this.selection, id);
+    this.anchorId = id;
+  }
+
+  selectRange(id: string, add: boolean) {
+    const range = rangeIds(this.#shownIds, this.anchorId, id);
+    if (!range) {
+      this.toggleSelected(id);
+      return;
+    }
+    this.selectedIds = add ? [...new Set([...this.selection, ...range])] : range;
   }
 
   clearSelection() {
     if (this.selectedIds.length) this.selectedIds = [];
+    this.anchorId = null;
   }
 
   async selectAll() {
@@ -365,9 +380,16 @@ export class GroupsStore {
     this.markDataRevision();
   }
 
-  setSelectedInterface(iface: string) {
+  setSelectedChain(list: string[]) {
     this.#editSelected((group) => {
-      if (group.interface !== iface) group.interface = iface;
+      if (sharedChain([group, { interface: list }]) === null) group.interface = ifaceValue(list);
+    });
+  }
+
+  setSelectedResolve(r: GroupResolve) {
+    this.#editSelected((group) => {
+      if (ifaceList(group).some(isSink) || resolveEqual(group.resolve, r)) return;
+      group.resolve = { tunnel: r.tunnel, server: r.server };
     });
   }
 
@@ -1565,9 +1587,25 @@ export class GroupsStore {
     this.markDataRevision();
   }
 
+  draggedIds(id: string): string[] {
+    if (!this.isSelected(id)) return [id];
+    const shown = new Set(this.#shownIds);
+    return this.selection.filter((selected) => shown.has(selected));
+  }
+
   handleGroupSlotDrop = (source: GroupDragData, target: GroupDropSlotData) => {
     const { group_index: from_index } = source;
     const { group_index: to_index, insert } = target;
+    if (this.isSelected(source.group_id)) {
+      const slotId = this.data[to_index]?.id;
+      if (slotId === undefined) return;
+      const moving = new Set(this.draggedIds(source.group_id));
+      const moved = moveBlock(this.data, moving, slotId, insert);
+      if (moved.every((group, index) => group.id === this.data[index].id)) return;
+      this.data.splice(0, this.data.length, ...moved);
+      this.markDataRevision();
+      return;
+    }
     if (from_index === to_index && insert !== "after") return;
     this.changeGroupIndex(from_index, to_index, insert);
   };

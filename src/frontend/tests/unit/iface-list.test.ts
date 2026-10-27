@@ -10,6 +10,7 @@ const {
   chainLabel,
   backupNote,
   backupText,
+  sharedChain,
 } = await import("../../src/modules/groups/iface-list");
 
 describe("a group's interface list", () => {
@@ -134,5 +135,31 @@ describe("backupText", () => {
       backupText({ active: "nwg0", first: "wg0", since: 0 }, t, clock),
       "Running on backup nwg0 · first wg0 down",
     );
+  });
+});
+
+describe("sharedChain", () => {
+  // Catches a string and a list of one read as different chains.
+  it("reads a string and a list of one as the same chain", () => {
+    assert.deepStrictEqual(sharedChain([{ interface: "wg0" }, { interface: ["wg0"] }]), ["wg0"]);
+  });
+  // Catches equal chains compared by reference instead of by entries.
+  it("returns the chain every group shares", () => {
+    assert.deepStrictEqual(sharedChain([{ interface: ["a", "b"] }, { interface: ["a", "b"] }]), [
+      "a",
+      "b",
+    ]);
+  });
+  // Catches the order of backups ignored when comparing chains.
+  it("is null when the order differs", () => {
+    assert.strictEqual(sharedChain([{ interface: ["a", "b"] }, { interface: ["b", "a"] }]), null);
+  });
+  // Catches a chain taken as shared when another group holds only its first entries.
+  it("is null when one chain is a prefix of the other", () => {
+    assert.strictEqual(sharedChain([{ interface: ["a", "b"] }, { interface: "a" }]), null);
+  });
+  // Catches an empty selection read as a chain.
+  it("is null for no groups", () => {
+    assert.strictEqual(sharedChain([]), null);
   });
 });

@@ -38,7 +38,7 @@
     SortNeutral,
   } from "../../../components/ui/icons";
   import { BLOCK } from "../../../data/iface-choices";
-  import { draggable, droppable, type Chip } from "../../../lib/dnd";
+  import { dnd_state, draggable, droppable, type Chip } from "../../../lib/dnd";
   import { type Rule } from "../../../types";
   import { defaultRule } from "../../../utils/defaults";
   import { coverageLabel } from "../../../utils/device-picker";
@@ -122,6 +122,22 @@
     }
   });
 
+  const isModified = (e: MouseEvent) => e.ctrlKey || e.metaKey || e.shiftKey;
+
+  function claimModified(e: PointerEvent) {
+    if (!isModified(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function selectByModifier(e: MouseEvent) {
+    if (e.detail === 0 || !isModified(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.shiftKey) store.selectRange(group.id, e.ctrlKey || e.metaKey);
+    else store.toggleSelected(group.id);
+  }
+
   function toggleOpen() {
     if (!group) return;
     store.setOpen(group.id, !effectiveOpen);
@@ -141,7 +157,25 @@
     group_index: number;
   };
 
+  const lifted = $derived(
+    dnd_state.is_dragging &&
+      dnd_state.source_scope === "group" &&
+      !!group &&
+      store.draggedIds(dnd_state.source.group_id).includes(group.id),
+  );
+
   function groupChip(): Chip {
+    const dragged = group ? store.draggedIds(group.id).length : 1;
+    if (dragged > 1) {
+      const text = counted(
+        dragged,
+        locale.current,
+        t("{n} group"),
+        t("{n} groups (2-4)"),
+        t("{n} groups"),
+      );
+      return { parts: [text] };
+    }
     const n = group?.rules.length ?? 0;
     return {
       parts: [
@@ -321,6 +355,7 @@
   <div
     class="group"
     class:selected
+    class:dnd-origin={lifted}
     role="listitem"
     data-uuid={group.id}
     use:draggable={{
@@ -338,6 +373,8 @@
     <Collapsible.Root open={effectiveOpen} onOpenChange={toggleOpen}>
       <div
         class="group-header"
+        onpointerdowncapture={claimModified}
+        onclickcapture={selectByModifier}
         data-group-index={group_index}
         use:droppable={{
           data: { rule_id: "", rule_index: 0, group_id: group.id, group_index },
