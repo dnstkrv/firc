@@ -348,6 +348,48 @@ test.describe("Tunnel editor", () => {
     expect(daemon.puts[0].tunnels[0].order).toEqual([]);
   });
 
+  // Catches the button leaving excluded nodes in place or not reaching `order`.
+  test("Excluded to the end moves excluded nodes down and writes order", async ({ page }) => {
+    const { daemon, tunnels } = await saved(page, { exclude: ["0000000a:A"] });
+    await expect(tunnels.nodeNames("a")).toHaveText(["A", "B", "C"]);
+    const sink = tunnels.card("a").locator("button", { hasText: "Excluded to the end" });
+    await expect(sink).not.toHaveClass(/inactive/);
+
+    await sink.click();
+    await expect(tunnels.nodeNames("a")).toHaveText(["B", "C", "A"]);
+    await expect(sink).toHaveClass(/inactive/);
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+    expect(daemon.puts[0].tunnels[0].order).toEqual(["0000000a:B", "0000000a:C", "0000000a:A"]);
+  });
+
+  // Catches the button offered with no excluded node to move.
+  test("Excluded to the end is inactive with nothing excluded", async ({ page }) => {
+    const { tunnels } = await saved(page);
+    const sink = tunnels.card("a").locator("button", { hasText: "Excluded to the end" });
+    await expect(sink).toHaveClass(/inactive/);
+  });
+
+  // Catches By latency ignoring exclude, so an excluded fast node goes first.
+  test("By latency puts an excluded node last", async ({ page }) => {
+    const { daemon, tunnels } = await saved(page, { exclude: ["0000000a:C"] });
+    daemon.probeAnswer = (_body, route) =>
+      route.fulfill({
+        json: {
+          nodes: [
+            { key: "0000000a:A", ok: true, handshakeMs: 20, firstByteMs: 900, why: "" },
+            { key: "0000000a:B", ok: true, handshakeMs: 20, firstByteMs: 500, why: "" },
+            { key: "0000000a:C", ok: true, handshakeMs: 20, firstByteMs: 100, why: "" },
+          ],
+        },
+      });
+    const card = tunnels.card("a");
+    await card.locator("button", { hasText: "Check nodes" }).click();
+    await expect(tunnels.nodeRows("a").nth(2).locator(".lat")).toContainText("100 ms");
+    await card.locator("button", { hasText: "By latency" }).click();
+    await expect(tunnels.nodeNames("a")).toHaveText(["B", "A", "C"]);
+  });
+
   // Catches the reset offered when there is no saved order to drop.
   test("As in the subscription is inactive while the order is empty", async ({ page }) => {
     const { tunnels } = await saved(page);

@@ -6,6 +6,7 @@ import {
   agoText,
   descriptionProblem,
   deviceProblem,
+  excludedLast,
   formatRate,
   keepHidden,
   latencyOf,
@@ -98,7 +99,29 @@ describe("keys the filter hides", () => {
   });
 });
 
+describe("excluded nodes to the end", () => {
+  // Catches excluded nodes left in place, the others reshuffled, or the input array mutated.
+  it("moves excluded keys after the rest, each group keeping its order", () => {
+    const visible = ["a", "x", "b", "y", "c"];
+    assert.deepStrictEqual(excludedLast(visible, ["y", "x"]), ["a", "b", "c", "x", "y"]);
+    assert.deepStrictEqual(visible, ["a", "x", "b", "y", "c"]);
+    assert.deepStrictEqual(excludedLast(visible, []), visible);
+    assert.deepStrictEqual(excludedLast(visible, ["gone"]), visible);
+  });
+});
+
 describe("sorting by latency", () => {
+  // Catches an excluded fast node sorted above the ones that carry traffic.
+  it("puts excluded nodes after every other, fastest first among them", () => {
+    const probes = { a: probe("a", 90), b: probe("b", 15), c: probe("c", 40), d: probe("d", 5) };
+    assert.deepStrictEqual(orderByLatency(["a", "b", "c", "d"], probes, ["b", "d"]), [
+      "c",
+      "a",
+      "d",
+      "b",
+    ]);
+  });
+
   // Catches a sort by the handshake, which ranks a near relay of a far exit first.
   it("ranks by the first byte through the node, not the handshake to it", () => {
     const probes = {

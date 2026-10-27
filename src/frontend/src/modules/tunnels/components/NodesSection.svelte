@@ -13,6 +13,7 @@
     GroupCollapse,
     GroupExpand,
     LoaderCircle,
+    SinkExcluded,
     SortByLatency,
     SortBySource,
   } from "../../../components/ui/icons";
@@ -20,6 +21,7 @@
   import { HttpError } from "../../../utils/fetcher";
   import { inboundPortsByNode } from "../inbounds";
   import {
+    excludedLast,
     keepHidden,
     orderAfterDrop,
     orderByLatency,
@@ -49,6 +51,9 @@
   const ports = $derived(inboundPortsByNode(tunnel));
   const rows = $derived(uniqueByKey(preview?.nodes ?? []));
   const visible = $derived(rows.map((r) => r.key));
+  const canSink = $derived(
+    excludedLast(visible, tunnel.exclude).some((key, i) => key !== visible[i]),
+  );
   const measured = $derived(Object.keys(probes).length > 0);
   const saved = $derived(store.isSaved(tunnel.id));
   const sourcesShape = $derived(JSON.stringify($state.snapshot(tunnel.sources)));
@@ -174,10 +179,29 @@
             small
             class="text-btn"
             inactive={!measured}
-            onclick={() => reorder(orderByLatency(visible, probes))}
+            onclick={() => reorder(orderByLatency(visible, probes, tunnel.exclude))}
           >
             <SortByLatency size={15} />
             {t("By latency")}
+          </Button>
+        </Tooltip>
+        <Tooltip
+          value={t(
+            !visible.some((key) => tunnel.exclude.includes(key))
+              ? "No node is excluded"
+              : canSink
+                ? "Move the excluded nodes to the end of the list"
+                : "The excluded nodes are already at the end",
+          )}
+        >
+          <Button
+            small
+            class="text-btn"
+            inactive={!canSink}
+            onclick={() => reorder(excludedLast(visible, tunnel.exclude))}
+          >
+            <SinkExcluded size={15} />
+            {t("Excluded to the end")}
           </Button>
         </Tooltip>
         <Tooltip

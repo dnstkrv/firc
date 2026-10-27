@@ -54,16 +54,23 @@ export function latencyOf(row: TunnelProbeRow | undefined): number | null {
 export function orderByLatency(
   visible: string[],
   probes: Record<string, TunnelProbeRow | undefined>,
+  exclude: readonly string[] = [],
 ): string[] {
+  const excluded = new Set(exclude);
   const rank = (key: string) => {
     const row = probes[key];
-    if (!row) return 1;
-    return latencyOf(row) === null ? 2 : 0;
+    const own = !row ? 1 : latencyOf(row) === null ? 2 : 0;
+    return excluded.has(key) ? own + 3 : own;
   };
   return visible
     .map((key, index) => ({ key, index, rank: rank(key), ms: latencyOf(probes[key]) ?? 0 }))
     .sort((a, b) => a.rank - b.rank || a.ms - b.ms || a.index - b.index)
     .map((row) => row.key);
+}
+
+export function excludedLast(visible: string[], exclude: readonly string[]): string[] {
+  const excluded = new Set(exclude);
+  return [...visible.filter((k) => !excluded.has(k)), ...visible.filter((k) => excluded.has(k))];
 }
 
 export function toggleExclude(exclude: string[], key: string): string[] {

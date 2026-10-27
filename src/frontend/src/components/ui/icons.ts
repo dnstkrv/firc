@@ -76,6 +76,7 @@ export { default as RotateCcw } from "@lucide/svelte/icons/rotate-ccw";
 export { default as Activity } from "@lucide/svelte/icons/activity";
 export { default as SortByLatency } from "@lucide/svelte/icons/arrow-down-wide-narrow";
 export { default as SortBySource } from "@lucide/svelte/icons/list-restart";
+export { default as SinkExcluded } from "@lucide/svelte/icons/list-end";
 export { default as Pencil } from "@lucide/svelte/icons/pencil";
 export { default as CloudDownload } from "@lucide/svelte/icons/cloud-download";
 export { default as Comment } from "@lucide/svelte/icons/message-square";
