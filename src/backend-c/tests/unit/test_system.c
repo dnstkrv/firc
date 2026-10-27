@@ -18,6 +18,7 @@
 #include "firc/app.h"
 #include "firc/dnsstat.h"
 #include "firc/events.h"
+#include "firc/ifaddr.h"
 #include "firc/keenetic_policy.h"
 #include "firc/keenetic_rci.h"
 #include "firc/log.h"
@@ -855,10 +856,110 @@ TEST the_hosts_route_answers_the_refreshers_table(void) {
     ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(tv, "active")));
     ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(tv, "registered")));
     ASSERT_STR_EQ("Policy0", cJSON_GetObjectItemCaseSensitive(tv, "policy")->valuestring);
+    ASSERT(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(tv, "intercepted")));
     cJSON_Delete(out);
     harness_stop(h);
     firc_kn_policies_stop(p);
     g_policies = NULL;
+    PASS();
+}
+
+/* Catches: a net matched by a wrong mask, an IPv6 or malformed address taken as IPv4, or no match returning a name. */
+TEST ifnet4_find_names_the_segment(void) {
+    firc_ifnet4_t nets[] = {{"br0", 0xC0A80100u, 0xFFFFFF00u}, {"br1", 0xC0A80200u, 0xFFFFFF00u},
+                            {"br2", 0x0A000000u, 0xFF000000u}};
+    ASSERT_STR_EQ("br0", firc_ifnet4_find(nets, 3, "192.168.1.5"));
+    ASSERT_STR_EQ("br1", firc_ifnet4_find(nets, 3, "192.168.2.14"));
+    ASSERT_STR_EQ("br2", firc_ifnet4_find(nets, 3, "10.20.30.40"));
+    ASSERT_EQ(NULL, firc_ifnet4_find(nets, 3, "172.16.0.1"));
+    ASSERT_EQ(NULL, firc_ifnet4_find(nets, 3, ""));
+    ASSERT_EQ(NULL, firc_ifnet4_find(nets, 3, "fd00::5"));
+    ASSERT_EQ(NULL, firc_ifnet4_find(nets, 3, "192.168.1"));
+    ASSERT_EQ(NULL, firc_ifnet4_find(nets, 3, NULL));
+    PASS();
+}
+
+/* Catches: no reorder, or one that loses the order of the rest, so a tunnel's overlapping net names a LAN device. */
+TEST ifnet4_link_first_prefers_lan_nets(void) {
+    firc_ifnet4_t nets[] = {{"wg0", 0xC0A80100u, 0xFFFFFF00u}, {"eth3", 0x0A000000u, 0xFF000000u},
+                            {"br0", 0xC0A80100u, 0xFFFFFF00u}, {"wg1", 0x0A000000u, 0xFF000000u}};
+    char *link[] = {"br0"};
+    firc_ifnet4_link_first(nets, 4, link, 1);
+    ASSERT_STR_EQ("br0", firc_ifnet4_find(nets, 4, "192.168.1.5"));
+    ASSERT_STR_EQ("br0", nets[0].name);
+    ASSERT_STR_EQ("wg0", nets[1].name);
+    ASSERT_STR_EQ("eth3", nets[2].name);
+    ASSERT_STR_EQ("wg1", nets[3].name);
+    PASS();
+}
+
+static const char *seg_of(const cJSON *hosts, int i) {
+    const cJSON *s = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(hosts, i), "segment");
+    return cJSON_IsString(s) ? s->valuestring : NULL;
+}
+
+static int intercepted_of(const cJSON *hosts, int i) {
+    const cJSON *b = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(hosts, i), "intercepted");
+    return cJSON_IsBool(b) ? cJSON_IsTrue(b) : -1;
+}
+
+/* Catches: interception off still flagging, br1 in the list matching br10, an unknown segment or empty ip flagged. */
+TEST hosts_mark_flags_devices_outside_link(void) {
+    firc_ifnet4_t nets[] = {{"br0", 0xC0A80100u, 0xFFFFFF00u}, {"br1", 0xC0A80200u, 0xFFFFFF00u},
+                            {"br10", 0xC0A80A00u, 0xFFFFFF00u}};
+    char *link[] = {"br1"};
+    cJSON *hosts = cJSON_Parse("[{\"ip\":\"192.168.1.5\"},{\"ip\":\"192.168.2.14\"},{\"ip\":\"192.168.10.3\"},"
+                               "{\"ip\":\"172.16.0.1\"},{\"ip\":\"\"}]");
+    ASSERT(hosts != NULL);
+    firc_system_hosts_mark(hosts, nets, 3, link, 1, true);
+    ASSERT_STR_EQ("br0", seg_of(hosts, 0));
+    ASSERT_EQ(0, intercepted_of(hosts, 0));
+    ASSERT_STR_EQ("br1", seg_of(hosts, 1));
+    ASSERT_EQ(1, intercepted_of(hosts, 1));
+    ASSERT_STR_EQ("br10", seg_of(hosts, 2));
+    ASSERT_EQ(0, intercepted_of(hosts, 2));
+    ASSERT_EQ(NULL, seg_of(hosts, 3));
+    ASSERT_EQ(1, intercepted_of(hosts, 3));
+    ASSERT_EQ(NULL, seg_of(hosts, 4));
+    ASSERT_EQ(1, intercepted_of(hosts, 4));
+    cJSON_Delete(hosts);
+
+    hosts = cJSON_Parse("[{\"ip\":\"192.168.1.5\"}]");
+    ASSERT(hosts != NULL);
+    firc_system_hosts_mark(hosts, nets, 3, link, 1, false);
+    ASSERT_STR_EQ("br0", seg_of(hosts, 0));
+    ASSERT_EQ(1, intercepted_of(hosts, 0));
+    cJSON_Delete(hosts);
+    PASS();
+}
+
+/* Catches: the running interception flag inverted, the LAN-first reorder dropped, or no settings taken as interception on. */
+TEST hosts_mark_running_reads_the_running_settings(void) {
+    firc_app_config_t running;
+    ASSERT_EQ(FIRC_OK, firc_app_config_init_defaults(&running));
+    const char *json = "[{\"ip\":\"192.168.1.5\"},{\"ip\":\"192.168.2.14\"}]";
+    firc_ifnet4_t nets[] = {{"wg0", 0xC0A80100u, 0xFFFFFF00u}, {"br0", 0xC0A80100u, 0xFFFFFF00u},
+                            {"br1", 0xC0A80200u, 0xFFFFFF00u}};
+
+    cJSON *hosts = cJSON_Parse(json);
+    firc_system_hosts_mark_running(hosts, nets, 3, &running);
+    ASSERT_STR_EQ("br0", seg_of(hosts, 0));
+    ASSERT_EQ(1, intercepted_of(hosts, 0));
+    ASSERT_STR_EQ("br1", seg_of(hosts, 1));
+    ASSERT_EQ(0, intercepted_of(hosts, 1));
+    cJSON_Delete(hosts);
+
+    running.dns_proxy.disable_remap53 = true;
+    hosts = cJSON_Parse(json);
+    firc_system_hosts_mark_running(hosts, nets, 3, &running);
+    ASSERT_EQ(1, intercepted_of(hosts, 1));
+    cJSON_Delete(hosts);
+
+    hosts = cJSON_Parse(json);
+    firc_system_hosts_mark_running(hosts, nets, 3, NULL);
+    ASSERT_EQ(1, intercepted_of(hosts, 1));
+    cJSON_Delete(hosts);
+    firc_app_config_clear(&running);
     PASS();
 }
 
@@ -1870,6 +1971,10 @@ int main(int argc, char **argv) {
     RUN_TEST(the_netfilter_route_says_whether_the_committer_is_failing);
     RUN_TEST(the_netfilter_route_says_the_first_write_is_pending);
     RUN_TEST(each_interface_gets_its_role);
+    RUN_TEST(ifnet4_find_names_the_segment);
+    RUN_TEST(ifnet4_link_first_prefers_lan_nets);
+    RUN_TEST(hosts_mark_flags_devices_outside_link);
+    RUN_TEST(hosts_mark_running_reads_the_running_settings);
     RUN_TEST(the_list_holds_what_ndms_knows_and_every_tunnel);
     RUN_TEST(without_ndms_data_the_list_falls_back_to_the_shape_rules);
     RUN_TEST(the_interfaces_route_answers_role_description_and_ndms_name);

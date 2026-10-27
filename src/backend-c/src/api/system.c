@@ -245,6 +245,28 @@ static void handle_policies(firc_http_req_t *req, firc_http_res_t *res, void *ud
     firc_http_res_write_json(res, 200, out);
 }
 
+void firc_system_hosts_mark(cJSON *hosts, const firc_ifnet4_t *nets, size_t n, char *const *link, size_t n_link,
+                            bool remap_on) {
+    cJSON *h = NULL;
+    cJSON_ArrayForEach(h, hosts) {
+        const cJSON *ip = cJSON_GetObjectItemCaseSensitive(h, "ip");
+        const char *seg = firc_ifnet4_find(nets, n, cJSON_IsString(ip) ? ip->valuestring : NULL);
+        bool listed = seg == NULL;
+        for (size_t i = 0; !listed && i < n_link; i++) { listed = strcmp(seg, link[i]) == 0; }
+        if (seg != NULL) { cJSON_AddStringToObject(h, "segment", seg); }
+        cJSON_AddBoolToObject(h, "intercepted", !remap_on || listed);
+    }
+}
+
+void firc_system_hosts_mark_running(cJSON *hosts, firc_ifnet4_t *nets, size_t n, const firc_app_config_t *running) {
+    if (running == NULL) {
+        firc_system_hosts_mark(hosts, nets, n, NULL, 0, false);
+        return;
+    }
+    firc_ifnet4_link_first(nets, n, running->link, running->n_link);
+    firc_system_hosts_mark(hosts, nets, n, running->link, running->n_link, !running->dns_proxy.disable_remap53);
+}
+
 /* answered from the policy refresher's latest cached table, never a live RCI call */
 static void handle_hosts(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
     (void)req;
@@ -257,6 +279,9 @@ static void handle_hosts(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
         firc_http_res_write_error(res, 500, firc_err_str(FIRC_ERR_NOMEM));
         return;
     }
+    firc_ifnet4_t nets[64];
+    size_t n = firc_ifnet4_list(nets, sizeof(nets) / sizeof(nets[0]));
+    firc_system_hosts_mark_running(hosts, nets, n, ctx->app != NULL ? firc_app_running_settings(ctx->app) : NULL);
     if (!cJSON_AddItemToObject(out, "hosts", hosts)) {
         cJSON_Delete(hosts);
         cJSON_Delete(out);

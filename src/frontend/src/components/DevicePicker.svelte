@@ -1,9 +1,11 @@
 <script lang="ts">
   import { hosts } from "../data/hosts.svelte";
+  import { interfaces } from "../data/interfaces.svelte";
   import { t } from "../data/locale.svelte";
   import { policies } from "../data/policies.svelte";
   import Switch from "./ui/Switch.svelte";
 
+  import { ifaceTitle } from "../data/iface-choices";
   import type { DeviceSelector } from "../types";
   import {
     flipPolicy,
@@ -25,6 +27,7 @@
     type RowNote,
   } from "../utils/device-picker";
   import { invalidDeviceEntries } from "../utils/device-validators";
+  import { outsideLan, policyOutside } from "../utils/lan-coverage";
   import { Search, SelectOpen } from "./ui/icons";
 
   type Props = {
@@ -125,6 +128,14 @@
     return row.mac;
   }
 
+  const around = (text: string, slot: string) => {
+    const at = text.indexOf(slot);
+    return at < 0 ? [text, ""] : [text.slice(0, at), text.slice(at + slot.length)];
+  };
+
+  const segmentTitle = (id: string) =>
+    ifaceTitle(interfaces.list.find((i) => i.id === id) ?? { id }).title;
+
   function noteText(note: NonNullable<RowNote>): string {
     switch (note.kind) {
       case "policy-off":
@@ -178,6 +189,7 @@
       {#each chips as chip, i (chip.id)}
         {@const on = policyOn(chip.side, mode)}
         {@const noteId = `devices-policy-note-${i}`}
+        {@const outside = mode === "only" && on ? policyOutside(hosts.list, chip.id) : 0}
         {@const takenBy = chip.takenBy}
         {@const note =
           takenBy !== null
@@ -193,12 +205,23 @@
             bind:checked={() => on, () => apply(flipPolicy(folded, chip.id, policies.list, mode))}
             disabled={chip.takenBy !== null}
             aria-label={chip.label}
-            aria-describedby={note ? noteId : undefined}
+            aria-describedby={[note ? noteId : "", outside > 0 ? `${noteId}-lan` : ""]
+              .filter(Boolean)
+              .join(" ") || undefined}
           />
           <div class="who">
             <div class="name">{chip.label}</div>
             {#if note}
               <div class="note denied" id={noteId}>{note}</div>
+            {/if}
+            {#if outside > 0}
+              {@const [before, after] = around(
+                t("Devices outside LAN interfaces: {n}; domains do not work for them"),
+                "{n}",
+              )}
+              <div class="note lan" id={`${noteId}-lan`}>
+                {before}<span class="lan-mark">{outside}</span>{after}
+              </div>
             {/if}
           </div>
           {#if chip.devices !== null}
@@ -241,12 +264,18 @@
       <ul class="hosts">
         {#each visible as row (row.mac)}
           {@const st = states.get(row.mac)!}
+          {@const lan = mode === "only" && st.on && outsideLan(row) && row.segment !== undefined}
           <li class="host" class:off={!st.on} data-mac={row.mac}>
             <Switch
               bind:checked={() => st.on, () => apply(flipRow(folded, row, policies.list, mode))}
               disabled={st.locked}
               aria-label={hostLabel(row)}
-              aria-describedby={st.note ? `devices-note-${row.mac}` : undefined}
+              aria-describedby={[
+                st.note ? `devices-note-${row.mac}` : "",
+                lan ? `devices-lan-${row.mac}` : "",
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined}
             />
             <span
               class="dot"
@@ -260,6 +289,15 @@
               {#if st.note}
                 <div class="note" class:denied={!st.on} id={`devices-note-${row.mac}`}>
                   {noteText(st.note)}
+                </div>
+              {/if}
+              {#if lan}
+                {@const [before, after] = around(
+                  t("{segment} is not in LAN interfaces: domains do not work"),
+                  "{segment}",
+                )}
+                <div class="note lan" id={`devices-lan-${row.mac}`}>
+                  {before}<span class="lan-mark">{segmentTitle(row.segment ?? "")}</span>{after}
                 </div>
               {/if}
             </div>
@@ -515,6 +553,10 @@
 
   .note.denied {
     color: var(--danger);
+  }
+
+  .lan-mark {
+    color: var(--yellow);
   }
 
   .meta {

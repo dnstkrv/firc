@@ -1,6 +1,7 @@
 <script lang="ts">
   import Switch from "../../components/ui/Switch.svelte";
   import { t } from "../../data/locale.svelte";
+  import LanCoverage from "./LanCoverage.svelte";
   import LanPicker from "./LanPicker.svelte";
   import { settings } from "./settings.svelte";
 
@@ -94,6 +95,12 @@
       {/if}
     {/each}
   </div>
+  {#if row.fields[0].key === "app.link"}
+    <LanCoverage
+      values={settings.draft["app.link"] as string[]}
+      onchange={(v) => (settings.draft["app.link"] = v)}
+    />
+  {/if}
 </div>
 
 <style>

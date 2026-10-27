@@ -100,6 +100,8 @@ export async function openSettings(
     onCheck?: Handler;
     onInstall?: Handler;
     locale?: string;
+    hosts?: unknown[];
+    groups?: unknown[];
   } = {},
 ) {
   await signedIn(page);
@@ -109,6 +111,9 @@ export async function openSettings(
     }, opts.locale);
   }
   await page.route("**/groups?with_rules=true", (r) => r.fulfill({ json: { groups: [] } }));
+  await page.route("**/groups", (r) => r.fulfill({ json: { groups: opts.groups ?? [] } }));
+  await page.route("**/system/hosts", (r) => r.fulfill({ json: { hosts: opts.hosts ?? [] } }));
+  await page.route("**/system/policies", (r) => r.fulfill({ json: { policies: [] } }));
   await page.route("**/interfaces", (r) =>
     r.fulfill({
       json: {

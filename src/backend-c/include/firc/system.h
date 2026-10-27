@@ -8,6 +8,7 @@
 #include "firc/app.h"
 #include "firc/dnsstat.h"
 #include "firc/httpd.h"
+#include "firc/ifaddr.h"
 #include "firc/tunnels.h"
 
 typedef struct firc_update firc_update_t;
@@ -34,6 +35,15 @@ typedef struct firc_system_ctx {
 } firc_system_ctx_t;
 
 void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx);
+
+/* adds segment (the net holding a host's ip, when one does) and intercepted to every host object; intercepted is
+ * false only when remap_on and the segment is not in link */
+void firc_system_hosts_mark(struct cJSON *hosts, const firc_ifnet4_t *nets, size_t n, char *const *link,
+                            size_t n_link, bool remap_on);
+
+/* hosts_mark against the running settings, their LAN nets first; NULL running marks every host intercepted */
+void firc_system_hosts_mark_running(struct cJSON *hosts, firc_ifnet4_t *nets, size_t n,
+                                    const firc_app_config_t *running);
 
 /* the DNS stats on or off as the running settings say, and switched by every live apply after; loop thread.
  * FIRC_ERR_NOMEM: no store, the stats stay off */

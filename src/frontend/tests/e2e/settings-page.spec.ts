@@ -204,7 +204,7 @@ test("the LAN picker offers the segments and finds any other interface", async (
   const row = page.locator('[data-row="app.link"]');
   await expect(row.locator(".tag")).toHaveText(["Home network"]);
   await expect(row.locator(".tag")).toHaveAttribute("title", "br0");
-  await row.getByRole("button", { name: "Add" }).click();
+  await row.getByRole("button", { name: "Add", exact: true }).click();
   const search = row.getByRole("combobox", { name: "Search interface" });
   await expect(search).toBeFocused();
   await expect(row.locator(".section")).toHaveText("Segments");
@@ -227,14 +227,14 @@ test("the LAN picker offers the segments and finds any other interface", async (
   await expect(row.locator(".tag")).toHaveText(["Home network", "Guest", "eth2.1", "eth9"]);
   await search.press("Escape");
   await expect(search).toHaveCount(0);
-  await expect(row.getByRole("button", { name: "Add" })).toBeFocused();
+  await expect(row.getByRole("button", { name: "Add", exact: true })).toBeFocused();
 });
 
 // Catches Enter ignoring a typed match until an arrow key, or Tab leaving the panel open behind.
 test("Enter takes the first match and Tab closes the LAN panel", async ({ page }) => {
   await openSettings(page, (r) => r.fulfill({ json: answer() }));
   const row = page.locator('[data-row="app.link"]');
-  await row.getByRole("button", { name: "Add" }).click();
+  await row.getByRole("button", { name: "Add", exact: true }).click();
   const search = row.getByRole("combobox", { name: "Search interface" });
   await search.fill("ppp");
   await search.press("Enter");
@@ -243,12 +243,82 @@ test("Enter takes the first match and Tab closes the LAN panel", async ({ page }
   await expect(search).toHaveCount(0);
 });
 
+const GUEST_HOST = {
+  mac: "aa:00:00:00:00:07",
+  name: "Console",
+  ip: "192.168.1.20",
+  ip6: [],
+  active: true,
+  registered: true,
+  policy: "",
+  segment: "br1",
+  intercepted: false,
+};
+const coveringGroups = [
+  {
+    id: "0a1b2c3d",
+    name: "Media",
+    interface: "ppp0",
+    enable: true,
+    devices: { allow: [], deny: [] },
+  },
+  {
+    id: "1a1b2c3d",
+    name: "Off",
+    interface: "ppp0",
+    enable: false,
+    devices: { allow: [], deny: [] },
+  },
+  {
+    id: "2a1b2c3d",
+    name: "Ads",
+    interface: "block",
+    enable: true,
+    devices: { allow: [], deny: [] },
+  },
+];
+
+// Catches a segment whose covered devices bypass firc left unreported, a disabled group named, or the block outliving the add.
+test("a segment with group devices outside the LAN list is offered for adding", async ({
+  page,
+}) => {
+  await openSettings(page, (r) => r.fulfill({ json: answer() }), {
+    hosts: [GUEST_HOST],
+    groups: coveringGroups,
+  });
+  const row = page.locator('[data-row="app.link"]');
+  const block = row.locator(".lan-coverage");
+  await expect(block).toHaveText(
+    /Devices of groups Media, Ads are in Guest: their DNS is not intercepted/,
+  );
+  await expect(block).not.toContainText("Off");
+  await block.getByRole("button", { name: "Add Guest" }).click();
+  await expect(row.locator(".tag")).toHaveText(["Home network", "Guest"]);
+  await expect(block).toHaveCount(0);
+  await expect(page.getByTestId("settings-counter")).toHaveText("1 setting changed");
+});
+
+// Catches the block wrapping past a phone's screen.
+test("the LAN coverage block fits a 375 px phone", async ({ page }) => {
+  await openSettings(page, (r) => r.fulfill({ json: answer() }), {
+    hosts: [GUEST_HOST],
+    groups: coveringGroups,
+  });
+  await page.setViewportSize({ width: 375, height: 800 });
+  const block = page.locator(".lan-coverage");
+  await expect(block).toBeVisible();
+  const box = await block.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(375);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+});
+
 // Catches the LAN panel spilling past a phone's screen once the row wraps.
 test("the LAN panel fits a 360 px phone", async ({ page }) => {
   await openSettings(page, (r) => r.fulfill({ json: answer() }));
   await page.setViewportSize({ width: 360, height: 800 });
   const row = page.locator('[data-row="app.link"]');
-  await row.getByRole("button", { name: "Add" }).click();
+  await row.getByRole("button", { name: "Add", exact: true }).click();
   const box = await row.locator(".panel").boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(360);

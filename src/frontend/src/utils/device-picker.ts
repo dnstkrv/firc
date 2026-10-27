@@ -19,6 +19,8 @@ export type Host = {
   active: boolean;
   registered: boolean;
   policy: string;
+  segment?: string;
+  intercepted?: boolean;
 };
 
 /* One policy of GET /api/v1/system/policies; `devices` counts hosts. */

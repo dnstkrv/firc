@@ -1142,7 +1142,7 @@ app.get(`${API_BASE}/system/resolvers`, (c) => c.json(RESOLVERS));
 
 const POLICIES = {
   policies: [
-    { name: "Policy0", description: "Kids", devices: 2 },
+    { name: "Policy0", description: "Kids", devices: 3 },
     { name: "Policy1", devices: 1 },
   ],
 };
@@ -1157,6 +1157,8 @@ const HOSTS = {
       active: true,
       registered: true,
       policy: "Policy0",
+      segment: "br0",
+      intercepted: true,
     },
     {
       mac: "aa:00:00:00:00:02",
@@ -1166,6 +1168,8 @@ const HOSTS = {
       active: false,
       registered: true,
       policy: "",
+      segment: "br0",
+      intercepted: true,
     },
     {
       mac: "aa:00:00:00:00:03",
@@ -1175,6 +1179,8 @@ const HOSTS = {
       active: true,
       registered: true,
       policy: "Policy0",
+      segment: "br0",
+      intercepted: true,
     },
     {
       mac: "aa:00:00:00:00:05",
@@ -1184,6 +1190,8 @@ const HOSTS = {
       active: true,
       registered: true,
       policy: "",
+      segment: "br0",
+      intercepted: true,
     },
     {
       mac: "aa:00:00:00:00:06",
@@ -1193,6 +1201,8 @@ const HOSTS = {
       active: true,
       registered: true,
       policy: "",
+      segment: "br0",
+      intercepted: true,
     },
     {
       mac: "aa:00:00:00:00:04",
@@ -1202,6 +1212,19 @@ const HOSTS = {
       active: true,
       registered: false,
       policy: "Policy1",
+      segment: "br0",
+      intercepted: true,
+    },
+    {
+      mac: "aa:00:00:00:00:07",
+      name: "Console",
+      ip: "192.168.2.20",
+      ip6: [],
+      active: true,
+      registered: true,
+      policy: "Policy0",
+      segment: "br1",
+      intercepted: false,
     },
   ],
 };

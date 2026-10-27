@@ -673,4 +673,66 @@ test.describe("Bulk devices", () => {
       "",
     );
   });
+  test.describe("outside the LAN interfaces", () => {
+    const SPLIT_HOSTS = [
+      { ...HOSTS[0], segment: "br0", intercepted: true },
+      {
+        mac: "aa:00:00:00:00:07",
+        name: "Console",
+        ip: "192.168.2.20",
+        ip6: [],
+        active: true,
+        registered: true,
+        policy: "Policy0",
+        segment: "br1",
+        intercepted: false,
+      },
+    ];
+
+    async function stubSplit(page: Page, devices: { allow: string[]; deny: string[] }) {
+      await stub(page, devices, SPLIT_HOSTS as typeof HOSTS, [
+        { name: "Policy0", description: "Kids", devices: 2 },
+      ]);
+      await page.route("**/system/interfaces", (route) =>
+        route.fulfill({
+          json: {
+            interfaces: [
+              { id: "br0", name: "Home", role: "lan" },
+              { id: "br1", name: "Guest", role: "lan" },
+            ],
+          },
+        }),
+      );
+    }
+
+    // Catches a chosen device or policy outside the LAN interfaces left unmarked, or the segment shown by kernel name.
+    test("a chosen device outside the LAN interfaces is marked, and its policy", async ({
+      page,
+    }) => {
+      await stubSplit(page, { allow: ["mac:aa:00:00:00:00:07"], deny: [] });
+      await groupsPage.goto();
+      await openDevices(page);
+      await expect(row(page, "07").locator(".note.lan")).toHaveText(
+        "Guest is not in LAN interfaces: domains do not work",
+      );
+      await expect(row(page, "07").locator(".note.lan .lan-mark")).toHaveText("Guest");
+      await expect(row(page, "01")).not.toContainText("LAN interfaces");
+      const kids = page.locator('li.host[data-policy="Policy0"]');
+      await expect(kids).not.toContainText("LAN interfaces");
+      await policySwitch(page, "Policy0").click();
+      await expect(kids).toContainText(
+        "Devices outside LAN interfaces: 1; domains do not work for them",
+      );
+      await expect(kids.locator(".note.lan .lan-mark")).toHaveText("1");
+    });
+
+    // Catches the notes shown in «для всех», where every device of the segment would be marked.
+    test("nothing is marked for every device", async ({ page }) => {
+      await stubSplit(page, { allow: [], deny: [] });
+      await groupsPage.goto();
+      await openDevices(page);
+      await expect(row(page, "07")).toBeVisible();
+      await expect(page.locator(".modal")).not.toContainText("LAN interfaces");
+    });
+  });
 });

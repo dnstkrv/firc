@@ -11,6 +11,13 @@ definitions:
         description: 'The firmware sees the device now'
         example: true
         type: boolean
+      intercepted:
+        description: >-
+          Port 53 interception reaches the device: false only when the
+          interception is on and segment is not among the running LAN
+          interfaces (app.link)
+        example: true
+        type: boolean
       ip:
         description: 'The device''s IPv4 address; an empty string if it has none'
         example: 192.168.1.5
@@ -38,6 +45,12 @@ definitions:
         description: 'The device is registered in the firmware'
         example: true
         type: boolean
+      segment:
+        description: >-
+          Kernel name of the router interface whose IPv4 subnet holds ip, the
+          LAN interfaces' subnets first; absent when none does or ip is empty
+        example: br0
+        type: string
     type: object
   types.HostsRes:
     properties:
@@ -2899,8 +2912,10 @@ paths:
         policy is the internal name of the device's policy (as name in
         /system/policies): its own, else the policy of the segment (interface)
         its address falls in -- by the same rule /system/policies counts
-        devices by; empty if neither. An empty list is an answer: before the
-        first read of the table it is empty.
+        devices by; empty if neither. segment and intercepted are read from
+        the router's interfaces and the running settings at each request. An
+        empty list is an answer: before the first read of the table it is
+        empty.
       produces:
       - application/json
       responses:
