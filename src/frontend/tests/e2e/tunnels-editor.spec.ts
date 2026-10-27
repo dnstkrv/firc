@@ -746,6 +746,33 @@ test.describe("Tunnel editor", () => {
     expect(width.scroll).toBeLessThanOrEqual(width.client);
   });
 
+  // Catches a long node name cut to one line with no way to read it whole.
+  test("a long node name wraps onto two lines and keeps its full text in the title", async ({
+    page,
+  }) => {
+    const long = "IT 🎮 ⚡ ⭐ 0.1X - LTE №109 - Италия, Милан, резервный узел";
+    await stubDaemon(page, {
+      tunnels: [tunnel("a", "tunvless0", { sources: [SUB] })],
+      states: [state("a", "tunvless0")],
+      nodes: [{ key: "0000000a:A", name: long, source: "Provider" }],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    const name = tunnels.nodeRows("a").nth(0).locator(".name");
+    await expect(name).toHaveAttribute("title", long);
+    const box = await name.evaluate((el) => ({
+      cw: el.clientWidth,
+      sw: el.scrollWidth,
+      ch: el.clientHeight,
+      sh: el.scrollHeight,
+      font: parseFloat(getComputedStyle(el).fontSize),
+    }));
+    expect(box.sw).toBeLessThanOrEqual(box.cw);
+    expect(box.sh).toBeLessThanOrEqual(box.ch);
+    expect(box.ch).toBeGreaterThan(box.font * 2);
+  });
+
   // Catches the fold chevron dropping off the Nodes heading onto the buttons' second line on a phone.
   test("on a phone the nodes fold button stays on the heading line", async ({ page }) => {
     const { tunnels } = await saved(page);

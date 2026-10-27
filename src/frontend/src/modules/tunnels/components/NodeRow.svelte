@@ -68,7 +68,7 @@
 >
   <div class="grip" title={t("Drag node")}><Grip size={16} /></div>
   <div class="nm">
-    <span class="name">{row.name}</span>
+    <span class="name" title={row.name}>{row.name}</span>
     {#if row.isNew && !row.missing}<span class="badge blue">{t("new")}</span>{/if}
     {#each ports as port (port)}<span class="badge port">:{port}</span>{/each}
   </div>
@@ -140,9 +140,12 @@
     min-width: 0;
   }
   .name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .ex .name,
   .ex .state,
