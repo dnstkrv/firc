@@ -179,13 +179,15 @@
             {#if up && live}
               <span class="it"
                 ><span class="sep" aria-hidden="true">·</span><ArrowDownUp size={15} /><span
-                  >↓ {formatRate(live.rxBps, t)} · ↑ {formatRate(live.txBps, t)}</span
+                  >↓ <span class="rate">{formatRate(live.rxBps, t)}</span> · ↑
+                  <span class="rate">{formatRate(live.txBps, t)}</span></span
                 ></span
               >
               {#each listening as ib (ib.port)}
                 <span class="it"
                   ><span class="sep" aria-hidden="true">·</span><span
-                    >:{ib.port} ↓ {formatRate(ib.rxBps, t)} · ↑ {formatRate(ib.txBps, t)}</span
+                    >:{ib.port} ↓ <span class="rate">{formatRate(ib.rxBps, t)}</span> · ↑
+                    <span class="rate">{formatRate(ib.txBps, t)}</span></span
                   ></span
                 >
               {/each}
@@ -359,6 +361,11 @@
     gap: 6px;
     white-space: nowrap;
     min-width: 0;
+  }
+  .rate {
+    display: inline-block;
+    min-width: 10.5ch;
+    font-variant-numeric: tabular-nums;
   }
   .it.wraps {
     white-space: normal;
