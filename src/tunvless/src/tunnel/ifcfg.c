@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -236,4 +237,50 @@ int ifcfg_bring_up(const char *dev, uint32_t addr, int prefix) {
                 dev, TUN_TXQLEN, strerror(errno));
     if (s >= 0) close(s);
     return failed;
+}
+
+void ifcfg_addr6_of(uint32_t v4_be, unsigned char out[16]) {
+    static const unsigned char doc[4] = { 0x20, 0x01, 0x0d, 0xb8 };
+    memset(out, 0, 16);
+    memcpy(out, doc, 4);
+    memcpy(out + 12, &v4_be, 4);
+}
+
+static int ipv6_enable(const char *dev) {
+    char path[96], c = 0;
+    snprintf(path, sizeof path, "/proc/sys/net/ipv6/conf/%s/disable_ipv6", dev);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    ssize_t n = read(fd, &c, 1);
+    close(fd);
+    if (n != 1 || c != '1') return 0;
+    fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    int rc = write(fd, "0\n", 2) == 2 ? 0 : -errno;
+    close(fd);
+    return rc;
+}
+
+int ifcfg_addr6_set(int ifindex, const unsigned char addr[16], int on) {
+    if (on) {
+        char dev[IF_NAMESIZE];
+        if (!if_indextoname((unsigned)ifindex, dev)) return -errno;
+        int rc = ipv6_enable(dev);
+        if (rc) return rc;
+    }
+    struct nlreq q;
+    memset(&q, 0, sizeof(q));
+    q.h.nlmsg_len = NLMSG_LENGTH(sizeof(q.u.ifa));
+    q.h.nlmsg_type = on ? RTM_NEWADDR : RTM_DELADDR;
+    q.h.nlmsg_flags = on ? NLM_F_CREATE | NLM_F_REPLACE : 0;
+    q.u.ifa.ifa_family = AF_INET6;
+    q.u.ifa.ifa_prefixlen = 128;
+    q.u.ifa.ifa_flags = on ? IFA_F_NODAD : 0;
+    q.u.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+    q.u.ifa.ifa_index = (unsigned)ifindex;
+    nl_attr(&q, IFA_LOCAL, addr, 16);
+    nl_attr(&q, IFA_ADDRESS, addr, 16);
+    int rc = nl_talk(&q.h, NULL, 0);
+    if (!on && (rc == -ENOENT || rc == -EADDRNOTAVAIL)) return 0;
+    return rc;
 }

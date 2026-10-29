@@ -23,6 +23,7 @@ struct pool_proto {
     const struct dialer_ops *ops;
     /* The same check that chose the node at startup: 0 — alive, otherwise why says what failed. */
     int (*probe)(const void *node, int timeout_s, char *why, size_t why_n);
+    int (*probe6)(const void *node, int timeout_s, char *why, size_t why_n);
     const char *(*name)(const void *node);
 };
 
@@ -40,6 +41,7 @@ struct pool_cfg {
     int by;                 /* enum pool_by */
     int interval_s;         /* health check period of each active node */
     int silence_s;          /* stall threshold on live connections (struct dialer), 0 — none */
+    int (*v6_changed)(int on);   /* nonzero — not applied, called again at the next publish while on */
 };
 
 /* Run the tunnel tc over the pool: the stack with the pool's dialer, health checks once the device

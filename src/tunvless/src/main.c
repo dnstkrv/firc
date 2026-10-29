@@ -563,6 +563,9 @@ static int choose_node(int *checked) {
 static int pool_probe(const void *node, int timeout_s, char *why, size_t why_n) {
     return vless_probe(node, timeout_s, why, why_n);
 }
+static int pool_probe6(const void *node, int timeout_s, char *why, size_t why_n) {
+    return vless_probe6(node, timeout_s, why, why_n);
+}
 static const char *pool_name(const void *node) {
     return ((const struct vless_node *)node)->name;
 }
@@ -702,6 +705,21 @@ static void on_ready(void *arg, const char *dev) {
     if (g.control) ctl_start();
 }
 
+static int on_v6(int on) {
+    unsigned char a6[16];
+    char s[INET6_ADDRSTRLEN];
+    ifcfg_addr6_of(g.tc.addr, a6);
+    inet_ntop(AF_INET6, a6, s, sizeof s);
+    unsigned ifindex = if_nametoindex(g.tc.dev);
+    int rc = ifindex ? ifcfg_addr6_set((int)ifindex, a6, on) : -errno;
+    if (rc)
+        fprintf(stderr, LOG_W "%s: IPv6 address %s/128 not %s: %s\n", g.tc.dev, s, on ? "added" : "removed",
+                strerror(-rc));
+    else
+        fprintf(stderr, LOG_I "%s: IPv6 address %s/128 %s\n", g.tc.dev, s, on ? "added" : "removed");
+    return rc;
+}
+
 /* ---- stopping ------------------------------------------------------------------------- */
 
 /* SIGINT, SIGTERM and SIGHUP are blocked in every thread (the stack's threads inherit the mask) and
@@ -780,7 +798,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     static const struct pool_proto proto = {
-        .ops = &vless_dialer, .probe = pool_probe, .name = pool_name,
+        .ops = &vless_dialer, .probe = pool_probe, .probe6 = pool_probe6, .name = pool_name,
     };
     struct pool_cfg pc = {
         .proto = &proto,
@@ -793,6 +811,7 @@ int main(int argc, char **argv) {
         .by = g.by,
         .interval_s = g.interval_s,
         .silence_s = g.silence_s,
+        .v6_changed = on_v6,
     };
     rc = vless_tunnel_run(&g.tc, &pc, on_ready, NULL);
     kept_remove();

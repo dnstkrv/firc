@@ -39,7 +39,8 @@ ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp
            xhttp-old-names xhttp-data-header xhttp-data-cookie xhttp-data-cookie-small
            xhttp-obfs-header xhttp-obfs-cookie xhttp-obfs-query xhttp-obfs-qih xhttp-tokenish
            xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
-           xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data"
+           xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data
+           v6-carry-tcp v6-carry-xhttp v6-second v6-none"
 CASES="${CASES:-$ALL_CASES}"
 XRAY="${XRAY:-$(command -v xray 2>/dev/null || true)}"
 
@@ -55,6 +56,7 @@ ip netns delete "grpc-probe-$$"
 
 NSC="grpcc$$"; NSS="grpcs$$"
 S_IP=10.93.0.1; C_IP=10.93.0.2; TARGET=203.0.113.9
+TARGET6=2001:db8:9::9; CHK6A=2606:4700:4700::1111; CHK6B=2001:4860:4860::8888
 PORT=18443; MASK=mask.grpc.test; SVC=grpcsvc
 UUID=8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124
 SID=0123456789abcdef
@@ -86,6 +88,7 @@ ip -n "$NSC" addr add "$C_IP/24" dev grc0
 ip -n "$NSS" addr add "$S_IP/24" dev grs0
 ip -n "$NSC" link set grc0 up; ip -n "$NSS" link set grs0 up
 for a in "$TARGET" 1.1.1.1 8.8.8.8; do ip -n "$NSS" addr add "$a/32" dev lo; done
+for a in "$TARGET6" "$CHK6A" "$CHK6B"; do ip -n "$NSS" addr add "$a/128" dev lo nodad; done
 
 "$XRAY" x25519 > "$W/keys.txt" 2>&1
 PRIV=$(awk '/^PrivateKey:/ {print $2}' "$W/keys.txt")
@@ -101,6 +104,16 @@ bg_in "$NSS" "$W/mask.log" openssl s_server -accept "$S_IP:8443" -cert "$W/mask.
 bg_in "$NSS" "$W/target.log" python3 tests/grpc-target.py "$TARGET" 8080
 bg_in "$NSS" "$W/probe1.log" python3 tests/grpc-target.py 1.1.1.1 80
 bg_in "$NSS" "$W/probe2.log" python3 tests/grpc-target.py 8.8.8.8 80
+bg_in "$NSS" "$W/target6.log" python3 tests/grpc-target.py "$TARGET6" 8080
+bg_in "$NSS" "$W/probe1-6.log" python3 tests/grpc-target.py "$CHK6A" 80 log-host
+bg_in "$NSS" "$W/probe2-6.log" python3 tests/grpc-target.py "$CHK6B" 80 log-host
+bg_in "$NSS" "$W/echo6.log" python3 -c '
+import socket
+s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+s.bind(("2001:db8:9::9", 9000))
+while True:
+    d, a = s.recvfrom(65535)
+    s.sendto(d, a)'
 # A counter of SYNs to the node, printed only (skipped without nft).
 if command -v nft >/dev/null 2>&1; then
     ip netns exec "$NSS" nft -f - >/dev/null 2>&1 <<NFT || true
@@ -116,7 +129,7 @@ enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[
 xh() { XP="{\"path\":\"/xp/\",\"mode\":\"$1\",$2}"; Q="type=xhttp&path=%2Fxp%2F&mode=$1&extra=$(enc "{$2}")"; }
 neg() { EXPECT=fail; XP="{\"path\":\"/xp/\",\"mode\":\"packet-up\",$1}"; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up"; }
 case_cfg() {
-    SEC=reality; TUN_ARGS=""; EXPECT=ok
+    SEC=reality; TUN_ARGS=""; EXPECT=ok; V6=""
     XP='{"path":"/xp/"}'
     case "$1" in
     grpc-gun|grpc-multi)
@@ -167,12 +180,16 @@ case_cfg() {
     xhttp-method-get)        xh packet-up '"uplinkHTTPMethod":"GET"' ;;
     xhttp-table)             xh packet-up '"sessionIDTable":"Base62","sessionIDLength":12' ;;
     xhttp-headers)           xh packet-up '"headers":{"X-Custom":"v1","User-Agent":"tv-test"}' ;;
+    v6-carry-tcp)      V6=carry; NET='"network":"tcp"'; Q="type=tcp" ;;
+    v6-second)         V6=second; NET='"network":"tcp"'; Q="type=tcp" ;;
+    v6-none)           V6=none; NET='"network":"tcp"'; Q="type=tcp" ;;
+    v6-carry-xhttp)    V6=carry; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up" ;;
     xhttp-neg-obfs)          neg '"xPaddingObfsMode":true,"xPaddingPlacement":"cookie"' ;;
     xhttp-neg-sess)          neg '"sessionIDPlacement":"header"' ;;
     xhttp-neg-data)          neg '"uplinkDataPlacement":"cookie"' ;;
     *) echo "run-xray: unknown case $1"; exit 2 ;;
     esac
-    case "$1" in xhttp-*) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
+    case "$1" in xhttp-*|v6-carry-xhttp) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
     if [ "$SEC" = reality ]; then
         SECJ="\"security\":\"reality\",\"realitySettings\":{\"show\":false,\"dest\":\"$S_IP:8443\",\"xver\":0,\"serverNames\":[\"$MASK\"],\"privateKey\":\"$PRIV\",\"shortIds\":[\"$SID\"]}"
         LSEC="security=reality&sni=$MASK&pbk=$PUB&sid=$SID&fp=chrome"
@@ -185,12 +202,18 @@ case_cfg() {
 for MODE in $CASES; do
     case_cfg "$MODE"
     echo "run-xray: ==== case $MODE ===="
+    FR="{\"action\":\"allow\",\"ip\":[\"$TARGET/32\"]}"
+    case "$V6" in
+    carry)  FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
+    none)   FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\"]},{\"action\":\"block\",\"ip\":[\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
+    second) FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6B/128\"]},{\"action\":\"block\",\"ip\":[\"$CHK6A/128\"]}" ;;
+    esac
     cat > "$W/xray.json" <<JSON
 {"log":{"loglevel":"warning","access":"$W/xray-access-$MODE.log"},
  "inbounds":[{"listen":"$S_IP","port":$PORT,"protocol":"vless",
    "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
    "streamSettings":{$NET,$SECJ}}],
- "outbounds":[{"protocol":"freedom","tag":"direct","settings":{"finalRules":[{"action":"allow","ip":["$TARGET/32"]}]}}]}
+ "outbounds":[{"protocol":"freedom","tag":"direct","settings":{"finalRules":[$FR]}}]}
 JSON
     ip netns exec "$NSS" "$XRAY" run -c "$W/xray.json" > "$W/xray-$MODE.log" 2>&1 &
     XPID=$!; PIDS="$PIDS $XPID"
@@ -239,6 +262,7 @@ JSON
 
     # 2-3. The tunnel and the load. The pool checks the node every 10 s instead of every minute,
     # so a false "dead" (two failures in a row) shows up within the run.
+    mark1=$(wc -l < "$W/probe1-6.log"); mark2=$(wc -l < "$W/probe2-6.log"); markx=$(wc -l < "$W/xray-access-$MODE.log")
     ip netns exec "$NSC" "$BIN" $TUN_ARGS "$W/sub.txt" -d vl -n 0 --interval 10 > "$W/tun-$MODE.log" 2>&1 &
     SPID=$!; PIDS="$PIDS $SPID"
     for _ in $(seq 60); do ip netns exec "$NSC" ip link show vl >/dev/null 2>&1 && break; sleep 0.25; done
@@ -246,11 +270,69 @@ JSON
         echo "run-xray: FAIL — the tunnel vl did not come up:"; tail -8 "$W/tun-$MODE.log"; FAIL=1
         kill "$SPID" "$XPID" 2>/dev/null || true; continue; }
     ip netns exec "$NSC" ip route replace "$TARGET/32" dev vl
+    rc=0
+    if [ -n "$V6" ]; then
+        seen() { tail -n +$(($2 + 1)) "$1"; }
+        v6addr() { ip netns exec "$NSC" ip -6 addr show dev vl 2>/dev/null | grep -c 'inet6 2001:db8::' || true; }
+        got6=0
+        for _ in $(seq 120); do
+            [ "$(v6addr)" -gt 0 ] && { got6=1; break; }
+            sleep 0.25
+        done
+        if [ "$V6" = none ]; then
+            if [ "$got6" -eq 1 ]; then echo "run-xray: FAIL — the device got an IPv6 address on a node that reaches no IPv6 check"; rc=1
+            else echo "run-xray: no IPv6 address on vl after 30 s, as expected"; fi
+            tried=$(seen "$W/xray-access-$MODE.log" "$markx" | grep -n "accepted tcp:\[$CHK6A\]:80" | head -1)
+            if [ -z "$tried" ]; then echo "run-xray: FAIL — Xray saw no attempt to [$CHK6A]:80"; rc=1
+            else echo "run-xray: Xray saw the check go to [$CHK6A]:80"; fi
+            reached="$(seen "$W/probe1-6.log" "$mark1")$(seen "$W/probe2-6.log" "$mark2")"
+            [ -z "$reached" ] || { echo "run-xray: FAIL — a blocked IPv6 check target was reached:"; printf '%s\n' "$reached"; rc=1; }
+        elif [ "$got6" -ne 1 ]; then
+            echo "run-xray: FAIL — no 2001:db8:: address on vl within 30 s:"; tail -8 "$W/tun-$MODE.log"; rc=1
+        else
+            echo "run-xray: IPv6 address on vl: $(ip netns exec "$NSC" ip -6 addr show dev vl | sed -n 's/.*inet6 \(2001:db8::[^ ]*\).*/\1/p')"
+            ip netns exec "$NSC" ip -6 route replace "$TARGET6/128" dev vl
+            ip netns exec "$NSC" python3 tests/grpc-load.py --target "$TARGET6:8080" --dur 20 \
+                --down 2 --up 2 --rate 10 --report 10 || rc=1
+            ip netns exec "$NSC" python3 -c '
+import os, socket, sys
+s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+s.settimeout(3)
+for size in (1, 200, 1200):
+    p = os.urandom(size)
+    for _ in range(5):
+        s.sendto(p, ("2001:db8:9::9", 9000))
+        try:
+            d = s.recv(65535)
+        except socket.timeout:
+            continue
+        break
+    else:
+        print("udp6 %d bytes: no answer" % size); sys.exit(1)
+    if d != p:
+        print("udp6 %d bytes: wrong content" % size); sys.exit(1)
+    print("udp6 %d bytes: echoed" % size)' || rc=1
+            case "$V6" in
+            carry)  want="$(seen "$W/probe1-6.log" "$mark1")"; other="$(seen "$W/probe2-6.log" "$mark2")"; host="[$CHK6A]" ;;
+            second) want="$(seen "$W/probe2-6.log" "$mark2")"; other="$(seen "$W/probe1-6.log" "$mark1")"; host="[$CHK6B]" ;;
+            esac
+            if [ "$(printf '%s\n' "$want" | sort -u)" = "host $host" ]; then echo "run-xray: the IPv6 check sent Host: $host"
+            else echo "run-xray: FAIL — the IPv6 check did not send exactly Host: $host to its target:"; printf '%s\n' "$want"; rc=1; fi
+            if [ "$V6" = second ]; then
+                xl=$(seen "$W/xray-access-$MODE.log" "$markx")
+                n1=$(printf '%s\n' "$xl" | grep -n "accepted tcp:\[$CHK6A\]:80" | head -1 | cut -d: -f1)
+                n2=$(printf '%s\n' "$xl" | grep -n "accepted tcp:\[$CHK6B\]:80" | head -1 | cut -d: -f1)
+                if [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" -lt "$n2" ]; then
+                    echo "run-xray: Xray saw [$CHK6A]:80 tried (line $n1) before [$CHK6B]:80 (line $n2)"
+                else echo "run-xray: FAIL — Xray did not see [$CHK6A]:80 tried before [$CHK6B]:80 (lines '$n1' '$n2')"; rc=1; fi
+            fi
+            [ -z "$other" ] || { echo "run-xray: FAIL — the other IPv6 check target was reached:"; printf '%s\n' "$other"; rc=1; }
+        fi
+    fi
     echo "run-xray: tunnel up, load for $DUR s (two flows down, two up, 10 pages/s)"
 
-    rc=0
     ip netns exec "$NSC" python3 tests/grpc-load.py --target "$TARGET:8080" --dur "$DUR" \
-        --down 2 --up 2 --rate 10 --report 10 || rc=$?
+        --down 2 --up 2 --rate 10 --report 10 || rc=1
 
     # The node declared dead (its connections reset) or a flow to it that did not open.
     # ... or the node refused uploaded data (xhttp: 413 over scMaxEachPostBytes, 400 on padding).

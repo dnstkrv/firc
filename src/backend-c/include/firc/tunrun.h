@@ -80,6 +80,9 @@ void firc_tunrun_node_answered(firc_tunrun_t *t, const char *id, const char *key
 /* True while the node with this key of tunnel id is among tunvless's active ones. */
 bool firc_tunrun_node_active(const firc_tunrun_t *t, const char *id, const char *key);
 
+/* True while the node with this key of tunnel id is active and tunvless reports IPv6 through it. */
+bool firc_tunrun_node_v6(const firc_tunrun_t *t, const char *id, const char *key);
+
 /* False when id is not configured; mark is its uplink mark (0 for auto), held while a child runs with it. */
 bool firc_tunrun_mark_of(const firc_tunrun_t *t, const char *id, uint32_t *mark, bool *held);
 

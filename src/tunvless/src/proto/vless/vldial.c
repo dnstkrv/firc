@@ -188,12 +188,13 @@ static void xudp_key_init(void) {
 static void xudp_gid(const struct flow_key *k, unsigned char gid[8]) {
     pthread_once(&g_xudp_once, xudp_key_init);
     uint64_t h = 1469598103934665603ULL;               /* FNV-1a, 64 bits */
-    unsigned char in[16 + 6];
+    unsigned char in[16 + 16 + 2];
+    size_t al = k->v6 ? 16 : 4, n = 16 + al + 2;
     memcpy(in, g_xudp_key, 16);
-    memcpy(in + 16, &k->src, 4);
-    in[20] = (unsigned char)(k->sport >> 8);
-    in[21] = (unsigned char)k->sport;
-    for (size_t i = 0; i < sizeof in; i++) { h ^= in[i]; h *= 1099511628211ULL; }
+    memcpy(in + 16, k->src.b, al);
+    in[16 + al] = (unsigned char)(k->sport >> 8);
+    in[17 + al] = (unsigned char)k->sport;
+    for (size_t i = 0; i < n; i++) { h ^= in[i]; h *= 1099511628211ULL; }
     h ^= h >> 32;
     for (int i = 0; i < 8; i++) gid[i] = (unsigned char)(h >> (56 - 8 * i));
 }
@@ -219,9 +220,9 @@ static size_t xudp_frames(const struct flow_key *k, int first, const unsigned ch
             meta[m++] = 2;                             /* network: UDP */
             meta[m++] = (unsigned char)(k->dport >> 8);
             meta[m++] = (unsigned char)k->dport;       /* port, then address type and address */
-            meta[m++] = VLESS_ADDR_IPV4;
-            memcpy(meta + m, &k->dst, 4);
-            m += 4;
+            meta[m++] = k->v6 ? VLESS_ADDR_IPV6 : VLESS_ADDR_IPV4;
+            memcpy(meta + m, k->dst.b, k->v6 ? 16 : 4);
+            m += k->v6 ? 16 : 4;
             xudp_gid(k, meta + m);
             m += 8;
             first = 0;
@@ -349,22 +350,20 @@ static int vl_send(const void *ctx, void *sess, const struct flow_key *k, int ud
         if (!s->header_sent) {
             /* Mux has no port and address in the header (vless_build_request): the
              * v1.mux.cool:666 service is implied by the command. */
-            len = vless_build_request(s->uuid, VLESS_CMD_MUX, NULL, NULL, 0, node->flow,
+            len = vless_build_request(s->uuid, VLESS_CMD_MUX, NULL, NULL, 0, 0, node->flow,
                                       out, sizeof(out));
             if (!len) return SEND_FATAL;
         }
     } else if (!s->header_sent) {
         /* The destination comes from the packet: there is no name, the client has already
          * resolved it. */
-        unsigned char ip4[4];
-        memcpy(ip4, &k->dst, 4);
         /* UDP gets here only for a node without flow (see XUDP above) and is declared with
          * command 2 and no flow: Vision (xtls-rprx-vision) is about TCP, it replaces the copying
          * of the stream after the handshake, and datagrams have no such stream.
          *
          * dport is already in host order (struct flow_key in tun.h). */
         len = vless_build_request(s->uuid, udp ? VLESS_CMD_UDP : VLESS_CMD_TCP,
-                                  s->host[0] ? s->host : NULL, ip4, k->dport,
+                                  s->host[0] ? s->host : NULL, k->dst.b, k->v6 ? 16 : 4, k->dport,
                                   udp ? NULL : node->flow, out, sizeof(out));
         if (!len) return SEND_FATAL;
     }

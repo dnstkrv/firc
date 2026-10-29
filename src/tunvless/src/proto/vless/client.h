@@ -34,6 +34,8 @@ int vless_probe(const struct vless_node *node, int timeout_s, char *why, size_t 
 int vless_probe_timed(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
                       int *handshake_ms, int *ttfb_ms);
 
+int vless_probe6(const struct vless_node *node, int timeout_s, char *why, size_t why_n);
+
 /* The reason text for a VLESS or transport code. */
 const char *vless_strerror(int rc);
 

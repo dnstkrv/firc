@@ -30,9 +30,10 @@ int vless_uuid_form(const char *s);
 /* The 16 bytes of the id from its text form. 0 on success, -1 if the form is unusable. */
 int vless_uuid_parse(const char *s, unsigned char out[16]);
 
-/* flow: the flow name (xtls-rprx-vision), or NULL or "" for plain VLESS. */
+/* ip: 4 or 16 bytes (ip_len), used when host is empty.
+ * flow: the flow name (xtls-rprx-vision), or NULL or "" for plain VLESS. */
 size_t vless_build_request(const unsigned char uuid[16], enum vless_cmd cmd,
-                           const char *host, const unsigned char ip4[4],
+                           const char *host, const unsigned char *ip, int ip_len,
                            uint16_t port, const char *flow,
                            unsigned char *out, size_t cap);
 

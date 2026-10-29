@@ -70,6 +70,7 @@
   <div class="nm">
     <span class="name" title={row.name}>{row.name}</span>
     {#if row.isNew && !row.missing}<span class="badge blue">{t("new")}</span>{/if}
+    {#if live?.state === "active" && live.v6}<span class="badge v6">IPv6</span>{/if}
     {#each ports as port (port)}<span class="badge port">:{port}</span>{/each}
   </div>
   <div class="src"><span class="badge">{row.source === "link" ? t("link") : row.source}</span></div>
@@ -215,6 +216,10 @@
   }
   .badge.port {
     font-family: Monaco, monospace;
+  }
+  .badge.v6 {
+    background: color-mix(in oklab, var(--green) 22%, transparent);
+    color: var(--green);
   }
   .badge.blue {
     background: color-mix(in oklab, var(--accent) 22%, transparent);

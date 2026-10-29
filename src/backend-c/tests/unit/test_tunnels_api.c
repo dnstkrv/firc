@@ -837,6 +837,50 @@ TEST a_node_down_shows_as_down_with_its_since(void)
     PASS();
 }
 
+TEST only_an_active_v6_node_carries_v6_true(void)
+{
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS", "{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"v6\":[true,false]}", 1);
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n"
+                    "      - id: 0000000a\n        link: \"" LINK_A "\"\n"
+                    "      - id: 0000000c\n        link: \"" LINK_B "\"\n",
+                    0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    ASSERT(same_json(at(tunnel_named(ans, "a"), "nodes"),
+                     "[{\"key\":\"0000000a:A\",\"name\":\"A\",\"source\":\"link\",\"state\":\"active\","
+                     "\"since\":0,\"skipReason\":\"\",\"v6\":true},"
+                     "{\"key\":\"0000000c:B\",\"name\":\"B\",\"source\":\"link\",\"state\":\"active\","
+                     "\"since\":0,\"skipReason\":\"\"}]"));
+    unsetenv("FAKE_EVENTS");
+    cJSON_Delete(ans);
+    PASS();
+}
+
+TEST a_later_active_event_without_v6_clears_the_tag(void)
+{
+    setenv("FAKE_MODE", "nodes", 1);
+    setenv("FAKE_EVENTS",
+           "{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"v6\":[true,false]}\n"
+           "{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"v6\":[false,false]}",
+           1);
+    ASSERT(hx_start("tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n"
+                    "      - id: 0000000a\n        link: \"" LINK_A "\"\n"
+                    "      - id: 0000000c\n        link: \"" LINK_B "\"\n",
+                    0) != NULL);
+    ASSERT(wait_for_status("a", "up", 3000));
+    sleep_ms(300);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &ans));
+    const cJSON *a = cJSON_GetArrayItem(at(tunnel_named(ans, "a"), "nodes"), 0);
+    ASSERT_STR_EQ("active", at(a, "state")->valuestring);
+    ASSERT(cJSON_GetObjectItemCaseSensitive(a, "v6") == NULL);
+    unsetenv("FAKE_EVENTS");
+    cJSON_Delete(ans);
+    PASS();
+}
+
 static const char *node_state(const char *key)
 {
     static char out[32];
@@ -1820,6 +1864,8 @@ SUITE(tunnels_api)
     RUN_TEST(a_saved_reversed_order_previews_every_node_once_in_that_order);
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);
+    RUN_TEST(only_an_active_v6_node_carries_v6_true);
+    RUN_TEST(a_later_active_event_without_v6_clears_the_tag);
     RUN_TEST(rates_are_the_counter_difference_over_the_time_between_polls);
     RUN_TEST(redirected_bytes_add_to_the_sysfs_rates);
     RUN_TEST(refresh_and_restart_answer_202_or_404);

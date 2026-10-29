@@ -120,20 +120,20 @@ tv_pid() {
 HX "$BIN" --control -d tvc0 -A 1 --interval 5 < "$W/nodes" > "$W/ev" 2> "$W/tun.log" 9< "$W/nodes" & TP=$!
 sleep 4
 check "ready line" '{"type":"ready","dev":"tvc0","tcpPort":0}' "$(grep '"ready"' "$W/ev" | head -1)"
-check "first active" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev" | head -1)"
+check "first active" '{"type":"active","nodes":["A"],"index":[0],"v6":[false]}' "$(grep '"active"' "$W/ev" | head -1)"
 TV=$(tv_pid)
 check "inherited fd 9 closed" "${TV:-none} no" "${TV:-none} $([ -e "/proc/$TV/fd/9" ] && echo yes || echo no)"
 check "tunvless found" 1 "$([ -n "$TV" ] && echo 1 || echo 0)"
 kill "$SRV_A"; sleep 12
 check "A down reported" 1 "$(grep -c '"node_down","node":"A"' "$W/ev")"
-check "B takes over" '{"type":"active","nodes":["B"],"index":[1]}' "$(grep '"active"' "$W/ev" | tail -1)"
+check "B takes over" '{"type":"active","nodes":["B"],"index":[1],"v6":[true]}' "$(grep '"active"' "$W/ev" | tail -1)"
 check "no link in stderr" 0 "$(grep -c "vless://\|$UUID" "$W/tun.log")"
 check "no link in stdout" 0 "$(grep -c "vless://\|$UUID" "$W/ev")"
 node_up A; sleep 1
 kill "$SRV_B"; sleep 12
 # catches: a node once reported down and taken back by a replacement round, never reported up
 check "A answers again: reported up" 1 "$(grep -c '"type":"node_up","node":"A"' "$W/ev")"
-check "A takes over again" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev" | tail -1)"
+check "A takes over again" '{"type":"active","nodes":["A"],"index":[0],"v6":[true]}' "$(grep '"active"' "$W/ev" | tail -1)"
 node_up B; sleep 1
 printf 'garbage-%s@host:1\n\n' "$UUID" | HX "$BIN" --control -d tvc1 > /dev/null 2> "$W/bad.log"
 check "malformed line: no uuid in stderr" 0 "$(grep -c "$UUID" "$W/bad.log")"
@@ -240,7 +240,7 @@ HX "$BIN" --control -d tvs0 -A 1 --interval 5 -r 203.0.113.0/24 < "$W/in" > "$W/
 exec 8> "$W/in"
 { lnk A; lnk B; echo; } >&8
 wait_ev '"ready"' 15
-check "swap: first active A" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev2" | head -1)"
+check "swap: first active A" '{"type":"active","nodes":["A"],"index":[0],"v6":[false]}' "$(grep '"active"' "$W/ev2" | head -1)"
 IFX=$(HX cat /sys/class/net/tvs0/ifindex 2>/dev/null)
 case "$IFX" in ''|*[!0-9]*) IFX_OK=no ;; *) IFX_OK=yes ;; esac
 check "swap: the device has an ifindex" yes "$IFX_OK"
@@ -249,8 +249,8 @@ sleep 1
 { echo nodes; lnk B; echo "garbage-$UUID"; lnk C; echo; } >&8
 wait_ev '"type":"nodes"' 2
 check "swap: acknowledged with the usable count" '{"type":"nodes","count":2}' "$(grep '"type":"nodes"' "$W/ev2" | head -1)"
-wait_ev '"index":[1]' 10
-check "swap: B active" '{"type":"active","nodes":["B"],"index":[1]}' "$(grep '"active"' "$W/ev2" | tail -1)"
+wait_ev '"index":[1],"v6":[true]' 10
+check "swap: B active" '{"type":"active","nodes":["B"],"index":[1],"v6":[true]}' "$(grep '"active"' "$W/ev2" | tail -1)"
 wait "$LONG"; LONG=""
 check "swap: the download through A completes" 1048576 "$(cat "$W/long.size")"
 check "swap: no second ready" 1 "$(grep -c '"ready"' "$W/ev2")"
@@ -259,9 +259,9 @@ sizes=""
 for i in 1 2 3 4; do sizes="$sizes $(fetch s$i)"; done
 check "swap: new connections go to B" " 2097152 2097152 2097152 2097152" "$sizes"
 { echo nodes; lnk A; lnk C; echo; } >&8
-wait_ev '"nodes":["A"]' 10
+wait_ev '"nodes":["A"],"index":[0],"v6":[true]' 10
 check "swap: two commands acknowledged" 2 "$(grep -c '"type":"nodes"' "$W/ev2")"
-check "swap: A comes back under its first index" '{"type":"active","nodes":["A"],"index":[0]}' "$(grep '"active"' "$W/ev2" | tail -1)"
+check "swap: A comes back under its first index" '{"type":"active","nodes":["A"],"index":[0],"v6":[true]}' "$(grep '"active"' "$W/ev2" | tail -1)"
 check "swap: new connections go to A again" 1048576 "$(fetch a1)"
 check "swap: every added node's name resolves" 0 "$(grep -c 'does not resolve' "$W/tun2.log")"
 check "swap: malformed line named, not shown" 1 "$(grep -c 'line 2: not a vless:// link' "$W/tun2.log")"

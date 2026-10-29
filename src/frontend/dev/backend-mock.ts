@@ -965,7 +965,7 @@ const tunnelStatus = (tn: any) =>
 
 const tunnelState = (tn: any) => {
   const status = tunnelStatus(tn);
-  const nodes = tunnelNodes(tn).map((row: any, k: number) => ({
+  const nodes: any[] = tunnelNodes(tn).map((row: any, k: number) => ({
     key: row.key,
     name: row.name,
     source: row.src.kind === "link" ? "link" : row.src.name,
@@ -976,6 +976,8 @@ const tunnelState = (tn: any) => {
         : "reserve",
     since: 0,
   }));
+  const first = nodes[0];
+  if (TUNNELS[0]?.id === tn.id && first?.state === "active") first.v6 = true;
   return {
     id: tn.id,
     device: tn.device,

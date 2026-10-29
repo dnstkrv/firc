@@ -62,6 +62,7 @@
 #define PL_STREAK      3
 #define PL_UNPROVEN    2
 #define PL_TIMEOUT_S   8
+#define PL_TIMEOUT6_S  4
 /* A cut connection brings a check forward at most this often: the connections of a dead node are
  * cut together, and one check is enough. */
 #define PL_LOST_GAP_MS 5000
@@ -76,7 +77,7 @@ struct pl_sess {
     uint8_t pinned;
     struct flow_key k;
 };
-#define PL_HDR 64
+#define PL_HDR 96
 _Static_assert(sizeof(struct pl_sess) <= PL_HDR, "pool session header larger than PL_HDR");
 #define INNER(s) ((void *)((unsigned char *)(s) + PL_HDR))
 #define CINNER(s) ((const void *)((const unsigned char *)(s) + PL_HDR))
@@ -95,6 +96,7 @@ struct pl_slot {
     uint64_t checked_at;
     unsigned drained[PL_DRAINED];
     unsigned drained_n;
+    int v6;
 };
 
 struct pl_sel { struct pl_sel *old; size_t n; int c[]; };
@@ -112,6 +114,9 @@ static struct {
     int pub;
     char why[256];              /* reason of the last failed check */
     char sig[1024];             /* the last active set logged */
+    uint64_t sig6;
+    int any_v6;
+    int v6_retry;
     int *down;                  /* nodes reported down and not reported up since */
     size_t down_n, down_cap;
 } g_pl = { .mu = PTHREAD_MUTEX_INITIALIZER };
@@ -166,23 +171,34 @@ static unsigned pl_rand(void) {
     return x;
 }
 
+static int pl_fits(const struct pl_slot *sl, int v6) {
+    return sl->node >= 0 && sl->up && (!v6 || sl->v6);
+}
+
 /* The slot for a new connection. Under the lock. -1 — no slot has a node. With no live slot, a
- * dead one that has a node: the connection fails fast (RST). */
+ * dead one that has a node: the connection fails fast (RST). An IPv6 connection takes only a live
+ * slot whose node carries IPv6, and no dead one: -1 without such a slot. */
 static int pl_pick(const struct flow_key *k) {
+    int v6 = k && k->v6;
     int live[64], nl = 0, any = -1;
     for (int i = 0; i < g_pl.n; i++) {
         if (g_pl.slot[i].node < 0) continue;
-        if (any < 0) any = i;
-        if (g_pl.slot[i].up && nl < (int)(sizeof live / sizeof live[0])) live[nl++] = i;
+        if (any < 0 && !v6) any = i;
+        if (pl_fits(&g_pl.slot[i], v6) && nl < (int)(sizeof live / sizeof live[0])) live[nl++] = i;
     }
     if (!nl) return any;
     if (g_pl.cf.by == POOL_BY_CONNECTION || !k) return live[pl_rand() % (unsigned)nl];
-    uint32_t h = g_pl.cf.by == POOL_BY_SITE_CLIENT ? pl_mix(k->src * 0x9e3779b1u) ^ k->dst : k->dst;
-    int at = (int)(pl_mix(h) % (uint32_t)g_pl.n);
-    for (int d = 0; d < g_pl.n; d++) {
-        const struct pl_slot *sl = &g_pl.slot[(at + d) % g_pl.n];
-        if (sl->node >= 0 && sl->up) return (at + d) % g_pl.n;
+    int by_client = g_pl.cf.by == POOL_BY_SITE_CLIENT;
+    uint32_t h = by_client ? pl_mix(k->src.v4 * 0x9e3779b1u) ^ k->dst.v4 : k->dst.v4;
+    for (int i = 1; i < 4; i++) {
+        uint32_t s, d;
+        memcpy(&s, k->src.b + 4 * i, 4);
+        memcpy(&d, k->dst.b + 4 * i, 4);
+        h ^= (by_client ? s * 0x9e3779b1u : 0) ^ d;
     }
+    int at = (int)(pl_mix(h) % (uint32_t)g_pl.n);
+    for (int d = 0; d < g_pl.n; d++)
+        if (pl_fits(&g_pl.slot[(at + d) % g_pl.n], v6)) return (at + d) % g_pl.n;
     return any;
 }
 
@@ -194,28 +210,36 @@ static void pl_bind(struct pl_sess *s, int slot) {
 
 /* ---- health: state in the log ----------------------------------------------------------- */
 
-/* Log the pool's state when it changes: the active nodes, and the moment no node answers (with the
- * reason of the last failed check) or one answers again. Takes the lock itself. */
+/* Log the pool's state when it changes: the active nodes and which carry IPv6, and the moment no
+ * node answers (with the reason of the last failed check) or one answers again. Tells v6_changed
+ * when the first active node carries IPv6 or the last stops. Takes the lock itself. */
 static void pl_publish(void) {
     char names[1024] = "";
     const char *plain[64];
-    int idx[64];
+    int idx[64], v6[64];
     size_t w = 0, np = 0;
-    int any = 0;
+    int any = 0, any6 = 0;
+    uint64_t sig6 = 0;
     pthread_mutex_lock(&g_pl.mu);
     for (int i = 0; i < g_pl.n; i++) {
         if (g_pl.slot[i].node < 0 || !g_pl.slot[i].up) continue;
         any = 1;
+        if (g_pl.slot[i].v6) any6 = 1;
         const char *nm = g_pl.cf.proto->name(pl_node(g_pl.slot[i].node));
         if (np < 64) {
             idx[np] = g_pl.slot[i].node;
+            v6[np] = g_pl.slot[i].v6;
+            if (v6[np]) sig6 |= 1ull << np;
             plain[np++] = nm;
         }
         if (w + 2 < sizeof names)
             w += (size_t)snprintf(names + w, sizeof names - w, "%s%s (#%d)", w ? ", " : "", nm,
                                   g_pl.slot[i].node);
     }
+    int flip6 = any6 != g_pl.any_v6 || (any6 && g_pl.v6_retry);
+    g_pl.any_v6 = any6;
     pthread_mutex_unlock(&g_pl.mu);
+    if (flip6 && g_pl.cf.v6_changed) g_pl.v6_retry = g_pl.cf.v6_changed(any6) != 0 && any6;
 
     if (any && !g_pl.said_up) {
         g_pl.said_up = 1;
@@ -225,16 +249,34 @@ static void pl_publish(void) {
                         "until one does\n", g_pl.why[0] ? g_pl.why : "no answer");
     }
     if (w >= sizeof names - 2) w = sizeof names - 1;
-    if (!strcmp(names, g_pl.sig)) return;
+    if (!strcmp(names, g_pl.sig) && sig6 == g_pl.sig6) return;
     snprintf(g_pl.sig, sizeof g_pl.sig, "%s", names);
+    g_pl.sig6 = sig6;
     if (any) fprintf(stderr, PL_LOG_I "active: %s\n", names);
-    ctl_emit_active(plain, idx, np);
+    ctl_emit_active(plain, idx, v6, np);
 }
 
 /* ---- health: checks --------------------------------------------------------------------- */
 
 static int pl_probe(int node, char *why, size_t n) {
     return g_pl.cf.proto->probe(pl_node(node), PL_TIMEOUT_S, why, n);
+}
+
+static void pl_probe6(int i, int node, unsigned gen) {
+    if (!g_pl.cf.proto->probe6) return;
+    char why[256];
+    int ok = g_pl.cf.proto->probe6(pl_node(node), PL_TIMEOUT6_S, why, sizeof why) == 0;
+    pthread_mutex_lock(&g_pl.mu);
+    struct pl_slot *sl = &g_pl.slot[i];
+    int cur = sl->gen == gen, was = sl->v6;
+    if (cur) sl->v6 = ok;
+    pthread_mutex_unlock(&g_pl.mu);
+    if (!cur) return;
+    if (ok && !was)
+        fprintf(stderr, PL_LOG_I "node %s carries IPv6\n", g_pl.cf.proto->name(pl_node(node)));
+    else if (!ok && was)
+        fprintf(stderr, PL_LOG_I "node %s no longer carries IPv6: %s\n", g_pl.cf.proto->name(pl_node(node)), why);
+    pl_publish();
 }
 
 /* Whether candidate c is the node of another slot (live, or dead and waiting for it). Under the
@@ -301,6 +343,7 @@ static int pl_refill(int i, int own) {
             fprintf(stderr, PL_LOG_I "node %s answers again\n", g_pl.cf.proto->name(pl_node(prev)));
             ctl_emit_node_up(g_pl.cf.proto->name(pl_node(prev)), prev);
             pl_publish();
+            pl_probe6(i, prev, gen);
             return 1;
         }
         snprintf(g_pl.why, sizeof g_pl.why, "%s", why);
@@ -327,6 +370,7 @@ static int pl_refill(int i, int own) {
         __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);  /* pl_stale reads it without the lock */
         sl->unproven = 0;
         pl_slot_alive(sl);
+        unsigned ngen = sl->gen;
         int n = g_pl.n, again = pl_unmark_down(c);
         pthread_mutex_unlock(&g_pl.mu);
         if (again) {
@@ -341,6 +385,7 @@ static int pl_refill(int i, int own) {
                     g_pl.cf.proto->name(pl_node(c)));
         stack_nodes_changed();
         pl_publish();
+        pl_probe6(i, c, ngen);
         return 1;
     }
     pthread_mutex_lock(&g_pl.mu);
@@ -386,6 +431,7 @@ static void pl_check(int i) {
         sl->fails = sl->streak = 0;
         sl->due = sl->checked_at + (uint64_t)g_pl.cf.interval_s * 1000ull;
         pthread_mutex_unlock(&g_pl.mu);
+        pl_probe6(i, node, gen);
         return;
     }
     /* Two failures in a row, against a single loss on a radio link; one is enough when a stall
@@ -400,6 +446,7 @@ static void pl_check(int i) {
     }
     /* Dead: its connections are reset now (generation), without waiting for a replacement. */
     sl->up = 0;
+    sl->v6 = 0;
     sl->fails = 0;
     __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);
     if (!unproven) sl->retry = PL_RETRY_S;
@@ -436,8 +483,18 @@ static int pl_next(void) {
     }
 }
 
+static void pl_start6(void) {
+    if (!g_pl.cf.checked) return;
+    pthread_mutex_lock(&g_pl.mu);
+    int node = g_pl.slot[0].node, up = g_pl.slot[0].up;
+    unsigned gen = g_pl.slot[0].gen;
+    pthread_mutex_unlock(&g_pl.mu);
+    if (node >= 0 && up) pl_probe6(0, node, gen);
+}
+
 static void *pl_thread(void *arg) {
     (void)arg;
+    pl_start6();
     for (;;) {
         pthread_mutex_lock(&g_pl.mu);
         int i = pl_next();
@@ -630,9 +687,10 @@ static int pl_match(const void *ctx, const void *dst, const void *src) {
     if (!s->node || s->slot < 0) return -1;
     pthread_mutex_lock(&g_pl.mu);
     const struct pl_slot *sl = &g_pl.slot[s->slot];
-    int live = sl->gen == s->gen && sl->up;
+    int live = sl->gen == s->gen && sl->up, v6 = sl->v6;
     pthread_mutex_unlock(&g_pl.mu);
     if (!live) return -1;
+    if (d->opened && d->k.v6 && !v6) return 0;
     if (g_pl.cf.by == POOL_BY_CONNECTION) return 1;
     return d->slot == s->slot;
 }
@@ -796,7 +854,7 @@ int pool_select(const int *c, size_t n) {
             if (ng < 64) gone[ng++] = g_pl.cf.proto->name(pl_node(sl->node));
             __atomic_store_n(&sl->drained[sl->drained_n++ % PL_DRAINED], sl->gen + 1, __ATOMIC_RELAXED);
             sl->node = -1;
-            sl->up = 0;
+            sl->up = sl->v6 = 0;
             sl->fails = sl->streak = sl->kick = sl->lost = 0;
             __atomic_add_fetch(&sl->gen, 1, __ATOMIC_RELEASE);
             drained++;

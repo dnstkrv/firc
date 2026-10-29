@@ -43,7 +43,7 @@ static int bulk_once(const struct vless_node *np, int port, int mb) {
     if (rc) { printf("connect: %s\n", transport_strerror(rc)); return 1; }
     unsigned char uuid[16], req[256], ip[4] = { 127, 0, 0, 1 };
     vless_uuid_parse(n.uuid, uuid);
-    size_t rn = vless_build_request(uuid, VLESS_CMD_TCP, NULL, ip, (uint16_t)port, n.flow, req, sizeof req);
+    size_t rn = vless_build_request(uuid, VLESS_CMD_TCP, NULL, ip, 4, (uint16_t)port, n.flow, req, sizeof req);
     unsigned char *out = malloc(total ? total : 1), *in = malloc(total + 64), *buf = malloc(1 << 15);
     for (size_t i = 0; i < total; i++) out[i] = (unsigned char)((i * 2654435761u) >> 13);
     size_t sent = 0, recvd = 0;

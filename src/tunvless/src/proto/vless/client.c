@@ -49,10 +49,14 @@ static int64_t now_ms(void) {
  * to blame: the server connection came up but no data came back. A handshake failure or a
  * Reality rejection belongs to the node, and retrying it would double the probe time of every
  * dead node. */
-struct probe_target { unsigned char ip[4]; const char *host; };
+struct probe_target { unsigned char ip[16]; size_t ip_len; const char *host; };
 static const struct probe_target PROBE_TARGETS[] = {
-    { { 1, 1, 1, 1 }, "1.1.1.1" },
-    { { 8, 8, 8, 8 }, "8.8.8.8" },
+    { { 1, 1, 1, 1 }, 4, "1.1.1.1" },
+    { { 8, 8, 8, 8 }, 4, "8.8.8.8" },
+};
+static const struct probe_target PROBE6_TARGETS[] = {
+    { { 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11 }, 16, "[2606:4700:4700::1111]" },
+    { { 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88 }, 16, "[2001:4860:4860::8888]" },
 };
 
 static int probe_once(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
@@ -63,19 +67,29 @@ int vless_probe(const struct vless_node *node, int timeout_s, char *why, size_t 
     return vless_probe_timed(node, timeout_s, why, why_n, NULL, NULL);
 }
 
-int vless_probe_timed(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
-                      int *handshake_ms, int *ttfb_ms) {
+static int probe_targets(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
+                         int *handshake_ms, int *ttfb_ms, const struct probe_target *tg, size_t tg_n) {
     int rc = TR_EIO;
-    for (size_t i = 0; i < sizeof(PROBE_TARGETS) / sizeof(PROBE_TARGETS[0]); i++) {
+    for (size_t i = 0; i < tg_n; i++) {
         int connected = 0;
-        rc = probe_once(node, timeout_s, why, why_n, handshake_ms, ttfb_ms,
-                        &PROBE_TARGETS[i], &connected);
+        rc = probe_once(node, timeout_s, why, why_n, handshake_ms, ttfb_ms, &tg[i], &connected);
         if (rc == 0) return 0;
         /* The server was not reached or did not accept us: not the target's fault. */
         if (!connected || rc == VLESS_CONN_EREJECTED || rc == VLESS_CONN_EBADUUID)
             return rc;
     }
     return rc;
+}
+
+int vless_probe_timed(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
+                      int *handshake_ms, int *ttfb_ms) {
+    return probe_targets(node, timeout_s, why, why_n, handshake_ms, ttfb_ms, PROBE_TARGETS,
+                         sizeof(PROBE_TARGETS) / sizeof(PROBE_TARGETS[0]));
+}
+
+int vless_probe6(const struct vless_node *node, int timeout_s, char *why, size_t why_n) {
+    return probe_targets(node, timeout_s, why, why_n, NULL, NULL, PROBE6_TARGETS,
+                         sizeof(PROBE6_TARGETS) / sizeof(PROBE6_TARGETS[0]));
 }
 
 static int probe_once(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
@@ -103,7 +117,7 @@ static int probe_once(const struct vless_node *node, int timeout_s, char *why, s
     }
 
     unsigned char req[512];
-    size_t req_n = vless_build_request(uuid, VLESS_CMD_TCP, NULL, tg->ip, 80,
+    size_t req_n = vless_build_request(uuid, VLESS_CMD_TCP, NULL, tg->ip, tg->ip_len, 80,
                                        node->flow, req, sizeof(req));
     if (!req_n) { transport_close(&c); snprintf(why, why_n, "cannot build the request header"); return TR_EIO; }
 

@@ -112,8 +112,8 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch xhoptsmatch
-CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch xhoptsmatch tun6match vreqmatch
+CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch xudpmatch
 
 test: unit-test crypto-test
 	@echo "all tests passed"
@@ -176,6 +176,14 @@ $(T)/vlinkmatch: tests/vlinkmatch.c tests/sub-pq-samples.h src/proto/vless/vlink
 $(T)/tungromatch: tests/tungromatch.c src/tunnel/tun.c $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/tungromatch.c
+
+$(T)/vreqmatch: tests/vreqmatch.c src/proto/vless/vless_proto.c $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/vreqmatch.c src/proto/vless/vless_proto.c
+
+$(T)/tun6match: tests/tun6match.c src/tunnel/tun.c $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/tun6match.c src/tunnel/tun.c
 
 $(T)/tunnamematch: tests/tunnamematch.c src/tunnel/tun.c $(HDR)
 	@mkdir -p $(T)
@@ -283,6 +291,10 @@ $(T)/vlessmatch: tests/vlessmatch.c $(CLIENT_SRC) src/proto/transport/trdial.c s
 
 $(T)/takematch: tests/takematch.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(T)/certzip.o $(HDR)
 	$(CC) $(T_CFLAGS) -o $@ tests/takematch.c src/proto/vless/vldial.c $(TUNNEL_SRC) $(CLIENT_SRC) \
+		src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CERTZIP) $(T_CRYPTO)
+
+$(T)/xudpmatch: tests/xudpmatch.c src/proto/vless/vldial.c $(CLIENT_SRC) $(T)/scrypto.o $(T)/certzip.o $(HDR)
+	$(CC) $(T_CFLAGS) -o $@ tests/xudpmatch.c $(TUNNEL_SRC) $(CLIENT_SRC) \
 		src/ctlinb.c src/ctlnodes.c src/proto/vless/vlink.c src/proto/transport/trdial.c src/proto/tls/roots.c $(T_CERTZIP) $(T_CRYPTO)
 
 # -- probes for the interop scripts (a real server on the other side) --

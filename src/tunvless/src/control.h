@@ -11,7 +11,7 @@ void ctl_emit_map(int count);
 void ctl_emit_close(int count);
 void ctl_emit_miss(const char *fake);
 void ctl_emit_bytes(uint32_t rx, uint32_t tx);
-void ctl_emit_active(const char *const *names, const int *index, size_t n);
+void ctl_emit_active(const char *const *names, const int *index, const int *v6, size_t n);
 void ctl_emit_node_down(const char *node, int index, const char *why);
 void ctl_emit_node_up(const char *node, int index);
 void ctl_emit_nodes(int count);

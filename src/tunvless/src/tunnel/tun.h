@@ -1,8 +1,9 @@
-/* The TUN device: opening it, reading packets, parsing IPv4 headers and building the packets sent
- * back to the client. */
+/* The TUN device: opening it, reading packets, parsing IPv4 and IPv6 headers and building the
+ * packets sent back to the client. */
 #ifndef STEER_TUN_H
 #define STEER_TUN_H
 #include <stdint.h>
+#include <string.h>
 #include <sys/uio.h>
 #include <stddef.h>
 #include <sys/types.h>
@@ -10,8 +11,14 @@
 #define TUN_ENODEV (-40)   /* no TUN clone device (/dev/net/tun) */
 #define TUN_ESETUP (-41)
 
+union fk_addr {
+    uint32_t v4;
+    unsigned char b[16];
+};
+
 struct flow_key {
-    uint32_t src, dst;      /* network order, as in the packet; tcp_build takes them as they are */
+    union fk_addr src, dst; /* network order, as in the packet; an IPv4 key keeps b[4..15] zero */
+    uint8_t v6;
     /* Ports are in HOST order: ip_parse assembles them from the bytes by hand. ntohs on them swaps
      * twice (port 80 becomes 20480) and sends the connection to the wrong place. */
     uint16_t sport, dport;
@@ -99,7 +106,7 @@ struct tun_dev {
      * tun_read_packet still hands out one packet at a time, so the data path never sees coalesced
      * frames. STEER_TUN_NORXGSO turns it off, for the same reason as its neighbours.
      *
-     * Only TUN_F_CSUM and TUN_F_TSO4 are asked for. Not TSO6: parsing here is IPv4 only, and a
+     * Only TUN_F_CSUM and TUN_F_TSO4 are asked for. Not TSO6: splitting here is IPv4 only, and a
      * frame we cannot split would be dropped instead of arriving as ordinary packets. */
     int rx_gso;
     /* ---- splitting coalesced frames (tun_read_packet) ----
@@ -130,6 +137,10 @@ struct tun_dev {
  * the same queue (see g_conns in stack.c). A kernel without IFF_MULTI_QUEUE is not an error: one
  * queue opens and one thread runs. */
 int tun_open(struct tun_dev *d, int max_queues, const char *name);
+static inline int fk_same_addr(const union fk_addr *a, const union fk_addr *b) {
+    return memcmp(a->b, b->b, 16) == 0;
+}
+
 int ip_parse(const unsigned char *p, size_t n, struct flow_key *k, size_t *payload_off);
 
 /* Read one packet: strips the offload header the device adds and splits coalesced frames. */
@@ -230,4 +241,20 @@ size_t tcp_build(unsigned char *out, size_t cap,
                  uint32_t seq, uint32_t ack, unsigned char flags,
                  const unsigned char *data, size_t data_n, uint16_t window,
                  unsigned mss, int wscale);
+
+#define TUN6_HDR_LEN 60
+#define TUN6_MSS 1440
+
+void tcp6_hdr_build(unsigned char out[TUN6_HDR_LEN], const unsigned char src[16],
+                    const unsigned char dst[16], uint16_t sport, uint16_t dport, uint32_t seq,
+                    uint32_t ack, uint8_t flags, uint16_t win);
+size_t tcp6_build(unsigned char *out, size_t cap, const unsigned char src[16],
+                  const unsigned char dst[16], uint16_t sport, uint16_t dport, uint32_t seq,
+                  uint32_t ack, uint8_t flags, uint16_t win, const unsigned char *opt,
+                  size_t opt_n, const unsigned char *data, size_t data_n);
+int tun_write_data6(const struct tun_dev *d, unsigned char hdr[TUN6_HDR_LEN],
+                    const unsigned char *data, size_t data_n);
+int udp6_write_to_client(const struct tun_dev *d, const unsigned char src[16],
+                         const unsigned char dst[16], uint16_t sport, uint16_t dport,
+                         const unsigned char *data, size_t n);
 #endif

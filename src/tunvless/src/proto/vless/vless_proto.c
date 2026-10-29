@@ -140,7 +140,7 @@ int vless_uuid_parse(const char *s, unsigned char out[16]) {
  * it and the lookup does not leak through local DNS. Traffic from TUN has only an address.
  * Returns the header length, or 0 if it does not fit in cap or the flow or host is too long. */
 size_t vless_build_request(const unsigned char uuid[16], enum vless_cmd cmd,
-                           const char *host, const unsigned char ip4[4],
+                           const char *host, const unsigned char *ip, int ip_len,
                            uint16_t port, const char *flow,
                            unsigned char *out, size_t cap) {
     size_t i = 0;
@@ -183,10 +183,16 @@ size_t vless_build_request(const unsigned char uuid[16], enum vless_cmd cmd,
         out[i++] = VLESS_ADDR_DOMAIN;
         out[i++] = (unsigned char)hl;
         memcpy(out + i, host, hl); i += hl;
-    } else {
+    } else if (ip_len == 16) {
+        if (i + 17 > cap) return 0;
+        out[i++] = VLESS_ADDR_IPV6;
+        memcpy(out + i, ip, 16); i += 16;
+    } else if (ip_len == 4) {
         if (i + 5 > cap) return 0;
         out[i++] = VLESS_ADDR_IPV4;
-        memcpy(out + i, ip4, 4); i += 4;
+        memcpy(out + i, ip, 4); i += 4;
+    } else {
+        return 0;
     }
     return i;
 }

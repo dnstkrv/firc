@@ -237,6 +237,36 @@ test.describe("Tunnels page", () => {
     await expect(tunnels.card("t3")).toContainText("(last good)");
   });
 
+  // Catches the IPv6 tag missing on an active v6 node, or shown on a v4-only one or a node that is not active.
+  test("an active node that carries IPv6 shows the tag and the others do not", async ({ page }) => {
+    const node = (name: string, nodeState: string, v6?: boolean) => ({
+      key: `0000000a:${name}`,
+      name,
+      source: "Provider",
+      state: nodeState,
+      since: 0,
+      skipReason: "",
+      ...(v6 === undefined ? {} : { v6 }),
+    });
+    await stubDaemon(page, {
+      tunnels: [tunnel("t3", "tunvless3")],
+      states: [
+        state("t3", "tunvless3", {
+          status: "up",
+          active: ["A", "B"],
+          nodes: [node("A", "active", true), node("B", "active"), node("C", "reserve", true)],
+        }),
+      ],
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("t3");
+    const rows = tunnels.nodeRows("t3");
+    await expect(rows.nth(0).locator(".badge.v6")).toHaveText("IPv6");
+    await expect(rows.nth(1).locator(".badge.v6")).toHaveCount(0);
+    await expect(rows.nth(2).locator(".badge.v6")).toHaveCount(0);
+  });
+
   // Catches a refusal naming one tunnel being shown as a banner, or on the wrong card.
   test("a rejected save marks the field on the tunnel the daemon names", async ({ page }) => {
     const daemon = await stubDaemon(page, {

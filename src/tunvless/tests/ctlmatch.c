@@ -15,6 +15,11 @@ static void map3(void) { ctl_emit_map(3); }
 static void close2(void) { ctl_emit_close(2); }
 static void miss1(void) { ctl_emit_miss("198.18.0.1"); }
 static void bytes_max(void) { ctl_emit_bytes(4294967295u, 0); }
+static void active_v6(void) {
+    static const char *const nm[2] = { "A", "B" };
+    static const int ix[2] = { 4, 7 }, v6[2] = { 1, 0 };
+    ctl_emit_active(nm, ix, v6, 2);
+}
 
 static void capture(char *out, size_t cap, void (*f)(void)) {
     int p[2];
@@ -57,7 +62,8 @@ int main(void) {
     dup2(p[1], 1);
     ctl_init(1);
     static const int idx[8] = { 0, 1, 2, 3, 4, 5, 6, 1234567 };
-    ctl_emit_active(names, idx, 8);
+    static const int v6[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    ctl_emit_active(names, idx, v6, 8);
     dup2(saved, 1);
     close(p[1]);
     char line[2048];
@@ -72,7 +78,9 @@ int main(void) {
     }
     check("all eight names present", 8, found);
     /* catches: the index list cut off when the names fill the line */
-    check("all eight indexes present", 1, strstr(line, "],\"index\":[0,1,2,3,4,5,6,1234567]}\n") != NULL);
+    check("all eight indexes present", 1, strstr(line, "],\"index\":[0,1,2,3,4,5,6,1234567],") != NULL);
+    check("all eight v6 flags present", 1,
+          strstr(line, ",\"v6\":[true,true,true,true,true,true,true,true]}\n") != NULL);
     char ev[512];
     /* catches: a node event without the node's index */
     check_str("node_up with index", "{\"type\":\"node_up\",\"node\":\"A\",\"index\":4}\n",
@@ -97,6 +105,8 @@ int main(void) {
     check_str("miss", "{\"type\":\"miss\",\"fake\":\"198.18.0.1\"}\n", (capture(ev, sizeof ev, miss1), ev));
     /* catches: a bytes event with a signed or 64-bit printf (wrong text at the top of the range) or a missing key */
     check_str("bytes event", "{\"type\":\"bytes\",\"rx\":4294967295,\"tx\":0}\n", (capture(ev, sizeof ev, bytes_max), ev));
+    check_str("active with v6 flags", "{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"index\":[4,7],\"v6\":[true,false]}\n",
+              (capture(ev, sizeof ev, active_v6), ev));
     /* catches: a descriptor inherited from fircd's parent kept open by a tunnel for its lifetime */
     int high = dup2(0, 200);
     int many = 0;

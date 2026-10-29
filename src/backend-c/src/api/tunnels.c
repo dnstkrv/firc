@@ -883,6 +883,7 @@ static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *s
     const char *state = "reserve";
     const char *skip = "";
     int64_t since = 0;
+    bool v6 = false;
     if (row->excluded) {
         state = "excluded";
     } else if (row->missing) {
@@ -892,6 +893,7 @@ static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *s
         skip = row->over_cap ? "over the 256-node limit" : row->skip_reason;
     } else if (st->n_active > 0 && firc_tunrun_node_active(ctx->run, st->id, row->key)) {
         state = "active";
+        v6 = firc_tunrun_node_v6(ctx->run, st->id, row->key);
     } else if (firc_tunrun_node_down(ctx->run, st->id, row->key, &since)) {
         state = "down";
     }
@@ -901,7 +903,7 @@ static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *s
         cJSON_AddStringToObject(o, "source", row->source) == NULL ||
         cJSON_AddStringToObject(o, "state", state) == NULL ||
         cJSON_AddNumberToObject(o, "since", (double)wall_s_of(since)) == NULL ||
-        cJSON_AddStringToObject(o, "skipReason", skip) == NULL) {
+        cJSON_AddStringToObject(o, "skipReason", skip) == NULL || (v6 && cJSON_AddTrueToObject(o, "v6") == NULL)) {
         cJSON_Delete(o);
         return NULL;
     }

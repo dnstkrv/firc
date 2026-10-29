@@ -246,7 +246,7 @@ struct conn {
 /* The hot record must stay small: that is the whole point of the split. A build check rather
  * than a promise: a buffer added here "for debugging" would bring the table back to megabytes,
  * and only the speed on a router would show it. */
-typedef char conn_hot_size_check[sizeof(struct conn) <= 192 ? 1 : -1];
+typedef char conn_hot_size_check[sizeof(struct conn) <= 224 ? 1 : -1];
 
 /* Bits of conn.armed. */
 #define ARM_IN  1
@@ -635,8 +635,13 @@ static inline unsigned flow_hash(const struct flow_key *k) {
      * The protocol is part of the key for correctness, not spreading: a TCP connection and a UDP
      * flow may have the same addresses and ports (a client may use one source port for both),
      * and a datagram must never land in a TCP connection or the other way round. */
-    uint32_t h = k->src ^ (k->dst * 0x9E3779B1u) ^
-                 ((uint32_t)k->sport << 16) ^ (uint32_t)k->dport ^ ((uint32_t)k->proto << 8);
+    uint32_t h = ((uint32_t)k->sport << 16) ^ (uint32_t)k->dport ^ ((uint32_t)k->proto << 8) ^ k->v6;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s, d;
+        memcpy(&s, k->src.b + 4 * i, 4);
+        memcpy(&d, k->dst.b + 4 * i, 4);
+        h = (h ^ s) * 0x9E3779B1u ^ d;
+    }
     h ^= h >> 15;
     h *= 0x2545F491u;
     h ^= h >> 13;
@@ -1227,7 +1232,8 @@ static void conn_table_free(void) {
 static struct conn *conn_find(const struct flow_key *k) {
     for (int16_t i = g_bucket[flow_hash(k)]; i >= 0; i = g_conns[i].hnext) {
         struct conn *c = &g_conns[i];
-        if (c->key.src == k->src && c->key.dst == k->dst &&
+        if (fk_same_addr(&c->key.src, &k->src) && fk_same_addr(&c->key.dst, &k->dst) &&
+            c->key.v6 == k->v6 &&
             c->key.sport == k->sport && c->key.dport == k->dport &&
             c->key.proto == k->proto)
             return c;
@@ -1274,6 +1280,34 @@ static __thread struct {
     uint32_t n;
     unsigned char buf[UP_MAX];
 } g_up;
+
+static void ctl_reply(const struct tun_dev *tun, const struct flow_key *k, uint32_t seq,
+                      uint32_t ack, unsigned char flags, uint16_t win) {
+    unsigned char pkt[64];
+    size_t l = k->v6 ? tcp6_build(pkt, sizeof pkt, k->dst.b, k->src.b, k->dport, k->sport, seq, ack,
+                                  flags, win, NULL, 0, NULL, 0)
+                     : tcp_build(pkt, sizeof pkt, k->dst.v4, k->src.v4, k->dport, k->sport, seq, ack,
+                                 flags, NULL, 0, win, 0, -1);
+    if (l) tun_write_ctl(tun, pkt, l);
+}
+
+static size_t seg_max(const struct conn *c, const struct tun_dev *tun) {
+    if (tun->gso) return TUN_GSO_MAX;
+    return c->key.v6 ? TUN6_MSS : TUN_MSS;
+}
+
+static int seg_write(const struct tun_dev *tun, const struct conn *c, uint32_t seq,
+                     const unsigned char *p, size_t n) {
+    unsigned char hdr[TUN6_HDR_LEN];
+    if (c->key.v6) {
+        tcp6_hdr_build(hdr, c->key.dst.b, c->key.src.b, c->key.dport, c->key.sport, seq,
+                       c->client_seq, TCP_ACK | TCP_PSH, rcv_win_field(c));
+        return tun_write_data6(tun, hdr, p, n);
+    }
+    tcp_hdr_build(hdr, c->key.dst.v4, c->key.src.v4, c->key.dport, c->key.sport, seq,
+                  c->client_seq, TCP_ACK | TCP_PSH, n, rcv_win_field(c));
+    return tun_write_data(tun, hdr, p, n);
+}
 
 /* A free slot; if there is none, evict the longest idle connection and take its slot.
  *
@@ -1329,14 +1363,8 @@ static struct conn *conn_new(const struct tun_dev *tun) {
     /* RST only to an evicted TCP connection: its client waits for an answer on an open
      * connection and without a refusal would sit until its timeout. A UDP flow has no such wait,
      * and an RST for a datagram is a packet the client's stack would not understand. */
-    if (!old->is_udp && !old->sock) {
-        unsigned char rst[64];
-        size_t rl = tcp_build(rst, sizeof(rst), old->key.dst, old->key.src,
-                              old->key.dport, old->key.sport,
-                              old->our_seq, old->client_seq, TCP_RST | TCP_ACK,
-                              NULL, 0, 0, 0, -1);
-        if (rl) tun_write_ctl(tun, rst, rl);
-    }
+    if (!old->is_udp && !old->sock)
+        ctl_reply(tun, &old->key, old->our_seq, old->client_seq, TCP_RST | TCP_ACK, 0);
     /* Evicting a dead connection is housekeeping, not an event, and a log that shouts during normal work
      * stops being read. */
     static struct ratelog said_evict;
@@ -1420,11 +1448,19 @@ static int upstream_send(struct conn *c, const unsigned char *data, size_t n) {
 /* SYN-ACK to the client. The ISN is always 1 and is not kept in our_seq: our_seq starts at 2 (the
  * next data byte), so resending the SYN-ACK is literally the same packet and moves no counter. */
 static void send_synack(struct conn *c, const struct tun_dev *tun) {
-    unsigned char sa[64];
-    size_t sl = tcp_build(sa, sizeof(sa), c->key.dst, c->key.src,
-                          c->key.dport, c->key.sport,
-                          1, c->client_seq, TCP_SYN | TCP_ACK,
-                          NULL, 0, RCV_WND_MIN, TUN_MSS, c->ws_on ? (int)g_rcv_shift : -1);
+    unsigned char sa[80];
+    size_t sl;
+    if (c->key.v6) {
+        unsigned char opt[8] = { 2, 4, TUN6_MSS >> 8, TUN6_MSS & 0xFF, 1, 3, 3, g_rcv_shift };
+        sl = tcp6_build(sa, sizeof(sa), c->key.dst.b, c->key.src.b, c->key.dport, c->key.sport,
+                        1, c->client_seq, TCP_SYN | TCP_ACK, RCV_WND_MIN, opt,
+                        c->ws_on ? 8 : 4, NULL, 0);
+    } else {
+        sl = tcp_build(sa, sizeof(sa), c->key.dst.v4, c->key.src.v4,
+                       c->key.dport, c->key.sport,
+                       1, c->client_seq, TCP_SYN | TCP_ACK,
+                       NULL, 0, RCV_WND_MIN, TUN_MSS, c->ws_on ? (int)g_rcv_shift : -1);
+    }
     if (sl) tun_write_ctl(tun, sa, sl);
     TR("SYN-ACK sent (ack=%u)\n", c->client_seq);
 }
@@ -1432,23 +1468,15 @@ static void send_synack(struct conn *c, const struct tun_dev *tun) {
 /* RST to the client, and free the record. A UDP flow has nothing to reset: the client has no
  * connection, and learns of the close by the lack of answers, as of any lost datagram. */
 static void conn_rst(const struct conn *c, const struct tun_dev *tun) {
-    unsigned char rst[64];
     /* The client accepts RST only with a sequence number EQUAL to the expected one (RFC 5961);
      * one inside the window but not equal draws a challenge ACK, and the connection stays. With
      * data in flight the expected number is either our_seq (all arrived, the ACK is on its way)
      * or client_ack (nothing arrived): send RST with the second, then with the first. If part
      * arrived, the client answers with a challenge ACK, and handle_packet answers that ACK
      * without a connection with RST. */
-    if (c->client_ack != c->our_seq) {
-        size_t rl = tcp_build(rst, sizeof(rst), c->key.dst, c->key.src, c->key.dport, c->key.sport,
-                              c->client_ack, c->client_seq, TCP_RST | TCP_ACK, NULL, 0, 0, 0, -1);
-        if (rl) tun_write_ctl(tun, rst, rl);
-    }
-    size_t rl = tcp_build(rst, sizeof(rst), c->key.dst, c->key.src,
-                          c->key.dport, c->key.sport,
-                          c->our_seq, c->client_seq, TCP_RST | TCP_ACK,
-                          NULL, 0, 0, 0, -1);
-    if (rl) tun_write_ctl(tun, rst, rl);
+    if (c->client_ack != c->our_seq)
+        ctl_reply(tun, &c->key, c->client_ack, c->client_seq, TCP_RST | TCP_ACK, 0);
+    ctl_reply(tun, &c->key, c->our_seq, c->client_seq, TCP_RST | TCP_ACK, 0);
 }
 
 static void conn_reset(struct conn *c, const struct tun_dev *tun) {
@@ -1558,8 +1586,14 @@ struct emit_ctx {
 static int emit_dgram(void *arg, const unsigned char *p, size_t n) {
     struct emit_ctx *e = arg;
     struct conn *c = e->c;
-    if (udp_write_to_client(e->tun, c->key.dst, c->key.src, c->key.dport, c->key.sport,
-                            p, n, ++g_ip_id) != 0)
+    if (c->key.v6 && n > TUN_MTU - 48) {
+        if (g_stats) g_st.udp_drops++;
+        return 0;
+    }
+    if (c->key.v6 ? udp6_write_to_client(e->tun, c->key.dst.b, c->key.src.b, c->key.dport,
+                                         c->key.sport, p, n)
+                  : udp_write_to_client(e->tun, c->key.dst.v4, c->key.src.v4, c->key.dport,
+                                        c->key.sport, p, n, ++g_ip_id))
         return -1;
     TR("datagram to client, %zu bytes\n", n);
     /* The timestamp moves on EVERY datagram, not only on client packets: a receive-only flow
@@ -1584,7 +1618,7 @@ static int emit_ib_dgram(void *arg, const unsigned char *p, size_t n) {
     if (n > sizeof b - 10 || !a->client.sin_family) return 0;
     b[0] = b[1] = b[2] = 0;
     b[3] = 1;
-    memcpy(b + 4, &c->key.dst, 4);
+    memcpy(b + 4, &c->key.dst.v4, 4);
     b[8] = (unsigned char)(c->key.dport >> 8);
     b[9] = (unsigned char)c->key.dport;
     memcpy(b + 10, p, n);
@@ -1625,16 +1659,12 @@ static int emit_to_client(struct conn *c, const struct tun_dev *tun,
     if (!c->rtx.len) { c->rtx_at = g_now_ns; c->rto_ms = rto_floor(); }
     rtx_push(&c->rtx, p, (uint32_t)n);
 
-    size_t seg = tun->gso ? (size_t)TUN_GSO_MAX : (size_t)TUN_MSS;
+    size_t seg = seg_max(c, tun);
     size_t sent = 0;
     while (sent < n) {
         size_t chunk = n - sent > seg ? seg : n - sent;
-        unsigned char hdr[TUN_HDR_LEN];
-        /* We answer as the server: addresses and ports swapped. */
-        tcp_hdr_build(hdr, c->key.dst, c->key.src, c->key.dport, c->key.sport,
-                      c->our_seq, c->client_seq, TCP_ACK | TCP_PSH, chunk, rcv_win_field(c));
         uint64_t w0 = g_stats ? now_ns() : 0;
-        if (tun_write_data(tun, hdr, p + sent, chunk) != 0) {
+        if (seg_write(tun, c, c->our_seq, p + sent, chunk) != 0) {
             TR("TUN write failed (%zu bytes): %s\n", chunk, strerror(errno));
             return -1;
         }
@@ -1656,17 +1686,13 @@ static int emit_to_client(struct conn *c, const struct tun_dev *tun,
  * The segment size is the one used for sending: with offload a whole 16 KB piece may have been
  * lost, and resending it in 1460-byte pieces would stretch recovery over ten timeouts. */
 static void rtx_resend(struct conn *c, const struct tun_dev *tun, const char *why) {
-    uint32_t seg = tun->gso ? (uint32_t)TUN_GSO_MAX : (uint32_t)TUN_MSS;
     const unsigned char *body = NULL;
-    uint32_t n = rtx_peek(&c->rtx, seg, &body);
+    uint32_t n = rtx_peek(&c->rtx, (uint32_t)seg_max(c, tun), &body);
     if (!n) return;
 
-    unsigned char hdr[TUN_HDR_LEN];
-    tcp_hdr_build(hdr, c->key.dst, c->key.src, c->key.dport, c->key.sport,
-                  c->client_ack, c->client_seq, TCP_ACK | TCP_PSH, n, rcv_win_field(c));
     TR("resend conn#%ld: %u bytes from seq=%u (%s)\n",
        (long)(c - g_conns), n, c->client_ack, why);
-    if (tun_write_data(tun, hdr, body, n) != 0) return;
+    if (seg_write(tun, c, c->client_ack, body, n) != 0) return;
     if (g_stats) { g_st.rtx_sends++; g_st.rtx_bytes += n; }
     c->rtx_at = g_now_ns;
     c->rto_ms = c->rto_ms * 2 > RTO_MAX_MS ? RTO_MAX_MS : c->rto_ms * 2;
@@ -2005,7 +2031,8 @@ static int udp_out(struct conn *c, const unsigned char *p, size_t dn) {
 #define FIN_RECENT_S 60
 
 static __thread struct fin_recent {
-    uint32_t src, dst;          /* the client's flow, as in its packets */
+    union fk_addr src, dst;     /* the client's flow, as in its packets */
+    uint8_t v6;
     uint16_t sport, dport;
     uint32_t fin_end;           /* our FIN's sequence number + 1: what the client acknowledges */
     uint16_t win;               /* the window field our FIN carried, repeated in the last ACK */
@@ -2017,6 +2044,7 @@ static void fin_recent_add(const struct conn *c) {
     struct fin_recent *r = &g_fin_recent[g_fin_recent_i++ % FIN_RECENT];
     r->src = c->key.src;
     r->dst = c->key.dst;
+    r->v6 = c->key.v6;
     r->sport = c->key.sport;
     r->dport = c->key.dport;
     r->fin_end = c->our_seq + 1;
@@ -2029,7 +2057,7 @@ static void fin_recent_add(const struct conn *c) {
 static int fin_recent_take(const struct tun_dev *tun, const struct flow_key *k, size_t data_n) {
     for (unsigned i = 0; i < FIN_RECENT; i++) {
         struct fin_recent *r = &g_fin_recent[i];
-        if (!r->at || r->src != k->src || r->dst != k->dst || r->sport != k->sport ||
+        if (!r->at || !fk_same_addr(&r->src, &k->src) || !fk_same_addr(&r->dst, &k->dst) || r->v6 != k->v6 || r->sport != k->sport ||
             r->dport != k->dport || g_now_s - r->at > FIN_RECENT_S ||
             !(k->tcp_flags & TCP_ACK) || k->ack != r->fin_end)
             continue;
@@ -2039,11 +2067,7 @@ static int fin_recent_take(const struct tun_dev *tun, const struct flow_key *k, 
          * answer it. */
         if (data_n) return 0;
         if (k->tcp_flags & TCP_FIN) {
-            unsigned char ack[64];
-            size_t al = tcp_build(ack, sizeof(ack), k->dst, k->src, k->dport, k->sport,
-                                  r->fin_end, k->seq + (uint32_t)data_n + 1, TCP_ACK,
-                                  NULL, 0, r->win, 0, -1);
-            if (al) tun_write_ctl(tun, ack, al);
+            ctl_reply(tun, k, r->fin_end, k->seq + (uint32_t)data_n + 1, TCP_ACK, r->win);
             r->at = 0;          /* both halves closed: the flow is over */
         }
         return 1;
@@ -2167,18 +2191,19 @@ static void handle_packet(const struct tun_dev *tun, const unsigned char *pkt, s
     }
 
     if (ip_parse(pkt, n, &k, &off) != 0) { TR("packet not parsed (%zu bytes)\n", n); return; }
+    if (k.v6) n = 40 + (((size_t)pkt[4] << 8) | pkt[5]);
     /* Anything but the next plain data segment of the gathered flow sends the gathered bytes
      * first: they come before it in the stream, or belong to another flow. */
     if (g_up.c) {
         const struct conn *u = g_up.c;
-        if (k.proto != 6 || k.src != u->key.src || k.dst != u->key.dst ||
+        if (k.proto != 6 || !fk_same_addr(&k.src, &u->key.src) || !fk_same_addr(&k.dst, &u->key.dst) || k.v6 != u->key.v6 ||
             k.sport != u->key.sport || k.dport != u->key.dport || n == off ||
             (k.tcp_flags & (TCP_SYN | TCP_RST | TCP_FIN)) || k.seq != u->client_seq + g_up.n)
             up_flush(tun);
     }
     TR("%u.%u.%u.%u:%u -> %u.%u.%u.%u:%u proto=%u flags=0x%02x len=%zu\n",
-       k.src&255,(k.src>>8)&255,(k.src>>16)&255,(k.src>>24)&255, k.sport,
-       k.dst&255,(k.dst>>8)&255,(k.dst>>16)&255,(k.dst>>24)&255, k.dport,
+       k.src.v4&255,(k.src.v4>>8)&255,(k.src.v4>>16)&255,(k.src.v4>>24)&255, k.sport,
+       k.dst.v4&255,(k.dst.v4>>8)&255,(k.dst.v4>>16)&255,(k.dst.v4>>24)&255, k.dport,
        k.proto, k.tcp_flags, n - off);
 
     /* Anything but TCP and UDP the tunnel cannot carry: ICMP, ESP and the rest have no command
@@ -2241,6 +2266,7 @@ static void handle_packet(const struct tun_dev *tun, const unsigned char *pkt, s
         /* Protocol state on the flow (for VLESS, UUID and Vision). On failure the dialer logs
          * the reason itself (an invalid node UUID). */
         if (g_dl->ops->flow_open(g_dl->ctx, SESS(c), &k, 0) != 0) {
+            if (k.v6) ctl_reply(tun, &k, 0, k.seq + 1, TCP_RST | TCP_ACK, 0);
             conn_drop(c);
             return;
         }
@@ -2321,10 +2347,7 @@ static void handle_packet(const struct tun_dev *tun, const unsigned char *pkt, s
          * fin_recent_take handles them. Only with one loop thread (g_one_worker). */
         if (g_one_worker && !(k.tcp_flags & TCP_RST) && (k.tcp_flags & TCP_ACK) &&
             !fin_recent_take(tun, &k, n - off)) {
-            unsigned char rst[64];
-            size_t rl = tcp_build(rst, sizeof(rst), k.dst, k.src, k.dport, k.sport,
-                                  k.ack, 0, TCP_RST, NULL, 0, 0, 0, -1);
-            if (rl) tun_write_ctl(tun, rst, rl);
+            ctl_reply(tun, &k, k.ack, 0, TCP_RST, 0);
             TR("segment without a connection — RST\n");
         }
         return;
@@ -2475,11 +2498,7 @@ static void flush_acks(const struct tun_dev *tun) {
             long r = conn_room(c);
             if (r >= 0) c->room_seen = r > 0x7FFFFFFF ? 0x7FFFFFFFu : (uint32_t)r;
         }
-        unsigned char ackp[64];
-        size_t al = tcp_build(ackp, sizeof(ackp), c->key.dst, c->key.src,
-                              c->key.dport, c->key.sport,
-                              c->our_seq, c->client_seq, TCP_ACK, NULL, 0, rcv_win_field(c), 0, -1);
-        if (al) tun_write_ctl(tun, ackp, al);
+        ctl_reply(tun, &c->key, c->our_seq, c->client_seq, TCP_ACK, rcv_win_field(c));
     }
 }
 
@@ -2774,12 +2793,7 @@ static int conn_deadlines(struct conn *c, const struct tun_dev *tun, uint64_t no
          * a FIN takes a sequence number, and Linux does not send one into a zero window. The
          * client's own FIN then waited for a window update that never came (LAST-ACK for good,
          * tests/run-tunnel-fin.sh `separate`). */
-        unsigned char fin[64];
-        size_t fl = tcp_build(fin, sizeof(fin), c->key.dst, c->key.src,
-                              c->key.dport, c->key.sport,
-                              c->our_seq, c->client_seq, TCP_FIN | TCP_ACK,
-                              NULL, 0, rcv_win_field(c), 0, -1);
-        if (fl) tun_write_ctl(tun, fin, fl);
+        ctl_reply(tun, &c->key, c->our_seq, c->client_seq, TCP_FIN | TCP_ACK, rcv_win_field(c));
         if (!c->is_udp) fin_recent_add(c);
         conn_drop(c);
         return 1;
@@ -2951,8 +2965,8 @@ static void ib_connect(struct loop *L, struct ib_hs *s) {
     c->hnext = -1;
     c->born_turn = g_turn;
     c->room_seen = UINT32_MAX;
-    c->key.src = s->peer;
-    c->key.dst = htonl(s->h.ip);
+    c->key.src.v4 = s->peer;
+    c->key.dst.v4 = htonl(s->h.ip);
     c->key.sport = s->pport;
     c->key.dport = s->h.port;
     c->key.proto = 6;
@@ -3060,7 +3074,7 @@ static int ib_udp_slot(struct ib_assoc *a, uint32_t dst, uint16_t port, struct c
             continue;
         }
         struct conn *c = &g_conns[idx];
-        if (c->key.dst == dst && c->key.dport == port) {
+        if (c->key.dst.v4 == dst && c->key.dport == port) {
             *found = c;
             return k;
         }
@@ -3087,8 +3101,8 @@ static void ib_udp_out(struct loop *L, struct ib_assoc *a, uint32_t dst, uint16_
         c->fd = c->cfd = -1;
         c->hnext = -1;
         c->born_turn = g_turn;
-        c->key.src = a->client_ip;
-        c->key.dst = dst;
+        c->key.src.v4 = a->client_ip;
+        c->key.dst.v4 = dst;
         c->key.sport = ntohs(a->client.sin_port);
         c->key.dport = port;
         c->key.proto = 17;
@@ -3376,8 +3390,8 @@ static void sock_open(const struct tun_dev *tun, int fd, uint32_t peer, uint16_t
     c->hnext = -1;
     c->born_turn = g_turn;
     c->room_seen = UINT32_MAX;
-    c->key.src = peer;
-    c->key.dst = dst;
+    c->key.src.v4 = peer;
+    c->key.dst.v4 = dst;
     c->key.sport = pport;
     c->key.dport = oport;
     c->key.proto = 6;

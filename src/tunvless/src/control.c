@@ -131,12 +131,15 @@ void ctl_emit_node_down(const char *node, int index, const char *why) {
     if (n > 0 && (size_t)n < sizeof l) emit(l, (size_t)n);
 }
 
-void ctl_emit_active(const char *const *names, const int *index, size_t cnt) {
-    char l[1024], v[300], ix[128];
+void ctl_emit_active(const char *const *names, const int *index, const int *v6, size_t cnt) {
+    char l[1024], v[300], ix[192];
     if (cnt > 8) cnt = 8;
     size_t xo = (size_t)snprintf(ix, sizeof ix, "],\"index\":[");
     for (size_t i = 0; i < cnt; i++)
         xo += (size_t)snprintf(ix + xo, sizeof ix - xo, "%s%d", i ? "," : "", index[i]);
+    xo += (size_t)snprintf(ix + xo, sizeof ix - xo, "],\"v6\":[");
+    for (size_t i = 0; i < cnt; i++)
+        xo += (size_t)snprintf(ix + xo, sizeof ix - xo, "%s%s", i ? "," : "", v6[i] ? "true" : "false");
     xo += (size_t)snprintf(ix + xo, sizeof ix - xo, "]}\n");
     size_t o = (size_t)snprintf(l, sizeof l, "{\"type\":\"active\",\"nodes\":[");
     size_t room = sizeof l - o - xo - 1;

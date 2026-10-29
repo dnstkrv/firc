@@ -57,6 +57,7 @@ typedef struct {
     int64_t syn_since;
     keys_t downs;
     keys_t acts;
+    keys_t v6s;
     firc_tunwatch_t watch;
     firc_logrep_t no_node;
     ib_t ib[FIRC_TUN_MAX_INBOUNDS];
@@ -252,6 +253,7 @@ static void track_nodes(firc_tunrun_t *t, const firc_tun_state_t *st, const firc
     const sent_t *sent = &t->sent[i];
     if (ev == NULL) {
         x->acts.n = 0;
+        x->v6s.n = 0;
         if (st->status == FIRC_TUN_ST_STARTING || st->status == FIRC_TUN_ST_OFF) {
             x->downs.n = 0;
         }
@@ -266,12 +268,17 @@ static void track_nodes(firc_tunrun_t *t, const firc_tun_state_t *st, const firc
         break;
     case FIRC_TEV_ACTIVE:
         x->acts.n = 0;
+        x->v6s.n = 0;
         for (size_t k = 0; k < ev->n_active && k < 8; k++) {
             each_key(sent, ev->active_pos[k], ev->active[k], &x->acts, key_add);
+            if (ev->active_v6[k]) {
+                each_key(sent, ev->active_pos[k], ev->active[k], &x->v6s, key_add);
+            }
         }
         break;
     case FIRC_TEV_NO_NODE:
         x->acts.n = 0;
+        x->v6s.n = 0;
         break;
     default:
         break;
@@ -1028,6 +1035,7 @@ static firc_err_t push(firc_tunrun_t *t, bool want)
             t->sent[i] = fresh;
             prune(&t->ext[i].downs, &t->sent[i]);
             prune(&t->ext[i].acts, &t->sent[i]);
+            prune(&t->ext[i].v6s, &t->sent[i]);
         }
         if (tun->enable && t->sent[i].n == 0) {
             if (!t->waiting[i]) {
@@ -1072,6 +1080,7 @@ static void free_ext(ext_t *v, size_t n)
     for (size_t i = 0; v != NULL && i < n; i++) {
         free(v[i].downs.v);
         free(v[i].acts.v);
+        free(v[i].v6s.v);
         free(v[i].sent_in);
     }
     free(v);
@@ -1370,6 +1379,12 @@ bool firc_tunrun_node_active(const firc_tunrun_t *t, const char *id, const char 
 {
     ssize_t i = find(&t->cur, id);
     return i >= 0 && key_find(&t->ext[i].acts, key) != NULL;
+}
+
+bool firc_tunrun_node_v6(const firc_tunrun_t *t, const char *id, const char *key)
+{
+    ssize_t i = find(&t->cur, id);
+    return i >= 0 && key_find(&t->ext[i].v6s, key) != NULL;
 }
 
 bool firc_tunrun_mark_of(const firc_tunrun_t *t, const char *id, uint32_t *mark, bool *held)

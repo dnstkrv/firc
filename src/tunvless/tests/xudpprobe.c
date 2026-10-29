@@ -61,8 +61,8 @@ int main(int argc, char **argv) {
     if (rc) { printf("node unusable: rc=%d %s\n", rc, n.skip_reason); return 2; }
     struct flow_key k;
     memset(&k, 0, sizeof k);
-    inet_pton(AF_INET, "10.99.1.9", &k.src);
-    inet_pton(AF_INET, argv[2], &k.dst);
+    inet_pton(AF_INET, "10.99.1.9", &k.src.v4);
+    inet_pton(AF_INET, argv[2], &k.dst.v4);
     k.sport = 40000;
     k.dport = (uint16_t)atoi(argv[3]);
     int cnt = argc > 4 ? atoi(argv[4]) : 3;

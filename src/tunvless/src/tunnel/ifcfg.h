@@ -26,4 +26,8 @@ int ifcfg_route_get(uint32_t dst, uint32_t *gw, unsigned *oif);
 int ifcfg_route_via(uint32_t dst, uint32_t gw, unsigned oif, uint32_t table);
 int ifcfg_route_unvia(uint32_t dst, uint32_t gw, unsigned oif, uint32_t table);
 
+void ifcfg_addr6_of(uint32_t v4_be, unsigned char out[16]);
+
+int ifcfg_addr6_set(int ifindex, const unsigned char addr[16], int on);
+
 #endif

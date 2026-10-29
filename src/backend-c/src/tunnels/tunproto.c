@@ -100,6 +100,19 @@ static bool parse_active(const cJSON *root, firc_tev_t *out)
             return false;
         snprintf(out->active[out->n_active++], sizeof(out->active[0]), "%s", it->valuestring);
     }
+    const cJSON *v6 = cJSON_GetObjectItemCaseSensitive(root, "v6");
+    if (cJSON_IsArray(v6) && (size_t)cJSON_GetArraySize(v6) == out->n_active) {
+        bool flags[8] = {false};
+        size_t j = 0;
+        bool all_bool = true;
+        cJSON_ArrayForEach(it, v6)
+        {
+            all_bool = all_bool && cJSON_IsBool(it);
+            flags[j++] = cJSON_IsTrue(it);
+        }
+        if (all_bool)
+            memcpy(out->active_v6, flags, sizeof flags);
+    }
     const cJSON *ix = cJSON_GetObjectItemCaseSensitive(root, "index");
     if (ix == NULL)
         return true;

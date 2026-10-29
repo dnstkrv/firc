@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Target for tests/run-xray.sh: HTTP on one address, no keep-alive.
 
-  grpc-target.py ADDRESS PORT
+  grpc-target.py ADDRESS PORT [log-host]
 
   /pg/<KB>   a page of that size, then the connection closes (Connection: close);
   /big/<MB>  a large response, read for as long as needed (a long download);
@@ -24,6 +24,10 @@ def handle(c):
         head, _, rest = buf.partition(b'\r\n\r\n')
         parts = head.split(b'\r\n', 1)[0].decode('latin1').split()
         path = parts[1] if len(parts) > 1 else '/'
+        if LOG_HOST:
+            for h in head.split(b'\r\n')[1:]:
+                if h.lower().startswith(b'host:'):
+                    print('host ' + h.split(b':', 1)[1].strip().decode('latin1'), flush=True)
         if path.startswith('/up'):
             cl = 0
             for h in head.split(b'\r\n')[1:]:
@@ -58,8 +62,10 @@ def handle(c):
         except Exception:
             pass
 
+LOG_HOST = len(sys.argv) > 3 and sys.argv[3] == 'log-host'
+
 def main():
-    s = socket.socket()
+    s = socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((sys.argv[1], int(sys.argv[2])))
     s.listen(4096)

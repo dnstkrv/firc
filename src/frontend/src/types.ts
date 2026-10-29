@@ -251,6 +251,7 @@ export type TunnelNodeState = {
   state: "active" | "down" | "reserve" | "excluded" | "missing" | "skipped";
   since: number;
   skipReason?: string;
+  v6?: boolean;
 };
 
 export type TunnelSubState = {

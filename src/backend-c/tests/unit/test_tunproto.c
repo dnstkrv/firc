@@ -264,6 +264,33 @@ TEST parse_index_next_to_names(void)
     PASS();
 }
 
+TEST active_v6_flags_stay_aligned_with_the_names(void)
+{
+    firc_tev_t e = parse("{\"type\":\"active\",\"nodes\":[\"A\",\"B\",\"C\"],\"index\":[0,1,2],\"v6\":[false,true,false]}");
+    ASSERT_EQ(FIRC_TEV_ACTIVE, e.kind);
+    ASSERT(!e.active_v6[0]);
+    ASSERT(e.active_v6[1]);
+    ASSERT(!e.active_v6[2]);
+    e = parse("{\"type\":\"active\",\"nodes\":[\"A\",\"B\"]}");
+    ASSERT_EQ(FIRC_TEV_ACTIVE, e.kind);
+    ASSERT(!e.active_v6[0] && !e.active_v6[1]);
+    PASS();
+}
+
+TEST a_v6_array_of_another_length_is_ignored_whole(void)
+{
+    firc_tev_t e = parse("{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"v6\":[true]}");
+    ASSERT_EQ(FIRC_TEV_ACTIVE, e.kind);
+    ASSERT(!e.active_v6[0] && !e.active_v6[1]);
+    e = parse("{\"type\":\"active\",\"nodes\":[\"A\"],\"v6\":[true,true]}");
+    ASSERT_EQ(FIRC_TEV_ACTIVE, e.kind);
+    ASSERT(!e.active_v6[0] && !e.active_v6[1]);
+    e = parse("{\"type\":\"active\",\"nodes\":[\"A\",\"B\"],\"v6\":[true,1]}");
+    ASSERT_EQ(FIRC_TEV_ACTIVE, e.kind);
+    ASSERT(!e.active_v6[0] && !e.active_v6[1]);
+    PASS();
+}
+
 TEST an_empty_active_list_is_no_live_node(void)
 {
     /* catches: the empty active list tunvless sends when its last node dies read as malformed */
@@ -534,6 +561,8 @@ int main(int argc, char **argv)
     RUN_TEST(embedded_nul_does_not_read_past_len);
     RUN_TEST(parse_nodes_ack_and_pins_full);
     RUN_TEST(parse_index_next_to_names);
+    RUN_TEST(active_v6_flags_stay_aligned_with_the_names);
+    RUN_TEST(a_v6_array_of_another_length_is_ignored_whole);
     RUN_TEST(an_empty_active_list_is_no_live_node);
     RUN_TEST(ready_carries_tcp_port_and_absent_reads_as_zero);
     RUN_TEST(a_bad_tcp_port_is_bad);

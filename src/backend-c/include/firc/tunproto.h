@@ -57,6 +57,7 @@ typedef struct {
     char active[8][128];
     int active_index[8];
     int active_pos[8];
+    bool active_v6[8];
     size_t n_active;
     uint16_t tcp_port;
     uint16_t ib_port;

@@ -1631,6 +1631,10 @@ definitions:
         - skipped
         example: active
         type: string
+      v6:
+        description: 'Present and true only on an active node tunvless found to carry IPv6'
+        example: true
+        type: boolean
     type: object
   types.TunnelSubState:
     properties:

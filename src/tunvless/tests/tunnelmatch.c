@@ -226,7 +226,7 @@ static int dev_drain(struct flow_key *last) {
 static struct flow_key cli_key(void) {
     struct flow_key k;
     memset(&k, 0, sizeof(k));
-    k.src = CLI_IP; k.dst = SRV_IP; k.sport = CLI_PORT; k.dport = SRV_PORT; k.proto = 6;
+    k.src.v4 = CLI_IP; k.dst.v4 = SRV_IP; k.sport = CLI_PORT; k.dport = SRV_PORT; k.proto = 6;
     return k;
 }
 
@@ -1033,8 +1033,11 @@ static void f_clear(void *sess) {
 }
 static int f_fd(const void *sess) { return ((const struct fsess *)sess)->fd; }
 static int f_has_data(const void *sess) { (void)sess; return 0; }
+static int g_fopen_fail;
+static struct flow_key g_fopen_key;
 static int f_flow_open(const void *ctx, void *sess, const struct flow_key *k, int udp) {
-    (void)k;
+    g_fopen_key = *k;
+    if (g_fopen_fail) return -1;
     struct fsess *s = sess;
     s->node = ctx;
     s->udp = udp;
@@ -1120,7 +1123,7 @@ static int pm_drain(unsigned *flags, uint32_t *seq) {
 static struct flow_key pm_key(uint16_t sport, uint32_t dst) {
     struct flow_key k;
     memset(&k, 0, sizeof(k));
-    k.src = CLI_IP; k.dst = dst; k.sport = sport; k.dport = 443; k.proto = 6;
+    k.src.v4 = CLI_IP; k.dst.v4 = dst; k.sport = sport; k.dport = 443; k.proto = 6;
     return k;
 }
 
@@ -1214,6 +1217,8 @@ static void pool_new_ex(int active, int by, int ncand, int checked) {
     g_pl.said_up = 0;
     g_pl.pub = 0;
     g_pl.why[0] = '\0';
+    g_pl.any_v6 = 0;
+    g_pl.sig6 = 0;
     struct pool_cfg pc = {
         .proto = &f_proto, .node = f_at, .sel = g_cand,
         .sel_n = (size_t)ncand, .first = 0, .checked = checked, .active = active, .by = by,
@@ -1311,13 +1316,13 @@ static void t_pool_pick(void) {
     int at[200], per[3] = { 0, 0, 0 }, same = 1;
     struct flow_key k = pm_key(1, 0);
     for (int i = 0; i < 200; i++) {
-        k.dst = htonl(0x5db80000u + (uint32_t)i * 7919u);
+        k.dst.v4 = htonl(0x5db80000u + (uint32_t)i * 7919u);
         k.sport = (uint16_t)(1000 + i);
         at[i] = pl_pick(&k);
         k.sport = (uint16_t)(2000 + i);
-        k.src = htonl(0x0a000099u);
+        k.src.v4 = htonl(0x0a000099u);
         if (pl_pick(&k) != at[i]) same = 0;
-        k.src = CLI_IP;
+        k.src.v4 = CLI_IP;
         per[at[i]]++;
     }
     check(same, "by site: a site stays on one node whatever the port and the client");
@@ -1325,7 +1330,7 @@ static void t_pool_pick(void) {
     g_pl.slot[1].up = 0;
     int kept = 1, moved = 1;
     for (int i = 0; i < 200; i++) {
-        k.dst = htonl(0x5db80000u + (uint32_t)i * 7919u);
+        k.dst.v4 = htonl(0x5db80000u + (uint32_t)i * 7919u);
         int now = pl_pick(&k);
         if (at[i] != 1 && now != at[i]) kept = 0;
         if (at[i] == 1 && now == 1) moved = 0;
@@ -1337,10 +1342,10 @@ static void t_pool_pick(void) {
     pool_new(3, POOL_BY_SITE_CLIENT, 5);
     pl_check(1);
     pl_check(2);
-    k.dst = htonl(0x5db80001u);
+    k.dst.v4 = htonl(0x5db80001u);
     int seen[3] = { 0, 0, 0 }, stable = 1;
     for (uint32_t c = 0; c < 60; c++) {
-        k.src = htonl(0x0a000002u + c);
+        k.src.v4 = htonl(0x0a000002u + c);
         int s1 = pl_pick(&k);
         k.sport = (uint16_t)(k.sport + 1);
         if (pl_pick(&k) != s1) stable = 0;
@@ -1935,7 +1940,7 @@ static void t_pool_swap_events(void) {
     pl_check(0);
     g_pl.sig[0] = '\0';
     /* catches: events without the node's index in the store */
-    check(stdout_has(publish, NULL, "{\"type\":\"active\",\"nodes\":[\"n3\",\"n1\"],\"index\":[3,1]}"),
+    check(stdout_has(publish, NULL, "{\"type\":\"active\",\"nodes\":[\"n3\",\"n1\"],\"index\":[3,1],\"v6\":[false,false]}"),
           "the active event carries each node's index");
     g_fn[3].alive = 0;
     g_pl.slot[0].lost = 1;
@@ -1953,7 +1958,7 @@ static void t_pool_swap_events(void) {
     /* catches: a drain the pool thread does not publish */
     check(next == -1, "a drain asks the pool thread to publish the active set");
     /* catches: a removed node still named active when nothing replaces it */
-    check(stdout_has(check0, NULL, "{\"type\":\"active\",\"nodes\":[],\"index\":[]}"),
+    check(stdout_has(check0, NULL, "{\"type\":\"active\",\"nodes\":[],\"index\":[],\"v6\":[]}"),
           "nothing active after a swap: the active event says so");
     g_fn[3].alive = 1;
 }
@@ -2102,6 +2107,294 @@ static void t_pin_never_takes_a_spare(void) {
     g_pl_ops.clear(g_pin);
 }
 
+static int g_v6ok[5];
+static int g_probes6[5];
+static int g_v6cb_n, g_v6cb_last = -1;
+static int g_hook6_node = -1;
+static int g_pick6_in_probe = -2;
+static int g_v6_in_probe = -1;
+static int f_probe6(const void *node, int t, char *why, size_t n) {
+    (void)t;
+    int i = (int)((const struct fnode *)node - g_fn);
+    g_probes6[i]++;
+    if (i == g_hook6_node) {
+        g_hook6_node = -1;
+        pool_select(g_hook_sel, g_hook_n);
+    }
+    if (g_pick6_in_probe == -1) {
+        struct flow_key k = pm_key(1, 0);
+        k.v6 = 1;
+        pthread_mutex_lock(&g_pl.mu);
+        g_pick6_in_probe = pl_pick(&k);
+        g_v6_in_probe = g_pl.slot[0].v6;
+        pthread_mutex_unlock(&g_pl.mu);
+    }
+    if (g_v6ok[i]) return 0;
+    snprintf(why, n, "no IPv6");
+    return -1;
+}
+static const struct pool_proto f6_proto = { .ops = &f_ops, .probe = f_probe, .probe6 = f_probe6,
+                                            .name = f_name };
+static int g_v6cb_rc;
+static int f_v6cb(int on) { g_v6cb_n++; g_v6cb_last = on; return g_v6cb_rc; }
+
+static void pool_new6(int active, int by, int ncand, int checked) {
+    pool_new_ex(active, by, ncand, checked);
+    g_pl.cf.proto = &f6_proto;
+    g_pl.cf.v6_changed = f_v6cb;
+    memset(g_probes6, 0, sizeof g_probes6);
+    g_v6cb_n = 0;
+    g_v6cb_last = -1;
+    g_v6cb_rc = 0;
+}
+
+static struct flow_key pkey6(uint16_t sport, unsigned char last) {
+    struct flow_key k = pm_key(sport, 0);
+    static const unsigned char cli[16] = { 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
+    static const unsigned char srv[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    memcpy(k.src.b, cli, 16);
+    memcpy(k.dst.b, srv, 16);
+    k.dst.b[15] = last;
+    k.v6 = 1;
+    return k;
+}
+
+static void t_pool_v6_flows_only_to_a_v6_node(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    for (int by = POOL_BY_CONNECTION; by <= POOL_BY_SITE_CLIENT; by++) {
+        pool_new6(2, by, 3, 1);
+        pl_check(1);
+        pl_check(0);
+        int only0 = 1, v4[2] = { 0, 0 };
+        for (int i = 0; i < 300; i++) {
+            struct flow_key k = pkey6((uint16_t)(1000 + i), (unsigned char)i);
+            k.src.b[14] = (unsigned char)i;
+            if (pl_pick(&k) != 0) only0 = 0;
+            struct flow_key k4 = pm_key((uint16_t)(1000 + i), htonl(0x5db80000u + (uint32_t)i * 7919u));
+            k4.src.v4 = htonl(0x0a000002u + (uint32_t)i);
+            int s = pl_pick(&k4);
+            if (s == 0 || s == 1) v4[s]++;
+        }
+        check(only0, "v6: every v6 flow goes to the one v6-capable node, whatever the spread");
+        check(v4[0] > 30 && v4[1] > 30, "v6: v4 flows still spread over both nodes");
+    }
+}
+
+static void t_pool_v6_none_refuses_v6_only(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    pl_check(0);
+    static unsigned char s6[PL_HDR + sizeof(struct fsess)], s4[PL_HDR + sizeof(struct fsess)];
+    pl_clear(s6);
+    pl_clear(s4);
+    struct flow_key k6 = pkey6(2000, 1), k4 = pm_key(2000, htonl(0x5db80001u));
+    check(pl_flow_open(&g_pl, s6, &k6, 0) == -1, "v6: no v6-capable node — a v6 flow does not open");
+    check(pl_flow_open(&g_pl, s4, &k4, 0) == 0, "v6: no v6-capable node — a v4 flow opens");
+    g_v6ok[0] = 1;
+    pl_check(0);
+    g_pl.slot[0].up = 0;
+    check(pl_pick(&k6) == -1 && pl_pick(&k4) == 0,
+          "v6: a dead v6 node is no fallback for a v6 flow, as it is for a v4 one");
+    g_pl.slot[0].up = 1;
+}
+
+static void t_pool_v6_changed_once_per_flip(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    pl_check(0);
+    check(g_v6cb_n == 1 && g_v6cb_last == 1 && g_probes6[0] == 1,
+          "v6: the first passing v6 check turns IPv6 on once");
+    pl_check(0);
+    check(g_v6cb_n == 1 && g_probes6[0] == 2, "v6: the next passing check does not call it again");
+    g_fn[0].alive = 0;
+    pl_check(0);
+    check(g_pl.slot[0].up && g_pl.slot[0].v6 && g_v6cb_n == 1 && g_probes6[0] == 2,
+          "v6: one failed v4 check keeping the node up leaves IPv6 on and skips the v6 check");
+    pl_check(0);
+    check(!g_pl.slot[0].up && g_v6cb_n == 2 && g_v6cb_last == 0 && g_probes6[0] == 2,
+          "v6: the node dies — IPv6 off once, no v6 check of a dead node");
+    pl_check(0);
+    check(g_v6cb_n == 2 && g_probes6[0] == 2, "v6: a failed search round neither checks v6 nor calls again");
+    g_fn[0].alive = 1;
+    pl_check(0);
+    check(g_pl.slot[0].up && g_v6cb_n == 3 && g_v6cb_last == 1 && g_probes6[0] == 3,
+          "v6: the node answers again — IPv6 on once");
+    g_v6ok[0] = 0;
+    pl_check(0);
+    check(g_pl.slot[0].up && !g_pl.slot[0].v6 && g_v6cb_n == 4 && g_v6cb_last == 0,
+          "v6: one failed v6 check turns IPv6 off");
+    g_v6ok[0] = 1;
+}
+
+static void t_pool_v6_failed_apply_retried_while_on(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    g_v6cb_rc = -1;
+    pl_check(0);
+    check(g_v6cb_n == 1 && g_v6cb_last == 1, "v6: the first apply is tried");
+    pl_check(0);
+    check(g_v6cb_n == 2 && g_v6cb_last == 1, "v6: a failed apply is tried again at the next check");
+    g_v6cb_rc = 0;
+    pl_check(0);
+    check(g_v6cb_n == 3, "v6: a failed apply is tried until it succeeds");
+    pl_check(0);
+    check(g_v6cb_n == 3, "v6: an applied flag is not called again");
+    g_v6cb_rc = -1;
+    g_v6ok[0] = 0;
+    pl_check(0);
+    check(g_v6cb_n == 4 && g_v6cb_last == 0, "v6: IPv6 off is called once");
+    pl_check(0);
+    check(g_v6cb_n == 4, "v6: a failed removal is not retried");
+    g_v6ok[0] = 1;
+}
+
+static void t_pool_v6_replacement_starts_v4_only(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new6(1, POOL_BY_CONNECTION, 2, 1);
+    pl_check(0);
+    g_fn[0].alive = 0;
+    pl_check(0);
+    g_pick6_in_probe = -1;
+    g_v6_in_probe = -1;
+    pl_check(0);
+    int pick = g_pick6_in_probe;
+    g_pick6_in_probe = -2;
+    check(g_pl.slot[0].up && g_pl.slot[0].node == 1 && g_probes6[1] == 1,
+          "v6 replacement fixture: node 1 replaces node 0 and gets its v6 check");
+    check(pick == -1 && g_v6_in_probe == 0,
+          "v6: a replacement node carries no v6 flow before its own v6 check passes");
+    check(g_v6cb_n == 2 && g_v6cb_last == 0, "v6: a v4-only replacement turns IPv6 off");
+    g_fn[0].alive = 1;
+}
+
+static void t_pool_v6_stale_result_dropped(void) {
+    all_alive();
+    for (int i = 0; i < 5; i++) g_v6ok[i] = 1;
+    pool_new6(1, POOL_BY_CONNECTION, 3, 1);
+    pl_check(0);
+    static const int sel_1[] = { 1 };
+    g_hook_sel = sel_1;
+    g_hook_n = 1;
+    g_hook6_node = 0;
+    pl_check(0);
+    check(g_v6cb_n == 1 && g_pl.slot[0].node == -1 && !g_pl.slot[0].v6,
+          "v6: a v6 check result for a node that left meanwhile is dropped, its flag cleared");
+    g_hook6_node = -1;
+    pl_publish();
+    check(g_v6cb_n == 2 && g_v6cb_last == 0, "v6: the node left — IPv6 off");
+}
+
+static void t_pool_v6_spare_on_v4_node_kept(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new6(2, POOL_BY_CONNECTION, 3, 1);
+    pl_check(1);
+    pl_check(0);
+    static _Alignas(64) unsigned char spare[PL_HDR + sizeof(struct fsess)];
+    static _Alignas(64) unsigned char sess[PL_HDR + sizeof(struct fsess)];
+    struct pl_sess *ps = (struct pl_sess *)spare;
+    struct spare *sp = &g_spares[0];
+    struct spare save = *sp;
+    g_pl_ops.clear(spare);
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(ps, 1);
+    pthread_mutex_unlock(&g_pl.mu);
+    sp->sess = spare;
+    sp->state = SPARE_READY;
+    sp->born_ns = now_ns();
+    g_pl_ops.clear(sess);
+    struct flow_key k6 = pkey6(3000, 3);
+    int opened = g_pl_ops.flow_open(&g_pl, sess, &k6, 0);
+    int took = spare_checkout(sess);
+    check(opened == 0 && took == -1 && sp->state == SPARE_READY && ((struct pl_sess *)sess)->slot == 0,
+          "v6: a v6 flow does not take a spare on a v4-only node, and the spare stays");
+    g_pl_ops.clear(sess);
+    struct flow_key k4 = pm_key(3001, htonl(0x5db80003u));
+    g_pl_ops.flow_open(&g_pl, sess, &k4, 0);
+    check(spare_checkout(sess) == 0, "v6: the same spare goes to a v4 flow");
+    pthread_mutex_lock(&g_pl.mu);
+    pl_bind(ps, 0);
+    pthread_mutex_unlock(&g_pl.mu);
+    g_pl_ops.clear(sess);
+    g_pl_ops.flow_open(&g_pl, sess, &k6, 0);
+    check(pl_match(&g_pl, sess, spare) == 1, "v6: a spare on the v6 node suits a v6 flow");
+    *sp = save;
+    g_pl_ops.clear(sess);
+}
+
+static void t_pool_v6_null_hooks(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new(1, POOL_BY_CONNECTION, 1);
+    pl_check(0);
+    struct flow_key k6 = pkey6(4000, 4);
+    check(g_pl.slot[0].up && !g_pl.slot[0].v6 && pl_pick(&k6) == -1,
+          "v6: a protocol without a v6 check — every node is v4-only");
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    g_pl.cf.v6_changed = NULL;
+    pl_check(0);
+    check(g_pl.slot[0].v6 && pl_pick(&k6) == 0, "v6: no v6_changed hook — the flag still works");
+}
+
+static void t_pool_v6_checked_first_node(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    g_v6ok[0] = 1;
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    pl_start6();
+    check(g_probes6[0] == 1 && g_pl.slot[0].v6 && g_v6cb_n == 1 && g_v6cb_last == 1,
+          "v6: a node probed at startup gets its v6 check when the checks start");
+    pool_new6(1, POOL_BY_CONNECTION, 1, 0);
+    pl_start6();
+    check(g_probes6[0] == 0, "v6: a node not probed at startup waits for its own first check");
+}
+
+static void check_slot0_once(void *arg) { (void)arg; pl_check(0); }
+
+static void t_pool_v6_flag_publishes(void) {
+    all_alive();
+    memset(g_v6ok, 0, sizeof g_v6ok);
+    pool_new6(1, POOL_BY_CONNECTION, 1, 1);
+    pl_publish();
+    g_v6ok[0] = 1;
+    check(stdout_has(check_slot0_once, NULL, "{\"type\":\"active\",\"nodes\":[\"n0\"],\"index\":[0],\"v6\":[true]}\n"),
+          "v6: the same node turning v6-capable publishes the active set again");
+}
+
+static void t_addr6_of(void) {
+    static const unsigned char want[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xc6, 0x33, 0x64, 0x02 };
+    unsigned char got[16];
+    struct in_addr a;
+    inet_pton(AF_INET, "198.51.100.2", &a);
+    ifcfg_addr6_of(a.s_addr, got);
+    check(!memcmp(got, want, 16), "v6: the device address is 2001:db8:: and the IPv4 address in network order");
+}
+
+static void pool_v6_part(void) {
+    t_pool_v6_flows_only_to_a_v6_node();
+    t_pool_v6_none_refuses_v6_only();
+    t_pool_v6_changed_once_per_flip();
+    t_pool_v6_failed_apply_retried_while_on();
+    t_pool_v6_replacement_starts_v4_only();
+    t_pool_v6_stale_result_dropped();
+    t_pool_v6_spare_on_v4_node_kept();
+    t_pool_v6_null_hooks();
+    t_pool_v6_checked_first_node();
+    t_pool_v6_flag_publishes();
+    t_addr6_of();
+}
+
 static void pool_part(void) {
     t_pool_setup();
     t_pool_stale();
@@ -2124,6 +2417,7 @@ static void pool_part(void) {
     t_pin_dials_the_named_node();
     t_pin_survives_a_dead_slot();
     t_pin_never_takes_a_spare();
+    pool_v6_part();
 }
 
 static struct conn *side_conn(uint16_t sport, int udp, int sock) {
@@ -2154,7 +2448,7 @@ static int stop_rsts(uint16_t dport, uint32_t *seq, uint32_t *ack, int cap, int 
         struct flow_key k;
         size_t off;
         if (ip_parse(p, (size_t)r, &k, &off) != 0) continue;
-        if (k.src != SRV_IP || k.dst != CLI_IP || k.sport != SRV_PORT || k.dport != dport ||
+        if (k.src.v4 != SRV_IP || k.dst.v4 != CLI_IP || k.sport != SRV_PORT || k.dport != dport ||
             k.tcp_flags != (TCP_RST | TCP_ACK)) {
             (*wrong)++;
             continue;
@@ -2692,6 +2986,440 @@ static void t_ack_paced(void) {
 
 /* Link cuts, the bounded queue and the pool come after the packet checks: they set up their own
  * dialers, and the connection table lives with them from here on. */
+static const unsigned char CLI6[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+static const unsigned char SRV6[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5 };
+
+static uint32_t sum6(const unsigned char *p, size_t n) {
+    size_t plen = ((size_t)p[4] << 8) | p[5];
+    uint32_t s = 0;
+    for (size_t i = 8; i < 40; i += 2) s += (uint32_t)(p[i] << 8 | p[i + 1]);
+    s += (uint32_t)plen + p[6];
+    for (size_t i = 0; i < plen && 40 + i < n; i++) s += (i & 1) ? p[40 + i] : (uint32_t)p[40 + i] << 8;
+    while (s >> 16) s = (s & 0xffff) + (s >> 16);
+    return s;
+}
+
+static int sum6_ok(const unsigned char *p, size_t n) {
+    return n >= 40 && 40 + (((size_t)p[4] << 8) | p[5]) == n && sum6(p, n) == 0xffff;
+}
+
+static void p6_send(const unsigned char *src, const unsigned char *dst, uint16_t sport, uint32_t seq,
+                    uint32_t ack, unsigned char flags, const unsigned char *opt, size_t opt_n,
+                    const unsigned char *d, size_t n) {
+    unsigned char p[2048];
+    size_t l = tcp6_build(p, sizeof p, src, dst, sport, 443, seq, ack, flags, 65535, opt, opt_n, d, n);
+    handle_packet(&g_tun, p, l);
+    up_flush(&g_tun);
+    flush_acks(&g_tun);
+}
+
+static void u6_send(const unsigned char *src, uint16_t sport, uint16_t dport, const char *d) {
+    unsigned char p[256];
+    size_t n = strlen(d), ul = 8 + n;
+    memset(p, 0, 48);
+    p[0] = 0x60;
+    p[4] = (unsigned char)(ul >> 8); p[5] = (unsigned char)ul;
+    p[6] = 17; p[7] = 64;
+    memcpy(p + 8, src, 16);
+    memcpy(p + 24, SRV6, 16);
+    p[40] = (unsigned char)(sport >> 8); p[41] = (unsigned char)sport;
+    p[42] = (unsigned char)(dport >> 8); p[43] = (unsigned char)dport;
+    p[44] = (unsigned char)(ul >> 8); p[45] = (unsigned char)ul;
+    memcpy(p + 48, d, n);
+    uint16_t cs = (uint16_t)~sum6(p, 48 + n);
+    p[46] = (unsigned char)(cs >> 8); p[47] = (unsigned char)cs;
+    handle_packet(&g_tun, p, 48 + n);
+}
+
+static unsigned char g_pk[16][2048];
+static size_t g_pk_n[16];
+static struct flow_key g_pk_k[16];
+static size_t g_pk_off[16];
+
+static int dev_take(void) {
+    int m = 0;
+    unsigned char sink[70000];
+    for (;;) {
+        unsigned char *b = m < 16 ? g_pk[m] : sink;
+        ssize_t r = recv(g_dev_peer, b, m < 16 ? sizeof g_pk[0] : sizeof sink, MSG_DONTWAIT);
+        if (r <= 0) break;
+        if (m < 16) {
+            g_pk_n[m] = (size_t)r;
+            if (ip_parse(b, (size_t)r, &g_pk_k[m], &g_pk_off[m]) != 0) g_pk_k[m].proto = 0;
+        }
+        m++;
+    }
+    return m;
+}
+
+static int from6(int i, const unsigned char *src, const unsigned char *dst, uint16_t cport) {
+    const struct flow_key *k = &g_pk_k[i];
+    return (g_pk[i][0] >> 4) == 6 && k->v6 && k->proto && !memcmp(k->src.b, src, 16) &&
+           !memcmp(k->dst.b, dst, 16) && k->sport == 443 && k->dport == cport &&
+           sum6_ok(g_pk[i], g_pk_n[i]);
+}
+
+static struct flow_key key6(const unsigned char *src, const unsigned char *dst, uint16_t sport) {
+    struct flow_key k;
+    memset(&k, 0, sizeof k);
+    memcpy(k.src.b, src, 16);
+    memcpy(k.dst.b, dst, 16);
+    k.v6 = 1;
+    k.sport = sport;
+    k.dport = 443;
+    k.proto = 6;
+    return k;
+}
+
+static struct conn *p6_syn(const unsigned char *src, const unsigned char *dst, uint16_t sport,
+                           const unsigned char *opt, size_t opt_n) {
+    struct flow_key k = key6(src, dst, sport);
+    p6_send(src, dst, sport, 1000, 0, TCP_SYN, opt, opt_n, NULL, 0);
+    struct conn *c = conn_find(&k);
+    return c && c->pending ? c : NULL;
+}
+
+static struct conn *p6_ready(struct conn *c, const unsigned char *src, const unsigned char *dst,
+                             uint16_t sport) {
+    struct flow_key k = key6(src, dst, sport);
+    if (!c) return NULL;
+    for (int i = 0; i < 3000 && !__atomic_load_n(&c->done, __ATOMIC_ACQUIRE); i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    if (!__atomic_load_n(&c->done, __ATOMIC_ACQUIRE) || conn_ready(c, &g_tun)) return NULL;
+    p6_send(src, dst, sport, 1001, 2, TCP_ACK, NULL, 0, NULL, 0);
+    dev_take();
+    return conn_find(&k);
+}
+
+static struct conn *p6_open(const unsigned char *src, const unsigned char *dst, uint16_t sport) {
+    return p6_ready(p6_syn(src, dst, sport, NULL, 0), src, dst, sport);
+}
+
+static void settle(void) {
+    struct timespec ts = { 0, 30000000 };
+    nanosleep(&ts, NULL);
+}
+
+static ssize_t srv_got(int s, unsigned char *b, size_t cap) {
+    settle();
+    return recv(s, b, cap, MSG_DONTWAIT);
+}
+
+static void t6_end(void) {
+    while (g_live_n) conn_drop(&g_conns[g_live[0]]);
+    dev_take();
+}
+
+static void t6_tcp_flow(void) {
+    fake_new();
+    dev_take();
+    struct conn *c = p6_syn(CLI6, SRV6, 51000, NULL, 0);
+    int n = dev_take();
+    const unsigned char *p = g_pk[0];
+    static const unsigned char mss[4] = { 2, 4, 0x05, 0xa0 };
+    check(n == 1 && from6(0, SRV6, CLI6, 51000) && g_pk_n[0] == 64 && p[52] == 0x60 &&
+              g_pk_k[0].tcp_flags == (TCP_SYN | TCP_ACK) && g_pk_k[0].seq == 1 &&
+              g_pk_k[0].ack == 1001 && !memcmp(p + 60, mss, 4),
+          "v6 SYN: one v6 SYN-ACK, seq 1, ack 1001, MSS 1440 only");
+
+    static const unsigned char ws[4] = { 1, 3, 3, 7 };
+    p6_ready(c, CLI6, SRV6, 51000);
+    c = p6_syn(CLI6, SRV6, 51001, ws, 4);
+    n = dev_take();
+    const unsigned char want[8] = { 2, 4, 0x05, 0xa0, 1, 3, 3, g_rcv_shift };
+    check(n == 1 && from6(0, SRV6, CLI6, 51001) && g_pk_n[0] == 68 && p[52] == 0x70 &&
+              !memcmp(p + 60, want, 8),
+          "v6 SYN with window scale: SYN-ACK carries MSS 1440, NOP, our shift");
+    p6_ready(c, CLI6, SRV6, 51001);
+
+    c = p6_open(CLI6, SRV6, 51002);
+    check(c != NULL, "fixture: v6 connection opened");
+    if (!c) return;
+    int s = pm_srv_of(c);
+    static unsigned char big[3000];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = (unsigned char)(i * 7 + 3);
+    if (send(s, big, sizeof big, 0) != (ssize_t)sizeof big) check(0, "fixture: server send failed");
+    settle();
+    drain_conn(c, &g_tun);
+    n = dev_take();
+    int ok = n > 0 && n <= 16;
+    size_t at = 0, most = 0;
+    for (int i = 0; ok && i < n; i++) {
+        size_t dn = g_pk_n[i] - g_pk_off[i];
+        ok = from6(i, SRV6, CLI6, 51002) && g_pk_k[i].proto == 6 &&
+             g_pk_k[i].tcp_flags == (TCP_ACK | TCP_PSH) && g_pk_k[i].seq == 2 + at &&
+             g_pk_k[i].ack == 1001 && dn <= 1440 && at + dn <= sizeof big &&
+             !memcmp(g_pk[i] + g_pk_off[i], big + at, dn);
+        at += dn;
+        if (dn > most) most = dn;
+    }
+    check(ok && at == sizeof big && most == 1440,
+          "v6 data from the node: v6 segments of at most 1440 bytes, seq from 2, in order");
+
+    p6_send(CLI6, SRV6, 51002, 1001, 3002, TCP_ACK | TCP_PSH | TCP_FIN, NULL, 0,
+            (const unsigned char *)"hi", 2);
+    n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51002) && g_pk_k[0].tcp_flags == TCP_ACK &&
+              g_pk_k[0].seq == 3002 && g_pk_k[0].ack == 1004,
+          "v6 data with FIN from the client: v6 ACK of both");
+    unsigned char got[16];
+    check(srv_got(s, got, sizeof got) == 2 && !memcmp(got, "hi", 2),
+          "v6 client data before its FIN reaches the node");
+
+    shutdown(s, SHUT_WR);
+    settle();
+    drain_conn(c, &g_tun);
+    pm_sweep();
+    n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51002) && g_pk_k[0].tcp_flags == (TCP_FIN | TCP_ACK) &&
+              g_pk_k[0].seq == 3002 && g_pk_k[0].ack == 1004,
+          "node closes a v6 flow: v6 FIN|ACK to the client");
+    close(s);
+}
+
+static void t6_trailing_bytes_not_forwarded(void) {
+    fake_new();
+    dev_take();
+    struct conn *c = p6_open(CLI6, SRV6, 51020);
+    check(c != NULL, "fixture: v6 connection for trailing bytes opened");
+    if (!c) return;
+    unsigned char p[2048];
+    size_t l = tcp6_build(p, sizeof p, CLI6, SRV6, 51020, 443, 1001, 2, TCP_ACK | TCP_PSH, 65535, NULL, 0,
+                          (const unsigned char *)"data", 4);
+    memcpy(p + l, "JUNK", 4);
+    handle_packet(&g_tun, p, l + 4);
+    up_flush(&g_tun);
+    flush_acks(&g_tun);
+    int n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51020) && g_pk_k[0].ack == 1005,
+          "v6 bytes past the payload length: not acknowledged");
+    int s = pm_srv_of(c);
+    unsigned char got[16];
+    check(srv_got(s, got, sizeof got) == 4 && !memcmp(got, "data", 4),
+          "v6 bytes past the payload length: only the payload reaches the node");
+    close(s);
+}
+
+static void t6_fin_recent(void) {
+    fake_new();
+    dev_take();
+    struct conn *c = p6_open(CLI6, SRV6, 51010);
+    check(c != NULL, "fixture: v6 connection for fin_recent opened");
+    if (!c) return;
+    const unsigned char d[] = "data";
+    p6_send(CLI6, SRV6, 51010, 1001, 2, TCP_ACK | TCP_PSH, NULL, 0, d, 4);
+    int n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51010) && g_pk_k[0].tcp_flags == TCP_ACK &&
+              g_pk_k[0].ack == 1005,
+          "v6 client data: v6 ACK of it");
+    int s = pm_srv_of(c);
+    unsigned char got[16];
+    check(srv_got(s, got, sizeof got) == 4 && !memcmp(got, "data", 4),
+          "v6 client data reaches the node");
+    shutdown(s, SHUT_WR);
+    settle();
+    drain_conn(c, &g_tun);
+    pm_sweep();
+    n = dev_take();
+    uint32_t fin_seq = g_pk_k[0].seq;
+    check(n == 1 && from6(0, SRV6, CLI6, 51010) && (g_pk_k[0].tcp_flags & TCP_FIN) && fin_seq == 2,
+          "v6 FIN to the client after the node closed");
+    close(s);
+
+    p6_send(CLI6, SRV6, 51010, 1005, fin_seq + 1, TCP_ACK, NULL, 0, NULL, 0);
+    check(dev_take() == 0, "late v6 ACK of our FIN: taken silently");
+    p6_send(CLI6, SRV6, 51010, 1005, fin_seq + 1, TCP_FIN | TCP_ACK, NULL, 0, NULL, 0);
+    n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51010) && g_pk_n[0] == 60 &&
+              g_pk_k[0].tcp_flags == TCP_ACK && g_pk_k[0].seq == fin_seq + 1 &&
+              g_pk_k[0].ack == 1006,
+          "v6 FIN after ours: the fin_recent ACK is v6, ack of its seq + 1");
+
+    p6_send(CLI6, SRV6, 51999, 5000, 777, TCP_ACK, NULL, 0, NULL, 0);
+    n = dev_take();
+    check(n == 1 && from6(0, SRV6, CLI6, 51999) && g_pk_n[0] == 60 &&
+              g_pk_k[0].tcp_flags == TCP_RST && g_pk_k[0].seq == 777,
+          "stray v6 ACK: v6 RST with seq = its ack");
+}
+
+static void t6_cut_resets(void) {
+    fake_new();
+    dev_take();
+    struct conn *c = p6_open(CLI6, SRV6, 51020);
+    check(c != NULL, "fixture: v6 connection for the cut opened");
+    if (!c) return;
+    pm_srv_rst(pm_srv_of(c));
+    drain_conn(c, &g_tun);
+    pm_sweep();
+    int n = dev_take();
+    int ok = n >= 1 && n <= 2;
+    for (int i = 0; ok && i < n; i++)
+        ok = from6(i, SRV6, CLI6, 51020) && g_pk_k[i].tcp_flags == (TCP_RST | TCP_ACK) &&
+             g_pk_k[i].ack == 1001;
+    struct flow_key k = key6(CLI6, SRV6, 51020);
+    check(ok && !conn_find(&k), "v6 link cut: the client gets a v6 RST");
+}
+
+static void t6_udp(void) {
+    fake_new();
+    dev_take();
+    memset(&g_fopen_key, 0, sizeof g_fopen_key);
+    u6_send(CLI6, 52001, 53, "ping");
+    struct flow_key k = key6(CLI6, SRV6, 52001);
+    k.dport = 53;
+    k.proto = 17;
+    struct conn *c = conn_find(&k);
+    check(c && c->is_udp && g_fopen_key.v6 == 1 && g_fopen_key.proto == 17 &&
+              !memcmp(g_fopen_key.dst.b, SRV6, 16) && !memcmp(g_fopen_key.src.b, CLI6, 16) &&
+              g_fopen_key.dport == 53,
+          "v6 datagram: the dialer opens a UDP flow with the 16-byte destination");
+    if (!c) return;
+    for (int i = 0; i < 3000 && !__atomic_load_n(&c->done, __ATOMIC_ACQUIRE); i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    if (!__atomic_load_n(&c->done, __ATOMIC_ACQUIRE) || conn_ready(c, &g_tun)) {
+        check(0, "fixture: v6 UDP flow did not become ready");
+        return;
+    }
+    int s = pm_srv_of(c);
+    unsigned char got[16];
+    static const unsigned char framed[6] = { 0, 4, 'p', 'i', 'n', 'g' };
+    check(srv_got(s, got, sizeof got) == 6 && !memcmp(got, framed, 6),
+          "v6 datagram reaches the node");
+
+    if (send(s, "pong", 4, 0) != 4) check(0, "fixture: server send failed");
+    settle();
+    drain_conn(c, &g_tun);
+    int n = dev_take();
+    const unsigned char *p = g_pk[0];
+    check(n == 1 && (p[0] >> 4) == 6 && g_pk_k[0].v6 && g_pk_k[0].proto == 17 && g_pk_n[0] == 52 &&
+              !memcmp(p + 8, SRV6, 16) && !memcmp(p + 24, CLI6, 16) && g_pk_k[0].sport == 53 &&
+              g_pk_k[0].dport == 52001 && !memcmp(p + 48, "pong", 4) && sum6_ok(p, g_pk_n[0]),
+          "reply on a v6 flow: v6 datagram to the client");
+
+    static unsigned char big[1500];
+    memset(big, 'z', sizeof big);
+    if (send(s, big, sizeof big, 0) != (ssize_t)sizeof big) check(0, "fixture: server send failed");
+    settle();
+    drain_conn(c, &g_tun);
+    check(dev_take() == 0, "1500-byte reply on a v6 flow: dropped, nothing written");
+    if (send(s, "pong", 4, 0) != 4) check(0, "fixture: server send failed");
+    settle();
+    drain_conn(c, &g_tun);
+    n = dev_take();
+    check(n == 1 && g_pk_k[0].v6 && g_pk_k[0].proto == 17 && !memcmp(g_pk[0] + 48, "pong", 4) &&
+              !c->srv_closed,
+          "after a dropped 1500-byte reply the v6 flow still carries the next one");
+    if (send(s, big, 1452, 0) != 1452) check(0, "fixture: server send failed");
+    settle();
+    drain_conn(c, &g_tun);
+    n = dev_take();
+    check(n == 1 && g_pk_n[0] == 1500 && g_pk_k[0].v6 && sum6_ok(g_pk[0], g_pk_n[0]),
+          "1452-byte reply on a v6 flow: one full 1500-byte v6 packet");
+
+    static const unsigned char odd[16] = { 0x20, 0x11, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    memset(&g_fopen_key, 0, sizeof g_fopen_key);
+    u6_send(odd, 52002, 53, "ping");
+    check(g_fopen_key.v6 == 1 && !memcmp(g_fopen_key.src.b, odd, 16) && g_fopen_key.sport == 52002,
+          "v6 datagram whose bytes look like a v4 fragment is not taken for one");
+    struct flow_key ko = key6(odd, SRV6, 52002);
+    ko.dport = 53;
+    ko.proto = 17;
+    struct conn *co = conn_find(&ko);
+    for (int i = 0; co && i < 3000 && !__atomic_load_n(&co->done, __ATOMIC_ACQUIRE); i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    if (co && conn_ready(co, &g_tun)) check(0, "fixture: the second v6 UDP flow did not open");
+}
+
+static void t6_refused_syn(void) {
+    fake_new();
+    dev_take();
+    g_fopen_fail = 1;
+    p6_send(CLI6, SRV6, 53001, 1000, 0, TCP_SYN, NULL, 0, NULL, 0);
+    int n = dev_take();
+    static const unsigned char want[60] = {
+        0x60, 0, 0, 0, 0x00, 0x14, 0x06, 0x40,
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5,
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        0x01, 0xbb, 0xcf, 0x09, 0, 0, 0, 0, 0x00, 0x00, 0x03, 0xe9,
+        0x50, 0x14, 0x00, 0x00, 0x7f, 0xab, 0x00, 0x00,
+    };
+    struct flow_key k = key6(CLI6, SRV6, 53001);
+    check(n == 1 && g_pk_n[0] == 60 && !memcmp(g_pk[0], want, 60) && !conn_find(&k),
+          "v6 SYN the dialer refuses: one v6 RST|ACK, seq 0, ack 1001, window 0");
+
+    pm_send(53002, SRV_IP, 1000, 0, TCP_SYN, NULL, 0);
+    struct flow_key k4 = pm_key(53002, SRV_IP);
+    check(dev_take() == 0 && !conn_find(&k4), "v4 SYN the dialer refuses: nothing written");
+
+    u6_send(CLI6, 53003, 53, "ping");
+    check(dev_take() == 0, "v6 datagram the dialer refuses: nothing written");
+    g_fopen_fail = 0;
+}
+
+static void t6_same_low_bytes(void) {
+    fake_new();
+    dev_take();
+    unsigned char c6[16] = { 0 }, s6[16] = { 0 };
+    uint32_t ci = CLI_IP, si = SRV_IP;
+    memcpy(c6, &ci, 4);
+    memcpy(s6, &si, 4);
+    uint16_t sp = 0;
+    for (uint32_t t = 1024; t < 65536 && !sp; t++) {
+        struct flow_key k4 = pm_key((uint16_t)t, SRV_IP), k6 = key6(c6, s6, (uint16_t)t);
+        if (flow_hash(&k4) == flow_hash(&k6)) sp = (uint16_t)t;
+    }
+    check(sp != 0, "fixture: a port where the v4 and the v6 key share a bucket");
+    struct conn *a = pm_open(sp, SRV_IP);
+    struct conn *b = p6_open(c6, s6, sp);
+    check(a && b && a != b && !a->key.v6 && b->key.v6,
+          "v4 and v6 SYN with the same address bytes: two connections");
+    if (!a || !b) return;
+    int sa = pm_srv_of(a), sb = pm_srv_of(b);
+    pm_send(sp, SRV_IP, 1001, 2, TCP_ACK | TCP_PSH, (const unsigned char *)"four", 4);
+    p6_send(c6, s6, sp, 1001, 2, TCP_ACK | TCP_PSH, NULL, 0, (const unsigned char *)"six!", 4);
+    unsigned char ga[16], gb[16];
+    ssize_t na = srv_got(sa, ga, sizeof ga), nb = recv(sb, gb, sizeof gb, MSG_DONTWAIT);
+    check(na == 4 && !memcmp(ga, "four", 4) && nb == 4 && !memcmp(gb, "six!", 4),
+          "same address bytes: client data goes to its own flow's node");
+    dev_take();
+    if (send(sa, "AAAA", 4, 0) != 4 || send(sb, "BBBB", 4, 0) != 4) check(0, "fixture: send failed");
+    settle();
+    drain_conn(a, &g_tun);
+    drain_conn(b, &g_tun);
+    int n = dev_take(), v4 = 0, v6 = 0;
+    for (int i = 0; i < n && i < 16; i++) {
+        const unsigned char *d = g_pk[i] + g_pk_off[i];
+        size_t dn = g_pk_n[i] - g_pk_off[i];
+        if ((g_pk[i][0] >> 4) == 4 && !g_pk_k[i].v6 && dn == 4 && !memcmp(d, "AAAA", 4)) v4++;
+        if (from6(i, s6, c6, sp) && dn == 4 && !memcmp(d, "BBBB", 4)) v6++;
+    }
+    check(n == 2 && v4 == 1 && v6 == 1, "same address bytes: node data goes to its own family");
+
+    pm_send(sp, SRV_IP, 1005, a->our_seq, TCP_ACK, NULL, 0);
+    p6_send(c6, s6, sp, 1005, b->our_seq, TCP_ACK, NULL, 0, NULL, 0);
+    dev_take();
+    shutdown(sa, SHUT_WR);
+    settle();
+    drain_conn(a, &g_tun);
+    pm_sweep();
+    n = dev_take();
+    uint32_t fin4 = g_pk_k[0].seq;
+    check(n == 1 && !g_pk_k[0].v6 && (g_pk_k[0].tcp_flags & TCP_FIN),
+          "same address bytes: the v4 flow closes with a v4 FIN");
+    conn_drop(b);
+    p6_send(c6, s6, sp, 1005, fin4 + 1, TCP_ACK, NULL, 0, NULL, 0);
+    n = dev_take();
+    check(n == 1 && from6(0, s6, c6, sp) && g_pk_k[0].tcp_flags == TCP_RST &&
+              g_pk_k[0].seq == fin4 + 1,
+          "same address bytes: a v6 ACK of the v4 FIN is a stranger's, RST");
+}
+
 static int stack_part(void) {
     signal(SIGPIPE, SIG_IGN);
     for (int i = 0; i < 5; i++) {
@@ -2710,6 +3438,19 @@ static int stack_part(void) {
     t_stack_abort();
     t_bytes_tun();
     t_ack_paced();
+    t6_tcp_flow();
+    t6_end();
+    t6_trailing_bytes_not_forwarded();
+    t6_fin_recent();
+    t6_end();
+    t6_cut_resets();
+    t6_end();
+    t6_udp();
+    t6_end();
+    t6_refused_syn();
+    t6_end();
+    t6_same_low_bytes();
+    t6_end();
     pool_part();
     return 0;
 }
@@ -2872,7 +3613,7 @@ static size_t host_header(struct vl_sess *s, const char *host, int reopen, unsig
     memcpy(flow, g_node.flow, sizeof flow);
     g_node.flow[0] = 0;
     struct flow_key k = cli_key();
-    k.dst = ip4(93, 184, 216, 34);
+    k.dst.v4 = ip4(93, 184, 216, 34);
     k.dport = 8443;
     memset(s, 0, offsetof(struct vl_sess, dg));
     s->t.link.fd = -1;
@@ -3144,7 +3885,7 @@ static void t_k_mapped(void) {
         spin(1);
         n = wire_of(c, w, sizeof w);
     }
-    check(c && c->odst == FAKE(10) && c->key.dst == ip4(10, 1, 2, 3) && n == 31 && g_miss.miss == miss0 &&
+    check(c && c->odst == FAKE(10) && c->key.dst.v4 == ip4(10, 1, 2, 3) && n == 31 && g_miss.miss == miss0 &&
               header_is(w, n, ip4(10, 1, 2, 3), 443) && !memcmp(w + 26, "hello", 5),
           "a mapped fake dials the real address (VLESS header carries 10.1.2.3:443)");
     if (fd >= 0) close(fd);
@@ -3314,7 +4055,7 @@ static void t_k_answer(int a, int b) {
     for (int i = 0; i < 10 && g_park_n; i++) spin(1);
     struct conn *ca = k_conn_of(a), *cb = k_conn_of(b);
     uint32_t r = 0;
-    check(!g_park_n && ca && cb && ca->key.dst == ip4(10, 9, 9, 9) && cb->key.dst == ip4(10, 9, 9, 9) &&
+    check(!g_park_n && ca && cb && ca->key.dst.v4 == ip4(10, 9, 9, 9) && cb->key.dst.v4 == ip4(10, 9, 9, 9) &&
               ca->odst == FAKE(20) && k_seen(a) == 'W' && k_seen(b) == 'W' &&
               ctlmap_answer(FAKE(20), &r) == CM_NONE,
           "an answer opens both parked connections and the ask is let go after the last");
@@ -3770,7 +4511,7 @@ static void t_k_two_loops(void) {
     struct conn *c = k_conn_of(fd);
     __atomic_store_n(&g_w1_stop, 1, __ATOMIC_RELEASE);
     pthread_join(t, NULL);
-    check(parked == 1 && kept == 1 && c && c->key.dst == ip4(10, 2, 4, 6) && k_seen(fd) == 'W' &&
+    check(parked == 1 && kept == 1 && c && c->key.dst.v4 == ip4(10, 2, 4, 6) && k_seen(fd) == 'W' &&
               __atomic_load_n(&g_w1_most, __ATOMIC_ACQUIRE) == 0,
           "two loops: only the listener's loop opens a parked socket, once");
     if (fd >= 0) close(fd);
@@ -4140,7 +4881,7 @@ static void t_ib_listens_on_its_address(void) {
     size_t n = ib_read(fd, r, sizeof r, 300);
     struct conn *c = k_conn_of(fd);
     check(srv_count() == n0 + 1 && g_srv_node[n0] == &g_fn[1] && n == 16 && !memcmp(r, want, 16) && c &&
-              c->key.dst == ip4(10, 9, 8, 7) && c->key.dport == 443 && c->ib == 1,
+              c->key.dst.v4 == ip4(10, 9, 8, 7) && c->key.dport == 443 && c->ib == 1,
           "a SOCKS CONNECT dials node 1; the client reads 05 00, the success reply, then the node's bytes");
     unsigned char b[4];
     size_t got = 0;
@@ -4278,7 +5019,7 @@ static void t_ib_domain_is_the_host(void) {
     int ok = ib_send_all(fd, m, sizeof m) == 0 && ib_reply_is(fd, 0);
     struct conn *c = ok ? k_conn_of(fd) : NULL;
     const struct fsess *fs = c ? CINNER(SESS(c)) : NULL;
-    check(fs && !strcmp(fs->host, "example.com") && c->key.dst == 0 && c->key.dport == 443,
+    check(fs && !strcmp(fs->host, "example.com") && c->key.dst.v4 == 0 && c->key.dport == 443,
           "a SOCKS domain goes to the dialer as the host, the address left 0");
     if (fd >= 0) close(fd);
 }
@@ -4688,7 +5429,7 @@ static void ib_to(int u, uint16_t relay, uint32_t dst, uint16_t dport, const cha
 static struct conn *ib_ucon(uint32_t dst, uint16_t dport) {
     for (int li = 0; li < g_live_n; li++) {
         struct conn *c = &g_conns[g_live[li]];
-        if (c->ib_udp && c->key.dst == dst && c->key.dport == dport) return c;
+        if (c->ib_udp && c->key.dst.v4 == dst && c->key.dport == dport) return c;
     }
     return NULL;
 }
@@ -4942,7 +5683,7 @@ static uint64_t *ib_last_of(uint32_t dst) {
     for (int a = 0; a < IB_ASSOC_MAX; a++)
         for (int k = 0; g_assoc[a].ib && k < IB_UDP_DST; k++) {
             int i = g_assoc[a].dst_conn[k];
-            if (i >= 0 && g_conns[i].used && g_conns[i].key.dst == dst) return &g_assoc[a].last_ms[k];
+            if (i >= 0 && g_conns[i].used && g_conns[i].key.dst.v4 == dst) return &g_assoc[a].last_ms[k];
         }
     return NULL;
 }
@@ -5104,7 +5845,7 @@ static void sock_part(void) {
     int fl = fcntl(g_tun.fd, F_GETFL, 0);
     fcntl(g_tun.fd, F_SETFL, fl | O_NONBLOCK);
     signal(SIGPIPE, SIG_IGN);
-    check(sizeof(struct conn) <= 192, "the hot record stays within 192 bytes");
+    check(sizeof(struct conn) <= 224, "the hot record stays within 224 bytes");
 
     int busy = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in ba = { .sin_family = AF_INET };
@@ -5170,6 +5911,50 @@ static void sock_part(void) {
     k_reset();
 }
 
+static struct conn *key_link(const struct flow_key *k) {
+    struct conn *c = conn_new(&g_tun);
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->fd = -1;
+    c->key = *k;
+    conn_link(c);
+    return c;
+}
+
+static void t_v4_and_v6_keys_differ(void) {
+    struct flow_key a = cli_key(), b = cli_key();
+    memset(&a.src, 0, sizeof a.src);
+    memset(&a.dst, 0, sizeof a.dst);
+    memset(&b.src, 0, sizeof b.src);
+    memset(&b.dst, 0, sizeof b.dst);
+    a.src.v4 = 0x0a000001u;
+    memcpy(b.src.b + 12, &a.src.v4, 4);
+    b.v6 = 1;
+    struct conn *ca = key_link(&a);
+    check(conn_find(&a) == ca && conn_find(&b) == NULL,
+          "a v4 key and a v6 key with the same four bytes are different flows");
+
+    struct flow_key c6 = b, d6 = b;
+    c6.dst.b[0] = 0x20;
+    d6.dst.b[0] = 0x30;
+    struct conn *cc = key_link(&c6);
+    struct conn *cd = key_link(&d6);
+    check(cc != cd && conn_find(&c6) == cc && conn_find(&d6) == cd && conn_find(&b) == NULL,
+          "two v6 keys differing in one leading address byte are found separately");
+    struct flow_key l1 = b, l2 = b;
+    l1.dst.b[15] = 1;
+    l2.dst.b[15] = 2;
+    struct conn *cl = key_link(&l1);
+    check(!fk_same_addr(&l1.dst, &l2.dst) && flow_hash(&l1) != flow_hash(&l2) &&
+              conn_find(&l1) == cl && conn_find(&l2) == NULL,
+          "two v6 keys differing only in the last address byte are separate flows");
+    struct flow_key e = a;
+    e.v6 = 1;
+    check(conn_find(&e) == NULL, "identical address bytes with the v6 byte set are another flow");
+    while (g_live_n) conn_drop(&g_conns[g_live[g_live_n - 1]]);
+    dev_drain(NULL);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);       /* a crash or a hang keeps the checks printed so far */
     int sp[2];
@@ -5189,6 +5974,7 @@ int main(void) {
     g_now_s = (time_t)(g_now_ns / 1000000000ull);
 
     t_no_connectors();
+    t_v4_and_v6_keys_differ();
     t_sendagain_window();
     t_sendagain_retry();
     t_sendagain_eof();

@@ -60,6 +60,7 @@ struct vnet_hdr {
 #define VNET_F_NEEDS_CSUM 1
 #define VNET_GSO_NONE     0
 #define VNET_GSO_TCPV4    1
+#define VNET_GSO_TCPV6    4
 /* ECN comes in the top bit of the offload type. It does not change splitting, but the type must be
  * compared without it, or a coalesced frame with ECN would be rejected as unknown. */
 #define VNET_GSO_ECN      0x80
@@ -361,22 +362,42 @@ ssize_t tun_read_packet(struct tun_dev *d, unsigned char *buf, size_t cap) {
  * code touches untrusted bytes from the network, the less room for a mistake in it. */
 int ip_parse(const unsigned char *p, size_t n, struct flow_key *k, size_t *payload_off) {
     if (n < 20) return -1;
-    if ((p[0] >> 4) != 4) return -1;                 /* IPv6 is not supported */
-    size_t ihl = (size_t)(p[0] & 0x0F) * 4;
-    if (ihl < 20 || n < ihl) return -1;
+    int ver = p[0] >> 4;
+    if (ver != 4 && ver != 6) return -1;
+    size_t ihl;
 
-    k->proto = p[9];
-    memcpy(&k->src, p + 12, 4);
-    memcpy(&k->dst, p + 16, 4);
+    memset(k->src.b, 0, sizeof k->src.b);
+    memset(k->dst.b, 0, sizeof k->dst.b);
+    if (ver == 6) {
+        if (n < 40) return -1;
+        size_t plen = ((size_t)p[4] << 8) | p[5];
+        if (n < 40 + plen) return -1;
+        if (p[6] != 6 && p[6] != 17) return -1;
+        n = 40 + plen;
+        ihl = 40;
+        k->proto = p[6];
+        k->v6 = 1;
+        k->frag = 0;
+        memcpy(k->src.b, p + 8, 16);
+        memcpy(k->dst.b, p + 24, 16);
+    } else {
+        ihl = (size_t)(p[0] & 0x0F) * 4;
+        if (ihl < 20 || n < ihl) return -1;
 
-    /* Fragments. A later fragment has data where the transport header would be; read as a header
-     * it yields random ports, and for UDP random ports mean a NEW flow and a handshake with the
-     * node. So a later fragment (non-zero offset) is rejected. The first fragment has the header
-     * but the datagram is incomplete: it is flagged, and the caller decides (handle_packet in
-     * stack.c). */
-    unsigned frag = (unsigned)((p[6] << 8) | p[7]);
-    if (frag & 0x1FFF) return -1;                    /* not the first fragment: no header */
-    k->frag = (frag & 0x2000) ? 1 : 0;               /* MF: more fragments follow */
+        k->proto = p[9];
+        k->v6 = 0;
+        memcpy(&k->src.v4, p + 12, 4);
+        memcpy(&k->dst.v4, p + 16, 4);
+
+        /* Fragments. A later fragment has data where the transport header would be; read as a header
+         * it yields random ports, and for UDP random ports mean a NEW flow and a handshake with the
+         * node. So a later fragment (non-zero offset) is rejected. The first fragment has the header
+         * but the datagram is incomplete: it is flagged, and the caller decides (handle_packet in
+         * stack.c). */
+        unsigned frag = (unsigned)((p[6] << 8) | p[7]);
+        if (frag & 0x1FFF) return -1;                    /* not the first fragment: no header */
+        k->frag = (frag & 0x2000) ? 1 : 0;               /* MF: more fragments follow */
+    }
 
     if (k->proto == 6) {                             /* TCP */
         if (n < ihl + 20) return -1;
@@ -966,4 +987,147 @@ int udp_write_to_client(const struct tun_dev *d, uint32_t src, uint32_t dst,
         off += chunk;
     }
     return 0;
+}
+
+static void ip6_hdr(unsigned char *out, size_t plen, unsigned char nh,
+                    const unsigned char src[16], const unsigned char dst[16]) {
+    memset(out, 0, 40);
+    out[0] = 0x60;
+    out[4] = (unsigned char)(plen >> 8);
+    out[5] = (unsigned char)plen;
+    out[6] = nh;
+    out[7] = 64;
+    memcpy(out + 8, src, 16);
+    memcpy(out + 24, dst, 16);
+}
+
+static uint32_t pseudo6_sum(const unsigned char src[16], const unsigned char dst[16],
+                            size_t len, unsigned char nh) {
+    unsigned char pseudo[40];
+    memcpy(pseudo, src, 16);
+    memcpy(pseudo + 16, dst, 16);
+    pseudo[32] = (unsigned char)(len >> 24); pseudo[33] = (unsigned char)(len >> 16);
+    pseudo[34] = (unsigned char)(len >> 8);  pseudo[35] = (unsigned char)len;
+    pseudo[36] = 0; pseudo[37] = 0; pseudo[38] = 0; pseudo[39] = nh;
+    return csum_add(pseudo, 40, 0);
+}
+
+static void tcp6_fields(unsigned char *t, uint16_t sport, uint16_t dport, uint32_t seq,
+                        uint32_t ack, uint8_t flags, uint16_t win, size_t doff_words) {
+    t[0] = (unsigned char)(sport >> 8); t[1] = (unsigned char)sport;
+    t[2] = (unsigned char)(dport >> 8); t[3] = (unsigned char)dport;
+    t[4] = (unsigned char)(seq >> 24); t[5] = (unsigned char)(seq >> 16);
+    t[6] = (unsigned char)(seq >> 8);  t[7] = (unsigned char)seq;
+    t[8] = (unsigned char)(ack >> 24); t[9] = (unsigned char)(ack >> 16);
+    t[10] = (unsigned char)(ack >> 8); t[11] = (unsigned char)ack;
+    t[12] = (unsigned char)(doff_words << 4);
+    t[13] = flags;
+    t[14] = (unsigned char)(win >> 8); t[15] = (unsigned char)win;
+}
+
+void tcp6_hdr_build(unsigned char out[TUN6_HDR_LEN], const unsigned char src[16],
+                    const unsigned char dst[16], uint16_t sport, uint16_t dport, uint32_t seq,
+                    uint32_t ack, uint8_t flags, uint16_t win) {
+    ip6_hdr(out, 0, 6, src, dst);
+    memset(out + 40, 0, 20);
+    tcp6_fields(out + 40, sport, dport, seq, ack, flags, win, 5);
+}
+
+size_t tcp6_build(unsigned char *out, size_t cap, const unsigned char src[16],
+                  const unsigned char dst[16], uint16_t sport, uint16_t dport, uint32_t seq,
+                  uint32_t ack, uint8_t flags, uint16_t win, const unsigned char *opt,
+                  size_t opt_n, const unsigned char *data, size_t data_n) {
+    if ((opt_n & 3) || opt_n > 40) return 0;
+    size_t tcp_len = 20 + opt_n + data_n;
+    size_t total = 40 + tcp_len;
+    if (total > cap || tcp_len > 0xFFFF) return 0;
+    ip6_hdr(out, tcp_len, 6, src, dst);
+    unsigned char *t = out + 40;
+    memset(t, 0, 20);
+    tcp6_fields(t, sport, dport, seq, ack, flags, win, (20 + opt_n) / 4);
+    if (opt_n) memcpy(t + 20, opt, opt_n);
+    if (data_n) memcpy(t + 20 + opt_n, data, data_n);
+    uint16_t tsum = csum_fin(csum_add(t, tcp_len, pseudo6_sum(src, dst, tcp_len, 6)));
+    t[16] = (unsigned char)(tsum >> 8);
+    t[17] = (unsigned char)tsum;
+    return total;
+}
+
+int tun_write_data6(const struct tun_dev *d, unsigned char hdr[TUN6_HDR_LEN],
+                    const unsigned char *data, size_t data_n) {
+    struct iovec iov[3];
+    int n = 0;
+    struct vnet_hdr vh;
+    size_t tcp_len = 20 + data_n;
+    if (tcp_len > 0xFFFF) return -1;
+    hdr[4] = (unsigned char)(tcp_len >> 8);
+    hdr[5] = (unsigned char)tcp_len;
+
+    if (d->gso) {
+        uint16_t partial = (uint16_t)~csum_fin(pseudo6_sum(hdr + 8, hdr + 24, tcp_len, 6));
+        hdr[40 + 16] = (unsigned char)(partial >> 8);
+        hdr[40 + 17] = (unsigned char)partial;
+        memset(&vh, 0, sizeof(vh));
+        vh.flags = VNET_F_NEEDS_CSUM;
+        vh.csum_start = 40;
+        vh.csum_offset = 16;
+        vh.hdr_len = TUN6_HDR_LEN;
+        if (data_n > TUN6_MSS) {
+            vh.gso_type = VNET_GSO_TCPV6;
+            vh.gso_size = TUN6_MSS;
+        }
+        iov[n].iov_base = &vh;
+        iov[n].iov_len = sizeof(vh);
+        n++;
+    } else {
+        uint32_t acc = pseudo6_sum(hdr + 8, hdr + 24, tcp_len, 6);
+        acc = csum_add(hdr + 40, 20, acc);
+        acc = csum_add(data, data_n, acc);
+        uint16_t tsum = csum_fin(acc);
+        hdr[40 + 16] = (unsigned char)(tsum >> 8);
+        hdr[40 + 17] = (unsigned char)tsum;
+    }
+    iov[n].iov_base = hdr;
+    iov[n].iov_len = TUN6_HDR_LEN;
+    n++;
+    if (data_n) {
+        iov[n].iov_base = (void *)(uintptr_t)data;
+        iov[n].iov_len = data_n;
+        n++;
+    }
+    return tun_writev(d, iov, n);
+}
+
+int udp6_write_to_client(const struct tun_dev *d, const unsigned char src[16],
+                         const unsigned char dst[16], uint16_t sport, uint16_t dport,
+                         const unsigned char *data, size_t n) {
+    if (n > TUN_MTU - 48) return -1;
+    unsigned char pkt[TUN_MTU];
+    size_t udp_len = 8 + n;
+    ip6_hdr(pkt, udp_len, 17, src, dst);
+    unsigned char *u = pkt + 40;
+    u[0] = (unsigned char)(sport >> 8); u[1] = (unsigned char)sport;
+    u[2] = (unsigned char)(dport >> 8); u[3] = (unsigned char)dport;
+    u[4] = (unsigned char)(udp_len >> 8); u[5] = (unsigned char)udp_len;
+    u[6] = 0; u[7] = 0;
+    if (n) memcpy(u + 8, data, n);
+    uint16_t usum = csum_fin(csum_add(u, udp_len, pseudo6_sum(src, dst, udp_len, 17)));
+    if (!usum) usum = 0xFFFF;
+    u[6] = (unsigned char)(usum >> 8);
+    u[7] = (unsigned char)usum;
+
+    struct iovec iov[2];
+    int nio = 0;
+    struct vnet_hdr vh;
+    if (d->gso) {
+        memset(&vh, 0, sizeof(vh));
+        vh.gso_type = VNET_GSO_NONE;
+        iov[nio].iov_base = &vh;
+        iov[nio].iov_len = sizeof(vh);
+        nio++;
+    }
+    iov[nio].iov_base = pkt;
+    iov[nio].iov_len = 40 + udp_len;
+    nio++;
+    return tun_writev(d, iov, nio);
 }
