@@ -628,25 +628,35 @@ static long packet_conn_room(const struct xh_up *u) {
  * gap, and everything sent meanwhile piles up behind it. Bounding the number of unanswered
  * chunks is not enough: later ones get answered and free their slots while the gap stays. So the
  * bound is a window over seq, as in TCP: no chunk more than PACKET_INFLIGHT past the oldest
- * unanswered one. Eight keeps well under the server's default, and under a lowered one too. */
-#define PACKET_INFLIGHT 8
+ * unanswered one: the node's scMaxBufferedPosts when the link carries it, else PACKET_INFLIGHT,
+ * and never more streams than the open table or the server's MAX_CONCURRENT_STREAMS. */
+#define PACKET_INFLIGHT 24
 #define PACKET_SLOT 8192
 
 /* packet-up: what the next chunk's request can carry. Before the first request the windows are
  * the default 65535. */
 /* Chunks that may still be sent before the window over seq is full (see PACKET_INFLIGHT). The
  * stream ids go up by two per chunk. */
-static long packet_slots(const struct xh_up *u) {
-    if (!u->started) return PACKET_INFLIGHT;
-    uint32_t oldest = h2_oldest_open(&u->h2);
-    if (!oldest) return PACKET_INFLIGHT;
-    long ahead = (long)(u->h2.sid - oldest) / 2 + 1;   /* chunks from the oldest to the last */
-    return ahead >= PACKET_INFLIGHT ? 0 : PACKET_INFLIGHT - ahead;
+static long packet_win(const struct xh_state *x) {
+    long w = x->opts.posts ? (long)x->opts.posts : PACKET_INFLIGHT;
+    long c = (long)h2_stream_cap(&x->up.h2);
+    return w < c ? w : c;
 }
 
-static long packet_room(const struct xh_up *u) {
+static long packet_slots(const struct xh_state *x) {
+    const struct xh_up *u = &x->up;
+    long win = packet_win(x);
+    if (!u->started) return win;
+    uint32_t oldest = h2_oldest_open(&u->h2);
+    if (!oldest) return win;
+    long ahead = (long)(u->h2.sid - oldest) / 2 + 1;   /* chunks from the oldest to the last */
+    return ahead >= win ? 0 : win - ahead;
+}
+
+static long packet_room(const struct xh_state *x) {
+    const struct xh_up *u = &x->up;
     if (!u->started) return 65535;
-    if (packet_slots(u) <= 0) return 0;
+    if (packet_slots(x) <= 0) return 0;
     const struct h2 *h = &u->h2;
     int32_t r = h->send_win_conn < h->peer_init_win ? h->send_win_conn : h->peer_init_win;
     return r > 0 ? r : 0;
@@ -663,8 +673,8 @@ static int packet_meta_write(struct transport *t, const unsigned char *d, size_t
         return TR_EIO;
     }
     long pieces = (long)((n + w - 1) / w);
-#define META_FITS() (packet_slots(&x->up) >= pieces || \
-                     (pieces > PACKET_INFLIGHT && !h2_open_streams(&x->up.h2)))
+#define META_FITS() (packet_slots(x) >= pieces || \
+                     (pieces > packet_win(x) && !h2_open_streams(&x->up.h2)))
     if (!META_FITS()) up_drain(&x->up);
     if (!META_FITS()) return H2_EWINDOW;
 #undef META_FITS
@@ -712,11 +722,11 @@ static int xhttp_write(struct transport *t, const unsigned char *d, size_t n) {
              * stream's window for one chunk. */
             size_t piece = x->post_max && x->post_max < n ? x->post_max : n;
             /* The chunks this write needs must fit among the unanswered ones; a write that needs
-             * more than PACKET_INFLIGHT alone (a tiny scMaxEachPostBytes) waits for none. */
+             * more than the whole window alone (a tiny scMaxEachPostBytes) waits for none. */
             int pieces = (int)((n + piece - 1) / piece);
-#define PACKET_FITS() ((long)piece <= packet_room(&x->up) && (long)n <= packet_conn_room(&x->up) && \
-                       (packet_slots(&x->up) >= pieces || \
-                        (pieces > PACKET_INFLIGHT && !h2_open_streams(&x->up.h2))))
+#define PACKET_FITS() ((long)piece <= packet_room(x) && (long)n <= packet_conn_room(&x->up) && \
+                       (packet_slots(x) >= pieces || \
+                        (pieces > packet_win(x) && !h2_open_streams(&x->up.h2))))
             if (!PACKET_FITS()) up_drain(&x->up);
             if (!PACKET_FITS()) return H2_EWINDOW;
 #undef PACKET_FITS
@@ -781,8 +791,8 @@ static long xhttp_room(struct transport *t) {
             return h2_room(&x->up.h2);
         case XH_PACKET_UP: {
             if (data_meta(&x->opts)) {
-                if (packet_slots(&x->up) <= PACKET_INFLIGHT / 2) up_drain(&x->up);
-                long slots = packet_slots(&x->up);
+                if (packet_slots(x) <= packet_win(x) / 2) up_drain(&x->up);
+                long slots = packet_slots(x);
                 long per = (long)packet_cap(t);
                 if (slots < 0) slots = 0;
                 if (!per) per = 1;
@@ -790,15 +800,15 @@ static long xhttp_room(struct transport *t) {
                 return slots * per;
             }
             /* In BYTES the free chunk slots can carry, not the HTTP/2 window: the window may
-             * be megabytes while only PACKET_INFLIGHT chunks can be unanswered. Granted the
+             * be megabytes while only packet_win chunks can be unanswered. Granted the
              * window, the client sent far more than the slots took, and every refused segment
              * waited out a retransmission timeout (11 MB uploaded in 20 s). A slot is counted
              * at PACKET_SLOT bytes, below what the stack gathers into one send (up to 16 KB),
              * so a granted window fills whole chunks; post_max when the node's is smaller. */
-            if (packet_room(&x->up) < UP_ROOM_LOW || packet_slots(&x->up) <= PACKET_INFLIGHT / 2)
+            if (packet_room(x) < UP_ROOM_LOW || packet_slots(x) <= packet_win(x) / 2)
                 up_drain(&x->up);
-            long r = packet_room(&x->up);
-            long slots = packet_slots(&x->up);
+            long r = packet_room(x);
+            long slots = packet_slots(x);
             long per = x->post_max && x->post_max < PACKET_SLOT ? (long)x->post_max : PACKET_SLOT;
             if (slots < 0) slots = 0;
             if (r > slots * per) r = slots * per;

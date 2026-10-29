@@ -241,6 +241,7 @@ int main(void) {
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingMethod%22%3A%22tokenish%22%2C%22xPaddingObfsMode%22%3Afalse%2C%22xPaddingPlacement%22%3A%22queryInHeader%22%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingBytes%22%3A%22100-200%22%2C%22scMaxEachPostBytes%22%3A%22500-900%22%2C%22uplinkChunkSize%22%3A%2210-20%22%2C%22xPaddingObfsMode%22%3Atrue%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22uplinkHTTPMethod%22%3A%22GET%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22scMaxBufferedPosts%22%3A40%7D#x",
         };
         links("xhttp-extra", v, N(v));
     }

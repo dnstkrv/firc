@@ -279,6 +279,10 @@ size_t h2_list_size(const struct h2 *h, const struct h2_req *r) {
     return s;
 }
 
+uint32_t h2_stream_cap(const struct h2 *h) {
+    return h->peer_max_streams && h->peer_max_streams < H2_OPEN_MAX ? h->peer_max_streams : H2_OPEN_MAX;
+}
+
 uint32_t h2_header_budget(const struct h2 *h) {
     return h->peer_settings_seen ? h->peer_hdr_list : 8192;
 }
@@ -490,6 +494,7 @@ static int ctl_handle(struct h2 *h) {
                  * 16384, and we never send more, which is legal under any setting. Larger
                  * frames would gain nothing and need a larger send buffer. */
                 if (id == 0x06) h->peer_hdr_list = v;
+                if (id == 0x03) h->peer_max_streams = v;
                 if (id == 0x04) {
                     /* Only the STREAM window shifts; SETTINGS never change the connection
                      * window, only WINDOW_UPDATE does. The difference is from the PREVIOUS

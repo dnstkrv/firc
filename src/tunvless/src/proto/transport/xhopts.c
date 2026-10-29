@@ -7,7 +7,7 @@ struct xh_val { const char *p; size_t n; };
 
 struct xh_raw {
     struct xh_val sess_id_place, sess_place, sess_id_key, sess_key, table, id_len, seq_place, seq_key,
-        data_place, data_key, chunk, method, obfs, pad_key, pad_header, pad_place, pad_method, download;
+        data_place, data_key, chunk, method, obfs, pad_key, pad_header, pad_place, pad_method, download, posts;
 };
 
 static const struct { const char *name; size_t off; } xh_keys[] = {
@@ -29,6 +29,7 @@ static const struct { const char *name; size_t off; } xh_keys[] = {
     { "xPaddingPlacement", offsetof(struct xh_raw, pad_place) },
     { "xPaddingMethod", offsetof(struct xh_raw, pad_method) },
     { "downloadSettings", offsetof(struct xh_raw, download) },
+    { "scMaxBufferedPosts", offsetof(struct xh_raw, posts) },
 };
 
 static const struct { const char *name, *alphabet; } xh_tables[] = {
@@ -182,6 +183,7 @@ int xh_opts_parse(const char *xhx, const char *mode, const char *headers, uint16
     memset(o, 0, sizeof *o);
     if (split(xhx, &r, why, why_n)) return -1;
 
+    if (r.posts.n && num(r.posts.p, r.posts.n, &o->posts)) return unsupported(why, why_n, "scMaxBufferedPosts", r.posts);
     if (r.download.n) {
         snprintf(why, why_n, "xhttp: downloadSettings is not supported");
         return -1;

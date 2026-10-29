@@ -801,6 +801,39 @@ static void t_data_cookie_budget(void) {
     xclose(fds);
 }
 
+static int unanswered_until_full(struct transport *c) {
+    int k = 0;
+    while (k < 200 && transport_write(c, piece, sizeof piece) == 0) { srv_drain(); k++; }
+    srv_drain();
+    return k;
+}
+
+static void t_packet_window_follows_posts(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", "scMaxBufferedPosts=12", NULL);
+    int rc = xopen(&c, &n, fds);
+    check(rc == 0 && unanswered_until_full(&c) == 12, "packet-up: scMaxBufferedPosts 12 leaves 12 chunks unanswered");
+    xclose(fds);
+    n = xnode("packet-up", NULL, NULL);
+    rc = xopen(&c, &n, fds);
+    check(rc == 0 && unanswered_until_full(&c) == 24, "packet-up: without scMaxBufferedPosts 24 chunks unanswered");
+    xclose(fds);
+    n = xnode("packet-up", "scMaxBufferedPosts=500", NULL);
+    rc = xopen(&c, &n, fds);
+    check(rc == 0 && unanswered_until_full(&c) == H2_OPEN_MAX, "packet-up: a large scMaxBufferedPosts stops at H2_OPEN_MAX");
+    xclose(fds);
+    n = xnode("packet-up", "scMaxBufferedPosts=40", NULL);
+    rc = xopen(&c, &n, fds);
+    int w0 = transport_write(&c, piece, sizeof piece);
+    unsigned char st[15] = { 0, 0, 6, 0x04, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 5 };
+    if (write(g_srv, st, sizeof st) != (ssize_t)sizeof st) { perror("write"); exit(2); }
+    srv_drain();
+    check(rc == 0 && w0 == 0 && unanswered_until_full(&c) == 4,
+          "packet-up: the server's MAX_CONCURRENT_STREAMS 5 bounds the unanswered chunks");
+    xclose(fds);
+}
+
 int main(void) {
     t_seq_cookie_after_session();
     t_tokenish_without_obfs_is_repeat_x();
@@ -829,6 +862,7 @@ int main(void) {
     t_packet_up(0x8C, 1, "packet-up: 400 to the previous chunk fails the next write, naming 400");
     t_packet_up(0x88, 0, "packet-up: 200 to the previous chunk is read and is not a refusal");
     t_packet_up_window();
+    t_packet_window_follows_posts();
     t_packet_up_rst();
     t_stream_up(0x8C, 1, "stream-up: 400 to the upload fails the write, naming 400");
     t_stream_up(0x88, 0, "stream-up: 200 to the upload is read and is not a refusal");

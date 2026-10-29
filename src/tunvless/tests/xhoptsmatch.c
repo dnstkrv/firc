@@ -347,6 +347,19 @@ static void t_unknown_values_accepted(void) {
     check("obfs false: off", 0, o.obfs);
 }
 
+static void t_buffered_posts_read_or_refused(void) {
+    struct xh_opts o;
+    check("posts 40: parse", 0, parse("scMaxBufferedPosts=40\n", "packet-up", "", 0, &o));
+    check("posts 40: kept", 40, (long)o.posts);
+    check("posts absent: parse", 0, parse("", "packet-up", "", 0, &o));
+    check("posts absent: 0", 0, (long)o.posts);
+    check("posts 0: parse", 0, parse("scMaxBufferedPosts=0\n", "packet-up", "", 0, &o));
+    check("posts 0: not given", 0, (long)o.posts);
+    check("posts abc: refused", -1, parse("scMaxBufferedPosts=abc\n", "packet-up", "", 0, &o));
+    check_why("posts abc: reason", "xhttp: unsupported scMaxBufferedPosts: abc");
+    check("posts -5: refused", -1, parse("scMaxBufferedPosts=-5\n", "packet-up", "", 0, &o));
+}
+
 static void t_query_padding_overflows_path(void) {
     struct xh_opts o;
     check("query pad 1368: parse", 0, parse("xPaddingObfsMode=true\nxPaddingPlacement=query\n", "", "", 1368, &o));
@@ -384,5 +397,6 @@ int main(void) {
     t_header_key_not_a_token();
     t_unknown_values_accepted();
     t_query_padding_overflows_path();
+    t_buffered_posts_read_or_refused();
     return unit_done("xhoptsmatch");
 }

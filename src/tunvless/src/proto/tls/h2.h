@@ -24,7 +24,7 @@ struct h2_io {
  * per-thread buffer, and only what cannot be parsed at once carries over between calls: a split
  * frame header, a control frame body and the count of unread body. A 16 KB frame buffer per
  * connection would add up to megabytes. */
-#define H2_OPEN_MAX 16
+#define H2_OPEN_MAX 64
 
 struct h2 {
     struct h2_io io;
@@ -94,6 +94,7 @@ struct h2 {
      * SETTINGS twice would shift it twice. Starts at 65535, set by h2_start_req. */
     int32_t peer_init_win;
     uint32_t peer_hdr_list;
+    uint32_t peer_max_streams;
     uint8_t peer_settings_seen;
 
     /* The CURRENT stream id. packet-up uploads as a series of short requests, and an HTTP/2
@@ -170,6 +171,7 @@ int h2_write(struct h2 *h, const unsigned char *d, size_t n);
 int h2_open_streams(const struct h2 *h);
 /* The oldest of them (the lowest id), 0 if none. */
 uint32_t h2_oldest_open(const struct h2 *h);
+uint32_t h2_stream_cap(const struct h2 *h);
 /* The largest n h2_write takes now: the smaller of the stream and connection windows, 0 if
  * either is closed (or negative, RFC 7540 §6.9.2). */
 long h2_room(const struct h2 *h);

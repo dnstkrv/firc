@@ -136,6 +136,12 @@ static void t_xhx_link_keeps_supported_keys_in_order_and_pad_from_extra(void) {
     check("xhx link: a repeated key keeps the last value", "sessionIDKey=b\nseqKey=q\n", xhx_of(&m));
     xhx_link("&headers=X-L%3A%201%0A", "{\"xPaddingBytes\":\"20-40\"}", &m);
     check("xhx link: extra without headers keeps the link's", "X-L: 1\n", m.headers);
+    xhx_link("&mode=packet-up", "{\"scMaxBufferedPosts\":40}", &m);
+    check("xhx link: scMaxBufferedPosts kept", "scMaxBufferedPosts=40\n", xhx_of(&m));
+    struct vless_node j[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_xray("{\"path\":\"/x\",\"mode\":\"packet-up\",\"scMaxBufferedPosts\":40}", j, &st);
+    check("xhx xray: scMaxBufferedPosts kept", "scMaxBufferedPosts=40\n", got ? xhx_of(&j[0]) : xhx_reason(got, &st));
 }
 
 static void t_xhx_settings_over_the_buffer_are_refused(void) {
