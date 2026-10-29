@@ -33,7 +33,7 @@ VLESS_SRC     := src/proto/vless/vldial.c src/proto/vless/client.c src/proto/vle
 TRANSPORT_SRC := src/proto/transport/transport.c src/proto/transport/trdial.c \
                  src/proto/transport/trsec.c src/proto/transport/trgrpc.c src/proto/transport/trxhttp.c \
                  src/proto/transport/trupgrade.c src/proto/transport/trws.c src/proto/transport/trpath.c \
-                 src/proto/transport/trvenc.c
+                 src/proto/transport/trvenc.c src/proto/transport/xhopts.c src/proto/transport/xhreq.c
 TLS_SRC       := src/proto/tls/tls13.c src/proto/tls/certverify.c src/proto/tls/reality.c \
                  src/proto/tls/h2.c src/proto/tls/ech.c src/proto/tls/roots.c
 LIB_SRC       := src/lib/osrand.c
@@ -112,7 +112,7 @@ T_CFLAGS  = -O1 -g $(WARN) -Wno-unused-function $(INC) -Itests $(if $(SANITIZE),
 TW_LIB   := $(T)/wolfssl/libwolfssl.a
 TW_FLAGS  = $(shell cat $(TW_LIB).cflags 2>/dev/null)
 
-UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch
+UNIT := h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq vlinkmatch tungromatch tunnamematch tunnelmatch rtxmatch grpcmatch ctlmatch nodesmatch ctlnodesmatch ctlmapmatch ctlinbmatch ibhsmatch dialmatch ratelogmatch xhoptsmatch
 CRYPTO_TESTS := scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch
 
 test: unit-test crypto-test
@@ -131,7 +131,7 @@ $(T)/h2match: tests/h2match.c src/proto/tls/h2.c $(HDR)
 XHUP_SRC := src/proto/tls/h2.c src/proto/transport/transport.c src/proto/transport/trsec.c \
             src/proto/transport/trdial.c src/proto/transport/trgrpc.c src/proto/tls/roots.c \
             src/proto/transport/trws.c src/proto/transport/trupgrade.c src/proto/transport/trpath.c \
-            src/lib/osrand.c
+            src/proto/transport/xhopts.c src/proto/transport/xhreq.c src/lib/osrand.c
 $(T)/xhupmatch: tests/xhupmatch.c tests/trvenc-stub.c src/proto/transport/trxhttp.c $(XHUP_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/xhupmatch.c tests/trvenc-stub.c $(XHUP_SRC) -lpthread
@@ -139,10 +139,14 @@ $(T)/xhupmatch: tests/xhupmatch.c tests/trvenc-stub.c src/proto/transport/trxhtt
 WS_SRC := src/proto/transport/trws.c src/proto/transport/trupgrade.c src/proto/transport/trpath.c \
           src/proto/transport/transport.c src/proto/transport/trsec.c src/proto/transport/trdial.c \
           src/proto/transport/trgrpc.c src/proto/transport/trxhttp.c src/proto/tls/h2.c \
-          src/proto/tls/roots.c src/lib/osrand.c
+          src/proto/transport/xhopts.c src/proto/transport/xhreq.c src/proto/tls/roots.c src/lib/osrand.c
 $(T)/wsmatch: tests/wsmatch.c tests/trvenc-stub.c $(WS_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/wsmatch.c tests/trvenc-stub.c $(WS_SRC) -lpthread
+
+$(T)/xhoptsmatch: tests/xhoptsmatch.c src/proto/transport/xhopts.c src/proto/transport/xhreq.c src/lib/osrand.c $(HDR)
+	@mkdir -p $(T)
+	$(CC) $(T_CFLAGS) -o $@ tests/xhoptsmatch.c src/proto/transport/xhopts.c src/proto/transport/xhreq.c src/lib/osrand.c
 
 $(T)/pqfallbackmatch: tests/pqfallbackmatch.c src/proto/transport/trsec.c $(HDR)
 	@mkdir -p $(T)
@@ -156,7 +160,7 @@ $(T)/visionmatch: tests/visionmatch.c src/proto/vless/vision.c src/lib/osrand.c 
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/visionmatch.c src/proto/vless/vision.c src/lib/osrand.c -lpthread
 
-SUB_SRC := src/proto/vless/sublink.c src/proto/transport/trpath.c
+SUB_SRC := src/proto/vless/sublink.c src/proto/transport/trpath.c src/proto/transport/xhopts.c
 $(T)/submatch: tests/submatch.c src/proto/vless/sub.c src/proto/vless/vless_proto.c $(SUB_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/submatch.c $(SUB_SRC)
@@ -259,6 +263,7 @@ CLIENT_SRC := src/proto/vless/client.c src/proto/vless/vless_proto.c src/proto/v
               src/proto/transport/transport.c src/proto/transport/trsec.c src/proto/transport/trgrpc.c \
               src/proto/transport/trxhttp.c src/proto/transport/trupgrade.c src/proto/transport/trws.c \
               src/proto/transport/trpath.c src/proto/transport/trvenc.c \
+              src/proto/transport/xhopts.c src/proto/transport/xhreq.c \
               src/proto/tls/tls13.c src/proto/tls/certverify.c src/proto/tls/reality.c src/proto/tls/h2.c \
               src/proto/tls/ech.c
 

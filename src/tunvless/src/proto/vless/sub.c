@@ -297,11 +297,158 @@ static void xray_upg(struct sj *j, struct upg_cfg *u, int hu) {
 
 static int sj_bool(struct sj *j);
 
+struct xh_set { struct vless_node n; struct sl_xh a; struct upg_cfg h; };
+
+static const char XH_NOT_A_STRING[] = "\"";
+
+static int xh_token(struct sj *j, char *buf, size_t cap) {
+    sj_ws(j);
+    if (*j->p == '"') return sj_str(j, buf, cap);
+    size_t i = 0;
+    while ((*j->p >= '0' && *j->p <= '9') || (*j->p >= 'a' && *j->p <= 'z') || *j->p == '-' || *j->p == '.' ||
+           *j->p == '+') {
+        if (i + 1 < cap) buf[i++] = *j->p;
+        j->p++;
+    }
+    buf[i] = '\0';
+    return i ? 0 : -1;
+}
+
+static int xh_digits(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++)
+        if (*s < '0' || *s > '9') return 0;
+    return 1;
+}
+
+static int xh_range_obj(struct sj *j, char *buf, size_t cap) {
+    int f = 1, r;
+    char k[16], from[24] = "", to[24] = "";
+    while ((r = sj_obj_key(j, &f, k, sizeof k)) == 0) {
+        char *dst = !strcmp(k, "from") ? from : !strcmp(k, "to") ? to : NULL;
+        sj_ws(j);
+        if (!dst || *j->p == '"') sj_skip(j);
+        else if (xh_token(j, dst, sizeof from)) return -1;
+    }
+    if (r != 1) return -1;
+    buf[0] = '\0';
+    if (!xh_digits(from) || !xh_digits(to)) return 1;
+    snprintf(buf, cap, "%s-%s", from, to);
+    return 0;
+}
+
+static int xh_string(struct sj *j, char *buf, size_t cap, int *nul) {
+    const char *b = j->p;
+    if (sj_str(j, buf, cap)) return -1;
+    for (const char *p = b; p + 6 <= j->p; p++)
+        if (!strncmp(p, "\\u0000", 6)) *nul = 1;
+    return 0;
+}
+
+static int xh_value(struct sj *j, struct sl_xh *a, const char *k) {
+    char v[sizeof a->buf];
+    sj_ws(j);
+    if (!strncmp(j->p, "null", 4)) { j->p += 4; return 0; }
+    if (!strcmp(k, "downloadSettings")) {
+        const char *b = j->p;
+        sj_skip(j);
+        if (j->p == b) return -1;
+        sl_xh_put(a, k, "present", 7);
+        return 0;
+    }
+    if (*j->p == '{' && (!strcmp(k, "uplinkChunkSize") || !strcmp(k, "sessionIDLength"))) {
+        int r = xh_range_obj(j, v, sizeof v);
+        if (r < 0) return -1;
+        if (r) { sl_xh_put(a, k, XH_NOT_A_STRING, 1); return 0; }
+    } else if (*j->p == '"') {
+        int nul = 0;
+        if (xh_string(j, v, sizeof v, &nul)) return -1;
+        if (nul) { sl_xh_put(a, k, XH_NOT_A_STRING, 1); return 0; }
+    } else if (*j->p == '{' || *j->p == '[') {
+        const char *b = j->p;
+        sj_skip(j);
+        if (j->p == b) return -1;
+        sl_xh_put(a, k, XH_NOT_A_STRING, 1);
+        return 0;
+    } else if (xh_token(j, v, sizeof v)) {
+        return -1;
+    }
+    sl_xh_put(a, k, v, strlen(v));
+    return 0;
+}
+
+static int xh_obj(struct sj *j, struct xh_set *s, struct xh_set *ex, int *ex_on) {
+    int f = 1, r;
+    char k[64], v[48];
+    while ((r = sj_obj_key(j, &f, k, sizeof k)) == 0) {
+        sj_ws(j);
+        if (ex && !strcmp(k, "path")) { if (sj_str(j, s->n.path, sizeof s->n.path)) return -1; }
+        else if (ex && !strcmp(k, "mode")) { if (sj_str(j, s->n.mode, sizeof s->n.mode)) return -1; }
+        else if (!strcmp(k, "xPaddingBytes") || !strcmp(k, "scMaxEachPostBytes")) {
+            if (*j->p == '{' ? xh_range_obj(j, v, sizeof v) < 0 : xh_token(j, v, sizeof v)) return -1;
+            if (k[0] == 'x') sl_pad_range(&s->n, v); else sl_post_range(&s->n, v);
+        }
+        else if (!strcmp(k, "headers")) {
+            if (*j->p == '{') xray_headers(j, &s->h, 1);
+            else { sj_skip(j); s->h.bad = 1; }
+        }
+        else if (ex && !strcmp(k, "extra")) {
+            memset(ex, 0, sizeof *ex);
+            *ex_on = 1;
+            if (!strncmp(j->p, "null", 4)) j->p += 4;
+            else if (xh_obj(j, ex, NULL, NULL)) return -1;
+        }
+        else if (xh_value(j, &s->a, k)) return -1;
+    }
+    return r == 1 ? 0 : -1;
+}
+
+static void xh_apply(struct vless_node *n, const struct xh_set *s) {
+    n->pad_from = s->n.pad_from, n->pad_to = s->n.pad_to;
+    n->post_from = s->n.post_from, n->post_to = s->n.post_to;
+    if (s->h.headers[0] || s->h.bad) {
+        snprintf(n->headers, sizeof(n->headers), "%s", s->h.headers);
+        n->headers_bad = s->h.bad;
+    }
+    sl_xh_done(n, &s->a);
+}
+
+void sl_parse_extra(struct vless_node *n, const char *extra) {
+    struct xh_set *s = calloc(1, sizeof *s);
+    if (!s) { n->xhx = SL_BAD_XHX_JSON; return; }
+    struct sj j = { extra };
+    int bad = xh_obj(&j, s, NULL, NULL);
+    sj_ws(&j);
+    if (bad || *j.p) n->xhx = SL_BAD_XHX_JSON;
+    else xh_apply(n, s);
+    free(s);
+}
+
+struct xh_cfg { struct xh_set s[2]; int ex_on, bad; };
+
+static struct xh_cfg *xh_settings(struct sj *j, struct xh_cfg *c) {
+    if (!c) c = malloc(sizeof *c);
+    if (!c) { sj_skip(j); return NULL; }
+    memset(c, 0, sizeof *c);
+    c->bad = xh_obj(j, &c->s[0], &c->s[1], &c->ex_on);
+    return c;
+}
+
+static void xh_settings_apply(struct vless_node *n, const struct xh_cfg *c, int seen) {
+    if (!seen || strcmp(n->type, "xhttp")) return;
+    if (!c || c->bad) { n->xhx = SL_BAD_XHX_JSON; return; }
+    snprintf(n->path, sizeof(n->path), "%s", c->s[0].n.path);
+    snprintf(n->mode, sizeof(n->mode), "%s", c->s[0].n.mode);
+    xh_apply(n, &c->s[c->ex_on]);
+}
+
 /* streamSettings: the transport, security and everything that depends on them. */
 static void xray_stream(struct sj *j, struct vless_node *n) {
     int first = 1;
     char k[64];
     struct upg_cfg ws, hu;
+    struct xh_cfg *xc = NULL;
+    int xc_seen = 0;
     memset(&ws, 0, sizeof(ws));
     memset(&hu, 0, sizeof(hu));
     while (sj_obj_key(j, &first, k, sizeof(k)) == 0) {
@@ -371,53 +518,12 @@ static void xray_stream(struct sj *j, struct vless_node *n) {
             }
         } else if (!strcmp(k, "xhttpSettings") || !strcmp(k, "splithttpSettings")) {
             /* splithttpSettings is the old name of xhttpSettings; some panels still use it. */
-            int f2 = 1;
-            char k2[64];
-            while (sj_obj_key(j, &f2, k2, sizeof(k2)) == 0) {
-                if (!strcmp(k2, "path")) sj_str(j, n->path, sizeof(n->path));
-                else if (!strcmp(k2, "mode")) sj_str(j, n->mode, sizeof(n->mode));
-                /* In a config this field is right here, not in `extra`: `extra` is how a
-                 * link wraps the same settings when there is no config. */
-                else if (!strcmp(k2, "xPaddingBytes")) {
-                    char pb[32];
-                    sj_str(j, pb, sizeof(pb));
-                    sl_pad_range(n, pb);
-                }
-                /* A number or a "from-to" string: the raw token, parsed as in a link. */
-                else if (!strcmp(k2, "scMaxEachPostBytes")) {
-                    sj_ws(j);
-                    const char *b = j->p;
-                    sj_skip(j);
-                    char raw[48];
-                    size_t l = (size_t)(j->p - b);
-                    if (l < sizeof raw) { memcpy(raw, b, l); raw[l] = 0; sl_post_range(n, raw); }
-                }
-                else if (!strcmp(k2, "extra")) {
-                    /* A nested extra (the link form inside a config): read as in a link. */
-                    const char *b = j->p;
-                    sj_skip(j);
-                    size_t l = (size_t)(j->p - b);
-                    char *cp = malloc(l + 1);
-                    if (cp) { memcpy(cp, b, l); cp[l] = 0; sl_parse_extra(n, cp); free(cp); }
-                }
-                else if (!strcmp(k2, "downloadSettings")) {
-                    sj_ws(j);
-                    if (strncmp(j->p, "null", 4) != 0) n->xh_extra = 1;
-                    sj_skip(j);
-                }
-                else if (!strcmp(k2, "sessionPlacement") || !strcmp(k2, "sessionIDPlacement") ||
-                         !strcmp(k2, "seqPlacement") || !strcmp(k2, "uplinkDataPlacement") ||
-                         !strcmp(k2, "xPaddingMethod")) {
-                    char v[32] = "";
-                    sj_ws(j);
-                    if (*j->p == '"') sj_str(j, v, sizeof v); else sj_skip(j);
-                    if (sl_xh_setting_bad(k2, v)) n->xh_extra = 1;
-                }
-                else if (!strcmp(k2, "xPaddingObfsMode")) { if (sj_bool(j)) n->xh_extra = 1; }
-                else sj_skip(j);
-            }
+            xc = xh_settings(j, xc);
+            xc_seen = 1;
         } else sj_skip(j);
     }
+    xh_settings_apply(n, xc, xc_seen);
+    free(xc);
     const struct upg_cfg *u = !strcmp(n->type, "ws") ? &ws : !strcmp(n->type, "httpupgrade") ? &hu : NULL;
     if (u) {
         snprintf(n->path, sizeof(n->path), "%s", u->path);
@@ -1074,6 +1180,36 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
         if ((v = yf_get(f, "xhttp-opts.path"))) sl_set_field(n->path, sizeof n->path, v, strlen(v));
         if ((v = yf_get(f, "xhttp-opts.mode"))) sl_set_field(n->mode, sizeof n->mode, v, strlen(v));
         if ((v = yf_get(f, "xhttp-opts.x-padding-bytes"))) sl_pad_range(n, v);
+        static const char *const map[][2] = {
+            { "x-padding-obfs-mode", "xPaddingObfsMode" }, { "x-padding-key", "xPaddingKey" },
+            { "x-padding-header", "xPaddingHeader" }, { "x-padding-placement", "xPaddingPlacement" },
+            { "x-padding-method", "xPaddingMethod" }, { "uplink-http-method", "uplinkHTTPMethod" },
+            { "session-placement", "sessionIDPlacement" }, { "session-key", "sessionIDKey" },
+            { "session-table", "sessionIDTable" }, { "session-length", "sessionIDLength" },
+            { "seq-placement", "seqPlacement" }, { "seq-key", "seqKey" },
+            { "uplink-data-placement", "uplinkDataPlacement" }, { "uplink-data-key", "uplinkDataKey" },
+            { "uplink-chunk-size", "uplinkChunkSize" },
+        };
+        struct sl_xh a;
+        memset(&a, 0, sizeof a);
+        for (size_t i = 0; i < f->n; i++) {
+            const char *k = f->kv[i].k;
+            if (strncmp(k, "xhttp-opts.", 11) != 0) continue;
+            k += 11;
+            if (!strncmp(k, "download-settings.", 18) ||
+                (!strcmp(k, "download-settings") && f->kv[i].v[0] && strcmp(f->kv[i].v, "null"))) {
+                sl_xh_put(&a, "downloadSettings", "present", 7);
+                continue;
+            }
+            if (!strncmp(k, "headers.", 8)) {
+                if (ci_eq(k + 8, "host") || hdr_append(n->headers, sizeof n->headers, k + 8, f->kv[i].v) != 0)
+                    n->headers_bad = 1;
+                continue;
+            }
+            for (size_t m = 0; m < sizeof map / sizeof *map; m++)
+                if (!strcmp(k, map[m][0])) sl_xh_put(&a, map[m][1], f->kv[i].v, strlen(f->kv[i].v));
+        }
+        sl_xh_done(n, &a);
     }
     return 1;
 }

@@ -34,7 +34,12 @@ BIN="${TUNVLESS:-./out/tunvless}"
 DUR="${DUR:-60}"
 ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp-packet-up xhttp-tls
            xhttp-auto-tls xhttp-auto-one xhttp-padding xhttp-host xhttp-path xhttp-up-secs
-           xhttp-no-sse xhttp-post-max"
+           xhttp-no-sse xhttp-post-max
+           xhttp-sess-header xhttp-sess-cookie xhttp-sess-query xhttp-seq-header xhttp-seq-cookie-key
+           xhttp-old-names xhttp-data-header xhttp-data-cookie xhttp-data-cookie-small
+           xhttp-obfs-header xhttp-obfs-cookie xhttp-obfs-query xhttp-obfs-qih xhttp-tokenish
+           xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
+           xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data"
 CASES="${CASES:-$ALL_CASES}"
 XRAY="${XRAY:-$(command -v xray 2>/dev/null || true)}"
 
@@ -107,8 +112,11 @@ fi
 FAIL=0
 # One case: NET (streamSettings without security), SEC (reality | tls), Q (the link's transport
 # parameters) and TUN_ARGS (extra client flags). Defaults are Xray's own.
+enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+xh() { XP="{\"path\":\"/xp/\",\"mode\":\"$1\",$2}"; Q="type=xhttp&path=%2Fxp%2F&mode=$1&extra=$(enc "{$2}")"; }
+neg() { EXPECT=fail; XP="{\"path\":\"/xp/\",\"mode\":\"packet-up\",$1}"; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up"; }
 case_cfg() {
-    SEC=reality; TUN_ARGS=""
+    SEC=reality; TUN_ARGS=""; EXPECT=ok
     XP='{"path":"/xp/"}'
     case "$1" in
     grpc-gun|grpc-multi)
@@ -140,6 +148,28 @@ case_cfg() {
     # packet-up: the server limits each POST body; the link says how much.
     xhttp-post-max)    XP='{"path":"/xp/","scMaxEachPostBytes":4096}'
                        Q="type=xhttp&path=%2Fxp%2F&mode=packet-up&extra=%7B%22scMaxEachPostBytes%22%3A4096%7D" ;;
+    xhttp-sess-header)       xh stream-up '"sessionIDPlacement":"header"' ;;
+    xhttp-sess-cookie)       xh packet-up '"sessionIDPlacement":"cookie"' ;;
+    xhttp-sess-query)        xh packet-up '"sessionIDPlacement":"query","sessionIDKey":"sid"' ;;
+    xhttp-seq-header)        xh packet-up '"seqPlacement":"header"' ;;
+    xhttp-seq-cookie-key)    xh packet-up '"seqPlacement":"cookie","seqKey":"sq"' ;;
+    xhttp-old-names)         XP='{"path":"/xp/","mode":"packet-up","sessionIDPlacement":"header","sessionIDKey":"X-Sid"}'
+                             Q="type=xhttp&path=%2Fxp%2F&mode=packet-up&extra=$(enc '{"sessionPlacement":"query","sessionKey":"old","sessionIDPlacement":"header","sessionIDKey":"X-Sid"}')" ;;
+    xhttp-data-header)       xh packet-up '"uplinkDataPlacement":"header"' ;;
+    xhttp-data-cookie)       xh packet-up '"uplinkDataPlacement":"cookie"' ;;
+    xhttp-data-cookie-small) xh packet-up '"uplinkDataPlacement":"cookie","uplinkChunkSize":64' ;;
+    xhttp-obfs-header)       xh packet-up '"xPaddingObfsMode":true,"xPaddingPlacement":"header"' ;;
+    xhttp-obfs-cookie)       xh packet-up '"xPaddingObfsMode":true,"xPaddingPlacement":"cookie","xPaddingKey":"pad"' ;;
+    xhttp-obfs-query)        xh packet-up '"xPaddingObfsMode":true,"xPaddingPlacement":"query","xPaddingKey":"pq"' ;;
+    xhttp-obfs-qih)          xh packet-up '"xPaddingObfsMode":true,"xPaddingPlacement":"queryInHeader","xPaddingHeader":"X-Ref"' ;;
+    xhttp-tokenish)          xh packet-up '"xPaddingObfsMode":true,"xPaddingPlacement":"header","xPaddingMethod":"tokenish","xPaddingBytes":"50-60"' ;;
+    xhttp-method-put)        xh stream-one '"uplinkHTTPMethod":"PUT"' ;;
+    xhttp-method-get)        xh packet-up '"uplinkHTTPMethod":"GET"' ;;
+    xhttp-table)             xh packet-up '"sessionIDTable":"Base62","sessionIDLength":12' ;;
+    xhttp-headers)           xh packet-up '"headers":{"X-Custom":"v1","User-Agent":"tv-test"}' ;;
+    xhttp-neg-obfs)          neg '"xPaddingObfsMode":true,"xPaddingPlacement":"cookie"' ;;
+    xhttp-neg-sess)          neg '"sessionIDPlacement":"header"' ;;
+    xhttp-neg-data)          neg '"uplinkDataPlacement":"cookie"' ;;
     *) echo "run-xray: unknown case $1"; exit 2 ;;
     esac
     case "$1" in xhttp-*) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
@@ -160,7 +190,7 @@ for MODE in $CASES; do
  "inbounds":[{"listen":"$S_IP","port":$PORT,"protocol":"vless",
    "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
    "streamSettings":{$NET,$SECJ}}],
- "outbounds":[{"protocol":"freedom","tag":"direct"}]}
+ "outbounds":[{"protocol":"freedom","tag":"direct","settings":{"finalRules":[{"action":"allow","ip":["$TARGET/32"]}]}}]}
 JSON
     ip netns exec "$NSS" "$XRAY" run -c "$W/xray.json" > "$W/xray-$MODE.log" 2>&1 &
     XPID=$!; PIDS="$PIDS $XPID"
@@ -180,6 +210,16 @@ JSON
         if is_ok "$out"; then warm=1; break; fi
         sleep 1
     done
+    if [ "$EXPECT" = fail ]; then
+        kill "$XPID" 2>/dev/null || true; sleep 0.5
+        if [ "$warm" -eq 1 ]; then
+            echo "run-xray: FAIL — the server accepted a request it must refuse: $out"; FAIL=1
+            echo "run-xray: case $MODE — FAIL"
+        else
+            echo "run-xray: refused as expected: $out"; echo "run-xray: case $MODE — ok"
+        fi
+        continue
+    fi
     [ "$warm" -eq 1 ] || { echo "run-xray: FAIL — the node did not answer the probe within a minute: $out"; FAIL=1; kill "$XPID" 2>/dev/null || true; continue; }
 
     # 1. The node probe, 30 times.

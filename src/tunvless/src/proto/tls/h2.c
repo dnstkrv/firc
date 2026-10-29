@@ -26,6 +26,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/random.h>
 
 #include "h2.h"
@@ -198,64 +199,134 @@ uint32_t h2_oldest_open(const struct h2 *h) {
     return m;
 }
 
-static int put_headers(struct h2 *h, struct wbuf *b, const char *authority,
-                       const char *path, const char *content_type, const char *referer,
-                       int method, int end_stream) {
-    const int browser = h->browser;
-    /* 4 KB: the browser look is a dozen headers, and with them goes a Referer of up to 1400
-     * bytes with the padding (2 KB was too small); a size failure would look like a dead
-     * node. One buffer per thread. */
-    static __thread unsigned char hb[4096];
-    struct wbuf hp = { hb, 0, sizeof(hb) };
-    hp_indexed(&hp, method == H2_GET ? HP_METHOD_GET : HP_METHOD_POST);
+struct hf { unsigned idx; const char *name, *value; };
+
+static const struct hf br_head[] = {
+    { 0, "sec-ch-ua", UA_CH_CHROME },
+    { 0, "sec-ch-ua-mobile", "?0" },
+    { 0, "sec-ch-ua-platform", "\"Windows\"" },
+    { 0, "dnt", "1" },
+    { HP_USER_AGENT, "user-agent", UA_CHROME },
+    { HP_ACCEPT, "accept", "*/*" },
+    { 0, "sec-fetch-site", "same-origin" },
+    { 0, "sec-fetch-mode", "cors" },
+    { 0, "sec-fetch-dest", "empty" },
+};
+static const struct hf br_tail[] = {
+    { HP_ACCEPT_LANG, "accept-language", "en-US,en;q=0.9" },
+    { 0, "priority", "u=1, i" },
+    { HP_CACHE_CTRL, "cache-control", "no-cache" },
+    { 0, "pragma", "no-cache" },
+};
+static const struct hf grpc_tail[] = {
+    { 0, "te", "trailers" },
+    { HP_USER_AGENT, "user-agent", "grpc-go/1.60.0" },
+};
+
+#define H2_MAX_BLOCK DEFAULT_MAX_FRAME
+#define NELEM(a) (sizeof(a) / sizeof((a)[0]))
+#define H2_PREFACE_LEN (24 + 9 + 12 + 9 + 4)
+
+static __thread unsigned char g_req_out[H2_PREFACE_LEN + 9 + H2_MAX_BLOCK];
+
+static int hf_taken(const struct h2_req *r, const char *name) {
+    for (size_t i = 0; r && i < r->fields_n; i++)
+        if (strcasecmp(r->fields[i].name, name) == 0) return 1;
+    return 0;
+}
+
+static void hp_list(struct wbuf *b, const struct hf *l, size_t n, const struct h2_req *r) {
+    for (size_t i = 0; i < n; i++) {
+        if (hf_taken(r, l[i].name)) continue;
+        if (l[i].idx) hp_field(b, l[i].idx, l[i].value);
+        else hp_new(b, l[i].name, l[i].value);
+    }
+}
+
+static size_t hf_size(const struct hf *l, size_t n, const struct h2_req *r) {
+    size_t s = 0;
+    for (size_t i = 0; i < n; i++)
+        if (!hf_taken(r, l[i].name)) s += strlen(l[i].name) + strlen(l[i].value) + 32;
+    return s;
+}
+
+static void hp_user(struct wbuf *b, const struct h2_field *f) {
+    size_t n = strlen(f->name);
+    if (n == 7 && strncasecmp(f->name, "referer", 7) == 0) {
+        hp_field(b, HP_REFERER, f->value);
+        return;
+    }
+    wb8(b, 0x00);
+    hp_int(b, 0x00, 7, (uint32_t)n);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)f->name[i];
+        wb8(b, c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+    }
+    hp_str(b, f->value, strlen(f->value));
+}
+
+size_t h2_list_size(const struct h2 *h, const struct h2_req *r) {
+    size_t s = strlen(":method") + strlen(r->method) + 32;
+    s += strlen(":scheme") + strlen("https") + 32;
+    s += strlen(":path") + strlen(r->path) + 32;
+    s += strlen(":authority") + strlen(r->authority) + 32;
+    if (r->content_type) s += strlen("content-type") + strlen(r->content_type) + 32;
+    for (size_t i = 0; i < r->fields_n; i++)
+        s += strlen(r->fields[i].name) + strlen(r->fields[i].value) + 32;
+    if (h->browser && !r->no_look)
+        s += hf_size(br_head, NELEM(br_head), r) + hf_size(br_tail, NELEM(br_tail), r);
+    else if (!h->browser) s += hf_size(grpc_tail, NELEM(grpc_tail), NULL);
+    return s;
+}
+
+uint32_t h2_header_budget(const struct h2 *h) {
+    return h->peer_settings_seen ? h->peer_hdr_list : 8192;
+}
+
+static int put_headers(struct h2 *h, struct wbuf *b, const struct h2_req *r) {
+    size_t at = b->n;
+    if (at + 9 > b->cap) return H2_ETOOBIG;
+    struct wbuf hp = { b->p + at + 9, 0, b->cap - at - 9 };
+    if (strcmp(r->method, "GET") == 0) hp_indexed(&hp, HP_METHOD_GET);
+    else if (strcmp(r->method, "POST") == 0) hp_indexed(&hp, HP_METHOD_POST);
+    else hp_field(&hp, HP_METHOD_GET, r->method);
     hp_indexed(&hp, HP_SCHEME_HTTPS);
-    hp_field(&hp, HP_PATH, path);
-    hp_field(&hp, HP_AUTHORITY, authority);
-    if (content_type) hp_field(&hp, HP_CONTENT_TYPE, content_type);
-    if (browser) {
+    hp_field(&hp, HP_PATH, r->path);
+    hp_field(&hp, HP_AUTHORITY, r->authority);
+    if (r->content_type) hp_field(&hp, HP_CONTENT_TYPE, r->content_type);
+    if (h->browser && r->no_look) {
+        for (size_t i = 0; i < r->fields_n; i++) hp_user(&hp, &r->fields[i]);
+    } else if (h->browser) {
         /* Chrome's order: client hints, then who it is, then what it wants and where it came
          * from. Referer carries the xhttp padding and stands where a browser puts it. */
-        hp_new(&hp, "sec-ch-ua", UA_CH_CHROME);
-        hp_new(&hp, "sec-ch-ua-mobile", "?0");
-        hp_new(&hp, "sec-ch-ua-platform", "\"Windows\"");
-        hp_new(&hp, "dnt", "1");
-        hp_field(&hp, HP_USER_AGENT, UA_CHROME);
-        hp_field(&hp, HP_ACCEPT, "*/*");
-        hp_new(&hp, "sec-fetch-site", "same-origin");
-        hp_new(&hp, "sec-fetch-mode", "cors");
-        hp_new(&hp, "sec-fetch-dest", "empty");
-        if (referer) hp_field(&hp, HP_REFERER, referer);
-        hp_field(&hp, HP_ACCEPT_LANG, "en-US,en;q=0.9");
-        hp_new(&hp, "priority", "u=1, i");
-        hp_field(&hp, HP_CACHE_CTRL, "no-cache");
-        hp_new(&hp, "pragma", "no-cache");
+        size_t lead = r->lead_n < r->fields_n ? r->lead_n : r->fields_n;
+        for (size_t i = 0; i < lead; i++) hp_user(&hp, &r->fields[i]);
+        hp_list(&hp, br_head, NELEM(br_head), r);
+        for (size_t i = lead; i < r->fields_n; i++) hp_user(&hp, &r->fields[i]);
+        hp_list(&hp, br_tail, NELEM(br_tail), r);
     } else {
-        if (referer) hp_field(&hp, HP_REFERER, referer);
+        for (size_t i = 0; i < r->fields_n; i++) hp_user(&hp, &r->fields[i]);
         /* te: trailers is the one connection-specific header HTTP/2 explicitly allows, and
          * gRPC requires it. */
-        hp_new(&hp, "te", "trailers");
-        hp_field(&hp, HP_USER_AGENT, "grpc-go/1.60.0");
+        hp_list(&hp, grpc_tail, NELEM(grpc_tail), NULL);
     }
-    if (hp.n > sizeof(hb)) return -1;
+    if (hp.n > H2_MAX_BLOCK || hp.n > hp.cap) return H2_ETOOBIG;
 
     /* END_STREAM as the caller asks. A long-lived stream has none: the request body is the
      * upstream channel and lives as long as the connection. A download GET has no body, and
      * the server waits for the close right here. END_HEADERS always: the headers are short and
      * need no CONTINUATION. */
-    unsigned char hdr[9];
+    unsigned char *hdr = b->p + at;
     hdr[0] = (unsigned char)(hp.n >> 16); hdr[1] = (unsigned char)(hp.n >> 8);
     hdr[2] = (unsigned char)hp.n;
     hdr[3] = FR_HEADERS;
-    hdr[4] = (unsigned char)(FLAG_END_HEADERS | (end_stream ? FLAG_END_STREAM : 0));
+    hdr[4] = (unsigned char)(FLAG_END_HEADERS | (r->end_stream ? FLAG_END_STREAM : 0));
     put32(hdr + 5, h->sid);
-    wb(b, hdr, 9);
-    wb(b, hb, hp.n);
+    b->n = at + 9 + hp.n;
     return 0;
 }
 
-int h2_start_ex(struct h2 *h, const struct h2_io *io, const char *authority,
-                const char *path, const char *content_type, const char *referer,
-                int method, int end_stream, int browser) {
+int h2_start_req(struct h2 *h, const struct h2_io *io, const struct h2_req *r, int browser) {
     memset(h, 0, sizeof(*h));
     h->io = *io;
     h->browser = browser;
@@ -266,8 +337,7 @@ int h2_start_ex(struct h2 *h, const struct h2_io *io, const char *authority,
     h->send_win_conn = 65535;
     h->peer_init_win = 65535;            /* the same default; shifts count from it */
 
-    static __thread unsigned char buf[4096];
-    struct wbuf b = { buf, 0, sizeof(buf) };
+    struct wbuf b = { g_req_out, 0, sizeof(g_req_out) };
 
     /* The preface, byte for byte from RFC 7540 §3.5: the server compares it literally. */
     wb(&b, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
@@ -294,10 +364,10 @@ int h2_start_ex(struct h2 *h, const struct h2_io *io, const char *authority,
         wb(&b, wu, 4);
     }
 
-    if (put_headers(h, &b, authority, path, content_type, referer, method, end_stream) != 0)
-        return H2_ETOOBIG;
+    int rc = put_headers(h, &b, r);
+    if (rc) return rc;
 
-    if (b.n > sizeof(buf)) return H2_ETOOBIG;
+    if (b.n > sizeof(g_req_out)) return H2_ETOOBIG;
     /* All in one write: preface, SETTINGS, WINDOW_UPDATE and the request leave together, as a
      * browser sends them; separately they would make a run of records of telltale lengths.
      *
@@ -305,18 +375,19 @@ int h2_start_ex(struct h2 *h, const struct h2_io *io, const char *authority,
      * for them would add a round trip before the first data byte, and HTTP/2 allows sending
      * data at once. The status shows on the first read. */
     h->started = 1;
-    return h->io.write(h->io.ctx, buf, b.n);
+    return h->io.write(h->io.ctx, g_req_out, b.n);
 }
 
 int h2_start(struct h2 *h, const struct h2_io *io, const char *authority,
              const char *path, const char *content_type, const char *referer) {
-    /* POST with an open body and gRPC headers (browser = 0): the grpc transport. xhttp calls
-     * h2_start_ex for the browser look. */
-    return h2_start_ex(h, io, authority, path, content_type, referer, H2_POST, 0, 0);
+    const struct h2_field ref = { "referer", referer };
+    const struct h2_req r = { .authority = authority, .path = path,
+                              .content_type = content_type, .method = "POST",
+                              .fields = referer ? &ref : NULL, .fields_n = referer ? 1 : 0 };
+    return h2_start_req(h, io, &r, 0);
 }
 
-int h2_next(struct h2 *h, const char *authority, const char *path,
-            const char *content_type, const char *referer, int method) {
+int h2_next_req(struct h2 *h, const struct h2_req *r) {
     if (!h->started) return H2_EPROTO;
     /* After GOAWAY the server takes no new streams (RFC 9113 §6.8): the request would get no
      * answer. Refusing now means reconnecting now, not after a timeout. */
@@ -325,11 +396,17 @@ int h2_next(struct h2 *h, const char *authority, const char *path,
         snprintf(g_reset_why, sizeof(g_reset_why), "%s", h->why);
         return H2_ERESET;
     }
+    struct wbuf b = { g_req_out, 0, sizeof(g_req_out) };
+    uint32_t sid = h->sid;
+    h->sid += 2;
+    int rc = put_headers(h, &b, r);
+    if (rc == 0 && b.n > sizeof(g_req_out)) rc = H2_ETOOBIG;
+    if (rc) { h->sid = sid; return rc; }
+
     h->pend_err = 0;                 /* the previous chunk's end does not carry over */
 
     /* The id grows by two: client streams are odd (RFC 7540 §5.1.1). Reusing a closed
      * stream's id is a connection error, not a stream error: the whole connection drops. */
-    h->sid += 2;
     open_add(h, h->sid);
 
     /* Fresh STREAM state, CONNECTION state untouched. The connection window and the server's
@@ -343,15 +420,7 @@ int h2_next(struct h2 *h, const char *authority, const char *path,
      * recv_credit_conn is NOT touched: it belongs to the connection, and zeroing it would never
      * return window the server already spent. */
     h->recv_credit = 0;
-
-    /* The same size as in h2_start_ex: the same headers (browser look, a Referer of up to
-     * 1400 bytes, a long node path); 2 KB was too small for them. */
-    static __thread unsigned char buf[4096];
-    struct wbuf b = { buf, 0, sizeof(buf) };
-    if (put_headers(h, &b, authority, path, content_type, referer, method, 0) != 0)
-        return H2_ETOOBIG;
-    if (b.n > sizeof(buf)) return H2_ETOOBIG;
-    return h->io.write(h->io.ctx, buf, b.n);
+    return h->io.write(h->io.ctx, g_req_out, b.n);
 }
 
 int h2_end_stream(struct h2 *h) {
@@ -408,6 +477,10 @@ static int ctl_handle(struct h2 *h) {
     switch (h->frame_type) {
         case FR_SETTINGS:
             if (h->frame_flags & FLAG_ACK) return 0;
+            if (!h->peer_settings_seen) {
+                h->peer_settings_seen = 1;
+                h->peer_hdr_list = 16384;
+            }
             /* INITIAL_WINDOW_SIZE shifts the SEND window of the open stream by the difference
              * (RFC 7540 §6.9.2); without it we either waste the window or overrun it. */
             for (size_t i = 0; i + 6 <= h->ctl_n; i += 6) {
@@ -416,6 +489,7 @@ static int ctl_handle(struct h2 *h) {
                 /* The server's MAX_FRAME_SIZE is ignored on purpose: it cannot be below
                  * 16384, and we never send more, which is legal under any setting. Larger
                  * frames would gain nothing and need a larger send buffer. */
+                if (id == 0x06) h->peer_hdr_list = v;
                 if (id == 0x04) {
                     /* Only the STREAM window shifts; SETTINGS never change the connection
                      * window, only WINDOW_UPDATE does. The difference is from the PREVIOUS
@@ -465,7 +539,7 @@ static int ctl_handle(struct h2 *h) {
             return h2_reset(h, "RST_STREAM", h->ctl_n >= 4 ? get32(h->ctl) : 0);
 
         case FR_GOAWAY: {
-            /* The end of the CONNECTION: no new streams after it (h2_next refuses). The current
+            /* The end of the CONNECTION: no new streams after it (h2_next_req refuses). The current
              * stream is not necessarily over: last_stream_id says how far the server will go
              * (RFC 9113 §6.8). A Go server closes gracefully with GOAWAY(NO_ERROR, the highest
              * id), then PING and a second GOAWAY, and finishes the streams in progress. The

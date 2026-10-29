@@ -23,7 +23,7 @@
 static const char *const g_fields[] = {
     "name", "host", "port", "uuid", "type", "security", "sni", "fp", "pbk", "sid", "flow", "path",
     "service", "mode", "http_host", "headers", "pad_from", "pad_to", "post_from", "post_to", "pqv",
-    "encryption", "tcp_http", "xh_extra", "pcs", "pks", "vcn", "ech", "allow_insecure", "insecure",
+    "encryption", "tcp_http", "pcs", "pks", "vcn", "ech", "allow_insecure", "insecure", "xhx",
 };
 #define NFIELDS (sizeof g_fields / sizeof *g_fields)
 static unsigned g_cover[NFIELDS];
@@ -37,7 +37,8 @@ static void hit(const char *f) {
 }
 
 static int marker(const char *p) {
-    return p && (p == SL_BAD_PQV || p == SL_FULL || p == SL_BAD_PIN || p == SL_BAD_ECH || p == SL_ECH_DNS);
+    return p && (p == SL_BAD_PQV || p == SL_FULL || p == SL_BAD_PIN || p == SL_BAD_ECH || p == SL_ECH_DNS ||
+                 p == SL_BAD_XHX || p == SL_BAD_XHX_JSON);
 }
 
 static int same_ptr(const char *a, const char *b) {
@@ -55,8 +56,8 @@ static const char *diff(const struct vless_node *n, const struct vless_node *m) 
     FS(name); FS(host); FN(port); FS(uuid); FS(type); FS(security); FS(sni); FS(fp); FS(pbk);
     FS(sid); FS(flow); FS(path); FS(service); FS(mode); FS(http_host); FS(headers);
     FN(pad_from); FN(pad_to); FN(post_from); FN(post_to); FP(pqv); FP(encryption);
-    FN(tcp_http); FN(xh_extra); FP(pcs); FP(pks); FP(vcn); FP(ech); FN(allow_insecure);
-    FN(insecure);
+    FN(tcp_http); FP(pcs); FP(pks); FP(vcn); FP(ech); FN(allow_insecure);
+    FN(insecure); FP(xhx);
     if (n->headers_bad != m->headers_bad) bad = "headers_bad";
     if (strcmp(n->skip_reason, m->skip_reason)) bad = "skip_reason";
     if (marker(n->pcs) || marker(n->pks) || marker(n->vcn) || marker(n->ech))
@@ -226,6 +227,22 @@ int main(void) {
         };
         /* catches: xhttp padding, post size, mode, extra or headerType lost or read as another value */
         links("xhttp and grpc links", v, N(v));
+    }
+    {
+        static const char *const v[] = {
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22sessionPlacement%22%3A%22path%22%2C%22seqPlacement%22%3A%22path%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22sessionPlacement%22%3A%22header%22%2C%22sessionKey%22%3A%22X-S%22%2C%22seqPlacement%22%3A%22header%22%2C%22seqKey%22%3A%22X-Q%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22sessionPlacement%22%3A%22cookie%22%2C%22sessionKey%22%3A%22sid%22%2C%22seqPlacement%22%3A%22query%22%2C%22seqKey%22%3A%22q%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22sessionIDPlacement%22%3A%22query%22%2C%22sessionIDKey%22%3A%22k%22%2C%22sessionIDTable%22%3A%22hex%22%2C%22sessionIDLength%22%3A%2216-20%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22uplinkDataPlacement%22%3A%22body%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22uplinkDataPlacement%22%3A%22header%22%2C%22uplinkDataKey%22%3A%22X-D%22%2C%22uplinkChunkSize%22%3A%22100-200%22%7D&mode=packet-up#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22uplinkChunkSize%22%3A%224096%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingMethod%22%3A%22repeat-x%22%2C%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingKey%22%3A%22pk%22%2C%22xPaddingHeader%22%3A%22X-P%22%2C%22xPaddingPlacement%22%3A%22header%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingMethod%22%3A%22tokenish%22%2C%22xPaddingObfsMode%22%3Afalse%2C%22xPaddingPlacement%22%3A%22queryInHeader%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingBytes%22%3A%22100-200%22%2C%22scMaxEachPostBytes%22%3A%22500-900%22%2C%22uplinkChunkSize%22%3A%2210-20%22%2C%22xPaddingObfsMode%22%3Atrue%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22uplinkHTTPMethod%22%3A%22GET%22%7D#x",
+        };
+        links("xhttp-extra", v, N(v));
     }
     {
         static char big[2048] = "%7B%22headers%22%3A%7B";

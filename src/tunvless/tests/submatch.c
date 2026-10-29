@@ -80,6 +80,304 @@ static void on_alarm(int sig) {
     _exit(1);
 }
 
+#define XHU "b831381d-6324-4d53-ad4f-8cda48b30811"
+
+static const char *xhx_of(const struct vless_node *n) {
+    return !n->xhx ? "(null)" : n->xhx == SL_BAD_XHX ? "(bad)" : n->xhx == SL_BAD_XHX_JSON ? "(bad json)" :
+           n->xhx == SL_FULL ? "(full)" : n->xhx;
+}
+
+static int xhx_link(const char *query, const char *json, struct vless_node *n) {
+    static char url[16384];
+    size_t o = (size_t)snprintf(url, sizeof url, "vless://" XHU "@example.org:443?type=xhttp&security=none&path=%%2Fx%s&extra=", query);
+    for (const unsigned char *p = (const unsigned char *)json; *p && o + 4 < sizeof url; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) url[o++] = (char)*p;
+        else o += (size_t)snprintf(url + o, sizeof url - o, "%%%02X", *p);
+    }
+    snprintf(url + o, sizeof url - o, "#x");
+    return vless_parse_url(url, n);
+}
+
+static size_t xhx_xray(const char *xhttp, struct vless_node *out, struct vless_sub_stats *st) {
+    static char js[8192];
+    snprintf(js, sizeof js,
+             "{\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"j\",\"settings\":{\"vnext\":[{\"address\":\"example.org\","
+             "\"port\":443,\"users\":[{\"id\":\"" XHU "\"}]}]},\"streamSettings\":{\"network\":\"xhttp\","
+             "\"xhttpSettings\":%s}}]}", xhttp);
+    memset(st, 0, sizeof *st);
+    return vless_parse_sub(js, out, 4, st);
+}
+
+static size_t xhx_clash(const char *opts, struct vless_node *out, struct vless_sub_stats *st) {
+    static char y[8192];
+    snprintf(y, sizeof y,
+             "proxies:\n  - name: c\n    type: vless\n    server: example.org\n    port: 443\n"
+             "    uuid: " XHU "\n    network: xhttp\n    xhttp-opts:\n      path: /x\n%s", opts);
+    memset(st, 0, sizeof *st);
+    return vless_parse_sub(y, out, 4, st);
+}
+
+static const char *xhx_reason(size_t got, const struct vless_sub_stats *st) {
+    return got ? "(usable)" : st->reasons_n ? st->reasons[0].reason : "(no reason)";
+}
+
+static void t_xhx_link_keeps_supported_keys_in_order_and_pad_from_extra(void) {
+    struct vless_node n, m;
+    const char *ex = "{\"sessionIDPlacement\":\"header\",\"xPaddingBytes\":\"20-40\",\"uplinkChunkSize\":\"200-100\"}";
+    check_n("xhx link: usable", 0, xhx_link("", ex, &n));
+    check("xhx link: canonical string", "sessionIDPlacement=header\nuplinkChunkSize=200-100\n", xhx_of(&n));
+    check_n("xhx link: pad from extra, lower", 20, n.pad_from);
+    check_n("xhx link: pad from extra, upper", 40, n.pad_to);
+    xhx_link("", "{\"uplinkChunkSize\":\"200-100\",\"sessionIDPlacement\":\"header\"}", &m);
+    check_n("xhx link: key order does not matter, one interned copy", 1, n.xhx == m.xhx);
+    xhx_link("", "{\"xPaddingBytes\":\"20-40\",\"sessionIDKey\":\"\"}", &m);
+    check("xhx link: only defaults leave no string", "(null)", xhx_of(&m));
+    xhx_link("", "{\"sessionIDKey\":\"a\",\"seqKey\":\"q\",\"sessionIDKey\":\"b\"}", &m);
+    check("xhx link: a repeated key keeps the last value", "sessionIDKey=b\nseqKey=q\n", xhx_of(&m));
+    xhx_link("&headers=X-L%3A%201%0A", "{\"xPaddingBytes\":\"20-40\"}", &m);
+    check("xhx link: extra without headers keeps the link's", "X-L: 1\n", m.headers);
+}
+
+static void t_xhx_settings_over_the_buffer_are_refused(void) {
+    static char ex[1024];
+    struct vless_node n;
+    size_t o = (size_t)snprintf(ex, sizeof ex, "{\"sessionIDTable\":\"");
+    for (int i = 0; i < 400; i++) ex[o++] = 'a';
+    o += (size_t)snprintf(ex + o, sizeof ex - o, "\",\"xPaddingKey\":\"");
+    for (int i = 0; i < 400; i++) ex[o++] = 'b';
+    snprintf(ex + o, sizeof ex - o, "\"}");
+    check_n("xhx overflow: skipped", 1, xhx_link("", ex, &n));
+    check("xhx overflow: reason", "xhttp: invalid extra value", n.skip_reason);
+}
+
+static void t_xhx_link_ranges_from_number_and_object(void) {
+    struct vless_node n;
+    check_n("xhx ranges: usable", 0,
+            xhx_link("", "{\"sessionIDLength\":16,\"uplinkChunkSize\":{\"from\":300,\"to\":200}}", &n));
+    check("xhx ranges: number and object", "sessionIDLength=16\nuplinkChunkSize=300-200\n", xhx_of(&n));
+    xhx_link("", "{\"xPaddingBytes\":{\"from\":30,\"to\":70}}", &n);
+    check_n("xhx ranges: xPaddingBytes object, upper", 70, n.pad_to);
+}
+
+static void t_xhx_long_extra_read_whole_and_cut_one_does_not_parse(void) {
+    static char ex[4096];
+    struct vless_node n;
+    size_t o = (size_t)snprintf(ex, sizeof ex, "{\"xmux\":{\"maxConcurrency\":\"16-32\",\"cMaxReuseTimes\":\"");
+    while (o < 2900) ex[o++] = 'z';
+    o += (size_t)snprintf(ex + o, sizeof ex - o,
+                          "\"},\"headers\":{\"X-A\":\"1\",\"X-B\":\"2\"},\"xPaddingBytes\":\"100-1000\","
+                          "\"xPaddingKey\":\"x_pad\",\"xPaddingMethod\":\"repeat-x\"}");
+    check_n("xhx long extra: over 3 KB", 1, o > 3000);
+    check_n("xhx long extra: usable", 0, xhx_link("", ex, &n));
+    check("xhx long extra: keys after xmux", "xPaddingKey=x_pad\nxPaddingMethod=repeat-x\n", xhx_of(&n));
+    check("xhx long extra: headers", "X-A: 1\nX-B: 2\n", n.headers);
+    check_n("xhx long extra: pad upper", 1000, n.pad_to);
+    ex[o / 2] = '\0';
+    check_n("xhx long extra cut: skipped", 1, xhx_link("", ex, &n));
+    check("xhx long extra cut: reason", "xhttp: extra does not parse", n.skip_reason);
+    check_n("xhx extra not an object: skipped", 1, xhx_link("", "[1]", &n));
+    check("xhx extra not an object: reason", "xhttp: extra does not parse", n.skip_reason);
+    check_n("xhx extra with trailing bytes: skipped", 1, xhx_link("", "{}x", &n));
+    check_n("xhx broken extra on tcp: tcp ignores it", 0,
+            vless_parse_url("vless://" XHU "@example.org:443?type=tcp&security=none&extra=%7B#t", &n));
+}
+
+static void t_xhx_xray_json_nested_extra_replaces_top_level(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_xray("{\"path\":\"/x\",\"seqPlacement\":\"cookie\"}", out, &st);
+    check("xhx xray: top level usable", "(usable)", xhx_reason(got, &st));
+    check("xhx xray: top level field", "seqPlacement=cookie\n", got ? xhx_of(&out[0]) : "");
+    got = xhx_xray("{\"path\":\"/x\",\"extra\":{\"sessionIDPlacement\":\"query\",\"xPaddingBytes\":\"30-60\"},"
+                   "\"seqPlacement\":\"cookie\",\"xPaddingBytes\":\"500-600\"}", out, &st);
+    check("xhx xray: extra first, only extra counts", "sessionIDPlacement=query\n", got ? xhx_of(&out[0]) : "");
+    check_n("xhx xray: extra first, pad from extra", 60, got ? out[0].pad_to : -1);
+    check("xhx xray: extra keeps the outer path", "/x", got ? out[0].path : "");
+    got = xhx_xray("{\"seqPlacement\":\"cookie\",\"xPaddingBytes\":\"500-600\",\"path\":\"/x\","
+                   "\"extra\":{\"sessionIDPlacement\":\"query\",\"xPaddingBytes\":\"30-60\"}}", out, &st);
+    check("xhx xray: extra last, only extra counts", "sessionIDPlacement=query\n", got ? xhx_of(&out[0]) : "");
+    check_n("xhx xray: extra last, pad from extra", 60, got ? out[0].pad_to : -1);
+    got = xhx_xray("{\"path\":\"/x\",\"extra\":{\"sessionIDKey\":}}", out, &st);
+    check("xhx xray: extra without a value", "xhttp: extra does not parse", xhx_reason(got, &st));
+}
+
+static void t_xhx_clash_maps_kebab_keys_and_download_settings(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_clash("      x-padding-method: tokenish\n      seq-placement: query\n"
+                           "      download-settings:\n        server: d.example\n", out, &st);
+    check("xhx clash: download-settings skipped", "xhttp: downloadSettings is not supported", xhx_reason(got, &st));
+    got = xhx_clash("      x-padding-method: tokenish\n      seq-placement: query\n"
+                    "      reuse-settings:\n        max-connections: 4\n", out, &st);
+    check("xhx clash: usable", "(usable)", xhx_reason(got, &st));
+    check("xhx clash: canonical string", "seqPlacement=query\nxPaddingMethod=tokenish\n", got ? xhx_of(&out[0]) : "");
+}
+
+static void t_xhx_clash_every_key_reaches_its_xray_name(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_clash("      mode: packet-up\n      x-padding-bytes: 100-200\n      x-padding-obfs-mode: true\n"
+                           "      x-padding-key: xk\n      x-padding-header: X-Pk\n      x-padding-placement: header\n"
+                           "      x-padding-method: tokenish\n      uplink-http-method: PUT\n"
+                           "      session-placement: query\n      session-key: sk\n      session-table: hex\n"
+                           "      session-length: 16\n      seq-placement: header\n      seq-key: X-Sq\n"
+                           "      uplink-data-placement: body\n      uplink-data-key: dk\n"
+                           "      uplink-chunk-size: 100-200\n      no-grpc-header: true\n", out, &st);
+    check("xhx clash map: usable", "(usable)", xhx_reason(got, &st));
+    check("xhx clash map: every key",
+          "sessionIDPlacement=query\nsessionIDKey=sk\nsessionIDTable=hex\nsessionIDLength=16\n"
+          "seqPlacement=header\nseqKey=X-Sq\nuplinkDataPlacement=body\nuplinkDataKey=dk\n"
+          "uplinkChunkSize=100-200\nuplinkHTTPMethod=PUT\nxPaddingObfsMode=true\nxPaddingKey=xk\n"
+          "xPaddingHeader=X-Pk\nxPaddingPlacement=header\nxPaddingMethod=tokenish\n",
+          got ? xhx_of(&out[0]) : "");
+    check_n("xhx clash map: pad upper", 200, got ? out[0].pad_to : -1);
+}
+
+static void t_xhx_hostile_value_refused_in_every_format(void) {
+    static const char *const js[] = { "a\\\"b", "a;b", "a\\nb", "a=b", "a,b", "a\\\\b" };
+    static const char *const ya[] = { "\"a\\\"b\"", "a;b", "\"a\\nb\"", "a=b", "a,b", "\"a\\\\b\"" };
+    struct vless_node n, out[4];
+    struct vless_sub_stats st;
+    char buf[256], name[64];
+    for (int i = 0; i < 6; i++) {
+        snprintf(buf, sizeof buf, "{\"sessionIDKey\":\"%s\"}", js[i]);
+        snprintf(name, sizeof name, "xhx hostile %d: link", i);
+        xhx_link("", buf, &n);
+        check(name, "xhttp: invalid extra value", n.skip_reason);
+        snprintf(name, sizeof name, "xhx hostile %d: xray", i);
+        check(name, "xhttp: invalid extra value", xhx_reason(xhx_xray(buf, out, &st), &st));
+        snprintf(buf, sizeof buf, "      session-key: %s\n", ya[i]);
+        snprintf(name, sizeof name, "xhx hostile %d: clash", i);
+        check(name, "xhttp: invalid extra value", xhx_reason(xhx_clash(buf, out, &st), &st));
+    }
+}
+
+static void t_xhx_data_in_cookie_needs_packet_up(void) {
+    struct vless_node n;
+    check_n("xhx mode rule: skipped", 1, xhx_link("", "{\"uplinkDataPlacement\":\"cookie\"}", &n));
+    check("xhx mode rule: reason", "xhttp: uplinkDataPlacement needs mode=packet-up", n.skip_reason);
+    check_n("xhx mode rule: packet-up usable", 0, xhx_link("&mode=packet-up", "{\"uplinkDataPlacement\":\"cookie\"}", &n));
+}
+
+static void t_xhx_headers_reach_the_node_and_host_is_refused(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_xray("{\"path\":\"/x\",\"headers\":{\"X-A\":\"1\"}}", out, &st);
+    check("xhx headers xray: usable", "(usable)", xhx_reason(got, &st));
+    check("xhx headers xray: lines", "X-A: 1\n", got ? out[0].headers : "");
+    got = xhx_xray("{\"path\":\"/x\",\"headers\":{\"Host\":\"x\"}}", out, &st);
+    check("xhx headers xray: Host refused", "invalid headers for xhttp", xhx_reason(got, &st));
+    got = xhx_clash("      headers:\n        X-A: 1\n", out, &st);
+    check("xhx headers clash: lines", "X-A: 1\n", got ? out[0].headers : "");
+    got = xhx_clash("      headers:\n        Host: x\n", out, &st);
+    check("xhx headers clash: Host refused", "invalid headers for xhttp", xhx_reason(got, &st));
+}
+
+static void xhx_long_value(char *ex, size_t cap, size_t len) {
+    size_t o = (size_t)snprintf(ex, cap, "{\"sessionIDTable\":\"");
+    for (size_t i = 0; i < len; i++) ex[o++] = 'a';
+    snprintf(ex + o, cap - o, "\"}");
+}
+
+static void t_xhx_line_that_fills_the_buffer_exactly_is_refused(void) {
+    static char ex[1024];
+    struct vless_node n;
+    xhx_long_value(ex, sizeof ex, 752);
+    xhx_link("", ex, &n);
+    check("xhx exact capacity: refused", "xhttp: invalid extra value", n.skip_reason);
+    xhx_long_value(ex, sizeof ex, 751);
+    xhx_link("", ex, &n);
+    const char *x = xhx_of(&n);
+    check_n("xhx one byte shorter: stored whole", 767, (long)strlen(x));
+    check_n("xhx one byte shorter: last line terminated", '\n', x[strlen(x) - 1]);
+}
+
+static void t_xhx_null_extra_resets_to_defaults_keeping_path(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_xray("{\"path\":\"/x\",\"seqPlacement\":\"cookie\",\"xPaddingBytes\":\"500-600\",\"extra\":null}", out, &st);
+    check("xhx null extra: usable", "(usable)", xhx_reason(got, &st));
+    check("xhx null extra: top level discarded", "(null)", got ? xhx_of(&out[0]) : "");
+    check_n("xhx null extra: pad discarded", 0, got ? out[0].pad_to : -1);
+    check("xhx null extra: path kept", "/x", got ? out[0].path : "");
+}
+
+static void t_xhx_settings_reach_only_xhttp_nodes(void) {
+    struct vless_node n, out[4];
+    struct vless_sub_stats st;
+    check_n("xhx ws link: usable", 0,
+            vless_parse_url("vless://" XHU "@example.org:443?type=ws&security=none&path=%2Fw&headers=X-W%3A%202%0A"
+                            "&extra=%7B%22headers%22%3A%7B%22X-A%22%3A%221%22%7D%2C%22seqPlacement%22%3A%22query%22%7D#w", &n));
+    check("xhx ws link: own headers kept", "X-W: 2\n", n.headers);
+    check("xhx ws link: no xhx", "(null)", xhx_of(&n));
+    vless_parse_url("vless://" XHU "@example.org:443?extra=%7B%22seqPlacement%22%3A%22query%22%7D&security=none&path=%2Fx&type=xhttp#x", &n);
+    check("xhx link: extra before type still read", "seqPlacement=query\n", xhx_of(&n));
+    static char js[2048];
+    static const char *const nets[] = { "tcp", "xhttp" };
+    size_t got = 0;
+    for (int k = 0; k < 2; k++) {
+        snprintf(js, sizeof js,
+                 "{\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"j\",\"settings\":{\"vnext\":[{\"address\":\"example.org\","
+                 "\"port\":443,\"users\":[{\"id\":\"" XHU "\"}]}]},\"streamSettings\":{"
+                 "\"xhttpSettings\":{\"seqPlacement\":\"cookie\",\"headers\":{\"X-A\":\"1\"}},\"network\":\"%s\"}}]}", nets[k]);
+        memset(&st, 0, sizeof st);
+        got = vless_parse_sub(js, out, 4, &st);
+        if (k) break;
+        check("xhx tcp json: no xhx", "(null)", got ? xhx_of(&out[0]) : "");
+        check("xhx tcp json: no xhttp headers", "", got ? out[0].headers : "x");
+    }
+    check("xhx json: network after xhttpSettings still read", "seqPlacement=cookie\n", got ? xhx_of(&out[0]) : "");
+}
+
+static void t_xhx_embedded_nul_is_refused(void) {
+    struct vless_node n;
+    xhx_link("", "{\"sessionIDKey\":\"a\\u0000b\"}", &n);
+    check("xhx embedded NUL: refused", "xhttp: invalid extra value", n.skip_reason);
+}
+
+static void t_xhx_range_object_needs_numeric_from_and_to(void) {
+    struct vless_node n;
+    xhx_link("", "{\"uplinkChunkSize\":{\"from\":300}}", &n);
+    check("xhx range object without to: refused", "xhttp: invalid extra value", n.skip_reason);
+    xhx_link("", "{\"uplinkChunkSize\":{\"from\":true,\"to\":400}}", &n);
+    check("xhx range object with a non-number: refused", "xhttp: invalid extra value", n.skip_reason);
+    xhx_link("", "{\"sessionIDLength\":{\"to\":16}}", &n);
+    check("xhx range object without from: refused", "xhttp: invalid extra value", n.skip_reason);
+}
+
+static const char *xhx_no_room(const char *v, size_t len) {
+    (void)v; (void)len;
+    return NULL;
+}
+
+static void t_xhx_full_intern_table_is_named(void) {
+    struct vless_node n;
+    sl_set_interner(xhx_no_room);
+    xhx_link("", "{\"seqPlacement\":\"query\"}", &n);
+    sl_set_interner(NULL);
+    check("xhx full table: marker", "(full)", xhx_of(&n));
+    check("xhx full table: reason", "too many distinct keys", n.skip_reason);
+}
+
+static void t_xhx_all(void) {
+    t_xhx_line_that_fills_the_buffer_exactly_is_refused();
+    t_xhx_null_extra_resets_to_defaults_keeping_path();
+    t_xhx_settings_reach_only_xhttp_nodes();
+    t_xhx_embedded_nul_is_refused();
+    t_xhx_range_object_needs_numeric_from_and_to();
+    t_xhx_full_intern_table_is_named();
+    t_xhx_link_keeps_supported_keys_in_order_and_pad_from_extra();
+    t_xhx_link_ranges_from_number_and_object();
+    t_xhx_settings_over_the_buffer_are_refused();
+    t_xhx_long_extra_read_whole_and_cut_one_does_not_parse();
+    t_xhx_xray_json_nested_extra_replaces_top_level();
+    t_xhx_clash_maps_kebab_keys_and_download_settings();
+    t_xhx_clash_every_key_reaches_its_xray_name();
+    t_xhx_hostile_value_refused_in_every_format();
+    t_xhx_data_in_cookie_needs_packet_up();
+    t_xhx_headers_reach_the_node_and_host_is_refused();
+}
+
 int main(void) {
     /* ---- base64: how subscriptions usually arrive ------------------------------ */
     {
@@ -822,15 +1120,15 @@ int main(void) {
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22uplinkDataPlacement%%22%%3A%%22auto%%22%%2C%%22sessionPlacement%%22%%3A%%22path%%22%%2C%%22seqPlacement%%22%%3A%%22path%%22%%2C%%22xPaddingMethod%%22%%3A%%22repeat-x%%22%%2C%%22xPaddingObfsMode%%22%%3Afalse%%7D#x", base);
         check_n("extra: Xray defaults written out, usable", 0, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22uplinkDataPlacement%%22%%3A%%22header%%22%%7D#x", base);
-        check_n("extra: uplinkDataPlacement=header, skipped", 1, vless_parse_url(url, &n));
+        check_n("extra: uplinkDataPlacement=header without packet-up, skipped by Xray's mode rule", 1, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22sessionPlacement%%22%%3A%%22query%%22%%7D#x", base);
-        check_n("extra: sessionPlacement=query, skipped", 1, vless_parse_url(url, &n));
+        check_n("extra: sessionPlacement=query, usable as Xray's query placement", 0, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22xPaddingMethod%%22%%3A%%22tokenish%%22%%7D#x", base);
-        check_n("extra: xPaddingMethod=tokenish, skipped", 1, vless_parse_url(url, &n));
+        check_n("extra: xPaddingMethod=tokenish, usable as Xray's tokenish padding", 0, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22xPaddingObfsMode%%22%%3Atrue%%7D#x", base);
-        check_n("extra: xPaddingObfsMode, skipped", 1, vless_parse_url(url, &n));
+        check_n("extra: xPaddingObfsMode, usable as Xray's obfuscated padding", 0, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22downloadSettings%%22%%3A%%7B%%22address%%22%%3A%%22d.example%%22%%7D%%7D#x", base);
-        check_n("extra: downloadSettings, skipped", 1, vless_parse_url(url, &n));
+        check_n("extra: downloadSettings, skipped as Xray's separate download", 1, vless_parse_url(url, &n));
     }
     {
         /* ---- xhttp modes -------------------------------------------------------
@@ -1366,6 +1664,8 @@ int main(void) {
             check("YAML: a character that does not fit is dropped with the rest", "aaa", out);
         }
     }
+
+    t_xhx_all();
 
     printf("\n%d checks passed", g_pass);
     if (g_fail) {

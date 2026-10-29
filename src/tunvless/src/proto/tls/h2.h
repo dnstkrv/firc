@@ -34,7 +34,7 @@ struct h2 {
     /* A server refusal on an EARLIER stream of this connection: a non-200 code from the HEADERS
      * of a stream that is no longer current. Only packet-up does this (the answer to a chunk
      * arrives when the next one is open); without this field the refusal would be lost with the
-     * frame of a closed stream. h2_next does NOT reset it: the refused chunk is lost, and the
+     * frame of a closed stream. h2_next_req does NOT reset it: the refused chunk is lost, and the
      * VLESS stream after it cannot be whole. 0 — no refusal seen. */
     int old_status;
     unsigned char frame_peeked; /* the status of this HEADERS frame has been looked at */
@@ -78,7 +78,7 @@ struct h2 {
      * Bytes read since the last WINDOW_UPDATE. TWO counters, because there are two receive
      * windows: the stream's and the connection's (RFC 7540 §6.9.1).
      *
-     * The stream counter gets only what came on the CURRENT stream, and h2_next zeroes it:
+     * The stream counter gets only what came on the CURRENT stream, and h2_next_req zeroes it:
      * the old stream is closed, there is no point growing its window.
      *
      * The connection counter gets EVERYTHING, including frames of the closed streams of earlier
@@ -91,8 +91,10 @@ struct h2 {
     int32_t send_win_conn;      /* the connection window */
     /* The previous SETTINGS_INITIAL_WINDOW_SIZE. RFC 7540 §6.9.2 shifts the window by the
      * difference from the PREVIOUS value, not from 65535; otherwise a server sending the same
-     * SETTINGS twice would shift it twice. Starts at 65535, set by h2_start_ex. */
+     * SETTINGS twice would shift it twice. Starts at 65535, set by h2_start_req. */
     int32_t peer_init_win;
+    uint32_t peer_hdr_list;
+    uint8_t peer_settings_seen;
 
     /* The CURRENT stream id. packet-up uploads as a series of short requests, and an HTTP/2
      * stream id cannot be reused: it grows by two (RFC 7540 §5.1.1).
@@ -139,29 +141,25 @@ struct h2 {
  * H2_ETOOBIG on a perfectly legal frame. */
 #define H2_MIN_READ_CAP (16384 + 16)
 
-/* Request method. GET is only for the xhttp download stream (stream-down): it has no body, and
- * the server tells download from upload by the method (hub.go in Xray). */
-#define H2_POST 0
-#define H2_GET  1
-
 /* Opens a stream with the gRPC headers (browser = 0): preface, SETTINGS, WINDOW_UPDATE,
  * HEADERS. content_type and referer may be NULL; gRPC sends no referer. */
 int h2_start(struct h2 *h, const struct h2_io *io, const char *authority,
              const char *path, const char *content_type, const char *referer);
 
-/* The same with a method, the option to close our half of the stream at once, and the header
- * set (browser, see struct h2). GET needs end_stream: it has no body, and the server waits for
- * END_STREAM right on HEADERS. referer is for xhttp, where it carries the padding. */
-int h2_start_ex(struct h2 *h, const struct h2_io *io, const char *authority,
-                const char *path, const char *content_type, const char *referer,
-                int method, int end_stream, int browser);
+struct h2_field { const char *name; const char *value; };
 
-/* The NEXT request on the same connection: a new stream id and fresh stream state; settings
- * and the connection window are not sent again. For packet-up, where each upload chunk is a
- * separate POST. The previous stream must already be closed on our side (h2_end_stream), or
- * the server sees two open streams. */
-int h2_next(struct h2 *h, const char *authority, const char *path,
-            const char *content_type, const char *referer, int method);
+struct h2_req {
+    const char *authority, *path, *content_type;
+    const char *method;
+    const struct h2_field *fields;
+    size_t fields_n, lead_n;
+    int end_stream, no_look;
+};
+
+int h2_start_req(struct h2 *h, const struct h2_io *io, const struct h2_req *r, int browser);
+int h2_next_req(struct h2 *h, const struct h2_req *r);
+size_t h2_list_size(const struct h2 *h, const struct h2_req *r);
+uint32_t h2_header_budget(const struct h2 *h);
 
 /* Closes our half of the current stream: an empty DATA with END_STREAM. */
 int h2_end_stream(struct h2 *h);

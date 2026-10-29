@@ -10,6 +10,7 @@
 /* tr_upgrade_target: a ws or httpupgrade path is checked here by the same rule the transport
  * builds the request with (src/proto/transport/trpath.c: strings only, no network or libraries). */
 #include "trpath.h"
+#include "xhopts.h"
 /* vencp_b64url_len: the pqv key length uses the same base64url arithmetic as VLESS encryption.
  * Strings only, no cryptography. */
 #include "vencp.h"
@@ -284,68 +285,6 @@ void sl_post_range(struct vless_node *n, const char *v) {
     n->post_to = (uint32_t)b;
 }
 
-/* xhttp settings that change the requests on the wire into a form the client does not produce
- * (Xray 26.3 names): the session id or seq outside the path, upload data in headers or cookies,
- * tokenish padding, obfuscated padding, a separate download server. A node with one of them
- * would not open, since the server expects a different request, so rejecting it early with a
- * reason loses nothing.
- *
- * By VALUE, not by presence: panels write the defaults out ("path", "auto", "repeat-x"), and those
- * are exactly what the client sends. uplinkHTTPMethod and xPaddingPlacement are not here: the
- * server does not check the method, and the placement matters only with xPaddingObfsMode. */
-int sl_xh_setting_bad(const char *key, const char *val) {
-    if (!val || !val[0] || !strcmp(val, "null")) return 0;
-    if (!strcmp(key, "downloadSettings")) return 1;
-    if (!strcmp(key, "sessionPlacement") || !strcmp(key, "sessionIDPlacement") ||
-        !strcmp(key, "seqPlacement"))
-        return strcmp(val, "path") != 0;
-    if (!strcmp(key, "uplinkDataPlacement")) return strcmp(val, "auto") && strcmp(val, "body");
-    if (!strcmp(key, "xPaddingMethod")) return strcmp(val, "repeat-x") != 0;
-    if (!strcmp(key, "xPaddingObfsMode")) return !strcmp(val, "true");
-    return 0;
-}
-
-static int xh_extra_bad(const char *json) {
-    static const char *const keys[] = { "downloadSettings", "sessionPlacement", "sessionIDPlacement",
-                                        "seqPlacement", "uplinkDataPlacement", "xPaddingMethod",
-                                        "xPaddingObfsMode" };
-    for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) {
-        char q[32];
-        snprintf(q, sizeof q, "\"%s\"", keys[i]);
-        const char *k = strstr(json, q);
-        if (!k || !(k = strchr(k + strlen(q), ':'))) continue;
-        k++;
-        while (*k == ' ') k++;
-        /* The value: a string's contents, or the bare token (true, null, an object's brace). */
-        char v[32];
-        size_t l = 0;
-        if (*k == '"') {
-            k++;
-            while (k[l] && k[l] != '"' && l < sizeof v - 1) l++;
-        } else {
-            while (k[l] && k[l] != ',' && k[l] != '}' && k[l] != ' ' && l < sizeof v - 1) l++;
-            if (*k == '{') l = 1;
-        }
-        memcpy(v, k, l);
-        v[l] = 0;
-        if (sl_xh_setting_bad(keys[i], v)) return 1;
-    }
-    return 0;
-}
-
-/* `extra` is xhttp settings in JSON (a link's is percent-decoded first). Only the padding length
- * and the obfuscation keys matter here; the rest (xmux, connection reuse) belongs to a
- * multiplexer the client does not have. So the keys are searched for by name instead of parsing
- * the object. */
-void sl_parse_extra(struct vless_node *n, const char *extra) {
-    if (xh_extra_bad(extra)) n->xh_extra = 1;
-    const char *k = strstr(extra, "\"xPaddingBytes\"");
-    if (k && (k = strchr(k + 15, ':'))) sl_pad_range(n, k + 1);
-    k = strstr(extra, "\"scMaxEachPostBytes\"");
-    if (k && (k = strchr(k + 20, ':'))) sl_post_range(n, k + 1);
-}
-
-
 /* ---- long node values: encryption, pqv, certificate pins ----------------------------------------
  *
  * The values are long (an ML-DSA-65 key is 2603 base64url characters, a VLESS encryption string
@@ -362,6 +301,8 @@ static volatile int g_intern_lock;
  * the reason. */
 const char SL_BAD_PQV[] = "!pqv";
 const char SL_FULL[] = "!full";
+const char SL_BAD_XHX[] = "!xhx";
+const char SL_BAD_XHX_JSON[] = "!xhx-json";
 
 static __thread const char *(*g_interner)(const char *v, size_t n);
 
@@ -384,6 +325,57 @@ const char *sl_intern(const char *v, size_t n) {
     }
     __atomic_clear(&g_intern_lock, __ATOMIC_RELEASE);
     return r;
+}
+
+static const char *const xh_names[] = {
+    "sessionIDPlacement", "sessionPlacement", "sessionIDKey", "sessionKey", "sessionIDTable",
+    "sessionIDLength", "seqPlacement", "seqKey", "uplinkDataPlacement", "uplinkDataKey",
+    "uplinkChunkSize", "uplinkHTTPMethod", "xPaddingObfsMode", "xPaddingKey", "xPaddingHeader",
+    "xPaddingPlacement", "xPaddingMethod", "downloadSettings",
+};
+#define XH_NAMES (sizeof xh_names / sizeof *xh_names)
+
+static size_t xh_index(const char *k, size_t kn) {
+    size_t i = 0;
+    while (i < XH_NAMES && !(strlen(xh_names[i]) == kn && !memcmp(xh_names[i], k, kn))) i++;
+    return i;
+}
+
+void sl_xh_put(struct sl_xh *a, const char *key, const char *val, size_t vlen) {
+    size_t idx = xh_index(key, strlen(key));
+    if (idx == XH_NAMES) return;
+    for (size_t i = 0; i < vlen; i++) {
+        unsigned char c = (unsigned char)val[i];
+        if (c < 0x20 || c == 0x7f || strchr("\"\\=;,", c)) { a->bad = 1; return; }
+    }
+    char tmp[sizeof a->buf];
+    size_t o = 0, kn = strlen(key);
+    int placed = !vlen;
+    for (size_t at = 0; at < a->n;) {
+        const char *line = a->buf + at, *e = memchr(line, '\n', a->n - at);
+        size_t len = (size_t)(e - line) + 1;
+        size_t li = xh_index(line, (size_t)((const char *)memchr(line, '=', len) - line));
+        at += len;
+        if (li == idx) continue;
+        if (!placed && li > idx) {
+            if (o + kn + vlen + 2 >= sizeof tmp) { a->bad = 1; return; }
+            o += (size_t)snprintf(tmp + o, sizeof tmp - o, "%s=%.*s\n", key, (int)vlen, val);
+            placed = 1;
+        }
+        if (o + len > sizeof tmp) { a->bad = 1; return; }
+        memcpy(tmp + o, line, len);
+        o += len;
+    }
+    if (!placed) {
+        if (o + kn + vlen + 2 >= sizeof tmp) { a->bad = 1; return; }
+        o += (size_t)snprintf(tmp + o, sizeof tmp - o, "%s=%.*s\n", key, (int)vlen, val);
+    }
+    memcpy(a->buf, tmp, o);
+    a->n = o;
+}
+
+void sl_xh_done(struct vless_node *n, const struct sl_xh *a) {
+    n->xhx = a->bad ? SL_BAD_XHX : a->n ? sl_intern(a->buf, a->n) : NULL;
 }
 
 void sl_intern_reset(void) {
@@ -697,16 +689,6 @@ int sl_link_param(struct vless_node *n, const char *k, size_t klen, const char *
     /* host: the Host header of ws and httpupgrade. xhttp links carry it too, but xhttp does not
      * use it: its :authority is the sni, else the address. */
     else if (klen == 4 && !strncmp(k, "host", 4)) sl_set_pct(n->http_host, sizeof(n->http_host), v, vlen);
-    /* extra: xhttp settings in JSON, read for the padding length (the server checks it and
-     * answers 400 to a wrong one) and obfuscation. The buffer is sized for the percent form, up
-     * to three times longer than the JSON: it is cut before decoding, and a buffer sized for the
-     * JSON would silently lose xPaddingBytes further in. */
-    else if (klen == 5 && !strncmp(k, "extra", 5)) {
-        char ex[2048];
-        sl_set_field(ex, sizeof(ex), v, vlen);
-        sl_pct_decode(ex);
-        sl_parse_extra(n, ex);
-    }
     else return 0;
     return 1;
 }
@@ -754,6 +736,8 @@ int sl_link_parse(const char *url, const char *scheme, struct vless_node *n, sl_
     /* Defaults VLESS implies for omitted fields: type=tcp here, security=none in
      * sl_link_usable_pre. */
     snprintf(n->type, sizeof(n->type), "tcp");
+    const char *ex = NULL;
+    size_t exn = 0;
     if (qmark) {
         const char *end = hash && hash > qmark ? hash : qmark + strlen(qmark);
         const char *k = qmark + 1;
@@ -764,11 +748,17 @@ int sl_link_parse(const char *url, const char *scheme, struct vless_node *n, sl_
             if (eq) {
                 size_t klen = (size_t)(eq - k), vlen = (size_t)(stop - eq - 1);
                 const char *v = eq + 1;
-                if (!own || !own(n, k, klen, v, vlen)) sl_link_param(n, k, klen, v, vlen);
+                if (klen == 5 && !strncmp(k, "extra", 5)) ex = v, exn = vlen;
+                else if (!own || !own(n, k, klen, v, vlen)) sl_link_param(n, k, klen, v, vlen);
             }
             if (!amp) break;
             k = amp + 1;
         }
+    }
+
+    if (ex && !strcmp(n->type, "xhttp")) {
+        char *d = sl_param_dup(ex, exn);
+        if (d) { sl_parse_extra(n, d); free(d); } else n->xhx = SL_BAD_XHX_JSON;
     }
 
     return 0;
@@ -792,9 +782,23 @@ int sl_link_usable_pre(struct vless_node *n) {
         snprintf(n->skip_reason, sizeof(n->skip_reason), "tcp headerType=http is not supported");
         return 1;
     }
-    if (n->xh_extra && !strcmp(n->type, "xhttp")) {
-        snprintf(n->skip_reason, sizeof(n->skip_reason), "xhttp: obfuscation is not supported");
-        return 1;
+    if (!strcmp(n->type, "xhttp")) {
+        struct xh_opts o;
+        if (n->xhx == SL_BAD_XHX || n->xhx == SL_BAD_XHX_JSON) {
+            snprintf(n->skip_reason, sizeof(n->skip_reason), "%s",
+                     n->xhx == SL_BAD_XHX ? "xhttp: invalid extra value" : "xhttp: extra does not parse");
+            return 1;
+        }
+        if (n->xhx == SL_FULL) {
+            snprintf(n->skip_reason, sizeof(n->skip_reason), "too many distinct keys");
+            return 1;
+        }
+        if (n->headers_bad || !hdr_lines_ok(n->headers, 0)) {
+            snprintf(n->skip_reason, sizeof(n->skip_reason), "invalid headers for xhttp");
+            return 1;
+        }
+        if (xh_opts_parse(n->xhx, n->mode, n->headers, n->pad_to, &o, n->skip_reason, sizeof(n->skip_reason)))
+            return 1;
     }
     if (n->encryption == SL_FULL || n->pqv == SL_FULL || n->pcs == SL_FULL || n->pks == SL_FULL ||
         n->vcn == SL_FULL) {

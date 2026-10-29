@@ -44,7 +44,8 @@ int sl_hdr_valid(const char *key, const char *val);
 /* ---- long values and certificate checks ------------------------------------------------------ */
 
 /* Markers of bad values: compared by address, so there is one of each per process. */
-extern const char SL_BAD_PQV[], SL_FULL[], SL_BAD_PIN[], SL_BAD_ECH[], SL_ECH_DNS[];
+extern const char SL_BAD_PQV[], SL_FULL[], SL_BAD_PIN[], SL_BAD_ECH[], SL_ECH_DNS[], SL_BAD_XHX[],
+    SL_BAD_XHX_JSON[];
 /* Shared table of long strings (pqv, encryption, pins, vcn, ech): equal values share one copy.
  * Bounded: when it is full (or memory runs out), SL_FULL is returned. */
 const char *sl_intern(const char *v, size_t n);
@@ -55,9 +56,10 @@ void sl_set_ech(struct vless_node *n, const char *v);
 /* xhttp: padding length "512" or "50-150", and the link's extra field (JSON). */
 void sl_pad_range(struct vless_node *n, const char *v);
 void sl_post_range(struct vless_node *n, const char *v);
-/* 1: this xhttp setting's value needs requests the client does not produce (see sublink.c). */
-int sl_xh_setting_bad(const char *key, const char *val);
 void sl_parse_extra(struct vless_node *n, const char *extra);
+struct sl_xh { char buf[768]; size_t n; uint8_t bad; };
+void sl_xh_put(struct sl_xh *a, const char *key, const char *val, size_t vlen);
+void sl_xh_done(struct vless_node *n, const struct sl_xh *a);
 
 /* ---- the whole link -------------------------------------------------------------------------- */
 
@@ -77,7 +79,7 @@ int sl_link_param(struct vless_node *n, const char *k, size_t klen, const char *
 /* Whether the node's transport and security are usable, in two halves; between them the protocol
  * checks its own fields (VLESS: the id), which sets the order in which reasons are reported.
  * 0 — usable, 1 — not (reason in skip_reason). pre: values that did not parse (pqv, pins, ech) or
- * did not fit the table, tcp headerType=http, xhttp obfuscation, certificate checks and
+ * did not fit the table, tcp headerType=http, xhttp settings, certificate checks and
  * allowInsecure. post: security, tls without sni, reality without pbk, the transport and its path,
  * an address with nobody to answer, the xhttp mode. */
 int sl_link_usable_pre(struct vless_node *n);
@@ -120,6 +122,7 @@ static inline void sl_tr_node(const struct vless_node *n, struct tr_node *t) {
     t->ech = tls ? n->ech : NULL;
     t->insecure = tls && n->insecure;
     t->encryption = n->encryption;
+    t->xhx = n->xhx;
 }
 
 #endif

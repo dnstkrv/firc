@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "../src/proto/tls/h2.c"
+#include "hpackread.h"
 
 static int fails;
 
@@ -109,7 +110,285 @@ static size_t settings_frame(unsigned char *out, uint16_t id, uint32_t v) {
     return 15;
 }
 
+static struct hr_block g_blk;
+
+static void t_req_put_method_not_collapsed_to_post(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "PUT" };
+    check("PUT request: started", 0, h2_start_req(&h, &ops, &r, 0));
+    check("PUT request: HEADERS decode", 0, hr_first_headers(io.sent, io.sent_n, &g_blk));
+    check("PUT request: :method first", 0, hr_find(&g_blk, ":method"));
+    check("PUT request: :method a literal with name index 2", 1,
+          g_blk.f[0].kind == 'l' && g_blk.f[0].index == 2);
+    check("PUT request: :method value PUT", 0, strcmp(g_blk.f[0].value, "PUT"));
+
+    struct h2_req g = { .authority = "a", .path = "/p", .method = "GET", .end_stream = 1 };
+    memset(&io, 0, sizeof io);
+    check("GET request: started", 0, h2_start_req(&h, &ops, &g, 1));
+    hr_first_headers(io.sent, io.sent_n, &g_blk);
+    check("GET request: :method indexed 2", 1, g_blk.f[0].kind == 'i' && g_blk.f[0].index == 2);
+    check("GET request: END_STREAM on HEADERS", 1, (io.sent[24 + 21 + 13 + 4] & 0x01) != 0);
+    h2_end_stream(&h);
+    struct h2_req d = { .authority = "a", .path = "/p", .method = "DELETE" };
+    io.sent_n = 0;
+    check("next DELETE request: sent", 0, h2_next_req(&h, &d));
+    hr_first_headers(io.sent, io.sent_n, &g_blk);
+    check("next DELETE request: :method value DELETE", 0, strcmp(g_blk.f[0].value, "DELETE"));
+    check("next DELETE request: stream 3", 3, (int)get32(io.sent + 5));
+}
+
+static void t_req_fields_slot_order_and_lowercase(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "X-A", "1" }, { "cookie", "s=2" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST",
+                        .fields = fl, .fields_n = 2 };
+    check("browser request with fields: started", 0, h2_start_req(&h, &ops, &r, 1));
+    check("browser request with fields: HEADERS decode", 0,
+          hr_first_headers(io.sent, io.sent_n, &g_blk));
+    int dest = hr_find(&g_blk, "sec-fetch-dest");
+    check("sec-fetch-dest present", 1, dest > 0);
+    check("first field right after sec-fetch-dest, lowercased", 0,
+          strcmp(g_blk.f[dest + 1].name, "x-a"));
+    check("first field value", 0, strcmp(g_blk.f[dest + 1].value, "1"));
+    check("second field next", 0, strcmp(g_blk.f[dest + 2].name, "cookie"));
+    check("second field value", 0, strcmp(g_blk.f[dest + 2].value, "s=2"));
+    check("accept-language after the fields", dest + 3, hr_find(&g_blk, "accept-language"));
+    check("no upper-case X-A", -1, hr_find(&g_blk, "X-A"));
+    check("no referer unless given", -1, hr_find(&g_blk, "referer"));
+}
+
+static void t_list_size_counts_32_per_field(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST" };
+    h2_start_req(&h, &ops, &r, 0);
+    check("list size of a gRPC-look request", 267, (int)h2_list_size(&h, &r));
+}
+
+static void t_list_size_browser_matches_decoded_block(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "X-Pad", "abc" }, { "referer", "https://a/p" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .content_type = "application/grpc",
+                        .method = "PATCH", .fields = fl, .fields_n = 2 };
+    h2_start_req(&h, &ops, &r, 1);
+    hr_first_headers(io.sent, io.sent_n, &g_blk);
+    size_t want = 0;
+    for (size_t i = 0; i < g_blk.n; i++)
+        want += strlen(g_blk.f[i].name) + strlen(g_blk.f[i].value) + 32;
+    check("browser list size: 20 fields decoded", 20, (int)g_blk.n);
+    check("browser list size equals the decoded block", (int)want, (int)h2_list_size(&h, &r));
+}
+
+static void t_budget_follows_peer_settings(void) {
+    struct h2 h;
+    struct fake_io io;
+    unsigned char feed[64];
+    unsigned char out[H2_MIN_READ_CAP];
+    size_t got = 0;
+    h2_open(&h, &io);
+    check("budget before the peer's SETTINGS", 8192, (int)h2_header_budget(&h));
+    io.feed = feed; io.feed_pos = 0;
+    io.feed_n = settings_frame(feed, 0x0006, 9000);
+    h2_read(&h, out, sizeof(out), &got);
+    check("budget after MAX_HEADER_LIST_SIZE 9000", 9000, (int)h2_header_budget(&h));
+    h2_open(&h, &io);
+    io.feed = feed; io.feed_pos = 0;
+    io.feed_n = settings_frame(feed, 0x0004, 70000);
+    h2_read(&h, out, sizeof(out), &got);
+    check("budget after a SETTINGS without 0x06", 16384, (int)h2_header_budget(&h));
+}
+
+static void t_budget_reset_by_a_later_settings(void) {
+    struct h2 h;
+    struct fake_io io;
+    unsigned char feed[64];
+    unsigned char out[H2_MIN_READ_CAP];
+    size_t got = 0;
+    h2_open(&h, &io);
+    io.feed = feed; io.feed_pos = 0;
+    io.feed_n = settings_frame(feed, 0x0006, 9000);
+    io.feed_n += settings_frame(feed + io.feed_n, 0x0004, 70000);
+    h2_read(&h, out, sizeof(out), &got);
+    if (io.feed_pos < io.feed_n) h2_read(&h, out, sizeof(out), &got);
+    check("later SETTINGS without 0x06: whole feed read", (int)io.feed_n, (int)io.feed_pos);
+    check("later SETTINGS without 0x06: budget stays 9000", 9000, (int)h2_header_budget(&h));
+}
+
+static void t_failed_next_req_moves_stream_state(void) {
+    static char big[16401];
+    memset(big, 'v', 16400); big[16400] = '\0';
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    struct h2_req s = { .authority = "a", .path = "/p", .method = "POST", .end_stream = 1 };
+    h2_start_req(&h, &ops, &s, 0);
+    check("before the failed request: stream 1", 1, (int)h.sid);
+    check("before the failed request: one open stream", 1, h2_open_streams(&h));
+    const struct h2_field fl[] = { { "x-big", big } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST", .fields = fl, .fields_n = 1 };
+    check("oversized next request: H2_ETOOBIG", H2_ETOOBIG, h2_next_req(&h, &r));
+    check("oversized next request: sid unchanged", 1, (int)h.sid);
+    check("oversized next request: open streams unchanged", 1, h2_open_streams(&h));
+    check("next request after the failure: sent", 0, h2_next_req(&h, &s));
+    check("next request after the failure: stream 3", 3, (int)h.sid);
+}
+
+static void t_next_req_block_over_16384_sent(void) {
+    static char v[16341];
+    struct h2 h;
+    struct fake_io io;
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "x", v } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST",
+                        .fields = fl, .fields_n = 1 };
+    struct h2_req s = { .authority = "a", .path = "/p", .method = "POST" };
+    memset(&io, 0, sizeof io);
+    h2_start_req(&h, &ops, &s, 0);
+    memset(v, 'v', 16339); v[16339] = '\0';
+    io.sent_n = 0;
+    check("next block of exactly 16384: sent", 0, h2_next_req(&h, &r));
+    check("next block of exactly 16384: frame length", 16384,
+          (int)(((uint32_t)io.sent[0] << 16) | ((uint32_t)io.sent[1] << 8) | io.sent[2]));
+    check("next block of exactly 16384: one frame written", 9 + 16384, (int)io.sent_n);
+    memset(v, 'v', 16340); v[16340] = '\0';
+    io.sent_n = 0;
+    check("next block of 16385: H2_ETOOBIG", H2_ETOOBIG, h2_next_req(&h, &r));
+    check("next block of 16385: nothing written", 0, (int)io.sent_n);
+}
+
+static void t_block_too_big_writes_nothing(void) {
+    static char big[16401];
+    memset(big, 'v', 16400); big[16400] = '\0';
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "x-big", big } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST",
+                        .fields = fl, .fields_n = 1 };
+    check("16400-byte field: H2_ETOOBIG", H2_ETOOBIG, h2_start_req(&h, &ops, &r, 0));
+    check("16400-byte field: nothing written", 0, (int)io.sent_n);
+    struct h2_req s = { .authority = "a", .path = "/p", .method = "POST" };
+    h2_start_req(&h, &ops, &s, 0);
+    h2_end_stream(&h);
+    io.sent_n = 0;
+    check("16400-byte field on the next request: H2_ETOOBIG", H2_ETOOBIG, h2_next_req(&h, &r));
+    check("16400-byte field on the next request: nothing written", 0, (int)io.sent_n);
+}
+
+static void t_block_at_16384_fits_16385_refused(void) {
+    static char v[16341];
+    struct h2 h;
+    struct fake_io io;
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "x", v } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "POST",
+                        .fields = fl, .fields_n = 1 };
+    memset(v, 'v', 16339); v[16339] = '\0';
+    memset(&io, 0, sizeof io);
+    check("block of exactly 16384: sent", 0, h2_start_req(&h, &ops, &r, 0));
+    check("block of exactly 16384: frame length", 16384,
+          (int)(((uint32_t)io.sent[58] << 16) | ((uint32_t)io.sent[59] << 8) | io.sent[60]));
+    memset(v, 'v', 16340); v[16340] = '\0';
+    memset(&io, 0, sizeof io);
+    check("block of 16385: H2_ETOOBIG", H2_ETOOBIG, h2_start_req(&h, &ops, &r, 0));
+}
+
+static int count_named(const struct hr_block *b, const char *name) {
+    int k = 0;
+    for (size_t i = 0; i < b->n; i++) k += strcmp(b->f[i].name, name) == 0;
+    return k;
+}
+
+static size_t decoded_size(const struct hr_block *b) {
+    size_t s = 0;
+    for (size_t i = 0; i < b->n; i++) s += strlen(b->f[i].name) + strlen(b->f[i].value) + 32;
+    return s;
+}
+
+static void t_lead_fields_before_the_look_not_after_dest(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "X-A", "1" }, { "referer", "https://a/p" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "GET", .end_stream = 1,
+                        .fields = fl, .fields_n = 2, .lead_n = 1 };
+    h2_start_req(&h, &ops, &r, 1);
+    check("lead: HEADERS decode", 0, hr_first_headers(io.sent, io.sent_n, &g_blk));
+    check("lead: x-a right after the pseudo-headers", 4, hr_find(&g_blk, "x-a"));
+    check("lead: the look follows it", 5, hr_find(&g_blk, "sec-ch-ua"));
+    check("lead: referer still right after sec-fetch-dest",
+          hr_find(&g_blk, "sec-fetch-dest") + 1, hr_find(&g_blk, "referer"));
+    check("lead: list size equals the decoded block", (int)decoded_size(&g_blk),
+          (int)h2_list_size(&h, &r));
+}
+
+static void t_field_named_like_a_look_field_replaces_it(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "Accept", "text/html" }, { "Pragma", "p" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "GET", .end_stream = 1,
+                        .fields = fl, .fields_n = 2, .lead_n = 2 };
+    h2_start_req(&h, &ops, &r, 1);
+    check("replace: HEADERS decode", 0, hr_first_headers(io.sent, io.sent_n, &g_blk));
+    check("replace: one accept", 1, count_named(&g_blk, "accept"));
+    check("replace: accept is ours", 0,
+          strcmp(g_blk.f[hr_find(&g_blk, "accept")].value, "text/html"));
+    check("replace: one pragma (a tail field)", 1, count_named(&g_blk, "pragma"));
+    check("replace: pragma is ours", 0, strcmp(g_blk.f[hr_find(&g_blk, "pragma")].value, "p"));
+    check("replace: the rest of the look stays", 1, hr_find(&g_blk, "sec-fetch-dest") > 0);
+    check("replace: list size equals the decoded block", (int)decoded_size(&g_blk),
+          (int)h2_list_size(&h, &r));
+}
+
+static void t_no_look_sends_only_the_fields(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "User-Agent", "MyApp/1" }, { "referer", "r" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "GET", .end_stream = 1,
+                        .fields = fl, .fields_n = 2, .lead_n = 1, .no_look = 1 };
+    h2_start_req(&h, &ops, &r, 1);
+    check("no look: HEADERS decode", 0, hr_first_headers(io.sent, io.sent_n, &g_blk));
+    check("no look: four pseudo-headers and two fields", 6, (int)g_blk.n);
+    check("no look: user-agent is ours", 0,
+          strcmp(g_blk.f[hr_find(&g_blk, "user-agent")].value, "MyApp/1"));
+    check("no look: no sec-ch-ua", -1, hr_find(&g_blk, "sec-ch-ua"));
+    check("no look: no pragma", -1, hr_find(&g_blk, "pragma"));
+    check("no look: list size equals the decoded block", (int)decoded_size(&g_blk),
+          (int)h2_list_size(&h, &r));
+}
+
 int main(void) {
+    t_lead_fields_before_the_look_not_after_dest();
+    t_field_named_like_a_look_field_replaces_it();
+    t_no_look_sends_only_the_fields();
+    t_req_put_method_not_collapsed_to_post();
+    t_req_fields_slot_order_and_lowercase();
+    t_list_size_counts_32_per_field();
+    t_list_size_browser_matches_decoded_block();
+    t_budget_follows_peer_settings();
+    t_budget_reset_by_a_later_settings();
+    t_failed_next_req_moves_stream_state();
+    t_next_req_block_over_16384_sent();
+    t_block_too_big_writes_nothing();
+    t_block_at_16384_fits_16385_refused();
     {
         /* A window gone negative: the server announced INITIAL_WINDOW_SIZE = 1024, taking
          * 64511 bytes off the default 65535 already granted. */
@@ -310,7 +589,7 @@ int main(void) {
 
         io.sent_n = 0;
         check("next request: no error",
-              0, h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST));
+              0, h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" }));
         check("next request: stream becomes 3", 3, (int)h.sid);
         check("next request: a HEADERS frame", FR_HEADERS, io.sent[3]);
         check("next request: stream 3 in the frame", 3, (int)io.sent[8]);
@@ -348,7 +627,7 @@ int main(void) {
          *
          *   1) a DATA frame from an ALREADY CLOSED stream of the previous chunk: it does not go
          *      into the body (checked above), but it has spent the connection window;
-         *   2) moving to the next chunk (h2_next): the STREAM state is fresh, while the debt to
+         *   2) moving to the next chunk (h2_next_req): the STREAM state is fresh, while the debt to
          *      the CONNECTION window carries over with the connection.
          *
          * Behavior is checked, not a field: the sum of increments in all WINDOW_UPDATE frames sent
@@ -362,7 +641,7 @@ int main(void) {
         /* --- case 1: frames of the previous stream spend the connection window --- */
         h2_open(&h, &io);
         check("next chunk: no error",
-              0, h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST));
+              0, h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" }));
         io.sent_n = 0;
         size_t fn = put_data(feed, 1, 16384);
         fn += put_data(feed + fn, 1, 16384);
@@ -381,25 +660,25 @@ int main(void) {
               32768, (int)wu_sum(&io, 0));
         check("and the current stream gets no update for those bytes", 0, (int)wu_sum(&io, h.sid));
 
-        /* --- case 2: h2_next keeps the debt to the connection window --- */
+        /* --- case 2: h2_next_req keeps the debt to the connection window --- */
         h2_open(&h, &io);
         put_data(feed, h.sid, 16384);
         io.feed = feed; io.feed_n = 9 + 16384; io.feed_pos = 0;
         io.sent_n = 0;
         while (io.feed_pos < io.feed_n)
             if (h2_read(&h, out, sizeof(out), &got) != 0) break;
-        h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST);
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" });
         io.sent_n = 0;
         fn = put_data(feed, h.sid, 16384);
         fn += put_data(feed + fn, h.sid, 16384);
         io.feed = feed; io.feed_n = 9 + 16384; io.feed_pos = 0;
         while (io.feed_pos < io.feed_n)
             if (h2_read(&h, out, sizeof(out), &got) != 0) break;
-        check("after h2_next: the debt to the connection window is kept",
+        check("after h2_next_req: the debt to the connection window is kept",
               32768, (int)wu_sum(&io, 0));
         /* The new stream's own count starts at zero: 16384 bytes on it, no update yet. The
          * second 16384 reach the threshold, and the update carries the stream's count. */
-        check("after h2_next: the new stream counts its window from zero",
+        check("after h2_next_req: the new stream counts its window from zero",
               0, (int)wu_sum(&io, h.sid));
         io.feed_n = fn;
         while (io.feed_pos < io.feed_n)
@@ -467,7 +746,7 @@ int main(void) {
 
         h2_open(&h, &io);
         h2_end_stream(&h);
-        h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST);
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" });
         io.feed = feed; io.feed_pos = 0;
         io.feed_n = put_frame(feed, FR_RST_STREAM, 0, 1, no_error, 4);
         check("RST_STREAM of the old stream: no error", 0, h2_read(&h, out, sizeof(out), &got));
@@ -492,9 +771,9 @@ int main(void) {
 
         h2_open(&h, &io);
         h2_end_stream(&h);
-        h2_next(&h, "example.org", "/x/sid/1", NULL, NULL, H2_POST);
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .method = "POST" });
         h2_end_stream(&h);
-        h2_next(&h, "example.org", "/x/sid/2", NULL, NULL, H2_POST);
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/2", .method = "POST" });
         check("open streams: three requests, none answered", 3, h2_open_streams(&h));
         io.feed = feed; io.feed_pos = 0;
         size_t fn = put_frame(feed, FR_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, st200, 1);
@@ -533,7 +812,7 @@ int main(void) {
 
         h2_open(&h, &io);
         h2_end_stream(&h);
-        h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST);
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" });
         g_last_status = 0;
         size_t fn = put_frame(feed, FR_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, st200, 1);
         fn += put_frame(feed + fn, FR_HEADERS, FLAG_END_HEADERS, h.sid, st404, 1);
@@ -559,11 +838,14 @@ int main(void) {
         memset(&io, 0, sizeof io);
         struct h2_io ops = { &io, fake_write, fake_read };
         check("first request: path 240, Referer 1399, no error",
-              0, h2_start_ex(&h, &ops, "example.org", path, "application/grpc", ref,
-                             H2_POST, 0, 1));
+              0, h2_start_req(&h, &ops, &(struct h2_req){ .authority = "example.org", .path = path,
+                              .content_type = "application/grpc", .method = "POST",
+                              .fields = &(struct h2_field){ "referer", ref }, .fields_n = 1 }, 1));
         h2_end_stream(&h);
         check("next request with the same headers: no error",
-              0, h2_next(&h, "example.org", path, "application/grpc", ref, H2_POST));
+              0, h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = path,
+                             .content_type = "application/grpc", .method = "POST",
+                             .fields = &(struct h2_field){ "referer", ref }, .fields_n = 1 }));
     }
 
     {
@@ -781,8 +1063,8 @@ int main(void) {
         check("GOAWAY(NO_ERROR, last >= our id): the stream goes on", 0, rc);
         check("  data after GOAWAY arrives", 4, (int)got);
         check("  the connection is marked: no new streams", 1, h.goaway);
-        check("  h2_next after GOAWAY: refused at once",
-              H2_ERESET, h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST));
+        check("  h2_next_req after GOAWAY: refused at once",
+              H2_ERESET, h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" }));
 
         h2_open(&h, &io);
         put32(ga, 1); put32(ga + 4, 11);
@@ -798,7 +1080,7 @@ int main(void) {
         /* Our stream past last_stream_id was never reached: the end, NO_ERROR or not. */
         h2_open(&h, &io);
         h2_end_stream(&h);
-        h2_next(&h, "example.org", "/x/sid/1", "application/grpc", NULL, H2_POST);   /* stream 3 */
+        h2_next_req(&h, &(struct h2_req){ .authority = "example.org", .path = "/x/sid/1", .content_type = "application/grpc", .method = "POST" });   /* stream 3 */
         put32(ga, 1); put32(ga + 4, 0);
         n = put_frame(feed, FR_GOAWAY, 0, 0, ga, 8);
         io.feed = feed; io.feed_n = n; io.feed_pos = 0;

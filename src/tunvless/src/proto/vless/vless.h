@@ -62,9 +62,9 @@ struct vless_node {
     const char *encryption;  /* vless: encryption=mlkem768x25519plus.… (none is not stored) */
     /* Settings the client does not support and the server requires (the connection would not
      * open): the node is unusable at once, with a named reason, instead of failing every connect.
-     * tcp_http — tcp HTTP camouflage header (headerType=http); xh_extra — xhttp request
-     * obfuscation (xPaddingObfsMode, sessionID/seq/data placements, downloadSettings). */
-    uint8_t tcp_http, xh_extra;
+     * tcp_http — tcp HTTP camouflage header (headerType=http). */
+    uint8_t tcp_http;
+    const char *xhx;
     /* Certificate check of a security=tls node (Xray-core: pinnedPeerCertSha256 / `pcs`,
      * verifyPeerCertByName / `vcn`; sing-box: certificate_public_key_sha256). Interned strings
      * (sl_intern), NULL — no such field. pcs and pks — lowercase hex SHA-256, comma separated:

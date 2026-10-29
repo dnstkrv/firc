@@ -163,11 +163,11 @@ int main(void) {
     check("tcp headerType=none: usable", url("type=tcp&security=none&headerType=none#h", &n) == 0);
     check("xhttp with downloadSettings in extra: skipped",
           url("type=xhttp&security=none&path=/x&extra=%7B%22downloadSettings%22%3A%7B%22address%22%3A%22d.example%22%7D%7D#x", &n) == 1);
-    check_s("xhttp skip reason", "xhttp: obfuscation is not supported", n.skip_reason);
+    check_s("xhttp skip reason names Xray's downloadSettings", "xhttp: downloadSettings is not supported", n.skip_reason);
     check("xhttp with xPaddingBytes in extra: usable, padding read",
           url("type=xhttp&security=none&path=/x&extra=%7B%22xPaddingBytes%22%3A%22100-200%22%7D#x", &n) == 0 && n.pad_from == 100);
-    check("xhttp with xPaddingObfsMode=true: skipped",
-          url("type=xhttp&security=none&path=/x&extra=%7B%22xPaddingObfsMode%22%3Atrue%7D#x", &n) == 1);
+    check("xhttp with xPaddingObfsMode=true: usable as Xray's obfuscated padding",
+          url("type=xhttp&security=none&path=/x&extra=%7B%22xPaddingObfsMode%22%3Atrue%7D#x", &n) == 0);
 
     /* --- sing-box: outbounds --- */
     {

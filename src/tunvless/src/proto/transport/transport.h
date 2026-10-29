@@ -26,6 +26,7 @@
 #include <stddef.h>
 #include "tls13.h"
 #include "h2.h"
+#include "xhopts.h"
 
 /* Transport error codes. They share one number space with the VLESS client's codes: -35 and -36
  * are VLESS_CONN_* (client.h), so a new code must not take them. */
@@ -99,6 +100,7 @@ struct tr_node {
     /* VLESS encryption: the node's `encryption` string as is (mlkem768x25519plus...), or NULL for
      * none. trvenc.c parses and runs it over the open transport. */
     const char *encryption;
+    const char *xhx;
 };
 
 /* A link: the socket and the security over it, one protected byte stream.
@@ -168,7 +170,12 @@ struct xh_state {
     struct xh_up up;           /* upload of stream-up and packet-up */
     uint64_t seq;              /* packet-up chunk number, from 0 */
     char authority[128];       /* repeated in every request of the series */
-    char up_path[288];         /* path with the session id, without the chunk number */
+    struct xh_opts opts;
+    char base_path[256];
+    char query[256];
+    char sid[136];
+    const char *headers;
+    size_t worst_base;
     /* Padding length announced by the node. Kept here because the packet-up upload requests are
      * built without the node at hand, and each needs padding: the server checks it on EVERY
      * request, not only the first. */
@@ -309,6 +316,7 @@ struct transport {
     struct xh_state xh;        /* xhttp only */
     struct h1_state h1;        /* ws and httpupgrade only */
     struct venc *enc;          /* VLESS encryption over the transport (trvenc.c), or NULL */
+    const char *why;
 };
 
 /* VLESS encryption (trvenc.c): a handshake over the open transport, then AEAD records in place of

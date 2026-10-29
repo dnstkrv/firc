@@ -169,7 +169,8 @@ TUNVLESS_PARSER_SRCS := \
     $(TUNVLESS_DIR)/src/proto/vless/sublink.c \
     $(TUNVLESS_DIR)/src/proto/vless/vless_proto.c \
     $(TUNVLESS_DIR)/src/proto/vless/vlink.c \
-    $(TUNVLESS_DIR)/src/proto/transport/trpath.c
+    $(TUNVLESS_DIR)/src/proto/transport/trpath.c \
+    $(TUNVLESS_DIR)/src/proto/transport/xhopts.c
 TUNVLESS_CFLAGS = -std=gnu11 $(OPT) -Wall -Wextra $(filter-out -Werror%,$(CFLAGS_EXTRA)) -MMD -MP \
     -I$(TUNVLESS_DIR)/src/lib -I$(TUNVLESS_DIR)/src/tunnel -I$(TUNVLESS_DIR)/src/proto/vless \
     -I$(TUNVLESS_DIR)/src/proto/transport -I$(TUNVLESS_DIR)/src/proto/tls \

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "vlink.h"
 #include "sublink.h"
@@ -48,7 +49,8 @@ static void param(struct wbuf *w, const char *k, const char *v) {
 }
 
 static int is_marker(const char *v) {
-    return v == SL_BAD_PQV || v == SL_FULL || v == SL_BAD_PIN || v == SL_BAD_ECH || v == SL_ECH_DNS;
+    return v == SL_BAD_PQV || v == SL_FULL || v == SL_BAD_PIN || v == SL_BAD_ECH || v == SL_ECH_DNS ||
+           v == SL_BAD_XHX || v == SL_BAD_XHX_JSON;
 }
 
 static void param_long(struct wbuf *w, const char *k, const char *v) {
@@ -60,24 +62,42 @@ static void range(char *dst, size_t n, unsigned long a, unsigned long b) {
     else snprintf(dst, n, "%lu-%lu", a, b);
 }
 
+static int xh_bare(const char *v, size_t l) {
+    return (l == 4 && !memcmp(v, "true", 4)) || (l == 5 && !memcmp(v, "false", 5));
+}
+
 static void extra(struct wbuf *w, const struct vless_node *n) {
-    char js[160], r[32];
-    size_t o = 0;
+    const char *x = n->xhx && !is_marker(n->xhx) ? n->xhx : "";
+    size_t cap = 8 * (strlen(x) + 1) + 160, o = 0;
+    char *js = malloc(cap), r[32];
+    if (!js) { w->over = 1; return; }
     js[0] = '\0';
     if (n->pad_to) {
         range(r, sizeof r, n->pad_from, n->pad_to);
-        o += (size_t)snprintf(js + o, sizeof js - o, "%s\"xPaddingBytes\":\"%s\"", o ? "," : "", r);
+        o += (size_t)snprintf(js + o, cap - o, "%s\"xPaddingBytes\":\"%s\"", o ? "," : "", r);
     }
     if (n->post_to) {
         range(r, sizeof r, n->post_from, n->post_to);
-        o += (size_t)snprintf(js + o, sizeof js - o, "%s\"scMaxEachPostBytes\":\"%s\"", o ? "," : "", r);
+        o += (size_t)snprintf(js + o, cap - o, "%s\"scMaxEachPostBytes\":\"%s\"", o ? "," : "", r);
     }
-    if (n->xh_extra)
-        o += (size_t)snprintf(js + o, sizeof js - o, "%s\"xPaddingObfsMode\":true", o ? "," : "");
-    if (!o) return;
-    char obj[sizeof js + 2];
-    snprintf(obj, sizeof obj, "{%s}", js);
-    param(w, "extra", obj);
+    for (const char *p = x; *p;) {
+        const char *e = strchr(p, '\n'), *eq = e ? memchr(p, '=', (size_t)(e - p)) : NULL;
+        if (!eq) { w->over = 1; free(js); return; }
+        size_t kl = (size_t)(eq - p), vl = (size_t)(e - eq - 1);
+        const char *q = xh_bare(eq + 1, vl) ? "" : "\"";
+        o += (size_t)snprintf(js + o, cap - o, "%s\"%.*s\":%s%.*s%s", o ? "," : "", (int)kl, p, q, (int)vl, eq + 1, q);
+        p = e + 1;
+    }
+    if (o) {
+        char *obj = malloc(o + 3);
+        if (!obj) w->over = 1;
+        else {
+            snprintf(obj, o + 3, "{%s}", js);
+            param(w, "extra", obj);
+            free(obj);
+        }
+    }
+    free(js);
 }
 
 static int clean(const char *s, const char *bad) {
