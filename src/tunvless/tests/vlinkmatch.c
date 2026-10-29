@@ -617,6 +617,22 @@ int main(void) {
         check_str("name cut: a short name stays", "short", nm);
     }
     {
+        struct vless_node n;
+        static const char it[] = "\xF0\x9F\x87\xAE\xF0\x9F\x87\xB9 \xF0\x9F\x8E\xAE \xE2\x9A\xA1\xEF\xB8\x8F "
+                                 "\xE2\xAD\x90\xEF\xB8\x8F 0.1X - LTE \xE2\x84\x96" "109 - "
+                                 "\xD0\x98\xD1\x82\xD0\xB0\xD0\xBB\xD0\xB8\xD1\x8F";
+        vless_parse_url("vless://" UUID "@h.example:443?type=tcp&security=none#%F0%9F%87%AE%F0%9F%87%B9%20"
+                        "%F0%9F%8E%AE%20%E2%9A%A1%EF%B8%8F%20%E2%AD%90%EF%B8%8F%200.1X%20-%20LTE%20%E2%84%96109"
+                        "%20-%20%D0%98%D1%82%D0%B0%D0%BB%D0%B8%D1%8F", &n);
+        check_str("name: a percent-encoded name that fits is kept whole", it, n.name);
+        char pct[512] = "";
+        for (int i = 0; i < 80; i++) strcat(pct, "%D0%9F");
+        char *link = fmt("vless://" UUID "@h.example:443?type=tcp&security=none#%s", pct);
+        vless_parse_url(link, &n);
+        free(link);
+        check("name: a long decoded name fills the field by whole characters", 126, (long)strlen(n.name));
+    }
+    {
         char v[32];
         for (int i = 0; i < 300; i++) {
             snprintf(v, sizeof v, "intern-%d", i);

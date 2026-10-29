@@ -5,7 +5,6 @@
 
 #include "firc/subinfo.h"
 
-/* Catches: a field read into the wrong slot, a key matched case-sensitively, or spaces kept in a number. */
 TEST the_four_fields_are_read_in_any_case_and_order(void)
 {
     firc_subinfo_t i;
@@ -18,7 +17,6 @@ TEST the_four_fields_are_read_in_any_case_and_order(void)
     PASS();
 }
 
-/* Catches: a missing total or expire taken as a limit, or an unknown key refusing the rest. */
 TEST missing_fields_are_zero_and_unknown_ones_skipped(void)
 {
     firc_subinfo_t i;
@@ -31,8 +29,6 @@ TEST missing_fields_are_zero_and_unknown_ones_skipped(void)
     PASS();
 }
 
-/* Catches: garbage, a negative or an overflowing number taken as a value, or a header with none of the four
-   reported as present. */
 TEST a_bad_value_is_refused_whole(void)
 {
     firc_subinfo_t i;
@@ -50,7 +46,6 @@ TEST a_bad_value_is_refused_whole(void)
     PASS();
 }
 
-/* Catches: the body line missed after a BOM or another comment, or looked for past the first node. */
 TEST the_body_line_is_read_only_among_the_opening_comments(void)
 {
     firc_subinfo_t i;
@@ -66,7 +61,6 @@ TEST the_body_line_is_read_only_among_the_opening_comments(void)
     PASS();
 }
 
-/* Catches: the kept line not read back as the same numbers. */
 TEST the_format_reads_back(void)
 {
     firc_subinfo_t a = {.have = true, .upload = 1, .download = 2, .total = 3, .expire = 4}, b;

@@ -2393,7 +2393,6 @@ TEST inbounds_go_out_after_ready(void)
     PASS();
 }
 
-/* catches: a whole-group inbound looked up as a node key and sent as a dash, or journalled as a gone node */
 TEST a_whole_group_inbound_sends_a_star(void)
 {
     static fx_t f;

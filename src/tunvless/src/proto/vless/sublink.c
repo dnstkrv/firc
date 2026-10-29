@@ -233,15 +233,17 @@ size_t sl_unescape(const char *p, int yaml, char out[4], size_t *olen) {
  * incomplete UTF-8 sequence (it may come from the percent form or from raw bytes in the
  * fragment). */
 void sl_set_name(char *dst, size_t n, const char *src) {
+    char tmp[512];
     size_t len = strlen(src);
-    int cut = len >= n;
-    sl_set_field(dst, n, src, len);
+    int cut = len >= sizeof(tmp);
+    sl_set_field(tmp, sizeof(tmp), src, len);
     if (cut) {
-        size_t l = strlen(dst);
-        if (l >= 1 && dst[l - 1] == '%') dst[l - 1] = '\0';
-        else if (l >= 2 && dst[l - 2] == '%') dst[l - 2] = '\0';
+        size_t l = strlen(tmp);
+        if (l >= 1 && tmp[l - 1] == '%') tmp[l - 1] = '\0';
+        else if (l >= 2 && tmp[l - 2] == '%') tmp[l - 2] = '\0';
     }
-    sl_pct_decode(dst);
+    sl_pct_decode(tmp);
+    sl_set_field(dst, n, tmp, strlen(tmp));
     sl_utf8_trim_tail(dst);
 }
 
