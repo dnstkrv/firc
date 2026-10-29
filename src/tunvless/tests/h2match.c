@@ -356,6 +356,32 @@ static void t_field_named_like_a_look_field_replaces_it(void) {
           (int)h2_list_size(&h, &r));
 }
 
+static void t_look_keeps_its_identity_fields_over_ours(void) {
+    struct h2 h;
+    struct fake_io io;
+    memset(&io, 0, sizeof io);
+    struct h2_io ops = { &io, fake_write, fake_read };
+    const struct h2_field fl[] = { { "Accept-Language", "ru" }, { "Sec-Fetch-Mode", "navigate" },
+                                   { "DNT", "0" }, { "sec-ch-ua", "x" }, { "X-A", "1" } };
+    struct h2_req r = { .authority = "a", .path = "/p", .method = "GET", .end_stream = 1,
+                        .fields = fl, .fields_n = 5, .lead_n = 2 };
+    h2_start_req(&h, &ops, &r, 1);
+    check("identity: HEADERS decode", 0, hr_first_headers(io.sent, io.sent_n, &g_blk));
+    check("identity: one accept-language", 1, count_named(&g_blk, "accept-language"));
+    check("identity: accept-language is the look's", 0,
+          strcmp(g_blk.f[hr_find(&g_blk, "accept-language")].value, "en-US,en;q=0.9"));
+    check("identity: one sec-fetch-mode", 1, count_named(&g_blk, "sec-fetch-mode"));
+    check("identity: sec-fetch-mode is cors", 0,
+          strcmp(g_blk.f[hr_find(&g_blk, "sec-fetch-mode")].value, "cors"));
+    check("identity: one dnt", 1, count_named(&g_blk, "dnt"));
+    check("identity: dnt is 1", 0, strcmp(g_blk.f[hr_find(&g_blk, "dnt")].value, "1"));
+    check("identity: one sec-ch-ua", 1, count_named(&g_blk, "sec-ch-ua"));
+    check("identity: sec-ch-ua is not ours", 1, strcmp(g_blk.f[hr_find(&g_blk, "sec-ch-ua")].value, "x") != 0);
+    check("identity: an unrelated field stays", 0, strcmp(g_blk.f[hr_find(&g_blk, "x-a")].value, "1"));
+    check("identity: list size equals the decoded block", (int)decoded_size(&g_blk),
+          (int)h2_list_size(&h, &r));
+}
+
 static void t_no_look_sends_only_the_fields(void) {
     struct h2 h;
     struct fake_io io;
@@ -378,6 +404,7 @@ static void t_no_look_sends_only_the_fields(void) {
 int main(void) {
     t_lead_fields_before_the_look_not_after_dest();
     t_field_named_like_a_look_field_replaces_it();
+    t_look_keeps_its_identity_fields_over_ours();
     t_no_look_sends_only_the_fields();
     t_req_put_method_not_collapsed_to_post();
     t_req_fields_slot_order_and_lowercase();

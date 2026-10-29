@@ -199,28 +199,28 @@ uint32_t h2_oldest_open(const struct h2 *h) {
     return m;
 }
 
-struct hf { unsigned idx; const char *name, *value; };
+struct hf { unsigned idx; const char *name, *value; int soft; };
 
 static const struct hf br_head[] = {
-    { 0, "sec-ch-ua", UA_CH_CHROME },
-    { 0, "sec-ch-ua-mobile", "?0" },
-    { 0, "sec-ch-ua-platform", "\"Windows\"" },
-    { 0, "dnt", "1" },
-    { HP_USER_AGENT, "user-agent", UA_CHROME },
-    { HP_ACCEPT, "accept", "*/*" },
-    { 0, "sec-fetch-site", "same-origin" },
-    { 0, "sec-fetch-mode", "cors" },
-    { 0, "sec-fetch-dest", "empty" },
+    { 0, "sec-ch-ua", UA_CH_CHROME, 0 },
+    { 0, "sec-ch-ua-mobile", "?0", 0 },
+    { 0, "sec-ch-ua-platform", "\"Windows\"", 0 },
+    { 0, "dnt", "1", 0 },
+    { HP_USER_AGENT, "user-agent", UA_CHROME, 0 },
+    { HP_ACCEPT, "accept", "*/*", 1 },
+    { 0, "sec-fetch-site", "same-origin", 0 },
+    { 0, "sec-fetch-mode", "cors", 0 },
+    { 0, "sec-fetch-dest", "empty", 0 },
 };
 static const struct hf br_tail[] = {
-    { HP_ACCEPT_LANG, "accept-language", "en-US,en;q=0.9" },
-    { 0, "priority", "u=1, i" },
-    { HP_CACHE_CTRL, "cache-control", "no-cache" },
-    { 0, "pragma", "no-cache" },
+    { HP_ACCEPT_LANG, "accept-language", "en-US,en;q=0.9", 0 },
+    { 0, "priority", "u=1, i", 1 },
+    { HP_CACHE_CTRL, "cache-control", "no-cache", 1 },
+    { 0, "pragma", "no-cache", 1 },
 };
 static const struct hf grpc_tail[] = {
-    { 0, "te", "trailers" },
-    { HP_USER_AGENT, "user-agent", "grpc-go/1.60.0" },
+    { 0, "te", "trailers", 0 },
+    { HP_USER_AGENT, "user-agent", "grpc-go/1.60.0", 0 },
 };
 
 #define H2_MAX_BLOCK DEFAULT_MAX_FRAME
@@ -235,9 +235,19 @@ static int hf_taken(const struct h2_req *r, const char *name) {
     return 0;
 }
 
+static int hf_forced(const struct hf *l, size_t n, const char *name) {
+    for (size_t i = 0; i < n; i++)
+        if (!l[i].soft && strcasecmp(l[i].name, name) == 0) return 1;
+    return 0;
+}
+
+static int look_forced(const char *name) {
+    return hf_forced(br_head, NELEM(br_head), name) || hf_forced(br_tail, NELEM(br_tail), name);
+}
+
 static void hp_list(struct wbuf *b, const struct hf *l, size_t n, const struct h2_req *r) {
     for (size_t i = 0; i < n; i++) {
-        if (hf_taken(r, l[i].name)) continue;
+        if (l[i].soft && hf_taken(r, l[i].name)) continue;
         if (l[i].idx) hp_field(b, l[i].idx, l[i].value);
         else hp_new(b, l[i].name, l[i].value);
     }
@@ -246,7 +256,7 @@ static void hp_list(struct wbuf *b, const struct hf *l, size_t n, const struct h
 static size_t hf_size(const struct hf *l, size_t n, const struct h2_req *r) {
     size_t s = 0;
     for (size_t i = 0; i < n; i++)
-        if (!hf_taken(r, l[i].name)) s += strlen(l[i].name) + strlen(l[i].value) + 32;
+        if (!l[i].soft || !hf_taken(r, l[i].name)) s += strlen(l[i].name) + strlen(l[i].value) + 32;
     return s;
 }
 
@@ -271,9 +281,11 @@ size_t h2_list_size(const struct h2 *h, const struct h2_req *r) {
     s += strlen(":path") + strlen(r->path) + 32;
     s += strlen(":authority") + strlen(r->authority) + 32;
     if (r->content_type) s += strlen("content-type") + strlen(r->content_type) + 32;
+    int look = h->browser && !r->no_look;
     for (size_t i = 0; i < r->fields_n; i++)
-        s += strlen(r->fields[i].name) + strlen(r->fields[i].value) + 32;
-    if (h->browser && !r->no_look)
+        if (!look || !look_forced(r->fields[i].name))
+            s += strlen(r->fields[i].name) + strlen(r->fields[i].value) + 32;
+    if (look)
         s += hf_size(br_head, NELEM(br_head), r) + hf_size(br_tail, NELEM(br_tail), r);
     else if (!h->browser) s += hf_size(grpc_tail, NELEM(grpc_tail), NULL);
     return s;
@@ -304,9 +316,11 @@ static int put_headers(struct h2 *h, struct wbuf *b, const struct h2_req *r) {
         /* Chrome's order: client hints, then who it is, then what it wants and where it came
          * from. Referer carries the xhttp padding and stands where a browser puts it. */
         size_t lead = r->lead_n < r->fields_n ? r->lead_n : r->fields_n;
-        for (size_t i = 0; i < lead; i++) hp_user(&hp, &r->fields[i]);
+        for (size_t i = 0; i < lead; i++)
+            if (!look_forced(r->fields[i].name)) hp_user(&hp, &r->fields[i]);
         hp_list(&hp, br_head, NELEM(br_head), r);
-        for (size_t i = lead; i < r->fields_n; i++) hp_user(&hp, &r->fields[i]);
+        for (size_t i = lead; i < r->fields_n; i++)
+            if (!look_forced(r->fields[i].name)) hp_user(&hp, &r->fields[i]);
         hp_list(&hp, br_tail, NELEM(br_tail), r);
     } else {
         for (size_t i = 0; i < r->fields_n; i++) hp_user(&hp, &r->fields[i]);
