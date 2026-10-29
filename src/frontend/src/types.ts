@@ -254,6 +254,12 @@ export type TunnelNodeState = {
   v6?: boolean;
 };
 
+export type TunnelSubUsage = {
+  used: number;
+  total: number;
+  expire: number;
+};
+
 export type TunnelSubState = {
   name: string;
   nodes: number;
@@ -261,6 +267,7 @@ export type TunnelSubState = {
   lastOk: number;
   lastTry: number;
   error: string;
+  usage?: TunnelSubUsage | null;
 };
 
 export type TunnelState = {

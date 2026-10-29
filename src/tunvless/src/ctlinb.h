@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #define IB_MAX 16
+#define IB_NODE_POOL (-2)
 
 struct ib_cfg {
     uint32_t addr;

@@ -35,6 +35,8 @@ typedef struct {
     firc_tun_sub_t sub;
 } firc_tun_src_t;
 
+#define FIRC_TUN_NODE_POOL "*"
+
 typedef struct {
     uint16_t port;
     char listen[16];

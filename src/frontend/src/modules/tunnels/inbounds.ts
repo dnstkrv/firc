@@ -1,6 +1,7 @@
 import type { Tunnel, TunnelInbound, TunnelInboundState } from "../../types";
 
 export const MAX_INBOUNDS = 16 as const;
+export const WHOLE_GROUP = "*" as const;
 const FIRST_PORT = 1080 as const;
 
 type T = (key: string) => string;
