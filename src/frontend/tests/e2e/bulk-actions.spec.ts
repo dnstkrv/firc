@@ -119,6 +119,63 @@ test.describe("Group bulk actions", () => {
     await expect(page.locator(".group.selected")).toHaveCount(0);
   });
 
+  // Catches a lost line, a non-domain rule, a disabled rule or a duplicate in the copy.
+  test("copy domains puts the selected groups' domains on the clipboard, one per line", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await setup(page, {
+      Insta: {
+        rules: [
+          { id: "ri1", enable: true, rule: "aaa.com", type: "namespace" },
+          { id: "ri2", enable: true, rule: "^ads\\.", type: "regex" },
+          { id: "ri3", enable: true, rule: "*.ccc.com", type: "wildcard" },
+        ],
+      },
+      Work: {
+        rules: [
+          { id: "rw1", enable: true, rule: "bbb.com", type: "domain" },
+          { id: "rw2", enable: true, rule: "10.0.0.0/8", type: "subnet" },
+          { id: "rw3", enable: true, rule: "aaa.com", type: "domain" },
+          { id: "rw4", enable: false, rule: "off.com", type: "domain" },
+        ],
+      },
+    });
+    await numberOf(page, "Insta").click();
+    await numberOf(page, "Work").click();
+    await bar(page).getByRole("button", { name: "Copy domains" }).click();
+    await expect(page.getByText("3 domains copied")).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied.replace(/\r\n/g, "\n")).toBe("aaa.com\n*.ccc.com\nbbb.com\n");
+  });
+
+  // Catches a copy that fails where the Clipboard API is refused, as on plain http.
+  test("copy domains falls back when the Clipboard API refuses", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.addInitScript(() => {
+      navigator.clipboard.writeText = () => Promise.reject(new Error("refused"));
+    });
+    await setup(page, {
+      Insta: { rules: [{ id: "ri1", enable: true, rule: "aaa.com", type: "domain" }] },
+    });
+    await numberOf(page, "Insta").click();
+    await bar(page).getByRole("button", { name: "Copy domains" }).click();
+    await expect(page.getByText("1 domain copied")).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied.replace(/\r\n/g, "\n")).toBe("aaa.com\n");
+  });
+
+  // Catches a silent no-op on a selection without domains.
+  test("copy domains says so when the selection has none", async ({ page }) => {
+    await setup(page, {
+      Insta: { rules: [{ id: "ri1", enable: true, rule: "10.0.0.0/8", type: "subnet" }] },
+    });
+    await numberOf(page, "Insta").click();
+    await bar(page).getByRole("button", { name: "Copy domains" }).click();
+    await expect(page.getByText("No domains in the selected groups")).toBeVisible();
+  });
+
   // Catches the wrong Russian plural form in the count.
   test("the count reads in Russian", async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem("locale", JSON.stringify({ value: "ru" })));

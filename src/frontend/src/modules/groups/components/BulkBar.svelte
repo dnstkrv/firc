@@ -14,6 +14,7 @@
 
   import {
     Check,
+    ClipboardCopy,
     Delete,
     Devices,
     Globe,
@@ -30,8 +31,10 @@
     moreText,
     type IfaceItem,
   } from "../../../data/iface-choices";
+  import { copyText } from "../../../utils/clipboard";
   import { replaceWith } from "../../../utils/device-bulk";
   import { coverageLabel } from "../../../utils/device-picker";
+  import { toast } from "../../../utils/events";
   import { counted } from "../../../utils/plural";
   import { resolverListProblem } from "../../../utils/resolver-validators";
   import { canBackup, entryNumber, ifaceList, sharedChain, toggleEntry } from "../iface-list";
@@ -43,7 +46,7 @@
     sharedResolve,
     type DnsMode,
   } from "../resolve-choice";
-  import { selectionCountText } from "../selection";
+  import { domainLines, selectionCountText } from "../selection";
 
   type Props = {
     /* The bar's own height, for the page to keep its last card clear of it. */
@@ -190,6 +193,27 @@
 
   let countText = $derived(selectionCountText(store.selection.length, locale.current, t));
 
+  async function copyDomains() {
+    const lines = domainLines(selectedGroups);
+    if (!lines.length) {
+      toast.warning(t("No domains in the selected groups"));
+      return;
+    }
+    if (await copyText(`${lines.join("\n")}\n`)) {
+      toast.success(
+        counted(
+          lines.length,
+          locale.current,
+          t("{n} domain copied"),
+          t("{n} domains copied (2-4)"),
+          t("{n} domains copied"),
+        ),
+      );
+    } else {
+      toast.error(t("Could not copy to the clipboard"));
+    }
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     /* Not while the Groups tab is hidden: the bar is not on screen. */
@@ -225,6 +249,11 @@
 >
   <div class="bulk-row bulk-selection">
     <strong class="bulk-count" role="status">{countText}</strong>
+    <button type="button" class="bulk-button" onclick={() => void copyDomains()}>
+      <ClipboardCopy size={18} /><span class="bulk-label label-long">{t("Copy domains")}</span><span
+        class="bulk-label label-short">{t("Domains")}</span
+      >
+    </button>
     <button type="button" class="bulk-button" onclick={() => store.selectAll()}>
       <Check size={18} />{t("Select all")}
     </button>

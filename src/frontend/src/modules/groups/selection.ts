@@ -1,3 +1,4 @@
+import type { Rule } from "../../types";
 import { counted } from "../../utils/plural";
 
 type WithId = { id: string };
@@ -54,6 +55,21 @@ export function moveBlock<T extends WithId>(
     at = prev ? rest.indexOf(prev) + 1 : 0;
   }
   return [...rest.slice(0, at), ...block, ...rest.slice(at)];
+}
+
+const DOMAIN_TYPES = new Set(["namespace", "wildcard", "domain"]);
+
+export function domainLines(
+  groups: readonly { rules: readonly Pick<Rule, "rule" | "type" | "enable">[] }[],
+): string[] {
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const rule of group.rules) {
+      const text = rule.rule.trim();
+      if (text && rule.enable && DOMAIN_TYPES.has(rule.type)) seen.add(text);
+    }
+  }
+  return [...seen];
 }
 
 export function selectionCountText(n: number, locale: string, t: (key: string) => string): string {
