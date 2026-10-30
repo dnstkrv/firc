@@ -82,6 +82,7 @@ firc_err_t firc_sub_fetch_list_mark_ex(const char *url, uint32_t mark, const cha
                                        char **out_body, size_t *out_len, int *out_http_status,
                                        firc_sub_fetch_progress_fn progress, void *ud);
 
+/* firc_sub_fetch_list_mark_ex that also hands every response header of every hop to on_header (NULL for none). */
 firc_err_t firc_sub_fetch_list_mark_hdr(const char *url, uint32_t mark, const char *const *headers,
                                         char **out_body, size_t *out_len, int *out_http_status,
                                         firc_sub_fetch_progress_fn progress, void *ud,
