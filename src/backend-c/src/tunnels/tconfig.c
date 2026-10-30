@@ -200,8 +200,7 @@ void firc_tunnels_free(firc_tunnels_t *t)
         free(x->exclude);
     }
     free(t->t);
-    t->t = NULL;
-    t->n = 0;
+    memset(t, 0, sizeof *t);
 }
 
 static bool hex8_ok(const char *s)
@@ -989,33 +988,66 @@ firc_err_t firc_tunnels_load_buffer(firc_tunnels_t *out, const char *buf, size_t
     return r;
 }
 
-firc_err_t firc_tunnels_load_file(firc_tunnels_t *out, const char *path, firc_tun_err_t *err)
+static firc_err_t read_file(const char *path, char **buf, size_t *len, bool warn_mode)
 {
-    memset(out, 0, sizeof *out);
+    *buf = NULL;
+    *len = 0;
     FILE *f = fopen(path, "rbe");
     if (f == NULL) {
         return errno == ENOENT ? FIRC_OK : firc_err_from_errno(errno);
     }
     struct stat st;
-    if (fstat(fileno(f), &st) == 0 && (st.st_mode & 077) != 0) {
+    if (warn_mode && fstat(fileno(f), &st) == 0 && (st.st_mode & 077) != 0) {
         FIRC_WARN("%s can be read by others (mode %03o) and holds the tunnel links; chmod 600 it", path,
                   (unsigned)(st.st_mode & 0777));
     }
-    char *buf = malloc(FILE_CAP + 1);
-    if (buf == NULL) {
+    *buf = malloc(FILE_CAP + 1);
+    if (*buf == NULL) {
         fclose(f);
         return FIRC_ERR_NOMEM;
     }
-    size_t len = fread(buf, 1, FILE_CAP + 1, f);
-    bool bad = ferror(f) != 0 || len > FILE_CAP;
+    *len = fread(*buf, 1, FILE_CAP + 1, f);
+    bool bad = ferror(f) != 0 || *len > FILE_CAP;
     fclose(f);
     if (bad) {
-        free(buf);
+        free(*buf);
+        *buf = NULL;
         return FIRC_ERR_IO;
     }
-    firc_err_t r = firc_tunnels_load_buffer(out, buf, len, err);
+    return FIRC_OK;
+}
+
+firc_err_t firc_tunnels_load_file(firc_tunnels_t *out, const char *path, firc_tun_err_t *err)
+{
+    memset(out, 0, sizeof *out);
+    char *buf = NULL;
+    size_t len = 0;
+    firc_err_t r = read_file(path, &buf, &len, true);
+    if (r != FIRC_OK) {
+        return r;
+    }
+    if (buf != NULL) {
+        r = firc_tunnels_load_buffer(out, buf, len, err);
+    }
+    if (r == FIRC_OK) {
+        firc_sha256((const uint8_t *)(buf != NULL ? buf : ""), len, out->file_sha);
+        out->file_known = true;
+    }
     free(buf);
     return r;
+}
+
+bool firc_tunnels_file_unchanged(const firc_tunnels_t *t, const char *path)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    if (!t->file_known || read_file(path, &buf, &len, false) != FIRC_OK) {
+        return false;
+    }
+    uint8_t sha[32];
+    firc_sha256((const uint8_t *)(buf != NULL ? buf : ""), len, sha);
+    free(buf);
+    return memcmp(sha, t->file_sha, sizeof sha) == 0;
 }
 
 typedef struct {
@@ -1217,7 +1249,7 @@ static void emit_tunnel(em_t *e, const firc_tunnel_t *t)
     map_end(e);
 }
 
-firc_err_t firc_tunnels_save_file(const firc_tunnels_t *in, const char *path)
+firc_err_t firc_tunnels_save_file(firc_tunnels_t *in, const char *path)
 {
     obuf_t out = {0};
     em_t e = {.ok = true};
@@ -1255,6 +1287,10 @@ firc_err_t firc_tunnels_save_file(const firc_tunnels_t *in, const char *path)
         return FIRC_ERR_SYS;
     }
     firc_err_t r = firc_atomic_write(path, out.data, out.len);
+    if (r == FIRC_OK) {
+        firc_sha256((const uint8_t *)(out.data != NULL ? out.data : ""), out.len, in->file_sha);
+        in->file_known = true;
+    }
     free(out.data);
     return r;
 }

@@ -460,7 +460,7 @@ TEST ok_child_up_links_on_stdin(void)
     char *links[] = {"vless://u1@h1:443?type=tcp#one", "vless://u2@h2:443?type=tcp#two"};
     firc_tunnel_t t;
     tun_init(&t, "a", 3, links, 2);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT(r.s != NULL);
@@ -499,7 +499,7 @@ TEST argv_full_and_no_link(void)
     t.insecure = true;
     snprintf(t.ca, sizeof t.ca, "/opt/etc/ca.pem");
     snprintf(t.fingerprint, sizeof t.fingerprint, "firefox");
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     uint32_t marks[] = {0x1a};
     static rec_t r;
     rec_open(&r);
@@ -529,7 +529,7 @@ TEST argv_with_every_option_set(void)
     t.kernel_tcp = true;
     snprintf(t.ca, sizeof t.ca, "/opt/etc/ca.pem");
     snprintf(t.fingerprint, sizeof t.fingerprint, "chrome");
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     uint32_t marks[] = {0x1a};
     static rec_t r;
     rec_open(&r);
@@ -556,7 +556,7 @@ TEST argv_minimal_without_options(void)
     char *links[] = {"vless://secret@h1:443#one"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     uint32_t marks[] = {0};
     static rec_t r;
     rec_open(&r);
@@ -581,7 +581,7 @@ TEST a_kernel_tcp_tunnel_is_spawned_with_its_port_and_pool(void)
     firc_tunnel_t t;
     tun_init(&t, "a", 7, links, 1);
     t.kernel_tcp = true;
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     uint32_t marks[] = {0};
     static rec_t r;
     rec_open(&r);
@@ -608,7 +608,7 @@ TEST a_kernel_tcp_tunnel_without_a_pool_gets_only_its_port(void)
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
     t.kernel_tcp = true;
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     uint32_t marks[] = {0};
     static rec_t r;
     rec_open(&r);
@@ -634,7 +634,7 @@ TEST stderr_logged_by_level_without_links(void)
     char *links[] = {"vless://secret@h1:443#one"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -664,7 +664,7 @@ TEST crash_restarts_with_growing_backoff(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -709,7 +709,7 @@ TEST twenty_restarts_leave_one_warning(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 1);
@@ -736,7 +736,7 @@ TEST backoff_doubles_up_to_sixty(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 10);
@@ -761,7 +761,7 @@ TEST backoff_resets_after_stable_run(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 10);
@@ -786,7 +786,7 @@ TEST badconf_not_restarted(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 10);
@@ -812,7 +812,7 @@ TEST flood_line_dropped_loop_responsive(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -837,7 +837,7 @@ TEST noread_child_never_blocks_loop(void)
     char **links = big_links();
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, BIG_N);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -861,7 +861,7 @@ TEST closed_stdin_counts_as_failed_start(void)
     char **links = big_links();
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, BIG_N);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -888,7 +888,7 @@ TEST stop_kills_child_ignoring_term(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -914,8 +914,8 @@ TEST apply_unchanged_keeps_child(void)
     firc_tunnel_t t, t2;
     tun_init(&t, "a", 0, links, 1);
     tun_init(&t2, "a", 0, links2, 1);
-    firc_tunnels_t set = {&t, 1};
-    firc_tunnels_t set2 = {&t2, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
+    firc_tunnels_t set2 = {.t = &t2, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -945,8 +945,8 @@ TEST apply_changed_restarts_only_that(void)
     tun_init(&t2[0], "a", 0, links, 1);
     tun_init(&t2[1], "b", 1, links, 1);
     t2[1].active = 2;
-    firc_tunnels_t set = {t, 2};
-    firc_tunnels_t set2 = {t2, 2};
+    firc_tunnels_t set = {.t = t, .n = 2};
+    firc_tunnels_t set2 = {.t = t2, .n = 2};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -978,8 +978,8 @@ TEST apply_disabled_and_absent_stopped(void)
     tun_init(&t[1], "b", 1, links, 1);
     tun_init(&t2, "a", 0, links, 1);
     t2.enable = false;
-    firc_tunnels_t set = {t, 2};
-    firc_tunnels_t set2 = {&t2, 1};
+    firc_tunnels_t set = {.t = t, .n = 2};
+    firc_tunnels_t set2 = {.t = &t2, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1026,9 +1026,9 @@ TEST bad_config_waits_for_a_changed_apply(void)
     off.enable = false;
     tun_init(&on, "a", 0, links, 1);
     on.active = 2;
-    firc_tunnels_t set = {&t, 1};
-    firc_tunnels_t set_off = {&off, 1};
-    firc_tunnels_t set_on = {&on, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
+    firc_tunnels_t set_off = {.t = &off, .n = 1};
+    firc_tunnels_t set_on = {.t = &on, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1063,7 +1063,7 @@ TEST uplink_tunnel_started_after_its_uplink(void)
     t[1].uplink = FIRC_UPLINK_TUNNEL;
     snprintf(t[1].uplink_ref, sizeof t[1].uplink_ref, "a");
     tun_init(&t[2], "c", 2, links, 1);
-    firc_tunnels_t set = {t, 3};
+    firc_tunnels_t set = {.t = t, .n = 3};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1195,7 +1195,7 @@ TEST child_inherits_no_helper_pipe(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     open_fds(during);
@@ -1227,7 +1227,7 @@ TEST each_tag_is_relayed_at_its_level_without_it(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1261,7 +1261,7 @@ TEST empty_dev_or_node_ignored_once_logged(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1290,7 +1290,7 @@ TEST oversize_lines_warned_per_stream(void)
     char *links[] = {"vless://u@h:443#x"};
     firc_tunnel_t t;
     tun_init(&t, "a", 0, links, 1);
-    firc_tunnels_t set = {&t, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &set, NULL));
@@ -1317,8 +1317,8 @@ TEST device_swap_waits_for_the_old_holder(void)
     tun_init(&t[1], "b", 1, links, 1);
     tun_init(&t2[0], "a", 1, links, 1);
     tun_init(&t2[1], "b", 0, links, 1);
-    firc_tunnels_t set = {t, 2};
-    firc_tunnels_t set2 = {t2, 2};
+    firc_tunnels_t set = {.t = t, .n = 2};
+    firc_tunnels_t set2 = {.t = t2, .n = 2};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 100);
@@ -1364,9 +1364,9 @@ TEST repeated_apply_keeps_the_kill_deadline(void)
     t2.active = 2;
     tun_init(&t3, "a", 0, links, 1);
     t3.active = 3;
-    firc_tunnels_t set = {&t, 1};
-    firc_tunnels_t set2 = {&t2, 1};
-    firc_tunnels_t set3 = {&t3, 1};
+    firc_tunnels_t set = {.t = &t, .n = 1};
+    firc_tunnels_t set2 = {.t = &t2, .n = 1};
+    firc_tunnels_t set3 = {.t = &t3, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 100);
@@ -1416,8 +1416,8 @@ TEST reap_hook_names_each_child_once_reaped(void)
     firc_tunnel_t t[2];
     tun_init(&t[0], "a", 0, links, 1);
     tun_init(&t[1], "b", 1, links, 1);
-    firc_tunnels_t both = {t, 2};
-    firc_tunnels_t only_b = {&t[1], 1};
+    firc_tunnels_t both = {.t = t, .n = 2};
+    firc_tunnels_t only_b = {.t = &t[1], .n = 1};
     memset(&g_reaps, 0, sizeof g_reaps);
     static rec_t r;
     rec_open(&r);
@@ -1447,8 +1447,8 @@ TEST reap_hook_names_each_child_once_reaped(void)
 }
 
 static firc_tunnel_t g_t1, g_t2;
-static firc_tunnels_t g_set1 = {&g_t1, 1};
-static firc_tunnels_t g_set2 = {&g_t2, 1};
+static firc_tunnels_t g_set1 = {.t = &g_t1, .n = 1};
+static firc_tunnels_t g_set2 = {.t = &g_t2, .n = 1};
 
 static void two_lists(char **l1, size_t n1, char **l2, size_t n2)
 {
@@ -1747,7 +1747,7 @@ TEST a_short_ack_stops_trusting_node_numbers(void)
     two_lists(l1, 1, l2, 2);
     static firc_tunnel_t t3;
     tun_init(&t3, "a", 0, l3, 2);
-    static firc_tunnels_t set3 = {&t3, 1};
+    static firc_tunnels_t set3 = {.t = &t3, .n = 1};
     static rec_t r;
     rec_open(&r);
     ASSERT_EQ(FIRC_OK, firc_tunsup_apply(r.s, &g_set1, NULL));
@@ -1785,7 +1785,7 @@ TEST a_terminating_child_has_no_ack_clock(void)
     static firc_tunnel_t t3;
     tun_init(&t3, "a", 0, l2, 1);
     t3.active = 2;
-    static firc_tunnels_t set3 = {&t3, 1};
+    static firc_tunnels_t set3 = {.t = &t3, .n = 1};
     static rec_t r;
     rec_open(&r);
     firc_tunsup_set_second_ms_for_test(r.s, 50);

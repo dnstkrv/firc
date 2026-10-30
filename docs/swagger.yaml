@@ -1523,7 +1523,7 @@ definitions:
         example: true
         type: boolean
       exclude:
-        description: 'Node keys never used'
+        description: 'Node keys never used; a key its source no longer gives is dropped once that source''s nodes are known'
         items:
           type: string
         type: array
@@ -1545,7 +1545,7 @@ definitions:
         example: 60
         type: integer
       order:
-        description: 'Node keys listed first, in this order; a key no source gives now is kept and not listed'
+        description: 'Node keys listed first, in this order; a key its source no longer gives is dropped once that source''s nodes are known'
         items:
           type: string
         type: array

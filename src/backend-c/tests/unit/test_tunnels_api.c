@@ -783,30 +783,33 @@ TEST a_saved_reversed_order_previews_every_node_once_in_that_order(void)
     PASS();
 }
 
-/* catches: a saved key its subscription no longer gives listed in the state, or dropped from the saved order or exclude */
-TEST a_saved_key_no_body_gives_stays_in_the_file_but_not_in_the_nodes(void)
+/* catches: a PUT writing keys its sources no longer give, or dropping a never-fetched subscription's or a filter-hidden key */
+TEST a_put_with_stale_keys_writes_them_pruned(void)
 {
     ASSERT(hx_start(SUB_TUN, 0) != NULL);
     ASSERT(wait_for_cached(5000));
     ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
                             "{\"tunnels\":[{\"id\":\"s\",\"device\":\"tunvless2\",\"sources\":["
+                            "{\"id\":\"0000000a\",\"kind\":\"link\",\"link\":\"" LINK_A "\"},"
                             "{\"id\":\"0000000b\",\"kind\":\"subscription\",\"name\":\"P\",\"url\":\"" SUB_URL
-                            "\",\"interval\":3600}],"
-                            "\"order\":[\"0000000b:Z\",\"0000000b:C\"],\"exclude\":[\"0000000b:Z\"]}]}",
+                            "\",\"interval\":3600},"
+                            "{\"id\":\"0000000e\",\"kind\":\"subscription\",\"name\":\"Q\","
+                            "\"url\":\"http://127.0.0.1:18144/other\",\"interval\":3600}],"
+                            "\"filter\":\"^(A|B)$\","
+                            "\"order\":[\"0000000b:Z\",\"0000000b:C\",\"0000000e:Z\",\"0000000a:old\",\"0000000a:A\"],"
+                            "\"exclude\":[\"0000000b:Z\",\"0000000e:Z\",\"0000000a:old\"]}]}",
                             NULL));
+    char file[4096];
+    slurp(g_hx->path, file, sizeof file);
+    ASSERT(strstr(file, "0000000b:Z") == NULL);
+    ASSERT(strstr(file, "0000000a:old") == NULL);
+    ASSERT(strstr(file, "0000000b:C") != NULL);
+    ASSERT(strstr(file, "0000000e:Z") != NULL);
     cJSON *got = NULL;
     ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &got));
     const cJSON *s = tunnel_named(got, "s");
-    ASSERT(same_json(at(s, "order"), "[\"0000000b:Z\",\"0000000b:C\"]"));
-    ASSERT(same_json(at(s, "exclude"), "[\"0000000b:Z\"]"));
-    cJSON_Delete(got);
-    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &got));
-    const cJSON *nodes = at(tunnel_named(got, "s"), "nodes");
-    ASSERT_EQ(4, cJSON_GetArraySize(nodes));
-    ASSERT_STR_EQ("0000000b:C", at(cJSON_GetArrayItem(nodes, 0), "key")->valuestring);
-    for (int i = 0; i < cJSON_GetArraySize(nodes); i++) {
-        ASSERT(strcmp("0000000b:Z", at(cJSON_GetArrayItem(nodes, i), "key")->valuestring) != 0);
-    }
+    ASSERT(same_json(at(s, "order"), "[\"0000000b:C\",\"0000000e:Z\",\"0000000a:A\"]"));
+    ASSERT(same_json(at(s, "exclude"), "[\"0000000e:Z\"]"));
     cJSON_Delete(got);
     PASS();
 }
@@ -1908,7 +1911,7 @@ SUITE(tunnels_api)
     RUN_TEST(preview_of_a_disabled_tunnel_shows_its_held_nodes);
     RUN_TEST(preview_lists_a_bracketed_ipv6_link_as_usable);
     RUN_TEST(a_saved_reversed_order_previews_every_node_once_in_that_order);
-    RUN_TEST(a_saved_key_no_body_gives_stays_in_the_file_but_not_in_the_nodes);
+    RUN_TEST(a_put_with_stale_keys_writes_them_pruned);
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);
     RUN_TEST(only_an_active_v6_node_carries_v6_true);

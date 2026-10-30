@@ -695,6 +695,33 @@ static void handle_get(firc_http_req_t *req, firc_http_res_t *res, void *ud)
     firc_http_res_write_json(res, 200, o);
 }
 
+static const firc_tunnel_t *saved_tunnel(firc_tunnels_ctx_t *ctx, const char *id)
+{
+    const firc_tunnels_t *cur = firc_tunrun_config(ctx->run);
+    for (size_t i = 0; id != NULL && i < cur->n; i++) {
+        if (strcmp(cur->t[i].id, id) == 0) {
+            return &cur->t[i];
+        }
+    }
+    return NULL;
+}
+
+static void prune_held(firc_tunnels_ctx_t *ctx, firc_tunnels_t *set)
+{
+    for (size_t i = 0; i < set->n; i++) {
+        firc_tunnel_t *t = &set->t[i];
+        firc_tun_body_t *b = calloc(t->n_src + 1, sizeof *b);
+        if (b == NULL) {
+            continue;
+        }
+        const firc_tunnel_t *saved = saved_tunnel(ctx, t->id);
+        size_t nb = firc_tunsubs_held(ctx->subs, saved != NULL ? saved : t, t, b, t->n_src);
+        size_t dropped = 0;
+        (void)firc_tun_nodes_prune(t, 0, b, nb, &dropped);
+        free(b);
+    }
+}
+
 static void handle_put(firc_http_req_t *req, firc_http_res_t *res, void *ud)
 {
     firc_tunnels_ctx_t *ctx = ud;
@@ -726,6 +753,7 @@ static void handle_put(firc_http_req_t *req, firc_http_res_t *res, void *ud)
         write_load_error(res, err, &le);
         return;
     }
+    prune_held(ctx, &set);
     err = firc_tunnels_save_file(&set, ctx->path);
     if (err != FIRC_OK) {
         firc_tunnels_free(&set);
@@ -1123,17 +1151,6 @@ static void handle_state(firc_http_req_t *req, firc_http_res_t *res, void *ud)
         return;
     }
     firc_http_res_write_json(res, 200, o);
-}
-
-static const firc_tunnel_t *saved_tunnel(firc_tunnels_ctx_t *ctx, const char *id)
-{
-    const firc_tunnels_t *cur = firc_tunrun_config(ctx->run);
-    for (size_t i = 0; id != NULL && i < cur->n; i++) {
-        if (strcmp(cur->t[i].id, id) == 0) {
-            return &cur->t[i];
-        }
-    }
-    return NULL;
 }
 
 static void handle_refresh(firc_http_req_t *req, firc_http_res_t *res, void *ud)

@@ -1592,6 +1592,7 @@ int main(int argc, char **argv)
             subscription_defaults(&d);
         }
         firc_tunrun_set_subs(d.tunrun, d.tunsubs);
+        firc_tunrun_set_path(d.tunrun, firc_tunnels_path());
         firc_app_set_tunnel_down(d.app, tunnel_down, d.tunrun);
         firc_ip_t pool4;
         uint8_t pool4_len = 0;

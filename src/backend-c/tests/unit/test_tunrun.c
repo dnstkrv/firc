@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -2963,6 +2964,159 @@ TEST a_disabled_tunnel_s_inbounds_are_off(void)
     PASS();
 }
 
+static void apply_file(fx_t *f, const char *path, const char *doc)
+{
+    FILE *fp = fopen(path, "we");
+    if (fp == NULL) {
+        return;
+    }
+    fputs(doc, fp);
+    fclose(fp);
+    chmod(path, 0600);
+    firc_tunnels_t t = {0};
+    firc_tun_err_t e = {0};
+    if (firc_tunnels_load_file(&t, path, &e) != FIRC_OK) {
+        fprintf(stderr, "config: %s: %s\n", e.where, e.why);
+        return;
+    }
+    (void)firc_tunrun_apply(f->run, &t);
+    firc_tunnels_free(&t);
+}
+
+static bool order_has(fx_t *f, const void *arg)
+{
+    const firc_tunnels_t *cur = firc_tunrun_config(f->run);
+    return cur->n >= 1 && cur->t[0].n_order == *(const size_t *)arg && cur->t[0].n_exclude == 0;
+}
+
+/* catches: a refresh that leaves a renamed node's key in order or exclude, keeps it in the file, writes the file when nothing went, is not 0600, refuses its own earlier write, or prunes a disabled tunnel by another uplink's body */
+TEST a_refresh_drops_keys_its_body_no_longer_gives_and_writes_the_file(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    static sub_srv_t srv;
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@b.example:443?security=none#B\n"
+               "vless://" U "@c.example:443?security=none#C\n");
+    ASSERT(sub_srv_start(&srv, 0));
+    subs_up(&f);
+    ASSERT(g_subs != NULL);
+    char path[128];
+    snprintf(path, sizeof path, "%s/tunnels.yaml", f.dir);
+    firc_tunrun_set_path(f.run, path);
+    firc_event_reset_for_test();
+    static const char doc[] = "tunnels:\n" XY_TUN("a", "0", "x", "    order: [\"00000000:B\", \"00000000:A\", \"00000000:C\"]\n"
+                                                                   "    exclude: [\"00000000:B\"]\n")
+        XY_TUN("b", "1", "x", "    enable: false\n    uplink: \"iface:lo\"\n    order: [\"00000001:B\"]\n");
+    apply_file(&f, path, doc);
+    int s0 = run_until_starts(&f, "tunvless0", 1, 3000);
+    char first[2048];
+    slurp(path, first, sizeof first);
+    int before_write = strcmp(first, doc);
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@c.example:443?security=none#C\n");
+    firc_err_t rc = firc_tunsubs_refresh(g_subs, "a");
+    size_t two = 2;
+    bool pruned = run_until(&f, order_has, &two, 3000);
+    char mid[2048];
+    slurp(path, mid, sizeof mid);
+    set_x_body("vless://" U "@a.example:443?security=none#A\n");
+    firc_err_t rc2 = firc_tunsubs_refresh(g_subs, "a");
+    size_t one = 1;
+    bool pruned2 = run_until(&f, order_has, &one, 3000);
+    sub_srv_stop(&srv);
+    char buf[2048];
+    slurp(path, buf, sizeof buf);
+    struct stat st;
+    int sr = stat(path, &st);
+    unlink(path);
+    ASSERT_EQ(1, s0);
+    ASSERT_EQ(0, before_write);
+    ASSERT_EQ(FIRC_OK, rc);
+    ASSERT(pruned);
+    ASSERT(strstr(mid, "00000000:B") == NULL && strstr(mid, "00000000:C") != NULL);
+    ASSERT_EQ(FIRC_OK, rc2);
+    ASSERT(pruned2);
+    ASSERT_STR_EQ("00000000:A", firc_tunrun_config(f.run)->t[0].order[0]);
+    ASSERT_EQ_FMT((size_t)1, firc_tunrun_config(f.run)->t[1].n_order, "%zu");
+    ASSERT_EQ(0, sr);
+    ASSERT_EQ(0600u, (unsigned)(st.st_mode & 0777));
+    ASSERT(strstr(buf, "00000000:A") != NULL);
+    ASSERT(strstr(buf, "00000000:B") == NULL);
+    ASSERT(strstr(buf, "00000000:C") == NULL);
+    ASSERT(strstr(buf, "exclude") == NULL);
+    ASSERT_EQ(1, journal_all("tunnel a: dropped 2 keys no source gives any more"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: the refresh path writing over a hand edit made since the file was loaded, or saying nothing about it */
+TEST a_refresh_leaves_a_hand_edited_file_alone(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    static sub_srv_t srv;
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@b.example:443?security=none#B\n");
+    ASSERT(sub_srv_start(&srv, 0));
+    subs_up(&f);
+    ASSERT(g_subs != NULL);
+    char path[128];
+    snprintf(path, sizeof path, "%s/tunnels.yaml", f.dir);
+    firc_tunrun_set_path(f.run, path);
+    static const char doc[] = "tunnels:\n" XY_TUN("a", "0", "x", "    order: [\"00000000:B\", \"00000000:A\"]\n");
+    apply_file(&f, path, doc);
+    int s0 = run_until_starts(&f, "tunvless0", 1, 3000);
+    static const char edited[] = "# by hand\ntunnels:\n" XY_TUN("a", "0", "x", "    order: [\"00000000:B\", \"00000000:A\"]\n");
+    FILE *fp = fopen(path, "we");
+    ASSERT(fp != NULL);
+    fputs(edited, fp);
+    fclose(fp);
+    firc_event_reset_for_test();
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@c.example:443?security=none#C\n");
+    firc_err_t rc = firc_tunsubs_refresh(g_subs, "a");
+    size_t one = 1;
+    bool pruned = run_until(&f, order_has, &one, 3000);
+    sub_srv_stop(&srv);
+    char buf[2048];
+    slurp(path, buf, sizeof buf);
+    unlink(path);
+    ASSERT_EQ(1, s0);
+    ASSERT_EQ(FIRC_OK, rc);
+    ASSERT(pruned);
+    ASSERT_STR_EQ(edited, buf);
+    ASSERT_EQ(1, journal_all("tunnels.yaml changed on disk since it was loaded; stale node keys not removed, reload to apply"));
+    fx_down(&f);
+    PASS();
+}
+
+/* catches: dropping keys restarting or updating a tunnel whose sent list stays the same */
+TEST pruning_alone_does_not_restart_the_tunnel(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    static sub_srv_t srv;
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@h.example:443?security=none#H\n");
+    ASSERT(sub_srv_start(&srv, 0));
+    subs_up(&f);
+    ASSERT(g_subs != NULL);
+    apply_yaml(&f, "tunnels:\n" XY_TUN("a", "0", "x", "    filter: \"^A$\"\n    order: [\"00000000:A\"]\n"
+                                                      "    exclude: [\"00000000:H\"]\n"));
+    int s0 = run_until_starts(&f, "tunvless0", 1, 3000);
+    uint64_t before = firc_tunrun_start_seq(f.run);
+    set_x_body("vless://" U "@a.example:443?security=none#A\nvless://" U "@h.example:443?security=none#H2\n");
+    firc_err_t rc = firc_tunsubs_refresh(g_subs, "a");
+    size_t one = 1;
+    bool pruned = run_until(&f, order_has, &one, 3000);
+    run_ms(&f, 300);
+    sub_srv_stop(&srv);
+    ASSERT_EQ(1, s0);
+    ASSERT_EQ(FIRC_OK, rc);
+    ASSERT(pruned);
+    ASSERT_EQ(1, starts_of(&f, "tunvless0"));
+    ASSERT(firc_tunrun_started(f.run, "a") <= before);
+    ASSERT(firc_tunrun_updated(f.run, "a") <= before);
+    fx_down(&f);
+    PASS();
+}
+
 SUITE(tunrun)
 {
     GREATEST_SET_TEARDOWN_CB(teardown, NULL);
@@ -3054,6 +3208,9 @@ SUITE(tunrun)
     RUN_TEST(a_child_that_died_shows_its_inbounds_starting);
     RUN_TEST(inbound_state_follows_its_port_across_a_save);
     RUN_TEST(a_gone_port_rebound_to_another_gone_node_warns_again);
+    RUN_TEST(a_refresh_drops_keys_its_body_no_longer_gives_and_writes_the_file);
+    RUN_TEST(a_refresh_leaves_a_hand_edited_file_alone);
+    RUN_TEST(pruning_alone_does_not_restart_the_tunnel);
 }
 
 GREATEST_MAIN_DEFS();

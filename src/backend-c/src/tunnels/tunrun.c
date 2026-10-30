@@ -78,6 +78,7 @@ struct firc_tunrun {
     drain_t *drains;
     size_t n_drains;
     firc_tunsubs_t *subs;
+    const char *path;
     size_t list_max;
     bool stopped;
     bool stopping;
@@ -1235,12 +1236,42 @@ void firc_tunrun_set_subs(firc_tunrun_t *t, firc_tunsubs_t *subs)
     t->subs = subs;
 }
 
+void firc_tunrun_set_path(firc_tunrun_t *t, const char *path)
+{
+    t->path = path;
+}
+
+static void prune_keys(firc_tunrun_t *t)
+{
+    size_t n_bodies = 0;
+    const firc_tun_body_t *bodies = firc_tunsubs_bodies(t->subs, &n_bodies);
+    bool any = false;
+    for (size_t i = 0; i < t->cur.n; i++) {
+        firc_tunnel_t *tun = &t->cur.t[i];
+        size_t dropped = 0;
+        if (tun->enable && t->ok[i] &&
+            firc_tun_nodes_prune(tun, t->up[i].mark, bodies, n_bodies, &dropped) == FIRC_OK && dropped > 0) {
+            FIRC_INFO("tunnel %s: dropped %zu keys no source gives any more", tun->id, dropped);
+            any = true;
+        }
+    }
+    if (any && t->path != NULL && !firc_tunnels_file_unchanged(&t->cur, t->path)) {
+        FIRC_WARN("tunnels.yaml changed on disk since it was loaded; stale node keys not removed, reload to apply");
+    } else if (any && t->path != NULL) {
+        firc_err_t err = firc_tunnels_save_file(&t->cur, t->path);
+        if (err != FIRC_OK) {
+            FIRC_ERROR("tunnels: %s not written: %s", t->path, firc_err_str(err));
+        }
+    }
+}
+
 void firc_tunrun_bodies_changed(void *ud)
 {
     firc_tunrun_t *t = ud;
     if (t == NULL || t->stopped) {
         return;
     }
+    prune_keys(t);
     (void)push(t, false);
 }
 
