@@ -8,6 +8,7 @@
   import { ifaceTitle, isSink } from "../../data/iface-choices";
   import { toast } from "../../utils/events";
   import { fetcher } from "../../utils/fetcher";
+  import { hasGroupNamed } from "./settings";
 
   type Props = {
     value: string;
@@ -52,8 +53,11 @@
     ...interfaces.list.filter((i) => i.role !== "tunnel" && i.role !== "lan" && !isSink(i.id)),
   ]);
 
+  const haveOwn = $derived(hasGroupNamed(manual, ["Autolist", AUTOLIST_NAME]));
   const options = $derived([
-    { value: NEW, label: t("New group {name}").replace("{name}", AUTOLIST_NAME) },
+    ...(haveOwn
+      ? []
+      : [{ value: NEW, label: t("New group {name}").replace("{name}", AUTOLIST_NAME) }]),
     ...manual.map((g) => ({ value: g.id, label: g.name || g.id, description: g.id, mono: true })),
     ...(known ? [] : [{ value, label: t("A group that no longer exists"), missing: true }]),
   ]);

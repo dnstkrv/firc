@@ -42,6 +42,7 @@ typedef struct firc_sub_fetch_opts {
     size_t errbuf_cap;
     bool no_redirects;
     const char *resolve;
+    const char *interface;
 } firc_sub_fetch_opts_t;
 
 /* Streams url's 2xx body into sink; every URL must pass firc_sub_url_is_supported and url_ok (which only narrows

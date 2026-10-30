@@ -31,6 +31,11 @@ export function parseNames(text: string): string[] {
   return [...seen];
 }
 
+export function hasGroupNamed(groups: { name: string }[], names: string[]): boolean {
+  const wanted = new Set(names.map((n) => n.trim().toLowerCase()));
+  return groups.some((g) => wanted.has((g.name ?? "").trim().toLowerCase()));
+}
+
 export function changedKeys(saved: SettingsMap, draft: SettingsMap): string[] {
   return Object.keys(saved).filter((k) => k in draft && !sameValue(saved[k], draft[k]));
 }

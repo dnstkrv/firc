@@ -38,7 +38,8 @@ static const char EVERY_FIELD[] =
     "  update: {check: true}\n"
     "  check: {url: 'https://check.example/204', wanUrl: 'http://wan.example/204', interval: 45s, timeout: 3s}\n"
     "  autolist: {enabled: true, group: 0a0b0c0d, failThreshold: 5, failTime: 2m, retransThreshold: 4,\n"
-    "             exclude: [example.com]}\n";
+    "             exclude: [example.com], recheck: true, recheckInterval: 2h,\n"
+    "             recheckInterface: ppp0}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -396,9 +397,12 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.autolist.enabled", FIRC_APPLY_AUTOLIST},
         {"app.autolist.group", FIRC_APPLY_AUTOLIST},
         {"app.autolist.failThreshold", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.exclude", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.recheck", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.recheckInterval", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.recheckInterface", FIRC_APPLY_AUTOLIST},
         {"app.autolist.failTime", FIRC_APPLY_AUTOLIST},
         {"app.autolist.retransThreshold", FIRC_APPLY_AUTOLIST},
-        {"app.autolist.exclude", FIRC_APPLY_AUTOLIST},
     };
     size_t n_live = 0;
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
@@ -490,6 +494,8 @@ static const field_t NUMERIC[] = {
     FIELD("app.autolist.failThreshold", autolist.fail_threshold),
     FIELD("app.autolist.failTime", autolist.fail_time),
     FIELD("app.autolist.retransThreshold", autolist.retrans_threshold),
+    FIELD("app.autolist.recheck", autolist.recheck),
+    FIELD("app.autolist.recheckInterval", autolist.recheck_interval),
 };
 
 static bool is_numeric(firc_setting_kind_t k) {

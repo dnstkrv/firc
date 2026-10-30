@@ -64,6 +64,9 @@ const firc_setting_t firc_settings[] = {
     {"app.autolist.retransThreshold", FIRC_SK_U32, LIVE, AT(autolist.retrans_threshold), 0, FIRC_APPLY_AUTOLIST},
     {"app.autolist.exclude", FIRC_SK_LIST, LIVE, AT(autolist.exclude), AT(autolist.n_exclude),
      FIRC_APPLY_AUTOLIST},
+    {"app.autolist.recheck", FIRC_SK_BOOL, LIVE, AT(autolist.recheck), 0, FIRC_APPLY_AUTOLIST},
+    {"app.autolist.recheckInterval", FIRC_SK_SEC, LIVE, AT(autolist.recheck_interval), 0, FIRC_APPLY_AUTOLIST},
+    {"app.autolist.recheckInterface", FIRC_SK_STRING, LIVE, AT(autolist.recheck_iface), 0, FIRC_APPLY_AUTOLIST},
 };
 _Static_assert(sizeof(firc_settings) / sizeof(firc_settings[0]) == FIRC_SETTINGS_COUNT,
                "FIRC_SETTINGS_COUNT is the number of rows");
@@ -392,6 +395,14 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
     }
     if (c->autolist.retrans_threshold < 1 || c->autolist.retrans_threshold > 8) {
         REFUSE("app.autolist.retransThreshold", "1 to 8 sendings again");
+    }
+    if (c->autolist.recheck_interval < 600 * FIRC_DURATION_SEC ||
+        c->autolist.recheck_interval > 7 * 86400 * FIRC_DURATION_SEC) {
+        REFUSE("app.autolist.recheckInterval", "600 seconds to 7 days");
+    }
+    if (c->autolist.recheck_iface != NULL && c->autolist.recheck_iface[0] != '\0' &&
+        !firc_is_interface_name(c->autolist.recheck_iface)) {
+        REFUSE("app.autolist.recheckInterface", "empty for the default route, or an interface name");
     }
     if (c->autolist.n_exclude > FIRC_AUTOLIST_EXCLUDE_MAX) {
         REFUSE("app.autolist.exclude", "at most 1000 names");

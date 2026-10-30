@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "firc/autolistcheck.h"
 #include "firc/cancel.h"
 #include "firc/fakeip.h"
 #include "firc/dnspipeline.h"
@@ -418,9 +419,17 @@ typedef struct firc_autolist_status {
     const char *why_off;
     uint64_t failures;
     uint64_t listed;
+    bool checking;
+    int64_t checked_at;
+    uint64_t switched_off;
+    uint64_t switched_on;
 } firc_autolist_status_t;
 
 void firc_app_autolist_status(const firc_app_t *app, firc_autolist_status_t *out);
+
+firc_err_t firc_app_autolist_recheck_now(firc_app_t *app);
+
+void firc_app_set_autolist_probe_for_test(firc_app_t *app, firc_autolist_probe_fn probe);
 
 firc_err_t firc_app_rebuild_netfilter(firc_app_t *app, firc_cancel_t *cancel);
 

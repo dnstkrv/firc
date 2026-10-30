@@ -51,6 +51,9 @@ app:
     failTime: 1m0s
     retransThreshold: 3
     exclude: []
+    recheck: false
+    recheckInterval: 6h0m0s
+    recheckInterface: ""
 groups:
 - id: d663876a
   name: Example

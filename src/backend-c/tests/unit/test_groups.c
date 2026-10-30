@@ -789,6 +789,40 @@ TEST a_rules_comment_round_trips_through_the_api(void) {
     PASS();
 }
 
+TEST a_rules_autolist_host_round_trips_through_the_api(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"namespace\",\"rule\":\"example.com\",\"enable\":false,"
+                                  "\"autolist\":\"www.example.com\"}",
+                                  &out), "%d");
+    ASSERT_STR_EQ("www.example.com", or_none(jstr(out, "autolist")));
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, jstr(out, "id"));
+    cJSON_Delete(out);
+    ASSERT_EQ(200, do_request("GET", rule_path, NULL, &out));
+    ASSERT_STR_EQ("www.example.com", or_none(jstr(out, "autolist")));
+    cJSON_Delete(out);
+
+    ASSERT_EQ_FMT(200, do_request("POST", path, "{\"type\":\"domain\",\"rule\":\"example.org\",\"enable\":true}", &out),
+                  "%d");
+    ASSERTm("a rule added by hand has no key", cJSON_GetObjectItem(out, "autolist") == NULL);
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true,\"autolist\":\"a b\"}",
+                                  &out), "%d");
+    cJSON_Delete(out);
+    ASSERT_EQ_FMT(400, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true,\"autolist\":5}", &out),
+                  "%d");
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
 /* Catches: a comment of two lines (newline, U+2028, U+2029), past 256 bytes, with a C1 control, not UTF-8 or not a string stored, or refused unnamed. */
 TEST a_comment_with_a_newline_or_257_bytes_is_400(void) {
     harness_t *h = harness_start();
@@ -2457,6 +2491,7 @@ int main(int argc, char **argv) {
     RUN_TEST(a_rule_the_daemon_cannot_use_is_refused);
     RUN_TEST(proto_and_ports_are_kept_or_refused);
     RUN_TEST(a_rules_comment_round_trips_through_the_api);
+    RUN_TEST(a_rules_autolist_host_round_trips_through_the_api);
     RUN_TEST(a_comment_with_a_newline_or_257_bytes_is_400);
     RUN_TEST(a_comment_of_exactly_256_bytes_is_kept);
     RUN_TEST(an_unusable_rule_names_the_group_and_the_rule);

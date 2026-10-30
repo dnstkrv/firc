@@ -328,6 +328,37 @@ TEST a_subnet_rule_keeps_its_proto_and_ports(void)
     PASS();
 }
 
+TEST a_rule_keeps_the_host_the_autolist_added_it_for(void)
+{
+    firc_config_t cfg;
+    firc_config_init_defaults(&cfg);
+    const char *doc =
+        "configVersion: 0.99.0\n"
+        "groups:\n"
+        "  - id: d663876a\n"
+        "    name: Autolist\n"
+        "    interface: nwg0\n"
+        "    rules:\n"
+        "      - {id: 6f34ee91, type: namespace, rule: example.com, enable: false, autolist: www.example.com}\n"
+        "      - {id: 6f34ee92, type: namespace, rule: bad.example, enable: true, autolist: 'not a host'}\n";
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
+    ASSERT_STR_EQ("www.example.com", cfg.groups[0]->rules[0]->autolist);
+    ASSERT_EQ(NULL, cfg.groups[0]->rules[1]->autolist);
+    char *out = NULL;
+    size_t len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.99.0", FIRC_CFG_GROUPS, &out, &len));
+    ASSERT(strstr(out, "autolist: www.example.com") != NULL);
+    firc_config_t back;
+    firc_config_init_defaults(&back);
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    ASSERT_STR_EQ("www.example.com", back.groups[0]->rules[0]->autolist);
+    ASSERT_FALSE(back.groups[0]->rules[0]->enable);
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 /* Catches: a key written to the wrong file, or the two files not loading back to the tree that was split. */
 TEST the_two_halves_hold_the_whole_config(void)
 {
@@ -504,6 +535,9 @@ TEST save_shape_matches_committed_fixture(void)
         "    failTime: 1m0s\n"
         "    retransThreshold: 3\n"
         "    exclude: []\n"
+        "    recheck: false\n"
+        "    recheckInterval: 6h0m0s\n"
+        "    recheckInterface: \"\"\n"
         "groups:\n"
         "- id: d663876a\n"
         "  name: Example\n"
@@ -2207,6 +2241,7 @@ int main(int argc, char **argv)
     RUN_TEST(two_zero_rule_ids_fail_and_one_loads);
     RUN_TEST(type_mismatch_fails);
     RUN_TEST(corrupt_yaml_fails);
+    RUN_TEST(a_rule_keeps_the_host_the_autolist_added_it_for);
     RUN_TEST(the_two_halves_hold_the_whole_config);
     RUN_TEST(a_subnet_rule_keeps_its_proto_and_ports);
     RUN_TEST(the_groups_file_sits_next_to_the_settings_file);

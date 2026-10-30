@@ -11,6 +11,7 @@
 #include "firc/ifacename.h"
 #include "firc/log.h"
 #include "firc/json.h"
+#include "firc/regdomain.h"
 #include "firc/resolve_check.h"
 #include "firc/resolver_addr.h"
 #include "firc/sub_fetch.h"
@@ -26,6 +27,7 @@ static const char *get_opt_string(const cJSON *obj, const char *key, bool *bad) 
 }
 
 static const char why_not_strings[] = "proto and ports are strings";
+static const char why_not_autolist[] = "autolist is the host name the automatic list added the rule for";
 
 static const char *comment_from_req(const cJSON *req, const char **why) {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(req, "comment");
@@ -154,6 +156,14 @@ static firc_err_t fill_rule_fields(firc_rule_t *rule, const cJSON *req, const ch
     if (comment_why != NULL) {
         if (why != NULL) { *why = comment_why; }
         return FIRC_ERR_INVAL;
+    }
+    const char *autolist = get_opt_string(req, "autolist", &bad);
+    if (bad || (autolist != NULL && autolist[0] != '\0' && !firc_autolist_exclude_ok(autolist))) {
+        if (why != NULL) { *why = why_not_autolist; }
+        return FIRC_ERR_INVAL;
+    }
+    if (firc_strset(&rule->autolist, autolist != NULL && autolist[0] != '\0' ? autolist : NULL) != FIRC_OK) {
+        return FIRC_ERR_NOMEM;
     }
     cJSON *enable_j = cJSON_GetObjectItemCaseSensitive(req, "enable"); /* absent/wrong-type/null all read as false */
     rule->enable = cJSON_IsBool(enable_j) && cJSON_IsTrue(enable_j);
@@ -498,6 +508,7 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
             if (e == FIRC_OK) { e = firc_strset(&r->proto, existing->rules[i]->proto); }
             if (e == FIRC_OK) { e = firc_strset(&r->ports, existing->rules[i]->ports); }
             if (e == FIRC_OK) { e = firc_strset(&r->comment, existing->rules[i]->comment); }
+            if (e == FIRC_OK) { e = firc_strset(&r->autolist, existing->rules[i]->autolist); }
             if (e == FIRC_OK) { r->enable = existing->rules[i]->enable; }
             if (e != FIRC_OK || firc_group_add_rule(group, r) != FIRC_OK) {
                 firc_rule_free(r);
@@ -522,6 +533,7 @@ static cJSON *rule_to_json(const firc_rule_t *r) {
     if (r->proto != NULL && *r->proto != '\0') { cJSON_AddStringToObject(obj, "proto", r->proto); }
     if (r->ports != NULL && *r->ports != '\0') { cJSON_AddStringToObject(obj, "ports", r->ports); }
     if (r->comment != NULL && *r->comment != '\0') { cJSON_AddStringToObject(obj, "comment", r->comment); }
+    if (r->autolist != NULL && *r->autolist != '\0') { cJSON_AddStringToObject(obj, "autolist", r->autolist); }
     return obj;
 }
 

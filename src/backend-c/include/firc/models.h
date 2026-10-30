@@ -25,6 +25,7 @@ typedef struct firc_rule {
     char *proto; /* subnet/subnet6 only; NULL/"" = any protocol */
     char *ports; /* NULL/"" = all ports */
     char *comment;
+    char *autolist;
 } firc_rule_t;
 
 /* Which client devices a group applies to; empty = every device. */
@@ -243,6 +244,9 @@ typedef struct firc_app_config {
         uint32_t retrans_threshold;
         char **exclude;
         size_t n_exclude;
+        bool recheck;
+        firc_duration_t recheck_interval;
+        char *recheck_iface;
     } autolist;
 } firc_app_config_t;
 

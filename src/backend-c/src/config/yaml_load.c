@@ -9,6 +9,7 @@
 #include <stddef.h>
 
 #include "firc/fakeip.h"
+#include "firc/regdomain.h"
 #include "firc/resolver_addr.h"
 #include "firc/settings.h"
 #include "firc/yamlio.h"
@@ -489,6 +490,9 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
         }
         GET_OR_FAIL(get_string_list(doc, map_get(doc, al, "exclude"), &c->autolist.exclude,
                                     &c->autolist.n_exclude, &err));
+        GET_OR_FAIL(get_bool(map_get(doc, al, "recheck"), &c->autolist.recheck, &err));
+        GET_OR_FAIL(get_duration(map_get(doc, al, "recheckInterval"), &c->autolist.recheck_interval, &err));
+        GET_OR_FAIL(get_string(map_get(doc, al, "recheckInterface"), &c->autolist.recheck_iface, &err));
     }
     /* runs unconditionally: a later overlay that omits a block must not leave an earlier value unchecked */
     const char *field = NULL, *why = NULL;
@@ -510,6 +514,11 @@ static firc_err_t load_rule(yaml_document_t *doc, node_t *n, firc_rule_t *r)
     GET_OR_FAIL(get_string(map_get(doc, n, "proto"), &r->proto, &err));
     GET_OR_FAIL(get_string(map_get(doc, n, "ports"), &r->ports, &err));
     GET_OR_FAIL(get_string(map_get(doc, n, "comment"), &r->comment, &err));
+    GET_OR_FAIL(get_string(map_get(doc, n, "autolist"), &r->autolist, &err));
+    if (r->autolist != NULL && !firc_autolist_exclude_ok(r->autolist)) {
+        free(r->autolist);
+        r->autolist = NULL;
+    }
     if (r->type == NULL && (err = firc_strset(&r->type, "")) != FIRC_OK) {
         return err;
     }

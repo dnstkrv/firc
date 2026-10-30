@@ -347,12 +347,34 @@ static void handle_autolist(firc_http_req_t *req, firc_http_res_t *res, void *ud
         cJSON_AddBoolToObject(out, "running", st.running) == NULL ||
         cJSON_AddNumberToObject(out, "failures", (double)st.failures) == NULL ||
         cJSON_AddNumberToObject(out, "listed", (double)st.listed) == NULL ||
-        (st.why_off != NULL && cJSON_AddStringToObject(out, "whyOff", st.why_off) == NULL)) {
+        (st.why_off != NULL && cJSON_AddStringToObject(out, "whyOff", st.why_off) == NULL) ||
+        cJSON_AddBoolToObject(out, "checking", st.checking) == NULL ||
+        cJSON_AddNumberToObject(out, "checkedAt", (double)st.checked_at) == NULL ||
+        cJSON_AddNumberToObject(out, "switchedOff", (double)st.switched_off) == NULL ||
+        cJSON_AddNumberToObject(out, "switchedOn", (double)st.switched_on) == NULL) {
         cJSON_Delete(out);
         firc_http_res_write_error(res, 500, firc_err_str(FIRC_ERR_NOMEM));
         return;
     }
     firc_http_res_write_json(res, 200, out);
+}
+
+static void handle_autolist_check(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    firc_system_ctx_t *ctx = ud;
+    firc_err_t err = firc_app_autolist_recheck_now(ctx->app);
+    if (err == FIRC_ERR_STATE) {
+        firc_http_res_write_error(res, 409, "the automatic list is not running");
+        return;
+    }
+    if (err == FIRC_ERR_EXIST) {
+        firc_http_res_write_error(res, 409, "a check is already running");
+        return;
+    }
+    if (err != FIRC_OK) {
+        firc_http_res_write_error(res, 500, firc_err_str(err));
+        return;
+    }
+    handle_autolist(req, res, ud);
 }
 
 void firc_system_name_tunnels(firc_iface_info_t *ifaces, size_t n, const firc_tunnels_t *ts) {
@@ -1127,6 +1149,7 @@ void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx) {
     must_route(h, "GET", "/api/v1/system/resolvers", handle_resolvers, ctx);
     must_route(h, "GET", "/api/v1/system/netfilter", handle_netfilter, ctx);
     must_route(h, "GET", "/api/v1/system/autolist", handle_autolist, ctx);
+    must_route(h, "POST", "/api/v1/system/autolist/check", handle_autolist_check, ctx);
     must_route(h, "POST", "/api/v1/system/config/save", handle_save_config, ctx);
     must_route(h, "POST", "/api/v1/system/hooks/netfilterd", handle_netfilterd_hook, ctx);
     must_route(h, "POST", "/api/v1/system/hooks/iflayer", handle_iflayer_hook, ctx);

@@ -178,6 +178,10 @@ static void emit_rule(emitter_ctx_t *ctx, const firc_rule_t *r)
         emit_plain(ctx, "comment");
         emit_string(ctx, r->comment);
     }
+    if (r->autolist != NULL && *r->autolist != '\0') {
+        emit_plain(ctx, "autolist");
+        emit_string(ctx, r->autolist);
+    }
     map_end(ctx);
 }
 
@@ -434,6 +438,12 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
         emit_string(ctx, a->autolist.exclude[i]);
     }
     seq_end(ctx);
+    emit_plain(ctx, "recheck");
+    emit_bool(ctx, a->autolist.recheck);
+    emit_plain(ctx, "recheckInterval");
+    emit_duration(ctx, a->autolist.recheck_interval);
+    emit_plain(ctx, "recheckInterface");
+    emit_string(ctx, a->autolist.recheck_iface != NULL ? a->autolist.recheck_iface : "");
     map_end(ctx);
     map_end(ctx); /* app */
 }

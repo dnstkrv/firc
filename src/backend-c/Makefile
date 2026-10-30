@@ -209,7 +209,8 @@ TAP_CFG_SRCS := \
 AUTOLIST_SRCS := \
     src/autolist/judge.c \
     src/autolist/svc.c \
-    src/autolist/alrules.c
+    src/autolist/alrules.c \
+    src/autolist/recheck.c
 
 INTERFACES_SRCS := \
     src/interfaces/ifchoose.c \

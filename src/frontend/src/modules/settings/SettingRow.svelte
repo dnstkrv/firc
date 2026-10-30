@@ -2,6 +2,7 @@
   import Switch from "../../components/ui/Switch.svelte";
   import { t } from "../../data/locale.svelte";
   import AutolistGroup from "./AutolistGroup.svelte";
+  import IfacePicker from "./IfacePicker.svelte";
   import LanCoverage from "./LanCoverage.svelte";
   import LanPicker from "./LanPicker.svelte";
   import NamesInput from "./NamesInput.svelte";
@@ -60,6 +61,14 @@
         />
       {:else if c.kind === "group"}
         <AutolistGroup
+          ariaLabel={field.label()}
+          value={String(settings.draft[field.key] ?? "")}
+          onchange={(v) => (settings.draft[field.key] = v)}
+          invalid={invalid(field.key)}
+          changed={changedClass(field.key)}
+        />
+      {:else if c.kind === "iface"}
+        <IfacePicker
           ariaLabel={field.label()}
           value={String(settings.draft[field.key] ?? "")}
           onchange={(v) => (settings.draft[field.key] = v)}

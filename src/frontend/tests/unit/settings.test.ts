@@ -5,6 +5,7 @@ import {
   changedKeys,
   followUrl,
   groupChanges,
+  hasGroupNamed,
   parseNames,
   pluralForm,
   putBody,
@@ -184,5 +185,15 @@ describe("parseNames", () => {
   });
   it("an empty text is no names", () => {
     assert.deepStrictEqual(parseNames("  \n"), []);
+  });
+});
+
+describe("hasGroupNamed", () => {
+  it("finds the group in either language, whatever its case", () => {
+    const groups = [{ name: "Ads" }, { name: " автолист " }];
+    assert.strictEqual(hasGroupNamed(groups, ["Autolist", "Автолист"]), true);
+  });
+  it("another name is not it", () => {
+    assert.strictEqual(hasGroupNamed([{ name: "Autolist 2" }], ["Autolist"]), false);
   });
 });

@@ -14,6 +14,7 @@ export type Control =
   | { kind: "switch"; invert?: boolean; caption?: string }
   | { kind: "tags" }
   | { kind: "group" }
+  | { kind: "iface" }
   | { kind: "names"; placeholder?: () => string };
 
 export type Field = { key: string; label: () => string; control: Control };
@@ -339,6 +340,42 @@ export const SECTIONS: Section[] = [
           },
         ],
       ),
+      row(
+        () => t("Check added domains"),
+        () =>
+          t(
+            "Now and then opens each added domain past the tunnel; one that opens is switched off until it is blocked again",
+          ),
+        [
+          {
+            key: "app.autolist.recheck",
+            label: () => t("Check added domains"),
+            control: { kind: "switch" },
+          },
+        ],
+      ),
+      row(
+        () => t("Check every"),
+        () => t("600 to 604800 seconds; 21600 is six hours"),
+        [
+          {
+            key: "app.autolist.recheckInterval",
+            label: () => t("Check every"),
+            control: { kind: "number", unit: () => t("s") },
+          },
+        ],
+      ),
+      row(
+        () => t("Check through"),
+        () => t("The provider's interface the domains are opened through"),
+        [
+          {
+            key: "app.autolist.recheckInterface",
+            label: () => t("Check through"),
+            control: { kind: "iface" },
+          },
+        ],
+      ),
     ],
   },
   {
@@ -467,6 +504,7 @@ export function formatValue(key: string, value: SettingValue | undefined): strin
     if (value === "") return t("not chosen");
     return knownGroups.list.find((g) => g.id === value)?.name || String(value);
   }
+  if (control?.kind === "iface" && value === "") return t("Default route");
   if (value === "" && key === "app.addressPool.v6.pool") return t("auto");
   const unit = control?.kind === "number" && control.unit ? ` ${control.unit()}` : "";
   return `${value}${unit}`;

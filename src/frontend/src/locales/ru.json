@@ -859,5 +859,16 @@
   "Where the added domains will go": "Куда пойдёт трафик добавленных доменов",
   "Group {name} created": "Группа «{name}» создана",
   "Not running": "Не работает",
-  "Running: {failures} failed connections, {listed} domains added": "Работает: неудачных соединений {failures}, добавлено доменов {listed}"
+  "Running: {failures} failed connections, {listed} domains added": "Работает: неудачных соединений {failures}, добавлено доменов {listed}",
+  "Check added domains": "Проверять добавленные домены",
+  "Now and then opens each added domain past the tunnel; one that opens is switched off until it is blocked again": "Время от времени открывает каждый добавленный домен мимо туннеля; открывшийся выключается, пока его снова не заблокируют",
+  "Check every": "Проверять каждые",
+  "600 to 604800 seconds; 21600 is six hours": "От 600 до 604800 секунд; 21600 — шесть часов",
+  "Check through": "Проверять через",
+  "The provider's interface the domains are opened through": "Интерфейс провайдера, через который открываются домены",
+  "Default route": "Маршрут по умолчанию",
+  "checking…": "идёт проверка…",
+  "not checked yet": "ещё не проверялись",
+  "checked {at}, {n} switched off": "проверено {at}, выключено {n}",
+  "Check now": "Проверить сейчас"
 }

@@ -2,6 +2,7 @@
 #include "firc/sub_fetch.h"
 
 #include <fcntl.h>
+#include <net/if.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,6 +254,10 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
                              .cap = (size_t)max_redirects + 1};
     char *current = strdup(url);
     struct curl_slist *pin = o->resolve != NULL ? curl_slist_append(NULL, o->resolve) : NULL;
+    char iface_opt[IF_NAMESIZE + 4] = "";
+    if (o->interface != NULL && o->interface[0] != '\0') {
+        snprintf(iface_opt, sizeof(iface_opt), "if!%s", o->interface);
+    }
     bool alloc_ok = headers_ok && stripped_ok && oerr != FIRC_ERR_NOMEM && visited.urls != NULL && current != NULL &&
                     (o->resolve == NULL || pin != NULL);
     if (!alloc_ok || oerr != FIRC_OK) {
@@ -308,6 +313,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
         free(hop);
         if (sent != NULL) { curl_easy_setopt(curl, CURLOPT_HTTPHEADER, sent); }
         if (pin != NULL) { curl_easy_setopt(curl, CURLOPT_RESOLVE, pin); }
+        if (iface_opt[0] != '\0') { curl_easy_setopt(curl, CURLOPT_INTERFACE, iface_opt); }
         if (o->on_header != NULL) {
             curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
             curl_easy_setopt(curl, CURLOPT_HEADERDATA, &x);

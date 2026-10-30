@@ -98,7 +98,12 @@ definitions:
           add a host, retransThreshold (1-8) is how many times a ClientHello
           is sent again before the connection counts as failed, exclude lists
           names never added (each with its subdomains). What is added is the
-          host's registrable domain as a namespace rule.
+          host's registrable domain as a namespace rule. app.autolist.recheck
+          (false by default) opens each enabled rule's autolist host past the
+          tunnel every recheckInterval (600 s to 7 days, 6 h by default)
+          through recheckInterface ("" is the default route); a rule whose
+          host opens is switched off and switched on again when its host is
+          blocked again.
         example:
           app.dnsProxy.upstream.address: 127.0.0.1
           app.dnsProxy.upstream.port: 53
@@ -114,6 +119,9 @@ definitions:
           app.autolist.failTime: 60
           app.autolist.retransThreshold: 3
           app.autolist.exclude: []
+          app.autolist.recheck: false
+          app.autolist.recheckInterval: 21600
+          app.autolist.recheckInterface: ""
         type: object
       classes:
         additionalProperties:
@@ -1153,11 +1161,31 @@ definitions:
         description: 'Hosts that failed failThreshold times in a row since it started; each was added unless excluded, already there or past 30 additions an hour'
         example: 2
         type: integer
+      checking:
+        description: 'A check of the added domains is running'
+        example: false
+        type: boolean
+      checkedAt:
+        description: 'Unix time the last check ended; 0 before the first'
+        example: 1793368532
+        type: integer
+      switchedOff:
+        description: 'Rules switched off since it started because their host opened past the tunnel'
+        example: 1
+        type: integer
+      switchedOn:
+        description: 'Rules switched on again since it started because their host was blocked again'
+        example: 0
+        type: integer
     required:
     - enabled
     - running
     - failures
     - listed
+    - checking
+    - checkedAt
+    - switchedOff
+    - switchedOn
     type: object
   types.NetfilterRes:
     properties:
@@ -1224,6 +1252,10 @@ definitions:
   types.RuleReq:
     description: 'A rule the daemon can actually route with. `type` is one of domain, namespace, wildcard, regex, subnet, subnet6; `rule` must be usable for that type -- a prefix for subnet/subnet6, a regex that compiles, never empty. Anything else is 400: a rule that matches nothing would otherwise be stored, listed and shown enabled while doing nothing.'
     properties:
+      autolist:
+        description: 'The host the automatic list added the rule for; absent on a rule added by hand. Keep it to keep the rule in the checks; a value that is not a host name is 400.'
+        example: www.example.com
+        type: string
       comment:
         description: 'One line about the rule, for people only. Spaces around it are trimmed; empty or only spaces means none. At most 256 bytes of UTF-8 after trimming, no control characters (C0, DEL, C1) and no U+2028 or U+2029. Anything else is 400, naming the rule (and the group, where the request carries one).'
         example: 'Meta: CDN'
@@ -1251,6 +1283,10 @@ definitions:
     type: object
   types.RuleRes:
     properties:
+      autolist:
+        description: 'Present only on a rule the automatic list added: the host it was added for, which the checks open.'
+        example: www.example.com
+        type: string
       comment:
         description: Present only when set.
         example: 'Meta: CDN'
@@ -3072,6 +3108,27 @@ paths:
           schema:
             $ref: '#/definitions/types.AutolistRes'
       summary: 'Automatic list state'
+      tags:
+      - system
+  /api/v1/system/autolist/check:
+    post:
+      description: >-
+        Starts a check of the added domains now, as the timer would: each
+        enabled rule with an autolist host is opened past the tunnel through
+        app.autolist.recheckInterface, and a rule whose host opens is switched
+        off. Answers the state with checking true while it runs.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.AutolistRes'
+        "409":
+          description: 'The automatic list is not running, or a check already is'
+          schema:
+            $ref: '#/definitions/types.ErrorRes'
+      summary: 'Check the added domains now'
       tags:
       - system
   /api/v1/system/events:

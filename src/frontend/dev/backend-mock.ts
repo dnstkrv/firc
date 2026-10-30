@@ -1279,6 +1279,9 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.autolist.failTime": 60,
   "app.autolist.retransThreshold": 3,
   "app.autolist.exclude": [],
+  "app.autolist.recheck": false,
+  "app.autolist.recheckInterval": 21600,
+  "app.autolist.recheckInterface": "",
 };
 const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.address",
@@ -1297,6 +1300,9 @@ const SETTINGS_LIVE = new Set([
   "app.autolist.failTime",
   "app.autolist.retransThreshold",
   "app.autolist.exclude",
+  "app.autolist.recheck",
+  "app.autolist.recheckInterval",
+  "app.autolist.recheckInterface",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
 let RUNNING: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -1730,14 +1736,27 @@ app.get(`${API_BASE}/system/dnsstats`, (c) => {
 
 app.get(`${API_BASE}/system/netfilter`, (c) => c.json(NETFILTER));
 
-app.get(`${API_BASE}/system/autolist`, (c) =>
-  c.json({
-    enabled: SAVED["app.autolist.enabled"] === true,
-    running: SAVED["app.autolist.enabled"] === true,
-    failures: 0,
-    listed: 0,
-  }),
-);
+let AUTOLIST_CHECKED_AT = 0;
+const autolistState = () => ({
+  enabled: SAVED["app.autolist.enabled"] === true,
+  running: SAVED["app.autolist.enabled"] === true,
+  failures: 0,
+  listed: 0,
+  checking: false,
+  checkedAt: AUTOLIST_CHECKED_AT,
+  switchedOff: 0,
+  switchedOn: 0,
+});
+
+app.get(`${API_BASE}/system/autolist`, (c) => c.json(autolistState()));
+
+app.post(`${API_BASE}/system/autolist/check`, (c) => {
+  if (SAVED["app.autolist.enabled"] !== true) {
+    return c.json({ error: "the automatic list is not running" }, 409);
+  }
+  AUTOLIST_CHECKED_AT = Math.floor(Date.now() / 1000);
+  return c.json(autolistState());
+});
 
 app.put("/dev/live", async (c) => {
   const body = await c.req.json();

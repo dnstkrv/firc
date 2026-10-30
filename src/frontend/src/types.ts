@@ -49,6 +49,7 @@ export const RuleSchema = object({
   proto: fallback(optional(picklist(["tcp", "udp"])), undefined),
   ports: fallback(optional(string()), undefined),
   comment: fallback(optional(string()), undefined),
+  autolist: fallback(optional(string()), undefined),
 });
 export type Rule = InferOutput<typeof RuleSchema>;
 

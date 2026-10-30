@@ -28,8 +28,10 @@
 #include "firc/ifacename.h"
 #include "firc/rand.h"
 #include "firc/taprules.h"
+#include "firc/autolistcheck.h"
 #include "firc/autolistrules.h"
 #include "firc/autolistsvc.h"
+#include "firc/ifcheck.h"
 #include "firc/regdomain.h"
 
 #define AL_ADDS_PER_HOUR 30
@@ -182,6 +184,13 @@ struct firc_app {
     int64_t al_added[AL_ADDS_PER_HOUR];
     size_t al_added_at;
     bool al_cap_said, al_group_said;
+    firc_autolist_check_t *al_check;
+    uint64_t al_check_gen;
+    int al_recheck_timer;
+    uint64_t al_recheck_ms;
+    int64_t al_checked_at;
+    uint64_t al_switched_off, al_switched_on;
+    firc_autolist_probe_fn al_probe;
     firc_app_tunnel_down_fn tunnel_down;
     void *tunnel_down_ud;
     firc_app_ifaces_t ifaces;
@@ -3153,6 +3162,22 @@ static bool autolist_take_slot(firc_app_t *app, int64_t now) {
     return true;
 }
 
+static void autolist_publish(firc_app_t *app, firc_ruleset_t *rs) {
+    firc_err_t err = firc_app_republish_dns_snapshot(app);
+    if (err != FIRC_OK) { FIRC_ERROR("autolist: the DNS rules were not refreshed: %s", firc_err_str(err)); }
+    if (rs != NULL && firc_ruleset_runtime_enabled(rs)) {
+        err = firc_app_sync_group(app, rs);
+        if (err != FIRC_OK) {
+            const firc_group_t *g = firc_ruleset_group(rs);
+            FIRC_ERROR("autolist: group \"%s\" not synced: %s", g->name != NULL ? g->name : "", firc_err_str(err));
+        }
+    }
+    if (app->config_path != NULL) {
+        err = firc_app_save_groups(app, app->config_path, app->config_version != NULL ? app->config_version : "");
+        if (err != FIRC_OK) { FIRC_ERROR("autolist: groups.yaml not saved: %s", firc_err_str(err)); }
+    }
+}
+
 static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
     firc_app_t *app = ud;
     const firc_app_config_t *ac = &app->cfg->app;
@@ -3196,10 +3221,18 @@ static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
         return;
     }
     for (size_t i = 0; i < g->n_rules; i++) {
-        if (g->rules[i]->rule != NULL && strcmp(g->rules[i]->rule, domain) == 0) {
-            FIRC_DEBUG("autolist: %s is already in group \"%s\"", domain, g->name != NULL ? g->name : "");
+        firc_rule_t *have = g->rules[i];
+        if (have->rule == NULL || strcmp(have->rule, domain) != 0) { continue; }
+        if (!have->enable && have->autolist != NULL) {
+            have->enable = true;
+            app->al_switched_on++;
+            autolist_publish(app, rs);
+            FIRC_INFO("autolist: %s switched on again in group \"%s\": %s failed %u times in a row (%s)", domain,
+                      g->name != NULL ? g->name : "", f->host, (unsigned)f->fails, why);
             return;
         }
+        FIRC_DEBUG("autolist: %s is already in group \"%s\"", domain, g->name != NULL ? g->name : "");
+        return;
     }
     int64_t now = app->wall_s != NULL ? app->wall_s() : (int64_t)time(NULL);
     if (!autolist_take_slot(app, now)) {
@@ -3217,6 +3250,7 @@ static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
     firc_err_t err = r != NULL ? autolist_rule_id(g, &r->id) : FIRC_ERR_NOMEM;
     if (err == FIRC_OK) { err = firc_strset(&r->type, "namespace"); }
     if (err == FIRC_OK) { err = firc_strset(&r->rule, domain); }
+    if (err == FIRC_OK) { err = firc_strset(&r->autolist, f->host); }
     if (err == FIRC_OK) {
         r->enable = true;
         err = firc_group_add_rule(g, r);
@@ -3226,16 +3260,7 @@ static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
         FIRC_ERROR("autolist: %s not added: %s", domain, firc_err_str(err));
         return;
     }
-    err = firc_app_republish_dns_snapshot(app);
-    if (err != FIRC_OK) { FIRC_ERROR("autolist: the DNS rules were not refreshed: %s", firc_err_str(err)); }
-    if (firc_ruleset_runtime_enabled(rs)) {
-        err = firc_app_sync_group(app, rs);
-        if (err != FIRC_OK) { FIRC_ERROR("autolist: group \"%s\" not synced: %s", g->name, firc_err_str(err)); }
-    }
-    if (app->config_path != NULL) {
-        err = firc_app_save_groups(app, app->config_path, app->config_version != NULL ? app->config_version : "");
-        if (err != FIRC_OK) { FIRC_ERROR("autolist: groups.yaml not saved: %s", firc_err_str(err)); }
-    }
+    autolist_publish(app, rs);
     FIRC_INFO("autolist: %s added to group \"%s\": %s failed %u times in a row (%s)", domain,
               g->name != NULL ? g->name : "", f->host, (unsigned)f->fails, why);
 }
@@ -3245,7 +3270,142 @@ static void autolist_lan_free(char **lan, size_t n) {
     free(lan);
 }
 
+static void autolist_checked(void *ud, uint64_t gen, const firc_autolist_probe_t *probes, size_t n) {
+    firc_app_t *app = ud;
+    if (gen != app->al_check_gen) { return; }
+    firc_autolist_check_free(app->al_check);
+    app->al_check = NULL;
+    app->al_checked_at = app->wall_s != NULL ? app->wall_s() : (int64_t)time(NULL);
+    const char *iface = app->cfg->app.autolist.recheck_iface;
+    const char *via = iface != NULL && iface[0] != '\0' ? iface : "the default route";
+    size_t blocked = 0, unknown = 0, off = 0;
+    for (size_t i = 0; i < n; i++) {
+        const firc_autolist_probe_t *p = &probes[i];
+        if (p->verdict == FIRC_AUTOLIST_BLOCKED) {
+            blocked++;
+            FIRC_DEBUG("autolist: %s is still blocked through %s: %s", p->host, via, p->error);
+            continue;
+        }
+        if (p->verdict != FIRC_AUTOLIST_REACHABLE) {
+            unknown++;
+            FIRC_DEBUG("autolist: %s could not be checked through %s: %s", p->host, via, p->error);
+            continue;
+        }
+        firc_ruleset_t *rs = firc_app_find_group_by_id(app, p->group);
+        firc_group_t *g = rs != NULL ? firc_ruleset_group_mut(rs) : NULL;
+        for (size_t k = 0; g != NULL && k < g->n_rules; k++) {
+            firc_rule_t *r = g->rules[k];
+            if (!firc_id_equal(r->id, p->rule) || !r->enable || r->autolist == NULL) { continue; }
+            r->enable = false;
+            app->al_switched_off++;
+            off++;
+            autolist_publish(app, rs);
+            FIRC_INFO("autolist: %s opens through %s again, so %s is switched off in group \"%s\" until it is "
+                      "blocked again",
+                      p->host, via, r->rule, g->name != NULL ? g->name : "");
+            break;
+        }
+    }
+    FIRC_INFO("autolist: checked %zu domains through %s: %zu switched off, %zu still blocked, %zu not checked", n, via,
+              off, blocked, unknown);
+}
+
+static void autolist_check_stop(firc_app_t *app) {
+    app->al_check_gen++;
+    firc_autolist_check_free(app->al_check);
+    app->al_check = NULL;
+}
+
+static void autolist_recheck_run(firc_app_t *app) {
+    if (app->al_check != NULL || app->loop == NULL) { return; }
+    firc_autolist_probe_t *probes = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t i = 0; i < app->n_rulesets; i++) {
+        const firc_group_t *g = firc_ruleset_group(app->rulesets[i]);
+        if (g->list != NULL) { continue; }
+        for (size_t k = 0; k < g->n_rules; k++) {
+            const firc_rule_t *r = g->rules[k];
+            if (!r->enable || r->autolist == NULL || r->autolist[0] == '\0') { continue; }
+            if (n == cap) {
+                size_t grown_cap = cap ? cap * 2 : 16;
+                firc_autolist_probe_t *grown = realloc(probes, grown_cap * sizeof(*grown));
+                if (grown == NULL) {
+                    free(probes);
+                    FIRC_WARN("autolist: no check this time: out of memory");
+                    return;
+                }
+                probes = grown;
+                cap = grown_cap;
+            }
+            firc_autolist_probe_t *p = &probes[n++];
+            memset(p, 0, sizeof(*p));
+            p->group = g->id;
+            p->rule = r->id;
+            snprintf(p->host, sizeof(p->host), "%s", r->autolist);
+        }
+    }
+    if (n == 0) {
+        free(probes);
+        app->al_checked_at = app->wall_s != NULL ? app->wall_s() : (int64_t)time(NULL);
+        return;
+    }
+    const firc_app_config_t *ac = &app->cfg->app;
+    firc_ifcheck_settings_t s;
+    firc_ifcheck_settings_from(ac, &s);
+    firc_autolist_check_opts_t o;
+    memset(&o, 0, sizeof(o));
+    snprintf(o.iface, sizeof(o.iface), "%s", ac->autolist.recheck_iface != NULL ? ac->autolist.recheck_iface : "");
+    snprintf(o.dns, sizeof(o.dns), "%s", s.upstream);
+    o.dns_port = s.upstream_port;
+    o.timeout_s = 10;
+    app->al_check = firc_autolist_check_start(app->loop, &o, probes, n, ++app->al_check_gen, app->al_probe,
+                                              autolist_checked, app);
+    free(probes);
+    if (app->al_check == NULL) { FIRC_WARN("autolist: the check could not start a thread"); }
+}
+
+static void on_autolist_recheck(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    autolist_recheck_run(ud);
+}
+
+static void autolist_recheck_arm(firc_app_t *app) {
+    const firc_app_config_t *ac = &app->cfg->app;
+    bool want = app->al_svc != NULL && ac->autolist.recheck && app->loop != NULL;
+    uint64_t ms = want ? (uint64_t)(ac->autolist.recheck_interval / FIRC_DURATION_MS) : 0;
+    if (want && app->al_recheck_timer != 0 && ms == app->al_recheck_ms) { return; }
+    if (app->al_recheck_timer != 0) { (void)firc_loop_del_timer(app->loop, app->al_recheck_timer); }
+    app->al_recheck_timer = 0;
+    app->al_recheck_ms = 0;
+    if (!want) {
+        autolist_check_stop(app);
+        return;
+    }
+    if (firc_loop_add_timer(app->loop, ms, ms, on_autolist_recheck, app, &app->al_recheck_timer) != FIRC_OK) {
+        app->al_recheck_timer = 0;
+        FIRC_WARN("autolist: the check's timer could not be armed");
+        return;
+    }
+    app->al_recheck_ms = ms;
+}
+
+firc_err_t firc_app_autolist_recheck_now(firc_app_t *app) {
+    if (app == NULL) { return FIRC_ERR_INVAL; }
+    if (app->al_svc == NULL) { return FIRC_ERR_STATE; }
+    if (app->al_check != NULL) { return FIRC_ERR_EXIST; }
+    autolist_recheck_run(app);
+    return FIRC_OK;
+}
+
+void firc_app_set_autolist_probe_for_test(firc_app_t *app, firc_autolist_probe_fn probe) {
+    if (app != NULL) { app->al_probe = probe; }
+}
+
 static void autolist_stop(firc_app_t *app) {
+    if (app->al_recheck_timer != 0 && app->loop != NULL) { (void)firc_loop_del_timer(app->loop, app->al_recheck_timer); }
+    app->al_recheck_timer = 0;
+    app->al_recheck_ms = 0;
+    autolist_check_stop(app);
     if (app->al_svc == NULL) { return; }
     app_nf_enter(app);
     app->al_on = false;
@@ -3280,6 +3440,7 @@ firc_err_t firc_app_autolist_apply(firc_app_t *app) {
     autolist_params(ac, &params);
     if (app->al_svc != NULL) {
         firc_autolist_svc_set_params(app->al_svc, &params);
+        autolist_recheck_arm(app);
         return FIRC_OK;
     }
 
@@ -3360,6 +3521,7 @@ firc_err_t firc_app_autolist_apply(firc_app_t *app) {
     app->al_group_said = false;
     if (app->pipeline != NULL) { firc_dns_pipeline_set_unmatched_fn(app->pipeline, autolist_hint, app); }
     if (app->committer != NULL) { firc_nfcommit_request(app->committer); }
+    autolist_recheck_arm(app);
     const firc_group_snapshot_t *target = autolist_target(app);
     FIRC_INFO("autolist started: blocked hosts go to group \"%s\"",
               target != NULL && target->name != NULL ? target->name : "(none chosen or switched off)");
@@ -3374,6 +3536,10 @@ void firc_app_autolist_status(const firc_app_t *app, firc_autolist_status_t *out
     out->running = app->al_svc != NULL;
     out->why_off = app->al_why_off;
     firc_autolist_svc_counts(app->al_svc, &out->failures, &out->listed);
+    out->checking = app->al_check != NULL;
+    out->checked_at = app->al_checked_at;
+    out->switched_off = app->al_switched_off;
+    out->switched_on = app->al_switched_on;
 }
 
 void firc_app_set_device_lookup(firc_app_t *app, firc_devsel_mark_fn mark, firc_devsel_hosts_fn hosts,
