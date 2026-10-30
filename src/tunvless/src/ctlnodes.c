@@ -83,10 +83,9 @@ static void apply(struct ctln_job *j) {
     const char **hosts = calloc(j->n ? j->n : 1, sizeof(*hosts));
     if (!hosts) return;
     size_t nh = 0;
-    uint32_t a;
     for (size_t k = 0; k < j->n; k++) {
         const char *h = vnode(j->idx[k])->host;
-        if (transport_pinned_addrs(h, &a, 1) > 0) { j->ok[k] = 1; continue; }
+        if (transport_pin_count(h) > 0) { j->ok[k] = 1; continue; }
         int dup = 0;
         for (size_t i = 0; i < nh && !dup; i++) dup = !strcmp(hosts[i], h);
         if (!dup) hosts[nh++] = h;

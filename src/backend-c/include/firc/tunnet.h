@@ -14,6 +14,7 @@ typedef struct {
     uint32_t table;
     bool routed;
     firc_iface_route_t route;
+    firc_iface_route_t route6;
     char dev[16];
 } firc_tunnet_uplink_t;
 

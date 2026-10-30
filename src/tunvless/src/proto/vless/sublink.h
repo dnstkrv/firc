@@ -18,6 +18,8 @@
 
 /* An address where no peer can ever be (0.0.0.0, ::, loopback, broadcast). */
 int sl_host_leads_nowhere(const char *h);
+/* Strip one enclosing [...] pair in place: the form a config may write an IPv6 address in. */
+void sl_host_unbracket(char *h);
 /* A name (1) or an IPv4/IPv6 address (0), judged by the string, without resolving. */
 int sl_host_is_name(const char *h);
 /* Percent-decoding in place; "%" not followed by two hex digits stays as it is. */

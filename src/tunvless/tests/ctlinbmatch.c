@@ -15,9 +15,17 @@
 #define LA "vless://" UUID "@ha:443?security=none&type=tcp#A"
 #define LB "vless://" UUID "@hb:443?security=none&type=tcp#B"
 
-static unsigned fake_resolve(const char *host, struct in_addr out[ADDR_MAX]) {
+static void put_v4(struct tr_ip *ip, uint32_t a) {
+    memset(ip, 0, sizeof *ip);
+    ip->b[0] = (unsigned char)(a >> 24);
+    ip->b[1] = (unsigned char)(a >> 16);
+    ip->b[2] = (unsigned char)(a >> 8);
+    ip->b[3] = (unsigned char)a;
+}
+
+static unsigned fake_resolve(const char *host, struct tr_ip out[ADDR_MAX]) {
     (void)host;
-    out[0].s_addr = htonl(0x0a000001u);
+    put_v4(out, 0x0a000001u);
     return 1;
 }
 

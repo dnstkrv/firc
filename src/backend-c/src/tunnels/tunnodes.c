@@ -182,9 +182,7 @@ static void add_node(build_t *b, const firc_tun_src_t *src, struct vless_node *n
     note_node(b, n);
     size_t len = vless_node_link(n, b->buf, LINK_BUF);
     if (len == 0) {
-        add_skipped(b, src, n->name,
-                    strchr(n->host, ':') != NULL ? "IPv6 server is not supported" : "cannot be written as a link",
-                    seq);
+        add_skipped(b, src, n->name, "cannot be written as a link", seq);
         return;
     }
     b->total++;

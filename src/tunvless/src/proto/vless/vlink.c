@@ -108,13 +108,17 @@ static int clean(const char *s, const char *bad) {
 
 size_t vless_node_link(const struct vless_node *n, char *out, size_t cap) {
     if (!out || !cap || n->skip_reason[0] || !n->port || !n->host[0]) return 0;
-    if (!clean(n->uuid, "@") || !clean(n->host, "?#[]@/:")) return 0;
+    int v6 = strchr(n->host, ':') != NULL;
+    if (!clean(n->uuid, "@") || !clean(n->host, v6 ? "?#[]@/%" : "?#[]@/:")) return 0;
+    if (v6 && strspn(n->host, "0123456789abcdefABCDEF:.") != strlen(n->host)) return 0;
     struct wbuf w = { out, cap, 0, 0, 0 };
     out[0] = '\0';
     puts_(&w, "vless://");
     puts_(&w, n->uuid);
     put(&w, "@", 1);
+    if (v6) put(&w, "[", 1);
     puts_(&w, n->host);
+    if (v6) put(&w, "]", 1);
     char port[8];
     snprintf(port, sizeof port, ":%u?", n->port);
     puts_(&w, port);

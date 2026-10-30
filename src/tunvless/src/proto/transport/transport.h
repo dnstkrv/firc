@@ -382,9 +382,12 @@ void transport_set_sock_mark(uint32_t mark, int required);
 void transport_set_bind_dev(const char *ifname);
 
 /* Resolve host once and use these addresses for every later connection to it, instead of a DNS
- * query per connection (trdial.c says why). Number of IPv4 addresses, or TR_EDNS. */
+ * query per connection (trdial.c says why). Number of addresses of both families, or TR_EDNS. */
 int transport_pin_host(const char *host);
-/* The addresses pinned for host (network order), at most max: how many. */
+int transport_pin_count(const char *host);
+/* host as a URL or Host value has it: an IPv6 address in brackets, else as it is. */
+const char *tr_host_literal(const char *host, char *buf, size_t cap);
+/* The IPv4 addresses pinned for host (network order), at most max: how many. */
 int transport_pinned_addrs(const char *host, uint32_t *out, int max);
 typedef void (*transport_pin_fn)(void *ud, const char *host, int ok);
 void transport_pin_hosts(const char *const *hosts, size_t n, int timeout_ms, transport_pin_fn fn,

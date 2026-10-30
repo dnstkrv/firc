@@ -559,8 +559,9 @@ static int xh_init(struct transport *t, const struct tr_node *n) {
     /* :authority as Xray's client builds the URL: the node's host setting, else the SNI (the
      * camouflage domain the server hides behind), else the address. A server with host set
      * compares it with :authority and answers 404 to anything else (hub.go). */
+    char hostbuf[160];
     const char *authority = n->http_host && n->http_host[0] ? n->http_host
-                          : n->sni[0] ? n->sni : n->host;
+                          : n->sni[0] ? n->sni : tr_host_literal(n->host, hostbuf, sizeof(hostbuf));
     x->mode = xhttp_mode_of(n);
     if (xh_opts_parse(n->xhx, n->mode, n->headers, n->pad_to, &x->opts, NULL, 0)) return TR_EIO;
     snprintf(x->authority, sizeof(x->authority), "%s", authority);

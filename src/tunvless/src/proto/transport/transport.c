@@ -222,6 +222,12 @@ void transport_close(struct transport *t) {
     tr_link_close(&t->link);
 }
 
+const char *tr_host_literal(const char *host, char *buf, size_t cap) {
+    if (!strchr(host, ':')) return host;
+    snprintf(buf, cap, "[%s]", host);
+    return buf;
+}
+
 const char *transport_strerror(int rc) {
     switch (rc) {
         case 0: return "ok";

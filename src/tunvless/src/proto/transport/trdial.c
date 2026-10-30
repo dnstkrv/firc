@@ -44,20 +44,26 @@
 #define ATTEMPT_MAX    4   /* attempts in flight at once */
 #define STAGGER_MS   150   /* pause before starting the next attempt */
 
+struct tr_ip { unsigned char b[16]; uint8_t v6; };
+
+static int ip_eq(const struct tr_ip *a, const struct tr_ip *b) {
+    return a->v6 == b->v6 && !memcmp(a->b, b->b, sizeof a->b);
+}
+
 /* The winning address per name, per thread: no lock is needed, and each thread learning on its
  * own costs one extra search per thread at startup. */
 #define GOOD_MAX 8
-static __thread struct { char host[96]; struct in_addr ip; uint16_t port; } g_good[GOOD_MAX];
+static __thread struct { char host[96]; struct tr_ip ip; uint16_t port; } g_good[GOOD_MAX];
 static __thread unsigned g_good_n;
 
-static struct in_addr *good_get(const char *host, uint16_t port) {
+static struct tr_ip *good_get(const char *host, uint16_t port) {
     for (unsigned i = 0; i < g_good_n; i++)
         if (g_good[i].port == port && strcmp(g_good[i].host, host) == 0) return &g_good[i].ip;
     return NULL;
 }
 
-static void good_put(const char *host, uint16_t port, struct in_addr ip) {
-    struct in_addr *p = good_get(host, port);
+static void good_put(const char *host, uint16_t port, struct tr_ip ip) {
+    struct tr_ip *p = good_get(host, port);
     if (p) { *p = ip; return; }
     unsigned i = g_good_n < GOOD_MAX ? g_good_n++ : GOOD_MAX - 1;
     snprintf(g_good[i].host, sizeof(g_good[i].host), "%s", host);
@@ -117,23 +123,33 @@ void transport_set_bind_dev(const char *ifname) {
 #define PIN_PAR 16
 #define PIN_POLL_MS 100
 #define PIN_STACK (1024 * 1024)
-struct pin { char host[128]; struct in_addr ip[ADDR_MAX]; unsigned n; };
+struct pin { char host[128]; struct tr_ip ip[ADDR_MAX]; unsigned n; };
 static struct pin g_pin[PIN_MAX];
 static unsigned g_pin_n;
 
-static unsigned resolve(const char *host, struct in_addr out[ADDR_MAX]) {
-    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+static unsigned addrs_of(const struct addrinfo *res, struct tr_ip out[ADDR_MAX]) {
+    unsigned an = 0;
+    for (int fam = 0; fam < 2; fam++)
+        for (const struct addrinfo *p = res; p && an < ADDR_MAX; p = p->ai_next) {
+            if (p->ai_family != (fam ? AF_INET6 : AF_INET)) continue;
+            memset(&out[an], 0, sizeof out[an]);
+            if (fam) memcpy(out[an].b, &((const struct sockaddr_in6 *)p->ai_addr)->sin6_addr, 16);
+            else memcpy(out[an].b, &((const struct sockaddr_in *)p->ai_addr)->sin_addr, 4);
+            out[an++].v6 = (uint8_t)fam;
+        }
+    return an;
+}
+
+static unsigned resolve(const char *host, struct tr_ip out[ADDR_MAX]) {
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM };
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return 0;
-    unsigned an = 0;
-    for (struct addrinfo *p = res; p && an < ADDR_MAX; p = p->ai_next)
-        if (p->ai_family == AF_INET)
-            out[an++] = ((struct sockaddr_in *)p->ai_addr)->sin_addr;
+    unsigned an = addrs_of(res, out);
     freeaddrinfo(res);
     return an;
 }
 
-static unsigned (*g_resolve)(const char *host, struct in_addr out[ADDR_MAX]) = resolve;
+static unsigned (*g_resolve)(const char *host, struct tr_ip out[ADDR_MAX]) = resolve;
 
 static const struct pin *pin_find(const char *host) {
     unsigned n = __atomic_load_n(&g_pin_n, __ATOMIC_ACQUIRE);
@@ -142,7 +158,7 @@ static const struct pin *pin_find(const char *host) {
     return NULL;
 }
 
-static int pin_add(const char *host, const struct in_addr *ip, unsigned an) {
+static int pin_add(const char *host, const struct tr_ip *ip, unsigned an) {
     const struct pin *old = pin_find(host);
     if (old) return (int)old->n;
     unsigned n = __atomic_load_n(&g_pin_n, __ATOMIC_RELAXED);
@@ -161,28 +177,34 @@ int transport_pin_host(const char *host) {
     if (old) return (int)old->n;
     if (__atomic_load_n(&g_pin_n, __ATOMIC_ACQUIRE) >= PIN_MAX) return TR_EPINFULL;
     if (strlen(host) >= sizeof(g_pin[0].host)) return TR_EDNS;
-    struct in_addr ip[ADDR_MAX];
+    struct tr_ip ip[ADDR_MAX];
     unsigned an = g_resolve(host, ip);
     if (!an) return TR_EDNS;
     return pin_add(host, ip, an);
 }
 
-static unsigned pinned(const char *host, struct in_addr out[ADDR_MAX]) {
+static unsigned pinned(const char *host, struct tr_ip out[ADDR_MAX]) {
     const struct pin *p = pin_find(host);
     if (!p) return 0;
     memcpy(out, p->ip, p->n * sizeof(out[0]));
     return p->n;
 }
 
+int transport_pin_count(const char *host) {
+    const struct pin *p = pin_find(host);
+    return p ? (int)p->n : 0;
+}
+
 int transport_pinned_addrs(const char *host, uint32_t *out, int max) {
-    struct in_addr a[ADDR_MAX];
+    struct tr_ip a[ADDR_MAX];
     unsigned n = pinned(host, a);
     int k = 0;
-    for (unsigned i = 0; i < n && k < max; i++) out[k++] = a[i].s_addr;
+    for (unsigned i = 0; i < n && k < max; i++)
+        if (!a[i].v6) memcpy(&out[k++], a[i].b, 4);
     return k;
 }
 
-struct pin_res { char host[128]; struct in_addr ip[ADDR_MAX]; unsigned an; int started, done, told; };
+struct pin_res { char host[128]; struct tr_ip ip[ADDR_MAX]; unsigned an; int started, done, told; };
 
 struct pin_wait {
     pthread_mutex_t mu;
@@ -206,7 +228,7 @@ static void pin_wait_put(struct pin_wait *w) {
 static void *pin_thread(void *arg) {
     struct pin_arg a = *(struct pin_arg *)arg;
     free(arg);
-    struct in_addr ip[ADDR_MAX];
+    struct tr_ip ip[ADDR_MAX];
     unsigned an = g_resolve(a.w->r[a.i].host, ip);
     pthread_mutex_lock(&a.w->mu);
     memcpy(a.w->r[a.i].ip, ip, an * sizeof(ip[0]));
@@ -274,7 +296,7 @@ static void pin_wave(const char *const *hosts, size_t n, int timeout_ms, transpo
         }
         for (size_t i = 0; i < next && !stopped; i++) {
             if (w->r[i].told || !w->r[i].done) continue;
-            struct in_addr ip[ADDR_MAX];
+            struct tr_ip ip[ADDR_MAX];
             unsigned an = w->r[i].an;
             memcpy(ip, w->r[i].ip, an * sizeof(ip[0]));
             w->r[i].told = 1;
@@ -320,8 +342,8 @@ void transport_pin_hosts(const char *const *hosts, size_t n, int timeout_ms, tra
 
 /* Starts a non-blocking connect. Returns the fd (connected, *done = 1, or in progress) or
  * -1. */
-static int attempt_start(struct in_addr ip, uint16_t port, int *done) {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+static int attempt_start(const struct tr_ip *ip, uint16_t port, int *done) {
+    int fd = socket(ip->v6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (fd < 0) return -1;
     /* Before connect(): connect is where the kernel picks the route by the mark (see --mark
      * above). */
@@ -350,9 +372,24 @@ static int attempt_start(struct in_addr ip, uint16_t port, int *done) {
         close(fd);
         return -1;
     }
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr = ip };
+    struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
+    socklen_t sl;
+    if (ip->v6) {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
+        s6->sin6_family = AF_INET6;
+        s6->sin6_port = htons(port);
+        memcpy(&s6->sin6_addr, ip->b, 16);
+        sl = sizeof(*s6);
+    } else {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
+        s4->sin_family = AF_INET;
+        s4->sin_port = htons(port);
+        memcpy(&s4->sin_addr, ip->b, 4);
+        sl = sizeof(*s4);
+    }
     *done = 0;
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) { *done = 1; return fd; }
+    if (connect(fd, (struct sockaddr *)&ss, sl) == 0) { *done = 1; return fd; }
     if (errno != EINPROGRESS) { close(fd); return -1; }
     return fd;
 }
@@ -376,23 +413,29 @@ static int dial_fail(unsigned in_flight, int err) {
 }
 
 static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
-    struct in_addr addr[ADDR_MAX];
+    struct tr_ip addr[ADDR_MAX];
     unsigned an = pinned(host, addr);
     if (an == 0) an = resolve(host, addr);
     if (an == 0) return TR_EDNS;
 
     /* The last winner goes first: in steady state one connect takes one round trip instead of
      * going through the dead addresses again each time. */
-    struct in_addr *g = good_get(host, port);
+    struct tr_ip *g = good_get(host, port);
     if (g) for (unsigned i = 1; i < an; i++)
-        if (addr[i].s_addr == g->s_addr) { struct in_addr t = addr[0]; addr[0] = addr[i]; addr[i] = t; break; }
+        if (ip_eq(&addr[i], g)) {
+            struct tr_ip t = addr[i];
+            memmove(&addr[1], &addr[0], i * sizeof addr[0]);
+            addr[0] = t;
+            break;
+        }
 
     int fd[ATTEMPT_MAX];
-    struct in_addr fa[ATTEMPT_MAX];
+    struct tr_ip fa[ATTEMPT_MAX];
     unsigned nf = 0;     /* attempts in flight */
     unsigned next = 0;   /* next address to start */
     unsigned dead = 0;   /* addresses that failed */
-    int last_err = 0;
+    unsigned unsent = 0;
+    int last_err = 0, last_sent = 0;
     int64_t deadline = now_ms() + (long long)timeout_s * 1000;
     int64_t stagger_at = 0;
     int win = -1;
@@ -405,9 +448,15 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
          * live first address (the usual case) no second socket is opened at all. */
         while (nf < ATTEMPT_MAX && next < an && t >= stagger_at) {
             int d = 0;
-            struct in_addr ip = addr[next++];
-            int s = attempt_start(ip, port, &d);
-            if (s < 0) { dead++; last_err = errno; continue; }
+            struct tr_ip ip = addr[next++];
+            int s = attempt_start(&ip, port, &d);
+            if (s < 0) {
+                int e = errno;
+                dead++;
+                if (e == ENETUNREACH || e == EHOSTUNREACH || e == EAFNOSUPPORT) unsent++;
+                if (!last_sent) last_err = e;
+                continue;
+            }
             if (d) {   /* connected at once: usually an address on the local network */
                 for (unsigned j = 0; j < nf; j++) close(fd[j]);
                 nf = 0;
@@ -450,12 +499,14 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
             }
             /* This address failed: free its place and try the next one at once. */
             last_err = err;
+            last_sent = 1;
             close(fd[i]); dead++;
             nf--; fd[i] = fd[nf]; fa[i] = fa[nf]; pv[i] = pv[nf];
             stagger_at = 0;
         }
     }
 
+    const char *lb = strchr(host, ':') ? "[" : "", *rb = *lb ? "]" : "";
     if (win < 0) {
         int rc = dial_fail(nf, last_err);
         for (unsigned i = 0; i < nf; i++) close(fd[i]);
@@ -465,13 +516,13 @@ static int tcp_connect(const char *host, uint16_t port, int timeout_s) {
         unsigned held;
         char more[48];
         if (ratelog_take(&said, ratelog_now(), 600, &held))
-            fprintf(stderr, "tunvless[warn]: %s:%u — %s%s%s\n", host, port, tr_dial_strerror(rc),
+            fprintf(stderr, "tunvless[warn]: %s%s%s:%u — %s%s%s\n", lb, host, rb, port, tr_dial_strerror(rc),
                     an > 1 ? " on every address" : "", ratelog_more(more, sizeof more, held));
         return rc;
     }
-    if (dead)
-        fprintf(stderr, "tunvless[info]: %s:%u — connected after %u of %u addresses failed\n",
-                host, port, dead, an);
+    if (dead > unsent)
+        fprintf(stderr, "tunvless[info]: %s%s%s:%u — connected after %u of %u addresses failed\n",
+                lb, host, rb, port, dead - unsent, an - unsent);
     sock_ready(win, timeout_s);
     return win;
 }

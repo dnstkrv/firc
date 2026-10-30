@@ -10,7 +10,15 @@ struct tn { char name[16]; int v; };
 
 static unsigned g_resolves;
 static int g_now_in, g_max_in, g_delay_ms;
-static unsigned fake_resolve(const char *host, struct in_addr out[ADDR_MAX]) {
+static void put_v4(struct tr_ip *ip, uint32_t a) {
+    memset(ip, 0, sizeof *ip);
+    ip->b[0] = (unsigned char)(a >> 24);
+    ip->b[1] = (unsigned char)(a >> 16);
+    ip->b[2] = (unsigned char)(a >> 8);
+    ip->b[3] = (unsigned char)a;
+}
+
+static unsigned fake_resolve(const char *host, struct tr_ip out[ADDR_MAX]) {
     __atomic_add_fetch(&g_resolves, 1, __ATOMIC_RELAXED);
     if (host[0] == 'd') {
         int in = __atomic_add_fetch(&g_now_in, 1, __ATOMIC_ACQ_REL);
@@ -19,17 +27,17 @@ static unsigned fake_resolve(const char *host, struct in_addr out[ADDR_MAX]) {
         struct timespec ts = { 0, (long)__atomic_load_n(&g_delay_ms, __ATOMIC_ACQUIRE) * 1000000L };
         nanosleep(&ts, NULL);
         __atomic_sub_fetch(&g_now_in, 1, __ATOMIC_ACQ_REL);
-        out[0].s_addr = htonl(0x0b000001u);
+        put_v4(out, 0x0b000001u);
         return 1;
     }
     if (!strcmp(host, "bad")) return 0;
     if (!strcmp(host, "slow")) {
         struct timespec ts = { 0, 600000000 };
         nanosleep(&ts, NULL);
-        out[0].s_addr = htonl(0x0a0000feu);
+        put_v4(out, 0x0a0000feu);
         return 1;
     }
-    out[0].s_addr = htonl(0x0a000000u + (uint32_t)atoi(host + 1));
+    put_v4(out, 0x0a000000u + (uint32_t)atoi(host + 1));
     return 1;
 }
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <arpa/inet.h>
 #include "vless.h"
 #include "sublink.h"
 /* tr_upgrade_target: a ws or httpupgrade path is checked here by the same rule the transport
@@ -56,12 +57,27 @@ size_t b64_decode(const char *in, size_t n, char *out, size_t out_n) {
  * inside a LAN or over another tunnel.
  *
  * Names are not resolved: a parser of untrusted text does not go to the network. Panel stubs
- * write the address in digits, so comparing strings is enough.
+ * write the address in digits.
  */
+static int v6_leads_nowhere(const char *h) {
+    char t[64];
+    size_t n = strlen(h);
+    if (n >= 2 && h[0] == '[' && h[n - 1] == ']') { h++; n -= 2; }
+    if (n >= sizeof t) return 0;
+    memcpy(t, h, n);
+    t[n] = '\0';
+    unsigned char b[16];
+    if (inet_pton(AF_INET6, t, b) != 1) return 0;
+    static const unsigned char zero[16];
+    if (!memcmp(b, zero, 15)) return b[15] <= 1;
+    if (memcmp(b, zero, 10) || b[10] != 0xff || b[11] != 0xff) return 0;
+    return b[12] == 127 || !memcmp(b + 12, zero, 4);
+}
+
 int sl_host_leads_nowhere(const char *h) {
     if (!h || !h[0]) return 1;
-    if (!strcmp(h, "0.0.0.0") || !strcmp(h, "::") || !strcmp(h, "[::]")) return 1;
-    if (!strcmp(h, "::1") || !strcmp(h, "[::1]")) return 1;
+    if (strchr(h, ':')) return v6_leads_nowhere(h);
+    if (!strcmp(h, "0.0.0.0")) return 1;
     if (!strcmp(h, "255.255.255.255")) return 1;
     /* All of 127.0.0.0/8: stubs use both 127.0.0.1 and 127.0.0.53. */
     if (!strncmp(h, "127.", 4)) {
@@ -70,6 +86,14 @@ int sl_host_leads_nowhere(const char *h) {
         return 1;
     }
     return 0;
+}
+
+void sl_host_unbracket(char *h) {
+    size_t n = strlen(h);
+    if (n >= 2 && h[0] == '[' && h[n - 1] == ']') {
+        memmove(h, h + 1, n - 2);
+        h[n - 2] = '\0';
+    }
 }
 
 /* A name or an address. security=tls needs to know: certificates are issued to names, so a node
@@ -701,9 +725,25 @@ int sl_link_parse(const char *url, const char *scheme, struct vless_node *n, sl_
     const char *hash = strchr(p, '#');
     const char *hp_end = hash ? hash : p + strlen(p);
     const char *qmark = memchr(p, '?', (size_t)(hp_end - p));
-    const char *colon = memchr(p, ':', (size_t)((qmark ? qmark : hp_end) - p));
-    if (!colon) return -1;
-    sl_set_field(n->host, sizeof(n->host), p, (size_t)(colon - p));
+    const char *hend = qmark ? qmark : hp_end;
+    const char *colon;
+    if (*p == '[') {
+        const char *rb = memchr(p, ']', (size_t)(hend - p));
+        if (!rb || rb == p + 1 || rb + 1 >= hend || rb[1] != ':') return -1;
+        int has_colon = 0;
+        for (const char *c = p + 1; c < rb; c++) {
+            if (*c == ':') has_colon = 1;
+            else if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f') || (*c >= 'A' && *c <= 'F') || *c == '.'))
+                return -1;
+        }
+        if (!has_colon) return -1;
+        colon = rb + 1;
+        sl_set_field(n->host, sizeof(n->host), p + 1, (size_t)(rb - p - 1));
+    } else {
+        colon = memchr(p, ':', (size_t)(hend - p));
+        if (!colon) return -1;
+        sl_set_field(n->host, sizeof(n->host), p, (size_t)(colon - p));
+    }
     {
         /* Digits only, up to the end of the host, 1..65535: atoi with a cast would turn
          * ":70000" into 4464, ":-1" into 65535 and ":443abc" into 443. */

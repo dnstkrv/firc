@@ -549,7 +549,7 @@ static void xray_settings(struct sj *j, struct vless_node *n) {
     while (sj_obj_key(j, &first, k, sizeof(k)) == 0) {
         /* The short outbound form (Xray 25+): address, port, id, flow and encryption right in
          * settings, without vnext and users. */
-        if (!strcmp(k, "address")) { sj_str(j, n->host, sizeof(n->host)); continue; }
+        if (!strcmp(k, "address")) { sj_str(j, n->host, sizeof(n->host)); sl_host_unbracket(n->host); continue; }
         if (!strcmp(k, "id")) { sj_str(j, n->uuid, sizeof(n->uuid)); continue; }
         if (!strcmp(k, "flow")) { sj_str(j, n->flow, sizeof(n->flow)); continue; }
         if (!strcmp(k, "encryption")) { json_encryption(j, n); continue; }
@@ -574,7 +574,7 @@ static void xray_settings(struct sj *j, struct vless_node *n) {
             int fo = 1;
             char k2[64];
             while (sj_obj_key(j, &fo, k2, sizeof(k2)) == 0) {
-                if (!strcmp(k2, "address")) sj_str(j, n->host, sizeof(n->host));
+                if (!strcmp(k2, "address")) { sj_str(j, n->host, sizeof(n->host)); sl_host_unbracket(n->host); }
                 else if (!strcmp(k2, "port")) {
                     sj_ws(j);
                     char num[16];
@@ -764,7 +764,7 @@ static void sb_outbound_body(struct sj *j, struct vless_node *n, char *proto, si
     while (sj_obj_key(j, &first, k, sizeof k) == 0) {
         if (!strcmp(k, "type")) sj_str(j, proto, proto_n);
         else if (!strcmp(k, "tag")) { sj_str(j, n->name, sizeof n->name); sl_utf8_trim_tail(n->name); }
-        else if (!strcmp(k, "server")) sj_str(j, n->host, sizeof n->host);
+        else if (!strcmp(k, "server")) { sj_str(j, n->host, sizeof n->host); sl_host_unbracket(n->host); }
         else if (!strcmp(k, "server_port")) n->port = port_of_num(sj_num(j));
         else if (!strcmp(k, "uuid")) sj_str(j, n->uuid, sizeof n->uuid);
         else if (!strcmp(k, "flow")) sj_str(j, n->flow, sizeof n->flow);
@@ -1125,7 +1125,7 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
     if (!(v = yf_get(f, "type")) || strcmp(v, "vless")) return 0;
     snprintf(n->type, sizeof n->type, "tcp");
     if ((v = yf_get(f, "name"))) { sl_set_field(n->name, sizeof n->name, v, strlen(v)); sl_utf8_trim_tail(n->name); }
-    if ((v = yf_get(f, "server"))) sl_set_field(n->host, sizeof n->host, v, strlen(v));
+    if ((v = yf_get(f, "server"))) { sl_set_field(n->host, sizeof n->host, v, strlen(v)); sl_host_unbracket(n->host); }
     if ((v = yf_get(f, "port"))) n->port = sl_port_of(v);
     if ((v = yf_get(f, "uuid"))) sl_set_field(n->uuid, sizeof n->uuid, v, strlen(v));
     if ((v = yf_get(f, "flow"))) sl_set_field(n->flow, sizeof n->flow, v, strlen(v));

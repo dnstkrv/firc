@@ -585,6 +585,27 @@ static void t_custom_headers_first(void) {
     xclose(fds);
 }
 
+static void t_ipv6_authority_in_brackets(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", NULL, NULL);
+    n.host = "2001:db8::1";
+    n.http_host = NULL;
+    int rc = xopen(&c, &n, fds);
+    down_block(&g_hb);
+    int a = hr_find(&g_hb, ":authority");
+    check(rc == 0 && a >= 0 && !strcmp(g_hb.f[a].value, "[2001:db8::1]"),
+          "IPv6 address as :authority: in brackets, no port");
+    n.host = "10.0.0.1";
+    xclose(fds);
+    rc = xopen(&c, &n, fds);
+    down_block(&g_hb);
+    a = hr_find(&g_hb, ":authority");
+    check(rc == 0 && a >= 0 && !strcmp(g_hb.f[a].value, "10.0.0.1"),
+          "IPv4 address as :authority: as it is");
+    xclose(fds);
+}
+
 static void t_custom_accept_replaces(void) {
     int fds[2];
     struct transport c;
@@ -855,6 +876,7 @@ int main(void) {
     t_budget_too_small_fails_with_reason();
     t_custom_headers_first();
     t_custom_accept_replaces();
+    t_ipv6_authority_in_brackets();
     t_literal_ua_drops_look();
     t_chrome_ua_keeps_look();
     t_room_worst_padding();

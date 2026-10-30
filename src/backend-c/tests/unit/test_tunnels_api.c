@@ -715,6 +715,24 @@ TEST preview_with_a_changed_uplink_shows_the_saved_nodes(void)
     PASS();
 }
 
+/* catches: an IPv6 link source previewed as unusable or not listed */
+TEST preview_lists_a_bracketed_ipv6_link_as_usable(void)
+{
+    ASSERT(hx_start(SUB_TUN, 0) != NULL);
+    cJSON *ans = NULL;
+    ASSERT_EQ(200, call_api("POST", "/api/v1/tunnels/preview",
+                            "{\"tunnel\":{\"id\":\"s\",\"device\":\"tunvless2\",\"sources\":["
+                            "{\"id\":\"0000000a\",\"kind\":\"link\","
+                            "\"link\":\"vless://" U "@[2001:db8::7]:8443?security=none#six\"}]}}",
+                            &ans));
+    ASSERT(same_json(ans,
+                     "{\"nodes\":[{\"key\":\"0000000a:six\",\"name\":\"six\",\"source\":\"link\",\"isNew\":true,"
+                     "\"excluded\":false,\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}],"
+                     "\"matched\":1,\"total\":1,\"subscriptions\":[]}"));
+    cJSON_Delete(ans);
+    PASS();
+}
+
 /* catches: a disabled tunnel's editor showing no nodes although its subscription's body was held */
 TEST preview_of_a_disabled_tunnel_shows_its_held_nodes(void)
 {
@@ -1862,6 +1880,7 @@ SUITE(tunnels_api)
     RUN_TEST(preview_follows_the_draft_from_cached_bodies_without_links);
     RUN_TEST(preview_with_a_changed_uplink_shows_the_saved_nodes);
     RUN_TEST(preview_of_a_disabled_tunnel_shows_its_held_nodes);
+    RUN_TEST(preview_lists_a_bracketed_ipv6_link_as_usable);
     RUN_TEST(a_saved_reversed_order_previews_every_node_once_in_that_order);
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);

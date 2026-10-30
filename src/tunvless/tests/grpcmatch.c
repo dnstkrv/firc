@@ -192,6 +192,29 @@ static int open_stream(struct transport *c) {
     return rc;
 }
 
+static void t_authority_of_ipv6(const char *host, const char *want, const char *what) {
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) { check(0, "socket pair created"); return; }
+    struct transport c;
+    memset(&c, 0, sizeof(c));
+    c.fr = &tr_grpc;
+    c.link.fd = sp[0];
+    c.link.plain = 1;
+    struct tr_node n;
+    memset(&n, 0, sizeof(n));
+    n.host = host; n.sni = ""; n.service = "svc"; n.mode = "gun";
+    int rc = tr_grpc.open(&c, &n, 5);
+    unsigned char b[4096];
+    ssize_t got = recv(sp[1], b, sizeof(b), MSG_DONTWAIT);
+    size_t wl = strlen(want);
+    int found = 0;
+    for (ssize_t i = 0; got > 0 && i + (ssize_t)wl <= got; i++)
+        if (!memcmp(b + i, want, wl) && (i == 0 || b[i - 1] == wl)) found = 1;
+    check(rc == 0 && found, what);
+    transport_close(&c);
+    close(sp[1]);
+}
+
 static void t_end_in_one_record(int with_rst, int with_end_stream, const char *what) {
     struct transport c;
     check(open_stream(&c) == 0, "stream opened");
@@ -250,6 +273,8 @@ static void t_trailers_only(const char *what) {
 
 int main(void) {
     t_framing();
+    t_authority_of_ipv6("2001:db8::1", "[2001:db8::1]", "IPv6 address as :authority: in brackets");
+    t_authority_of_ipv6("10.0.0.1", "10.0.0.1", "IPv4 address as :authority: as it is");
     t_end_in_one_record(1, 1, "data + END_STREAM + RST_STREAM in one record");
     t_end_in_one_record(0, 1, "data + END_STREAM without RST_STREAM");
     t_end_in_one_record(1, 0, "data + RST_STREAM without END_STREAM");

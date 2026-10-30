@@ -297,6 +297,7 @@ jobs:
           sudo apt-get install -y python3 iproute2 curl
           make -C ../tunvless fetch
           sh tests/e2e/tunnels.sh
+          sh tests/routing/run_uplink_routing.sh
 
       - name: Sanitizers (ASan+UBSan)
         working-directory: src/backend-c
@@ -515,7 +516,7 @@ jobs:
           set -eu
           tests="h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq tungromatch tunnelmatch \
                  rtxmatch grpcmatch vlinkmatch ctlmatch nodesmatch ctlnodesmatch tunnamematch xhoptsmatch tun6match vreqmatch \
-                 scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch xudpmatch"
+                 scryptomatch hellofreeze echmatch vlessmatch takematch certzipmatch xudpmatch dialmatch"
           run=""
           for t in $tests; do
             case " $SKIP " in *" $t "*) echo "skipped under qemu: $t"; continue ;; esac

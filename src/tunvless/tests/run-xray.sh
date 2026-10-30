@@ -40,7 +40,8 @@ ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp
            xhttp-obfs-header xhttp-obfs-cookie xhttp-obfs-query xhttp-obfs-qih xhttp-tokenish
            xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
            xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data
-           v6-carry-tcp v6-carry-xhttp v6-second v6-none"
+           v6-carry-tcp v6-carry-xhttp v6-second v6-none
+           node6-tcp node6-xhttp node6-name node6-dual"
 CASES="${CASES:-$ALL_CASES}"
 XRAY="${XRAY:-$(command -v xray 2>/dev/null || true)}"
 
@@ -56,6 +57,7 @@ ip netns delete "grpc-probe-$$"
 
 NSC="grpcc$$"; NSS="grpcs$$"
 S_IP=10.93.0.1; C_IP=10.93.0.2; TARGET=203.0.113.9
+C_IP6=2001:db8:93::2; S_IP6=2001:db8:93::1
 TARGET6=2001:db8:9::9; CHK6A=2606:4700:4700::1111; CHK6B=2001:4860:4860::8888
 PORT=18443; MASK=mask.grpc.test; SVC=grpcsvc
 UUID=8f7d3b1a-2c4e-4f60-9a81-b5d7e6c30124
@@ -68,6 +70,7 @@ cleanup() {
         for p in $(ip netns pids "$n" 2>/dev/null || true); do kill "$p" 2>/dev/null || true; done
     done
     sleep 0.3
+    rm -rf "/etc/netns/$NSC" 2>/dev/null || true
     for n in "$NSC" "$NSS"; do
         for p in $(ip netns pids "$n" 2>/dev/null || true); do kill -9 "$p" 2>/dev/null || true; done
         ip netns delete "$n" 2>/dev/null || true
@@ -86,6 +89,8 @@ ip -n "$NSC" link set lo up; ip -n "$NSS" link set lo up
 ip link add grc0 netns "$NSC" type veth peer name grs0 netns "$NSS"
 ip -n "$NSC" addr add "$C_IP/24" dev grc0
 ip -n "$NSS" addr add "$S_IP/24" dev grs0
+ip -n "$NSC" addr add "$C_IP6/64" dev grc0 nodad
+ip -n "$NSS" addr add "$S_IP6/64" dev grs0 nodad
 ip -n "$NSC" link set grc0 up; ip -n "$NSS" link set grs0 up
 for a in "$TARGET" 1.1.1.1 8.8.8.8; do ip -n "$NSS" addr add "$a/32" dev lo; done
 for a in "$TARGET6" "$CHK6A" "$CHK6B"; do ip -n "$NSS" addr add "$a/128" dev lo nodad; done
@@ -122,14 +127,14 @@ table inet grpccnt { chain in { type filter hook input priority -300; policy acc
 NFT
 fi
 
-FAIL=0
+FAIL=0; SKIPPED=""
 # One case: NET (streamSettings without security), SEC (reality | tls), Q (the link's transport
 # parameters) and TUN_ARGS (extra client flags). Defaults are Xray's own.
 enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 xh() { XP="{\"path\":\"/xp/\",\"mode\":\"$1\",$2}"; Q="type=xhttp&path=%2Fxp%2F&mode=$1&extra=$(enc "{$2}")"; }
 neg() { EXPECT=fail; XP="{\"path\":\"/xp/\",\"mode\":\"packet-up\",$1}"; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up"; }
 case_cfg() {
-    SEC=reality; TUN_ARGS=""; EXPECT=ok; V6=""
+    SEC=reality; TUN_ARGS=""; EXPECT=ok; V6=""; NODE=v4
     XP='{"path":"/xp/"}'
     case "$1" in
     grpc-gun|grpc-multi)
@@ -184,12 +189,16 @@ case_cfg() {
     v6-second)         V6=second; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-none)           V6=none; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-carry-xhttp)    V6=carry; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up" ;;
+    node6-tcp)         NODE=v6; NET='"network":"tcp"'; Q="type=tcp" ;;
+    node6-name)        NODE=name6; NET='"network":"tcp"'; Q="type=tcp" ;;
+    node6-dual)        NODE=dual; NET='"network":"tcp"'; Q="type=tcp" ;;
+    node6-xhttp)       NODE=v6; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up" ;;
     xhttp-neg-obfs)          neg '"xPaddingObfsMode":true,"xPaddingPlacement":"cookie"' ;;
     xhttp-neg-sess)          neg '"sessionIDPlacement":"header"' ;;
     xhttp-neg-data)          neg '"uplinkDataPlacement":"cookie"' ;;
     *) echo "run-xray: unknown case $1"; exit 2 ;;
     esac
-    case "$1" in xhttp-*|v6-carry-xhttp) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
+    case "$1" in xhttp-*|v6-carry-xhttp|node6-xhttp) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
     if [ "$SEC" = reality ]; then
         SECJ="\"security\":\"reality\",\"realitySettings\":{\"show\":false,\"dest\":\"$S_IP:8443\",\"xver\":0,\"serverNames\":[\"$MASK\"],\"privateKey\":\"$PRIV\",\"shortIds\":[\"$SID\"]}"
         LSEC="security=reality&sni=$MASK&pbk=$PUB&sid=$SID&fp=chrome"
@@ -199,9 +208,69 @@ case_cfg() {
     fi
 }
 
+v6_routes_clean() {
+    addrs=$(ip netns exec "$NSC" ip -6 addr show dev vl scope global 2>/dev/null | awk '$1 == "inet6" { print $2 }')
+    na=$(printf '%s' "$addrs" | grep -c . || true)
+    own=""
+    if [ "$na" -gt 1 ]; then
+        echo "run-xray: FAIL — vl holds $na global IPv6 addresses, at most one is expected:"; printf '%s\n' "$addrs" | sed 's/^/    /'
+        return 1
+    fi
+    if [ "$na" -eq 1 ]; then
+        case "$addrs" in
+        */128) own=${addrs%/128} ;;
+        *) echo "run-xray: FAIL — the device address is not a /128: $addrs"; return 1 ;;
+        esac
+    fi
+    rt=$(ip netns exec "$NSC" ip -6 route show table all | awk '!(/^(local|anycast|multicast) / && / table local /)')
+    bad=$(printf '%s\n' "$rt" | awk -v own="$own" -v t6="${1:+$TARGET6}" '
+        /^([a-z]+ )?(default|::\/0)( |$)/ { print; next }
+        / dev vl( |$)/ {
+            if (index($0, "fe80::/64 dev vl proto kernel ") == 1) next
+            if (own != "" && index($0, own " dev vl proto kernel ") == 1) next
+            if (t6 != "" && index($0, t6 " dev vl ") == 1) next
+            print
+        }')
+    rl=$(ip netns exec "$NSC" ip -6 rule show | awk '$1 != "0:" && $1 != "32766:"')
+    if [ -n "$bad" ] || [ -n "$rl" ]; then
+        echo "run-xray: FAIL — IPv6 routes or rules outside the expected set:"
+        printf '%s\n' "$rt" | sed 's/^/    route /'; ip netns exec "$NSC" ip -6 rule show | sed 's/^/    rule /'
+        return 1
+    fi
+    echo "run-xray: IPv6 routes clean"
+}
+
+etc_writable() { mkdir -p /etc/netns 2>/dev/null && : > /etc/netns/.w 2>/dev/null && rm -f /etc/netns/.w; }
+
 for MODE in $CASES; do
+    rm -rf "/etc/netns/$NSC" 2>/dev/null || true
     case_cfg "$MODE"
     echo "run-xray: ==== case $MODE ===="
+    HOST="$S_IP"
+    case "$NODE" in
+    v6)    HOST="[$S_IP6]" ;;
+    name6) HOST=node6.test ;;
+    dual)  HOST=node46.test ;;
+    esac
+    case "$NODE" in
+    name6|dual)
+        if ! etc_writable; then
+            echo "run-xray: case $MODE — SKIPPED (no writable /etc for the hosts file; not passed)"
+            SKIPPED="$SKIPPED $MODE"; continue
+        fi
+        mkdir -p "/etc/netns/$NSC"
+        if [ "$NODE" = name6 ]; then printf '%s node6.test\n' "$S_IP6" > "/etc/netns/$NSC/hosts"
+        else
+            printf '%s node46.test\n%s node46.test\n' "$S_IP" "$S_IP6" > "/etc/netns/$NSC/hosts"
+            printf 'precedence ::/0 100\nprecedence ::ffff:0:0/96 10\n' > "/etc/netns/$NSC/gai.conf"
+        fi ;;
+    esac
+    INB1="\"port\":$PORT,\"protocol\":\"vless\",\"settings\":{\"clients\":[{\"id\":\"$UUID\"}],\"decryption\":\"none\"},\"streamSettings\":{$NET,$SECJ}"
+    case "$NODE" in
+    v6|name6) INB="{\"listen\":\"$S_IP6\",$INB1}" ;;
+    dual)     INB="{\"listen\":\"$S_IP\",$INB1},{\"listen\":\"$S_IP6\",$INB1}" ;;
+    *)        INB="{\"listen\":\"$S_IP\",$INB1}" ;;
+    esac
     FR="{\"action\":\"allow\",\"ip\":[\"$TARGET/32\"]}"
     case "$V6" in
     carry)  FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
@@ -210,9 +279,7 @@ for MODE in $CASES; do
     esac
     cat > "$W/xray.json" <<JSON
 {"log":{"loglevel":"warning","access":"$W/xray-access-$MODE.log"},
- "inbounds":[{"listen":"$S_IP","port":$PORT,"protocol":"vless",
-   "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
-   "streamSettings":{$NET,$SECJ}}],
+ "inbounds":[$INB],
  "outbounds":[{"protocol":"freedom","tag":"direct","settings":{"finalRules":[$FR]}}]}
 JSON
     ip netns exec "$NSS" "$XRAY" run -c "$W/xray.json" > "$W/xray-$MODE.log" 2>&1 &
@@ -220,7 +287,7 @@ JSON
     for _ in $(seq 40); do ip netns exec "$NSS" ss -ltn 2>/dev/null | grep -q ":$PORT " && break; sleep 0.25; done
     ip netns exec "$NSS" ss -ltn 2>/dev/null | grep -q ":$PORT " || { echo "run-xray: Xray did not start:"; tail -5 "$W/xray-$MODE.log"; exit 1; }
 
-    printf '%s\n' "vless://$UUID@$S_IP:$PORT?encryption=none&$Q&$LSEC#$MODE" > "$W/sub.txt"
+    printf '%s\n' "vless://$UUID@$HOST:$PORT?encryption=none&$Q&$LSEC#$MODE" > "$W/sub.txt"
     probe() { ip netns exec "$NSC" "$BIN" --probe --timeout 5 $TUN_ARGS "$W/sub.txt" 2>&1 || true; }
     is_ok() { printf '%s' "$1" | awk -F '\t' '$3 == "ok" { f = 1 } END { exit !f }'; }
 
@@ -271,6 +338,7 @@ JSON
         kill "$SPID" "$XPID" 2>/dev/null || true; continue; }
     ip netns exec "$NSC" ip route replace "$TARGET/32" dev vl
     rc=0
+    [ "$NODE" = v4 ] || v6_routes_clean || rc=1
     if [ -n "$V6" ]; then
         seen() { tail -n +$(($2 + 1)) "$1"; }
         v6addr() { ip netns exec "$NSC" ip -6 addr show dev vl 2>/dev/null | grep -c 'inet6 2001:db8::' || true; }
@@ -279,6 +347,7 @@ JSON
             [ "$(v6addr)" -gt 0 ] && { got6=1; break; }
             sleep 0.25
         done
+        v6_routes_clean || rc=1
         if [ "$V6" = none ]; then
             if [ "$got6" -eq 1 ]; then echo "run-xray: FAIL — the device got an IPv6 address on a node that reaches no IPv6 check"; rc=1
             else echo "run-xray: no IPv6 address on vl after 30 s, as expected"; fi
@@ -342,9 +411,22 @@ for size in (1, 200, 1200):
         printf '%s\n' "$bad_log" | head -5 | sed 's/^/    /'
         rc=1
     fi
+    if [ "$NODE" != v4 ]; then
+        n4=$(grep -Fc "from $C_IP:" "$W/xray-access-$MODE.log" || true)
+        n6=$(grep -Fc "from [$C_IP6]:" "$W/xray-access-$MODE.log" || true)
+        echo "run-xray: Xray accepted from $C_IP: $n4, from [$C_IP6]: $n6"
+        if [ "$NODE" = dual ]; then
+            [ "$n4" -gt 0 ] && [ "$n6" -eq 0 ] || { echo "run-xray: FAIL — a dual-stack node must be reached over IPv4 only"; rc=1; }
+        else
+            [ "$n6" -gt 0 ] && [ "$n4" -eq 0 ] || { echo "run-xray: FAIL — the node must be reached over IPv6 only"; rc=1; }
+        fi
+    fi
     if command -v nft >/dev/null 2>&1; then
         syns=$(ip netns exec "$NSS" nft list chain inet grpccnt in 2>/dev/null | sed -n 's/.*packets \([0-9]*\) .*comment "syn".*/\1/p')
         [ -n "$syns" ] && echo "run-xray: TCP connections to the node in this case: $syns"
+    fi
+    if [ "$NODE" != v4 ] || [ -n "$V6" ]; then
+        case "$V6" in carry|second) v6_routes_clean target || rc=1 ;; *) v6_routes_clean || rc=1 ;; esac
     fi
     kill "$SPID" 2>/dev/null || true
     sleep 0.5
@@ -354,5 +436,6 @@ for size in (1, 200, 1200):
     if [ "$rc" -ne 0 ]; then FAIL=1; echo "run-xray: case $MODE — FAIL"; else echo "run-xray: case $MODE — ok"; fi
 done
 
-[ "$FAIL" -eq 0 ] && echo "run-xray: all checks passed" || echo "run-xray: FAILED"
-exit "$FAIL"
+[ "$FAIL" -eq 0 ] || { echo "run-xray: FAILED"; exit 1; }
+[ -z "$SKIPPED" ] || { echo "run-xray: SKIPPED, not passed:$SKIPPED"; exit 2; }
+echo "run-xray: all checks passed"

@@ -534,15 +534,115 @@ int main(void) {
     }
 
     {
-        struct vless_node n;
+        struct vless_node n, m;
         struct vless_node out[2];
         char buf[2048];
         size_t c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"tag\":\"v6\",\"server\":\"2001:db8::1\","
                                    "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
         size_t l = c ? vless_node_link(&out[0], buf, sizeof buf) : 0;
-        /* catches: an IPv6 node given a link the dialer cannot use */
+        static const char want6[] = "vless://" SBU "@[2001:db8::1]:443?";
+        /* catches: an IPv6 node given a link the dialer cannot use, or a host written without brackets */
         check("IPv6 host: usable from a config", 1, (long)c);
-        check("IPv6 host: no link", 0, (long)l);
+        check("IPv6 host: bare in memory", 0, strcmp(out[0].host, "2001:db8::1"));
+        check("IPv6 host: link", 1, l > 0 && !strncmp(buf, want6, sizeof want6 - 1));
+
+        /* catches: bracketed or bare hosts of Xray, sing-box and Clash kept with brackets or lost */
+        c = vless_parse_sub("{\"outbounds\":[{\"protocol\":\"vless\",\"settings\":{\"vnext\":[{\"address\":\"[2001:db8::2]\","
+                            "\"port\":443,\"users\":[{\"id\":\"u\"}]}]}}]}", out, 2, NULL);
+        check("Xray [v6] address: usable", 1, (long)c);
+        check_str("Xray [v6] address: bare", "2001:db8::2", c ? out[0].host : "");
+        c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"server\":\"2001:db8::3\","
+                            "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
+        check_str("sing-box v6 server: bare", "2001:db8::3", c ? out[0].host : "");
+        c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"server\":\"[2001:db8::3]\","
+                            "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
+        check_str("sing-box [v6] server: bare", "2001:db8::3", c ? out[0].host : "");
+        c = vless_parse_sub("proxies:\n  - name: c1\n    type: vless\n    server: 2001:db8::4\n    port: 443\n"
+                            "    uuid: " SBU "\n", out, 2, NULL);
+        check("Clash plain v6 server: usable", 1, (long)c);
+        check_str("Clash plain v6 server: bare", "2001:db8::4", c ? out[0].host : "");
+        c = vless_parse_sub("proxies:\n  - name: c1\n    type: vless\n    server: \"[2001:db8::5]\"\n    port: 443\n"
+                            "    uuid: " SBU "\n", out, 2, NULL);
+        check("Clash [v6] server: usable", 1, (long)c);
+        check_str("Clash [v6] server: bare", "2001:db8::5", c ? out[0].host : "");
+
+        /* catches: a bracket, port or character rule of the IPv6 host loosened */
+        static const char *const bad6[] = {
+            "vless://U@[2001:db8::1:443?security=none#x", "vless://U@[]:443?security=none#x",
+            "vless://U@[2001:db8::1]443?security=none#x", "vless://U@[fe80::1%25eth0]:443?security=none#x",
+            "vless://U@[2001:db8::1]:0?security=none#x", "vless://U@[x.example]:443?security=none#x",
+            "vless://U@[2001:db8::1]?security=none#x", "vless://U@[2001:db8::g]:443?security=none#x",
+            "vless://U@[1.2.3.4]:443?security=none#x",
+        };
+        for (size_t i = 0; i < N(bad6); i++) {
+            char w[96];
+            snprintf(w, sizeof w, "bad IPv6 host %zu: refused", i);
+            check(w, -1, vless_parse_url(bad6[i], &n));
+        }
+        check("v6 link: parsed", 0, vless_parse_url("vless://U@[2001:db8::1]:443?security=reality&pbk=K&sni=x.com#six", &n));
+        check_str("v6 link: host", "2001:db8::1", n.host);
+        check("v6 link: port", 443, (long)n.port);
+        l = vless_node_link(&n, buf, sizeof buf);
+        check("v6 link: written in brackets", 1, !strncmp(buf, "vless://U@[2001:db8::1]:443?", 28));
+        check("v6 link: round trip", 0, vless_parse_url(buf, &m) || strcmp(m.host, n.host) || m.port != n.port);
+
+        /* catches: an uppercase-hex v6 host refused, or a mapped address matched case-sensitively */
+        check("uppercase v6 link: parsed", 0, vless_parse_url("vless://U@[2001:DB8::1]:443?security=none#x", &n));
+        check("uppercase mapped loopback: skipped", 1, vless_parse_url("vless://U@[::FFFF:127.0.0.1]:443?security=none#x", &n));
+        check("uppercase mapped unspecified: skipped", 1, vless_parse_url("vless://U@[::FFFF:0.0.0.0]:443?security=none#x", &n));
+
+        /* catches: a v6 branch of the writer accepting what the parser would refuse */
+        static const char *const nolink[] = { "h.example:8443", "2001:db8::zz", "fe80::1%eth0", "[2001:db8::2", "2001:db8::2]" };
+        for (size_t i = 0; i < N(nolink); i++) {
+            struct vless_node z;
+            vless_parse_url("vless://U@h:443?security=none#x", &z);
+            snprintf(z.host, sizeof z.host, "%s", nolink[i]);
+            char w[96];
+            snprintf(w, sizeof w, "host %s: no link", nolink[i]);
+            check(w, 0, (long)vless_node_link(&z, buf, sizeof buf));
+        }
+        c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"server\":\"h.example:8443\","
+                            "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
+        check("config host with a name and a colon: no link", 0, c ? (long)vless_node_link(&out[0], buf, sizeof buf) : 0);
+        c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"server\":\"2001:db8::zz\","
+                            "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
+        check("config host 2001:db8::zz: no link", 0, c ? (long)vless_node_link(&out[0], buf, sizeof buf) : 0);
+        c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"server\":\"[2001:db8::2\","
+                            "\"server_port\":443,\"uuid\":\"" SBU "\"}]}", out, 2, NULL);
+        check("config unclosed [ host kept as written", 1, c ? out[0].host[0] == '[' : 1);
+        c = vless_parse_sub("{\"outbounds\":[{\"protocol\":\"vless\",\"settings\":{\"address\":\"[2001:db8::3]\","
+                            "\"port\":443,\"id\":\"u\"}}]}", out, 2, NULL);
+        check_str("Xray short form [v6] address: bare", "2001:db8::3", c ? out[0].host : "");
+
+        /* catches: a mapped loopback or unspecified address dialled */
+        check("mapped loopback: skipped", 1, vless_parse_url("vless://U@[::ffff:127.0.0.1]:443?security=none#x", &n));
+        check_str("mapped loopback: reason", "::ffff:127.0.0.1: nobody to answer", n.skip_reason);
+        check("mapped unspecified: skipped", 1, vless_parse_url("vless://U@[::ffff:0.0.0.0]:443?security=none#x", &n));
+        check("unspecified: skipped", 1, vless_parse_url("vless://U@[::]:443?security=none#x", &n));
+        check_str("unspecified: reason", "::: nobody to answer", n.skip_reason);
+        check("mapped public: usable", 0, vless_parse_url("vless://U@[::ffff:8.8.8.8]:443?security=none#x", &n));
+        static const char *const sinks6[] = { "::ffff:7f00:1", "::FFFF:7F35:0", "0:0:0:0:0:0:0:1", "::0", "0::",
+                                              "::ffff:0:0", "0:0:0:0:0:ffff:7fff:ffff" };
+        for (size_t i = 0; i < N(sinks6); i++) {
+            snprintf(buf, sizeof buf, "vless://U@[%s]:443?security=none#x", sinks6[i]);
+            char w[96];
+            snprintf(w, sizeof w, "%s: skipped", sinks6[i]);
+            /* catches: a sink spelled another way than the usual string dialled */
+            check(w, 1, vless_parse_url(buf, &n));
+        }
+        /* catches: a bracketed sink taken as written and dialled */
+        check("[::1] as written: leads nowhere", 1, sl_host_leads_nowhere("[::1]"));
+        check("[::ffff:7f00:1] as written: leads nowhere", 1, sl_host_leads_nowhere("[::ffff:7f00:1]"));
+        check("[2001:db8::1] as written: leads somewhere", 0, sl_host_leads_nowhere("[2001:db8::1]"));
+        static const char *const live6[] = { "::2", "::ffff:128.0.0.1", "::ffff:126.255.255.255", "::ffff:0:1", "::1:0", "1::",
+                                             "::7f00:1", "::1:ffff:7f00:1", "::fffe:7f00:1" };
+        for (size_t i = 0; i < N(live6); i++) {
+            snprintf(buf, sizeof buf, "vless://U@[%s]:443?security=none#x", live6[i]);
+            char w[96];
+            snprintf(w, sizeof w, "%s: usable", live6[i]);
+            /* catches: an address next to a sink taken for one */
+            check(w, 0, vless_parse_url(buf, &n));
+        }
 
         c = vless_parse_sub("{\"outbounds\":[{\"type\":\"vless\",\"tag\":\"at\",\"server\":\"h.example\","
                             "\"server_port\":443,\"uuid\":\"a@b\"}]}", out, 2, NULL);

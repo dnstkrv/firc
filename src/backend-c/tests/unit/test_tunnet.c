@@ -1,5 +1,6 @@
 #include "greatest.h"
 
+#include <errno.h>
 #include <sys/socket.h>
 #include <linux/if.h>
 #include <linux/rtnetlink.h>
@@ -45,11 +46,13 @@ static void uplink(fx_t *f, firc_uplink_kind_t kind, const char *ref) {
     strcpy(f->t[0].uplink_ref, ref);
 }
 
-static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t table, uint32_t priority, uint32_t oif) {
+static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t table, uint32_t priority, uint32_t oif,
+                    int family) {
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f->kernel, m, 64), c = 0;
     for (size_t i = 0; i < n && i < 64; i++) {
         if (m[i].type != type || m[i].table != table || m[i].priority != priority) { continue; }
+        if (m[i].family != family) { continue; }
         if (rtm_type != 0 && m[i].rtm_type != rtm_type) { continue; }
         if (oif != 0 && m[i].oif != oif) { continue; }
         c++;
@@ -74,6 +77,7 @@ TEST an_iface_uplink_writes_the_rule_the_default_and_the_blackhole(void) {
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f.kernel, m, 64), rules = 0, defaults = 0, holes = 0;
     for (size_t i = 0; i < n; i++) {
+        if (m[i].family != AF_INET) { continue; }
         if (m[i].type == RTM_NEWRULE) {
             rules++;
             ASSERT_EQ_FMT(AF_INET, (int)m[i].family, "%d");
@@ -127,8 +131,8 @@ TEST a_tunnel_uplink_routes_through_that_tunnels_device(void) {
     firc_tunnet_uplink_t u;
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
     ASSERT(u.routed);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -142,8 +146,8 @@ TEST a_missing_uplink_fails_closed(void) {
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
     ASSERT_FALSE(u.routed);
     ASSERT(u.mark != 0);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_BLACKHOLE, u.table, 20, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_BLACKHOLE, u.table, 20, 0, AF_INET), "%zu");
     ASSERT_EQ_FMT((size_t)0, fake_rtnl_count(f.kernel, RTM_NEWROUTE, RTN_UNICAST), "%zu");
     down(&f);
     PASS();
@@ -157,7 +161,7 @@ TEST a_tunnel_uplink_to_an_unknown_tunnel_fails_closed(void) {
     firc_tunnet_uplink_t u;
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
     ASSERT_FALSE(u.routed);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_BLACKHOLE, u.table, 20, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_BLACKHOLE, u.table, 20, 0, AF_INET), "%zu");
     ASSERT_EQ_FMT((size_t)0, fake_rtnl_count(f.kernel, RTM_NEWROUTE, RTN_UNICAST), "%zu");
     down(&f);
     PASS();
@@ -170,17 +174,17 @@ TEST link_down_then_up_writes_the_default_again(void) {
     uplink(&f, FIRC_UPLINK_IFACE, "lo");
     firc_tunnet_uplink_t u;
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
 
     fake_rtnl_set_link_flags(f.kernel, 0);
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
     ASSERT_FALSE(u.routed);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
 
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
     ASSERT(u.routed);
-    ASSERT_EQ_FMT((size_t)2, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
+    ASSERT_EQ_FMT((size_t)2, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -196,7 +200,7 @@ TEST refresh_routes_an_uplink_that_appeared_after_apply(void) {
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
     ASSERT(u.routed);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -205,16 +209,18 @@ TEST refresh_routes_an_uplink_that_appeared_after_apply(void) {
 TEST refresh_moves_the_default_off_a_device_the_uplink_left(void) {
     fx_t f;
     ASSERT(up(&f, IFF_UP | IFF_POINTOPOINT));
+    fake_rtnl_add_addr(f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
     uplink(&f, FIRC_UPLINK_IFACE, "lo");
     firc_tunnet_uplink_t u;
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET), "%zu");
     uplink(&f, FIRC_UPLINK_IFACE, "firc-nope0");
     ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
     ASSERT_FALSE(u.routed);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, u.table, 10, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, u.table, 20, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, u.table, 48, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, u.table, 10, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, u.table, 10, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, u.table, 20, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, u.table, 48, 0, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -242,6 +248,77 @@ TEST remove_deletes_exactly_what_apply_wrote(void) {
     ASSERT(n <= 64);
     for (size_t i = 0; i < applied; i++) {
         uint16_t want = m[i].type == RTM_NEWRULE ? RTM_DELRULE : m[i].type == RTM_NEWROUTE ? RTM_DELROUTE : 0;
+        if (want == 0 || m[i].family != AF_INET) { continue; }
+        adds++;
+        size_t matched = 0;
+        for (size_t j = applied; j < n; j++) {
+            if (m[j].type == want && same_key(&m[i], &m[j])) { matched++; }
+        }
+        ASSERT_EQ_FMT((size_t)1, matched, "%zu");
+    }
+    for (size_t j = applied; j < n; j++) {
+        if ((m[j].type == RTM_DELRULE || m[j].type == RTM_DELROUTE) && m[j].family == AF_INET) { dels++; }
+    }
+    ASSERT_EQ_FMT((size_t)3, adds, "%zu");
+    ASSERT_EQ_FMT(adds, dels, "%zu");
+    down(&f);
+    PASS();
+}
+
+static const uint8_t fe80_1[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01};
+
+static void main_v6_default_via_fe80_1(fx_t *f) {
+    const uint8_t any[16] = {0};
+    fake_rtnl_add_route(f->kernel, AF_INET6, RT_TABLE_MAIN, RTN_UNICAST, RTPROT_BOOT, any, 0, 1024);
+    fake_rtnl_route_via(f->kernel, 1, fe80_1, 16);
+}
+
+/* catches: an unmarked or main-table IPv6 write, a blackhole in place of unreachable, a v6 leftover after remove */
+TEST the_uplink_twin_stays_inside_its_marked_table(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    fake_rtnl_add_addr(f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    const uint8_t gw[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 1, gw, 4);
+    main_v6_default_via_fe80_1(&f);
+    uplink(&f, FIRC_UPLINK_IFACE, "lo");
+    firc_tunnet_uplink_t u;
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
+    ASSERT(u.routed);
+    ASSERT(u.route6.present);
+
+    fake_rtnl_msg_t m[64];
+    size_t applied = fake_rtnl_messages(f.kernel, m, 64);
+    ASSERT(applied <= 64);
+    size_t v6_unicast = 0;
+    for (size_t i = 0; i < applied; i++) {
+        if (m[i].type == RTM_NEWRULE) {
+            ASSERT_EQ_FMT(u.mark, m[i].mark, "%#x");
+            ASSERT_EQ_FMT(0x00ff0000u, m[i].mask, "%#x");
+            ASSERT_EQ_FMT(u.table, m[i].table, "%u");
+            ASSERT_EQ_FMT(48u, m[i].priority, "%u");
+        } else if (m[i].type == RTM_NEWROUTE) {
+            ASSERT_EQ_FMT(u.table, m[i].table, "%u");
+            ASSERT(m[i].table != 254u && m[i].table != 0u);
+            if (m[i].family == AF_INET6 && m[i].rtm_type == RTN_UNICAST) {
+                v6_unicast++;
+                ASSERT_EQ_FMT(10u, m[i].priority, "%u");
+                ASSERT_EQ_FMT(1u, m[i].oif, "%u");
+                ASSERT_EQ_FMT(16, (int)m[i].gw_len, "%d");
+                ASSERT_MEM_EQ(fe80_1, m[i].gw, 16);
+            }
+        }
+    }
+    ASSERT_EQ_FMT((size_t)1, v6_unicast, "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNREACHABLE, u.table, 20, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_BLACKHOLE, u.table, 20, 0, AF_INET6), "%zu");
+
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_remove(f.rtnl, &u));
+    size_t n = fake_rtnl_messages(f.kernel, m, 64), adds = 0, dels = 0;
+    ASSERT(n <= 64);
+    for (size_t i = 0; i < applied; i++) {
+        uint16_t want = m[i].type == RTM_NEWRULE ? RTM_DELRULE : m[i].type == RTM_NEWROUTE ? RTM_DELROUTE : 0;
         if (want == 0) { continue; }
         adds++;
         size_t matched = 0;
@@ -253,8 +330,105 @@ TEST remove_deletes_exactly_what_apply_wrote(void) {
     for (size_t j = applied; j < n; j++) {
         if (m[j].type == RTM_DELRULE || m[j].type == RTM_DELROUTE) { dels++; }
     }
-    ASSERT_EQ_FMT((size_t)3, adds, "%zu");
-    ASSERT_EQ_FMT(adds, dels, "%zu");
+    ASSERT_EQ_FMT((size_t)6, adds, "%zu");
+    ASSERT_EQ_FMT((size_t)6, dels, "%zu");
+    down(&f);
+    PASS();
+}
+
+/* catches: a dev-only IPv6 default through an uplink that carries no IPv6 */
+TEST an_uplink_without_ipv6_gets_the_v6_unreachable_only(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    const uint8_t gw[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 1, gw, 4);
+    uplink(&f, FIRC_UPLINK_IFACE, "lo");
+    firc_tunnet_uplink_t u;
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
+    ASSERT(u.routed);
+    ASSERT_FALSE(u.route6.present);
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNREACHABLE, u.table, 20, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 0, AF_INET6), "%zu");
+    down(&f);
+    PASS();
+}
+
+/* catches: refresh leaving the IPv6 default behind, or never writing it once the uplink gains IPv6 */
+TEST refresh_adds_and_drops_the_v6_default_with_the_uplink_s_ipv6(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    uplink(&f, FIRC_UPLINK_IFACE, "lo");
+    firc_tunnet_uplink_t u;
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 0, AF_INET6), "%zu");
+
+    fake_rtnl_add_addr(f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET6), "%zu");
+    ASSERT(u.route6.present);
+
+    fake_rtnl_clear_addrs(f.kernel);
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_refresh(f.rtnl, &f.t[0], &f.all, &u));
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET6), "%zu");
+    ASSERT_FALSE(u.route6.present);
+    ASSERT(u.routed);
+    down(&f);
+    PASS();
+}
+
+static uint32_t first_rule_table(fx_t *f) {
+    fake_rtnl_msg_t m[64];
+    size_t n = fake_rtnl_messages(f->kernel, m, 64);
+    for (size_t i = 0; i < n && i < 64; i++) {
+        if (m[i].type == RTM_NEWRULE) { return m[i].table; }
+    }
+    return 0;
+}
+
+/* catches: a refused IPv6 rule leaving the IPv4 half or the IPv6 unreachable in place */
+TEST a_failed_v6_rule_rolls_back_both_families(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    uplink(&f, FIRC_UPLINK_IFACE, "lo");
+    fake_rtnl_fail_after_of(f.kernel, RTM_NEWRULE, EPERM, 1);
+    firc_tunnet_uplink_t u;
+    ASSERT(firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u) != FIRC_OK);
+    ASSERT_FALSE(fake_rtnl_failure_armed(f.kernel));
+    ASSERT_EQ_FMT(0u, u.table, "%u");
+    ASSERT_EQ_FMT(0u, u.mark, "%#x");
+    uint32_t table = first_rule_table(&f);
+    ASSERT(table >= START);
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, table, 48, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, table, 20, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, table, 48, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNREACHABLE, table, 20, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, fake_rtnl_count(f.kernel, RTM_NEWROUTE, RTN_UNICAST), "%zu");
+    down(&f);
+    PASS();
+}
+
+/* catches: a refused IPv6 default taking the tunnel down or tearing down the fail-closed half */
+TEST a_failed_v6_default_leaves_the_uplink_routed(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    fake_rtnl_add_addr(f.kernel, AF_INET6, 1, RT_SCOPE_UNIVERSE, 0);
+    const uint8_t gw[4] = {10, 0, 0, 1};
+    fake_rtnl_set_gateway(f.kernel, 1, gw, 4);
+    uplink(&f, FIRC_UPLINK_IFACE, "lo");
+    fake_rtnl_fail_after_of(f.kernel, RTM_NEWROUTE, EPERM, 3);
+    firc_tunnet_uplink_t u;
+    ASSERT_EQ(FIRC_OK, firc_tunnet_uplink_apply(f.rtnl, START, &f.t[0], &f.all, &u));
+    ASSERT_FALSE(fake_rtnl_failure_armed(f.kernel));
+    ASSERT(u.routed);
+    ASSERT(u.route.present);
+    ASSERT_FALSE(u.route6.present);
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, u.table, 10, 1, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, u.table, 48, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNREACHABLE, u.table, 20, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, fake_rtnl_count(f.kernel, RTM_DELRULE, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, fake_rtnl_count(f.kernel, RTM_DELROUTE, 0), "%zu");
     down(&f);
     PASS();
 }
@@ -286,8 +460,8 @@ TEST the_start_sweep_removes_a_left_tunnel_rule(void) {
     size_t removed = 0;
     ASSERT_EQ(FIRC_OK, firc_rtnl_clean_stale_rules(f.rtnl, &removed));
     ASSERT_EQ_FMT((size_t)1, removed, "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, 4200, 48, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 4201, 48, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, 4200, 48, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 4201, 48, 0, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -306,10 +480,31 @@ TEST the_start_sweep_flushes_a_left_tunnel_table(void) {
     size_t removed = 0;
     ASSERT_EQ(FIRC_OK, firc_rtnl_clean_stale_rules(f.rtnl, &removed));
     ASSERT_EQ_FMT((size_t)1, removed, "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, 4200, 20, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, 4200, 10, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4200, 0, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4202, 20, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, 4200, 20, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, 4200, 10, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4200, 0, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4202, 20, 0, AF_INET), "%zu");
+    down(&f);
+    PASS();
+}
+
+/* catches: a killed daemon's IPv6 tunnel table surviving the start sweep */
+TEST the_start_sweep_flushes_a_left_v6_tunnel_table(void) {
+    fx_t f;
+    ASSERT(up(&f, IFF_UP));
+    const uint8_t any[16] = {0};
+    const uint8_t doc[16] = {0x20, 0x01, 0x0d, 0xb8};
+    fake_rtnl_add_rule(f.kernel, AF_INET6, 0x30000, FIRC_MARK_GROUP_MASK, 4200, FIRC_RULE_PRIORITY_TUNNEL);
+    fake_rtnl_add_route(f.kernel, AF_INET6, 4200, RTN_UNREACHABLE, FIRC_RTPROT, any, 0, 20);
+    fake_rtnl_add_route(f.kernel, AF_INET6, 4200, RTN_UNICAST, FIRC_RTPROT, any, 0, 10);
+    fake_rtnl_add_route(f.kernel, AF_INET6, 4200, RTN_UNICAST, RTPROT_STATIC, doc, 32, 0);
+    size_t removed = 0;
+    ASSERT_EQ(FIRC_OK, firc_rtnl_clean_stale_rules(f.rtnl, &removed));
+    ASSERT_EQ_FMT((size_t)1, removed, "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, 4200, 48, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNREACHABLE, 4200, 20, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, 4200, 10, 0, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4200, 0, 0, AF_INET6), "%zu");
     down(&f);
     PASS();
 }
@@ -326,8 +521,8 @@ TEST the_start_sweep_leaves_group_tables_alone(void) {
     size_t removed = 0;
     ASSERT_EQ(FIRC_OK, firc_rtnl_clean_stale_rules(f.rtnl, &removed));
     ASSERT_EQ_FMT((size_t)2, removed, "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, 0, 4301, 20, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4300, 20, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, 0, 4301, 20, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, 0, 4300, 20, 0, AF_INET), "%zu");
     down(&f);
     PASS();
 }
@@ -342,9 +537,15 @@ SUITE(tunnet) {
     RUN_TEST(refresh_routes_an_uplink_that_appeared_after_apply);
     RUN_TEST(refresh_moves_the_default_off_a_device_the_uplink_left);
     RUN_TEST(remove_deletes_exactly_what_apply_wrote);
+    RUN_TEST(the_uplink_twin_stays_inside_its_marked_table);
+    RUN_TEST(an_uplink_without_ipv6_gets_the_v6_unreachable_only);
+    RUN_TEST(refresh_adds_and_drops_the_v6_default_with_the_uplink_s_ipv6);
+    RUN_TEST(a_failed_v6_rule_rolls_back_both_families);
+    RUN_TEST(a_failed_v6_default_leaves_the_uplink_routed);
     RUN_TEST(the_field_is_held_under_the_tunnel_owner);
     RUN_TEST(the_start_sweep_removes_a_left_tunnel_rule);
     RUN_TEST(the_start_sweep_flushes_a_left_tunnel_table);
+    RUN_TEST(the_start_sweep_flushes_a_left_v6_tunnel_table);
     RUN_TEST(the_start_sweep_leaves_group_tables_alone);
 }
 

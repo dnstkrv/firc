@@ -127,7 +127,8 @@ static int grpc_open(struct transport *t, const struct tr_node *n, int timeout_s
     struct h2_io io = { .ctx = &t->link, .write = tr_link_write, .read = tr_link_read };
     /* :authority carries the cover domain, as SNI does: the server hides behind it, and a
      * request for another name would give the client away at once. */
-    const char *authority = n->sni[0] ? n->sni : n->host;
+    char hostbuf[160];
+    const char *authority = n->sni[0] ? n->sni : tr_host_literal(n->host, hostbuf, sizeof(hostbuf));
     char path[320];
     grpc_path(n, path, sizeof(path));
     memset(&t->de, 0, sizeof(t->de));

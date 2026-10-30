@@ -15,8 +15,21 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static int g_release[8], g_holding[8];
 
-static unsigned fake_resolve(const char *host, struct in_addr out[ADDR_MAX]) {
+static int g_six_resolves;
+
+static unsigned fake_resolve(const char *host, struct tr_ip out[ADDR_MAX]) {
     if (!strncmp(host, "bad", 3)) return 0;
+    if (!strncmp(host, "six", 3)) {
+        __atomic_add_fetch(&g_six_resolves, 1, __ATOMIC_RELAXED);
+        memset(&out[0], 0, sizeof out[0]);
+        out[0].b[0] = 0x20;
+        out[0].b[1] = 0x01;
+        out[0].b[2] = 0x0d;
+        out[0].b[3] = 0xb8;
+        out[0].b[15] = 0x01;
+        out[0].v6 = 1;
+        return 1;
+    }
     if (!strncmp(host, "hold", 4)) {
         int k = host[4] - '0';
         pthread_mutex_lock(&g_mu);
@@ -25,7 +38,9 @@ static unsigned fake_resolve(const char *host, struct in_addr out[ADDR_MAX]) {
         while (!g_release[k]) pthread_cond_wait(&g_cv, &g_mu);
         pthread_mutex_unlock(&g_mu);
     }
-    out[0].s_addr = htonl(0x0a000001u);
+    memset(&out[0], 0, sizeof out[0]);
+    out[0].b[0] = 0x0a;
+    out[0].b[3] = 0x01;
     return 1;
 }
 
@@ -142,6 +157,7 @@ int main(void) {
     nodes_init(sizeof(struct vless_node));
     transport_pin_host("pinned1");
     transport_pin_host("pinned2");
+    transport_pin_host("six1");
     ctlmap_init(htonl(0xc6120000u), 15);
     static const struct ctln_hooks h = { on_select, on_ack, on_full, 2000, on_map_ack };
     check("resolver thread started", 0, ctln_start(&h));
@@ -210,6 +226,18 @@ int main(void) {
     settle();
     /* catches: a superseded command published after the newer one */
     check("the superseded set is never published", pubs + 1, g_pub_n);
+
+    pubs = g_pub_n;
+    cmd((const char *[]){ "pinned1", "six1", "hold5" }, 3);
+    wait_for(&g_pub_n, pubs + 1, 2000);
+    settle();
+    int s1 = idx_of("six1"), h5 = idx_of("hold5");
+    check("an IPv6-only pin is published with the other pinned nodes", 1,
+          g_pub_n == pubs + 1 && pub_is(pubs, 2, (int[]){ p1, s1 }));
+    release(5);
+    wait_for(&g_pub_n, pubs + 2, 2000);
+    check("an IPv6-only pin then the resolved node", 1, pub_is(pubs + 1, 3, (int[]){ p1, s1, h5 }));
+    check("an IPv6-only pin is not resolved again", 1, g_six_resolves);
 
     pubs = g_pub_n;
     acks = g_ack_n;

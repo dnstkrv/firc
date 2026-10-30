@@ -646,14 +646,14 @@ int main(void) {
     /* ---- subscription arithmetic -----------------------------------------------
      *
      * No link may vanish without landing in a counter. Two of these links make
-     * vless_parse_url return -1: an IPv6 literal host (the first colon is inside the
-     * brackets, so the port reads as 0) and port 0. Both must still count as skipped. */
+     * vless_parse_url return -1: an IPv6 literal with no closing
+     * bracket and port 0. Both must still count as skipped. */
     {
         struct vless_node nodes[16];
         struct vless_sub_stats st;
         const char *sub =
             "vless://a@1.2.3.4:443?security=reality&pbk=K&sni=x.com#ok\n"
-            "vless://b@[2001:db8::1]:443?security=reality&pbk=K&sni=x.com#ipv6\n"
+            "vless://b@[2001:db8::1:443?security=reality&pbk=K&sni=x.com#ipv6\n"
             "vless://c@5.6.7.8:0?security=reality&pbk=K&sni=x.com#zero-port\n"
             "vless://d@9.9.9.9:443?security=tls#tls\n"
             "hy2://e@10.0.0.1:443#foreign\n";
@@ -742,7 +742,7 @@ int main(void) {
             "vless://b@2.2.2.2:443?security=tls#Второй\n"
             "vless://c@3.3.3.3:443?security=tls#Третий\n"
             "vless://d@4.4.4.4:443?type=kcp&security=none#Вебсокет\n"
-            "vless://e@[2001:db8::1]:443?security=none#IPv6\n"
+            "vless://e@[2001:db8::1:443?security=none#IPv6\n"
             "vless://f@6.6.6.6:443?security=reality&pbk=K&sni=x.com#Годный\n";
         size_t n = vless_parse_sub(sub, nodes, 16, &st);
         check_n("reasons: one node usable", 1, (long)n);
@@ -763,7 +763,7 @@ int main(void) {
         check("second reason: transport kcp", "transport kcp is not supported",
               st.reasons[1].reason);
         check("kcp: example is its own node's name", "Вебсокет", st.reasons[1].example);
-        /* The IPv6 literal does not parse and never reaches the usability check, so the
+        /* The unclosed IPv6 literal does not parse and never reaches the usability check, so the
          * subscription loop names the reason itself; otherwise it would be one more skip
          * without an explanation. */
         check("third reason: link cannot be parsed", "cannot parse the link",

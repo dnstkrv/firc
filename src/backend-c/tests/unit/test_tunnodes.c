@@ -1,6 +1,8 @@
 #include "greatest.h"
 #include "firc/tunnels.h"
 #include "firc/tunnodes.h"
+#include "vless.h"
+#include "vlink.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -244,6 +246,23 @@ TEST a_link_key_its_link_no_longer_names_gives_no_row(void)
     PASS();
 }
 
+TEST a_bracketed_ipv6_link_source_is_one_node(void)
+{
+    /* catches: a link source with a bracketed IPv6 host dropped, mis-keyed, or sent with another host */
+    const firc_tunnel_t *t = tunnel("      - id: cccccccc\n        link: \"vless://" U "@[2001:db8::7]:8443?security=reality&pbk=K&sni=x.com#n\"\n", "");
+    ASSERT(t != NULL);
+    ASSERT_EQ(FIRC_OK, build(t, 0, NULL, 0));
+    const char *want[] = {"cccccccc:n"};
+    ASSERT(keys_are(want, 1));
+    ASSERT_EQ(1u, g_nodes.total);
+    ASSERT(g_nodes.v[0].link != NULL);
+    struct vless_node m;
+    ASSERT_EQ(0, vless_parse_url(g_nodes.v[0].link, &m));
+    ASSERT_STR_EQ("2001:db8::7", m.host);
+    ASSERT_EQ(8443, m.port);
+    PASS();
+}
+
 TEST a_link_source_counts_whatever_the_filter(void)
 {
     /* catches: the filter applied to a manual link, or link sources not listed first */
@@ -360,9 +379,9 @@ TEST a_node_the_parser_skips_is_listed_with_its_reason(void)
     PASS();
 }
 
-TEST an_ipv6_server_is_listed_as_not_supported(void)
+TEST an_ipv6_server_is_sent_as_a_bracketed_link(void)
 {
-    /* catches: a node with an IPv6 server sent, or dropped without a reason */
+    /* catches: a node with an IPv6 server dropped, or its host written without brackets */
     static const char body[] = "proxies:\n"
                                "  - {name: six, type: vless, server: \"2001:db8::1\", port: 443, uuid: " U "}\n"
                                "  - {name: four, type: vless, server: 192.0.2.1, port: 443, uuid: " U "}\n";
@@ -371,10 +390,10 @@ TEST an_ipv6_server_is_listed_as_not_supported(void)
     ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
     const char *want[] = {"aaaaaaaa:six", "aaaaaaaa:four"};
     ASSERT(keys_are(want, 2));
-    ASSERT_STR_EQ("IPv6 server is not supported", g_nodes.v[0].skip_reason);
-    ASSERT(g_nodes.v[0].link == NULL);
+    ASSERT(g_nodes.v[0].skip_reason[0] == 0 && g_nodes.v[1].skip_reason[0] == 0);
+    ASSERT(g_nodes.v[0].link != NULL && strncmp(g_nodes.v[0].link, "vless://" U "@[2001:db8::1]:443?", 8 + 36 + 19) == 0);
     ASSERT(g_nodes.v[1].link != NULL);
-    ASSERT_EQ(1u, g_nodes.total);
+    ASSERT_EQ(2u, g_nodes.total);
     PASS();
 }
 
@@ -603,7 +622,8 @@ int main(int argc, char **argv)
     RUN_TEST(the_body_of_another_mark_is_not_used);
     RUN_TEST(the_body_of_other_headers_is_not_used);
     RUN_TEST(a_node_the_parser_skips_is_listed_with_its_reason);
-    RUN_TEST(an_ipv6_server_is_listed_as_not_supported);
+    RUN_TEST(an_ipv6_server_is_sent_as_a_bracketed_link);
+    RUN_TEST(a_bracketed_ipv6_link_source_is_one_node);
     RUN_TEST(a_long_name_is_cut_to_100_bytes);
     RUN_TEST(insecure_is_set_per_tunnel_for_each_build);
     RUN_TEST(a_link_source_that_does_not_parse_is_listed_with_a_reason);

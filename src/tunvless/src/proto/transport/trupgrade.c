@@ -341,8 +341,7 @@ static void trim(const char **v, size_t *vn) {
 static const char *host_of(const struct tr_node *n, char *buf, size_t cap) {
     if (n->http_host && n->http_host[0]) return n->http_host;
     if (n->sni && n->sni[0]) return n->sni;
-    if (strchr(n->host, ':')) { snprintf(buf, cap, "[%s]", n->host); return buf; }
-    return n->host;
+    return tr_host_literal(n->host, buf, cap);
 }
 
 size_t tr_h1_request(const struct tr_node *n, int ws, const char *key, const char *proto,

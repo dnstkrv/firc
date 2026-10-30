@@ -288,12 +288,12 @@ typedef struct {
     int64_t deadline;
 } dels_t;
 
-static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t priority);
+static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t priority, int family);
 
 static void dels_cb(firc_loop_t *loop, void *ud)
 {
     dels_t *w = ud;
-    if (count(w->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL) >= w->want || now_ms() >= w->deadline) {
+    if (count(w->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET) >= w->want || now_ms() >= w->deadline) {
         firc_loop_stop(loop);
     }
 }
@@ -305,7 +305,7 @@ static size_t run_until_dels(fx_t *f, size_t want, int ms)
     firc_loop_add_timer(f->loop, 20, 20, dels_cb, &w, &timer);
     firc_loop_run(f->loop);
     firc_loop_del_timer(f->loop, timer);
-    return count(f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL);
+    return count(f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET);
 }
 
 static int wait_starts(fx_t *f, const char *dev, int want, int ms)
@@ -318,13 +318,13 @@ static int wait_starts(fx_t *f, const char *dev, int want, int ms)
     return starts_of(f, dev);
 }
 
-static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t priority)
+static size_t count(fx_t *f, uint16_t type, uint8_t rtm_type, uint32_t priority, int family)
 {
     fake_rtnl_msg_t m[64];
     size_t n = fake_rtnl_messages(f->kernel, m, 64), c = 0;
     for (size_t i = 0; i < n && i < 64; i++) {
         if (m[i].type == type && (rtm_type == 0 || m[i].rtm_type == rtm_type) &&
-            (priority == 0 || m[i].priority == priority)) {
+            (priority == 0 || m[i].priority == priority) && (family == 0 || m[i].family == family)) {
             c++;
         }
     }
@@ -521,10 +521,12 @@ TEST a_failed_default_route_takes_the_rule_back(void)
     fx_t f;
     ASSERT(fx_up(&f, IFF_UP | IFF_POINTOPOINT));
     const spec_t s[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}};
-    fake_rtnl_fail_after_of(f.kernel, RTM_NEWROUTE, EPERM, 1);
+    fake_rtnl_fail_after_of(f.kernel, RTM_NEWROUTE, EPERM, 2);
     apply(&f, s, 1);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET6), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET6), "%zu");
     ASSERT_EQ(0, wait_starts(&f, "tunvless0", 1, 300));
     fx_down(&f);
     PASS();
@@ -541,7 +543,7 @@ TEST a_removed_tunnel_gives_back_its_rule_and_field_once_reaped(void)
     ASSERT_EQ_FMT(0x20000u, last_rule_mark(&f), "%#x");
     watch(&f, last_pid(&f, "tunvless1"), 0x20000u);
     apply(&f, NULL, 0);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, 0), "%zu");
     ASSERT_EQ_FMT((size_t)2, run_until_dels(&f, 2, 3000), "%zu");
     ASSERT_EQ(0, g_dels_while_alive);
     const spec_t one[] = {{"a", 1, FIRC_UPLINK_IFACE, "lo", false}};
@@ -645,8 +647,8 @@ TEST a_tunnel_back_before_the_reap_keeps_its_uplink(void)
     apply(&f, NULL, 0);
     apply(&f, one, 1);
     ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0, 0), "%zu");
     ASSERT(argv_has(&f, "-m"));
     fx_down(&f);
     PASS();
@@ -666,10 +668,10 @@ static void holders_cb(firc_loop_t *loop, void *ud)
     holders_t *h = ud;
     if (!h->second_reaped && (h->second <= 0 || kill(h->second, 0) != 0)) {
         h->second_reaped = true;
-        h->dels_at_second_reap = count(h->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL);
+        h->dels_at_second_reap = count(h->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET);
         kill(h->first, SIGKILL);
     }
-    if ((h->second_reaped && count(h->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL) > 0) || now_ms() >= h->deadline) {
+    if ((h->second_reaped && count(h->f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET) > 0) || now_ms() >= h->deadline) {
         firc_loop_stop(loop);
     }
 }
@@ -699,12 +701,12 @@ TEST removed_twice_keeps_the_rule_while_the_first_child_lives(void)
     apply(&f, NULL, 0);
     apply(&f, x, 1);
     apply(&f, NULL, 0);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, 0), "%zu");
     ASSERT_EQ(0, kill(p1, 0));
     holders_t h = {.first = p1, .second = 0};
     run_holders(&f, &h);
     ASSERT_EQ_FMT((size_t)0, h.dels_at_second_reap, "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
     ASSERT_EQ(0, g_dels_while_alive);
     fx_down(&f);
     PASS();
@@ -734,7 +736,7 @@ TEST a_later_child_reaped_first_leaves_the_rule_to_the_earlier(void)
     run_holders(&f, &h);
     ASSERT(h.second_reaped);
     ASSERT_EQ_FMT((size_t)0, h.dels_at_second_reap, "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
     ASSERT_EQ(0, g_dels_while_alive);
     fx_down(&f);
     PASS();
@@ -747,13 +749,13 @@ TEST moving_an_uplink_keeps_the_rule_and_moves_the_default(void)
     ASSERT(fx_up(&f, IFF_UP | IFF_POINTOPOINT));
     const spec_t lo[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}};
     apply(&f, lo, 1);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, AF_INET), "%zu");
     const spec_t gone[] = {{"a", 0, FIRC_UPLINK_IFACE, "firc-nope0", false}};
     apply(&f, gone, 1);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELROUTE, RTN_UNICAST, 0, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELROUTE, RTN_BLACKHOLE, 0, 0), "%zu");
     fx_down(&f);
     PASS();
 }
@@ -765,11 +767,11 @@ TEST a_disabled_tunnel_gets_no_uplink_until_enabled(void)
     ASSERT(fx_up(&f, IFF_UP | IFF_POINTOPOINT));
     const spec_t off[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", true}};
     apply(&f, off, 1);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWRULE, 0, 0), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, 0, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWRULE, 0, 0, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, 0, 0, 0), "%zu");
     const spec_t on[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}};
     apply(&f, on, 1);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
     ASSERT_EQ(1, wait_starts(&f, "tunvless0", 1, 2000));
     ASSERT(argv_has(&f, "-m"));
     fx_down(&f);
@@ -787,10 +789,10 @@ TEST switching_to_auto_drops_the_rule_and_the_mark(void)
     ASSERT(argv_has(&f, "-m"));
     const spec_t aut[] = {{"a", 0, FIRC_UPLINK_AUTO, NULL, false}};
     apply(&f, aut, 1);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, 0), "%zu");
     ASSERT_EQ(2, run_until_starts(&f, "tunvless0", 2, 3000));
     ASSERT_FALSE(argv_has(&f, "-m"));
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
     fx_down(&f);
     PASS();
 }
@@ -807,8 +809,8 @@ TEST an_unchanged_reload_keeps_rule_and_process(void)
     apply(&f, s, 1);
     ASSERT_EQ(1, run_until_starts(&f, "tunvless0", 2, 700));
     ASSERT(pid > 0 && kill(pid, 0) == 0);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_DELRULE, 0, 0, 0), "%zu");
     fx_down(&f);
     PASS();
 }
@@ -974,12 +976,12 @@ TEST link_up_rewrites_the_default_of_its_own_uplink(void)
     ASSERT(fx_up(&f, 0));
     const spec_t s[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}};
     apply(&f, s, 1);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, 0), "%zu");
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
     firc_tunrun_refresh_uplinks(f.run, "firc-nope0");
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, 0), "%zu");
     firc_tunrun_refresh_uplinks(f.run, "lo");
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, AF_INET), "%zu");
     fx_down(&f);
     PASS();
 }
@@ -992,10 +994,10 @@ TEST a_reread_of_everything_rewrites_every_uplink(void)
     const spec_t s[] = {{"a", 0, FIRC_UPLINK_IFACE, "lo", false}, {"b", 1, FIRC_UPLINK_IFACE, "lo", false},
                         {"c", 2, FIRC_UPLINK_AUTO, NULL, false}};
     apply(&f, s, 3);
-    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)0, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, 0), "%zu");
     fake_rtnl_set_link_flags(f.kernel, IFF_UP | IFF_POINTOPOINT);
     firc_tunrun_refresh_uplinks(f.run, NULL);
-    ASSERT_EQ_FMT((size_t)2, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0), "%zu");
+    ASSERT_EQ_FMT((size_t)2, count(&f, RTM_NEWROUTE, RTN_UNICAST, 0, AF_INET), "%zu");
     ASSERT_EQ(1, uplink_ok_of(&f, "a"));
     ASSERT_EQ(1, uplink_ok_of(&f, "b"));
     fx_down(&f);
@@ -1015,7 +1017,7 @@ TEST stop_ends_children_then_removes_uplinks(void)
     watch(&f, pid, 0);
     firc_tunrun_stop(f.run, 1000);
     ASSERT(kill(pid, 0) == -1 && errno == ESRCH);
-    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL), "%zu");
+    ASSERT_EQ_FMT((size_t)1, count(&f, RTM_DELRULE, 0, FIRC_RULE_PRIORITY_TUNNEL, AF_INET), "%zu");
     ASSERT_EQ(0, g_dels_while_alive);
     fx_down(&f);
     PASS();
