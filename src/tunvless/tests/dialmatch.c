@@ -526,10 +526,11 @@ int main(void) {
     if (fd < 0) {
         const char *pre = "tunvless[warn]: cannot bind a socket for the node to lo";
         check("IPv6 socket without its device is not used", 1, !strncmp(g_err, pre, strlen(pre)));
-    } else if (getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl) == 0 || (errno != EOPNOTSUPP && errno != ENOPROTOOPT)) {
-        check_str("IPv6 socket bound to the device", "lo", dev);
-    } else {
+    } else if (getenv("TUNVLESS_NO_SOCKOPT_READ")) {
         printf("dialmatch: the device of a socket cannot be read here (qemu-user), not checked\n");
+    } else {
+        getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl);
+        check_str("IPv6 socket bound to the device", "lo", dev);
     }
     if (fd >= 0) close(fd);
     transport_set_bind_dev(NULL);

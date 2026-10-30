@@ -512,6 +512,7 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
           SKIP: ${{ matrix.skip }}
+          TUNVLESS_NO_SOCKOPT_READ: 1
         run: |
           set -eu
           tests="h2match xhupmatch wsmatch pqfallbackmatch b3match visionmatch submatch subpq tungromatch tunnelmatch \
