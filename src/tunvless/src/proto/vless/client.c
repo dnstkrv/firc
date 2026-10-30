@@ -25,8 +25,8 @@
 #include "sublink.h"
 
 int vless_connect(const struct vless_node *node, struct transport *conn, int timeout_s) {
-    struct tr_node tn;
-    sl_tr_node(node, &tn);
+    struct tr_node tn, td;
+    sl_tr_nodes(node, &tn, &td);
     return transport_open(conn, &tn, timeout_s);
 }
 

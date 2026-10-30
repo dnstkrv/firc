@@ -128,6 +128,11 @@ int main(void) {
     /* catches: equal values stored twice, or different ones merged */
     check("intern: equal values share one copy", 1, s1 && s1 == s2 && !strcmp(s1, "abc"));
     check("intern: a different value is another copy", 1, s3 && s3 != s1 && !strcmp(s3, "abd"));
+    char b1[8] = { 'a', 0, 'b' }, b2[8] = { 'a', 0, 'b' }, b3[8] = { 'a', 0, 'c' };
+    const char *i1 = nodes_intern(b1, 8), *i2 = nodes_intern(b2, 8), *i3 = nodes_intern(b3, 8);
+    /* catches: nodes_intern still comparing strlen */
+    check("intern blob: equal blobs share one copy", 1, i1 && i1 == i2 && !memcmp(i1, b1, 8));
+    check("intern blob: blobs differing after a NUL are apart", 1, i3 && i3 != i1 && !memcmp(i3, b3, 8));
 
     g_resolve = fake_resolve;
     __atomic_store_n(&g_stop, 0, __ATOMIC_RELEASE);
@@ -216,7 +221,7 @@ int main(void) {
     check("pin hosts: the one name past the last place answers full", 1,
           sn.n == 2 && ((sn.ok[0] > 0 && sn.ok[1] == TR_EPINFULL) || (sn.ok[1] > 0 && sn.ok[0] == TR_EPINFULL)));
     int full = 0, other = 0;
-    for (int i = 1000; i < 1600; i++) {
+    for (int i = 4000; i < 4600; i++) {
         snprintf(h, sizeof h, "h%d", i);
         int rc = transport_pin_host(h);
         if (rc == TR_EPINFULL) full++;

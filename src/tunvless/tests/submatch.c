@@ -117,6 +117,8 @@ static size_t xhx_clash(const char *opts, struct vless_node *out, struct vless_s
     return vless_parse_sub(y, out, 4, st);
 }
 
+static const char *dl_host(const struct vless_node *n);
+
 static const char *xhx_reason(size_t got, const struct vless_sub_stats *st) {
     return got ? "(usable)" : st->reasons_n ? st->reasons[0].reason : "(no reason)";
 }
@@ -212,7 +214,10 @@ static void t_xhx_clash_maps_kebab_keys_and_download_settings(void) {
     struct vless_sub_stats st;
     size_t got = xhx_clash("      x-padding-method: tokenish\n      seq-placement: query\n"
                            "      download-settings:\n        server: d.example\n", out, &st);
-    check("xhx clash: download-settings skipped", "xhttp: downloadSettings is not supported", xhx_reason(got, &st));
+    check("xhx clash: download-settings with server only, usable as mihomo fills the port", "(usable)", xhx_reason(got, &st));
+    check("xhx clash: download-settings with server only, block host", "d.example", got ? dl_host(&out[0]) : "");
+    check("xhx clash: download-settings leaves no xhttp key", "seqPlacement=query\nxPaddingMethod=tokenish\n",
+          got ? xhx_of(&out[0]) : "");
     got = xhx_clash("      x-padding-method: tokenish\n      seq-placement: query\n"
                     "      reuse-settings:\n        max-connections: 4\n", out, &st);
     check("xhx clash: usable", "(usable)", xhx_reason(got, &st));
@@ -382,6 +387,629 @@ static void t_xhx_all(void) {
     t_xhx_hostile_value_refused_in_every_format();
     t_xhx_data_in_cookie_needs_packet_up();
     t_xhx_headers_reach_the_node_and_host_is_refused();
+}
+
+static void t_intern_blob(void) {
+    struct vless_node a, b, c, d;
+    memset(&a, 0, sizeof a);
+    strcpy(a.host, "a.example");
+    b = a;
+    c = a;
+    c.sni[0] = 'x';
+    d = a;
+    d.host[20] = 'z';
+    const char *pa = (const char *)sl_intern_node(&a), *pb = (const char *)sl_intern_node(&b);
+    const char *pc = (const char *)sl_intern_node(&c), *pd = (const char *)sl_intern_node(&d);
+    /* catches: a blob compared by strlen (every node blob has strlen 0) */
+    check_n("intern blob: equal nodes share one pointer", 1, pa && pa == pb && !memcmp(pa, &a, sizeof a));
+    check_n("intern blob: a byte in sni gives another pointer", 1, pc && pc != pa);
+    check_n("intern blob: a byte after the NUL of host gives another pointer", 1, pd && pd != pa && pd != pc);
+    sl_intern_reset();
+}
+
+static void t_intern_blob_full(void) {
+    struct vless_node n;
+    memset(&n, 0, sizeof n);
+    int ok = 1;
+    for (int i = 1; i <= 512; i++) {
+        n.port = (uint16_t)i;
+        if (!sl_intern_node(&n)) ok = 0;
+    }
+    n.port = 513;
+    /* catches: SL_FULL returned as a pointer to a node, or no bound */
+    check_n("intern blob full: 512 accepted", 1, ok);
+    check_n("intern blob full: the 513th is NULL", 1, sl_intern_node(&n) == NULL);
+    sl_intern_reset();
+    check_n("intern blob full: after reset the 513th is accepted", 1, sl_intern_node(&n) != NULL);
+    sl_intern_reset();
+}
+
+static size_t g_hook_n;
+
+static const char *hook_echo(const char *v, size_t len) {
+    g_hook_n = len;
+    return v;
+}
+
+static void t_intern_node_hook(void) {
+    struct vless_node a;
+    memset(&a, 0, sizeof a);
+    strcpy(a.host, "h.example");
+    sl_set_interner(hook_echo);
+    const struct vless_node *echo = sl_intern_node(&a);
+    size_t seen = g_hook_n;
+    sl_set_interner(xhx_no_room);
+    const struct vless_node *none = sl_intern_node(&a);
+    sl_set_interner(NULL);
+    /* catches: the hook bypassed for node blobs, or its NULL turned into a pointer */
+    check_n("intern node hook: the hook's pointer is returned", 1, echo == &a);
+    check_n("intern node hook: the whole node goes to the hook", (long)sizeof a, (long)seen);
+    check_n("intern node hook: NULL from the hook passes through", 1, none == NULL);
+}
+
+#define DL_PBK "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw"
+#define DL_D "{\"address\":\"d.example\",\"port\":8443,\"network\":\"xhttp\",\"security\":\"tls\",\"tlsSettings\":" \
+             "{\"serverName\":\"dl.example\",\"fingerprint\":\"firefox\"},\"xhttpSettings\":{\"host\":\"cdn.example\"," \
+             "\"path\":\"/dl?k=v\",\"xPaddingBytes\":\"20-40\",\"sessionIDPlacement\":\"header\",\"headers\":{\"X-D\":\"1\"}}}"
+#define DL_B(h) "{\"address\":\"" h "\",\"port\":443,\"network\":\"xhttp\"}"
+#define DL_TLS(tls) "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"security\":\"tls\"," \
+                    "\"tlsSettings\":{\"serverName\":\"dl.example\"" tls "}}"
+#define DL_X(x) "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"xhttpSettings\":" x "}"
+
+static const struct vless_node g_no_dl;
+
+static const struct vless_node *dl_of(const struct vless_node *n) {
+    return n->dl && n->dl != &SL_DL_FULL ? n->dl : &g_no_dl;
+}
+
+static const char *dl_host(const struct vless_node *n) {
+    return !n->dl ? "(none)" : n->dl == &SL_DL_FULL ? "(full)" : n->dl->host;
+}
+
+static int dl_link_as(const char *main, const char *json, struct vless_node *n) {
+    static char url[16384];
+    size_t o = (size_t)snprintf(url, sizeof url, "vless://" XHU "@m.example:443?%s&extra=", main);
+    for (const unsigned char *p = (const unsigned char *)json; *p && o + 4 < sizeof url; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) url[o++] = (char)*p;
+        else o += (size_t)snprintf(url + o, sizeof url - o, "%%%02X", *p);
+    }
+    snprintf(url + o, sizeof url - o, "#d");
+    return vless_parse_url(url, n);
+}
+
+static int dl_link_json(const char *json, struct vless_node *n) {
+    return dl_link_as("type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up", json, n);
+}
+
+static int dl_link(const char *block, struct vless_node *n) {
+    static char js[8192];
+    snprintf(js, sizeof js, "{\"downloadSettings\":%s}", block);
+    return dl_link_json(js, n);
+}
+
+static struct vless_node g_dl_last;
+
+static void dl_hook(void *ud, const struct vless_node *n, const char *why) {
+    (void)ud;
+    (void)why;
+    g_dl_last = *n;
+}
+
+static const char *dl_xray(const char *xhttp) {
+    struct vless_node out[4];
+    static struct vless_sub_stats st;
+    memset(&g_dl_last, 0, sizeof g_dl_last);
+    vless_set_node_hook(dl_hook, NULL);
+    size_t got = xhx_xray(xhttp, out, &st);
+    vless_set_node_hook(NULL, NULL);
+    return xhx_reason(got, &st);
+}
+
+static void t_dl_link_extra(void) {
+    struct vless_node n;
+    int rc = dl_link(DL_D, &n);
+    const struct vless_node *d = dl_of(&n);
+    /* catches: block fields landing on the main node, or the block dropped */
+    check_n("dl link: usable, as Xray takes a download block", 0, rc);
+    check("dl link: reason", "", n.skip_reason);
+    check("dl link: block host", "d.example", dl_host(&n));
+    check_n("dl link: block port", 8443, d->port);
+    check("dl link: block type", "xhttp", d->type);
+    check("dl link: block security", "tls", d->security);
+    check("dl link: block sni", "dl.example", d->sni);
+    check("dl link: block fp", "firefox", d->fp);
+    check("dl link: block http_host", "cdn.example", d->http_host);
+    check("dl link: block path", "/dl?k=v", d->path);
+    check_n("dl link: block pad lower", 20, d->pad_from);
+    check_n("dl link: block pad upper", 40, d->pad_to);
+    check("dl link: block xhx", "sessionIDPlacement=header\n", xhx_of(d));
+    check("dl link: block headers", "X-D: 1\n", d->headers);
+    check("dl link: block mode", "", d->mode);
+    check_n("dl link: block has no block", 1, d->dl == NULL);
+    check("dl link: block reason", "", d->skip_reason);
+    check("dl link: main host", "m.example", n.host);
+    check_n("dl link: main pad untouched", 0, n.pad_to);
+    check("dl link: main headers untouched", "", n.headers);
+}
+
+static void t_dl_xray_json(void) {
+    const char *why = dl_xray("{\"path\":\"/x\",\"mode\":\"packet-up\",\"downloadSettings\":{\"address\":\"[2001:db8::5]\","
+                              "\"port\":\"8443\",\"network\":\"splithttp\",\"security\":\"reality\",\"realitySettings\":"
+                              "{\"serverName\":\"r.example\",\"publicKey\":\"" DL_PBK "\",\"shortId\":\"ab\"}}}");
+    const struct vless_node *d = dl_of(&g_dl_last);
+    /* catches: a string port, a bracketed address or splithttp refused */
+    check("dl xray: usable, as Xray takes a download block", "(usable)", why);
+    check("dl xray: block host unbracketed", "2001:db8::5", dl_host(&g_dl_last));
+    check_n("dl xray: block port from a string", 8443, d->port);
+    check("dl xray: splithttp is xhttp", "xhttp", d->type);
+    check("dl xray: block pbk", DL_PBK, d->pbk);
+    check("dl xray: block sid", "ab", d->sid);
+    check("dl xray: block sni", "r.example", d->sni);
+    check("dl xray: block reason", "", d->skip_reason);
+}
+
+static void t_dl_extra_wins(void) {
+    struct vless_node n;
+    /* catches: the outer block kept when extra replaces the settings, or the first heap block leaked */
+    dl_xray("{\"path\":\"/x\",\"downloadSettings\":" DL_B("outer.example") ",\"extra\":{\"downloadSettings\":"
+            DL_B("inner.example") "}}");
+    check("dl extra after block: extra's block", "inner.example", dl_host(&g_dl_last));
+    dl_xray("{\"path\":\"/x\",\"extra\":{\"downloadSettings\":" DL_B("inner.example") "},\"downloadSettings\":"
+            DL_B("outer.example") "}");
+    check("dl extra before block: extra's block", "inner.example", dl_host(&g_dl_last));
+    const char *why = dl_xray("{\"path\":\"/x\",\"downloadSettings\":" DL_B("outer.example") ",\"extra\":{\"seqPlacement\":\"cookie\"}}");
+    check("dl extra without a block: no block", "(none)", dl_host(&g_dl_last));
+    check("dl extra without a block: usable", "(usable)", why);
+    dl_xray("{\"path\":\"/x\",\"extra\":{\"downloadSettings\":" DL_B("one.example") "},\"extra\":{\"downloadSettings\":"
+            DL_B("two.example") "}}");
+    check("dl two extras: the second's block", "two.example", dl_host(&g_dl_last));
+    dl_link_json("{\"downloadSettings\":" DL_B("one.example") ",\"downloadSettings\":" DL_B("two.example") "}", &n);
+    check("dl repeated key: the second block", "two.example", dl_host(&n));
+    dl_link_json("{\"downloadSettings\":" DL_B("one.example") ",\"downloadSettings\":null}", &n);
+    check("dl repeated key: null drops the first", "(none)", dl_host(&n));
+    static char js[2048];
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    snprintf(js, sizeof js,
+             "{\"outbounds\":[{\"protocol\":\"vless\",\"settings\":{\"address\":\"example.org\",\"port\":443,\"id\":\"" XHU "\"},"
+             "\"streamSettings\":{\"network\":\"xhttp\",\"xhttpSettings\":{\"downloadSettings\":" DL_B("one.example") "},"
+             "\"xhttpSettings\":{\"downloadSettings\":" DL_B("two.example") "}}}]}");
+    memset(&g_dl_last, 0, sizeof g_dl_last);
+    vless_set_node_hook(dl_hook, NULL);
+    memset(&st, 0, sizeof st);
+    vless_parse_sub(js, out, 4, &st);
+    vless_set_node_hook(NULL, NULL);
+    check("dl repeated xhttpSettings: the second block", "two.example", dl_host(&g_dl_last));
+}
+
+static void t_xhttp_host_main(void) {
+    /* catches: main xhttpSettings.host still dropped, or read from extra */
+    check("xhttp host main: usable", "(usable)", dl_xray("{\"host\":\"h.example\",\"path\":\"/p\"}"));
+    check("xhttp host main: read", "h.example", g_dl_last.http_host);
+    dl_xray("{\"path\":\"/p\",\"extra\":{\"host\":\"h.example\"}}");
+    check("xhttp host in extra: not read", "", g_dl_last.http_host);
+    dl_xray("{\"host\":\"h.example\",\"path\":\"/p\",\"extra\":{\"seqPlacement\":\"cookie\"}}");
+    check("xhttp host with extra: the outer one", "h.example", g_dl_last.http_host);
+}
+
+static void t_dl_refusals(void) {
+    static const char *const cases[][2] = {
+        { "{\"port\":443,\"network\":\"xhttp\"}", "downloadSettings: no address" },
+        { "{\"network\":\"ws\"}", "downloadSettings: no address" },
+        { "{\"address\":\"d.example\",\"network\":\"xhttp\"}", "downloadSettings: no port" },
+        { "{\"address\":\"d.example\",\"port\":443}", "downloadSettings: network tcp is not xhttp" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"ws\"}", "downloadSettings: network ws is not xhttp" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"ws\",\"finalmask\":{}}", "downloadSettings: network ws is not xhttp" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"security\":\"xtls\"}",
+          "downloadSettings: security=xtls is not supported" },
+        { "{\"address\":\"192.0.2.7\",\"port\":443,\"network\":\"xhttp\",\"security\":\"tls\"}",
+          "downloadSettings: tls to an IP address without sni: nothing to verify" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"security\":\"reality\","
+          "\"realitySettings\":{\"serverName\":\"r.example\"}}", "downloadSettings: reality without pbk" },
+        { DL_B("0.0.0.0"), "downloadSettings: 0.0.0.0: nobody to answer" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"finalmask\":{}}",
+          "downloadSettings: finalmask is not supported" },
+        { "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"quicParams\":{}}",
+          "downloadSettings: quicParams is not supported" },
+        { DL_TLS(",\"alpn\":[\"h3\"]"), "downloadSettings: alpn h3 is not supported" },
+        { DL_TLS(",\"alpn\":[\"http/1.1\"]"), "downloadSettings: alpn http/1.1 is not supported" },
+        { DL_TLS(",\"alpn\":\"h3\""), "downloadSettings: alpn h3 is not supported" },
+        { DL_TLS(",\"alpn\":\"http/1.1\""), "downloadSettings: alpn http/1.1 is not supported" },
+        { DL_TLS(",\"alpn\":[\"h3\",1]"), "downloadSettings: does not parse" },
+        { "\"x\"", "downloadSettings: does not parse" },
+        { DL_TLS(",\"allowInsecure\":true"), "downloadSettings: allowInsecure: needs --insecure" },
+    };
+    struct vless_node n;
+    char name[80];
+    vless_set_insecure(0);
+    /* catches: any refusal missing, or a fallback to the main endpoint */
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        int rc = dl_link(cases[i][0], &n);
+        snprintf(name, sizeof name, "dl refusal %zu: skipped", i);
+        check_n(name, 1, rc);
+        snprintf(name, sizeof name, "dl refusal %zu: reason", i);
+        check(name, cases[i][1], n.skip_reason);
+    }
+}
+
+static void t_dl_accepted(void) {
+    static const char *const cases[] = {
+        DL_TLS(",\"alpn\":[\"h2\",\"http/1.1\"]"),
+        DL_TLS(",\"alpn\":[\"h3\",\"h2\"]"),
+        DL_TLS(",\"alpn\":\"h3,h2\""),
+        DL_X("{\"uplinkDataPlacement\":\"header\"}"),
+        DL_X("{\"uplinkHTTPMethod\":\"GET\"}"),
+        DL_X("{\"sessionIDTable\":\"hex\",\"sessionIDLength\":7,\"seqKey\":\"q\"}"),
+        DL_X("{\"mode\":\"stream-one\"}"),
+        DL_X("{\"mode\":\"stream-down\"}"),
+        DL_X("{\"downloadSettings\":{\"address\":\"x.example\"}}"),
+        "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"sockopt\":{\"mark\":5},\"xhttpSettings\":{\"xmux\":{}}}",
+    };
+    struct vless_node n;
+    char name[80];
+    /* catches: the download's own upload checks, id table, mode, sockopt or a nested block refusing it */
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        dl_link(cases[i], &n);
+        snprintf(name, sizeof name, "dl accepted %zu: block reason", i);
+        check(name, "", dl_of(&n)->skip_reason);
+        snprintf(name, sizeof name, "dl accepted %zu: node reason", i);
+        check(name, "", n.skip_reason);
+        snprintf(name, sizeof name, "dl accepted %zu: block mode", i);
+        check(name, "", dl_of(&n)->mode);
+        snprintf(name, sizeof name, "dl accepted %zu: block host", i);
+        check(name, "d.example", dl_host(&n));
+    }
+    dl_link(cases[5], &n);
+    check("dl accepted: id table and length dropped", "seqKey=q\n", xhx_of(dl_of(&n)));
+    dl_link(cases[8], &n);
+    check_n("dl accepted: nested block ignored", 1, dl_of(&n)->dl == NULL);
+    check_n("dl null: usable", 0, dl_link("null", &n));
+    check("dl null: no block", "(none)", dl_host(&n));
+    vless_set_insecure(1);
+    dl_link(DL_TLS(",\"allowInsecure\":true"), &n);
+    vless_set_insecure(0);
+    check("dl insecure: block reason", "", dl_of(&n)->skip_reason);
+    check_n("dl insecure: block not verified", 1, dl_of(&n)->insecure);
+}
+
+static void t_dl_stream_one_refused(void) {
+    struct vless_node n;
+    int tls = dl_link_as("type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=stream-one",
+                         "{\"downloadSettings\":" DL_D "}", &n);
+    /* catches: Xray's build-time refusal not copied */
+    check_n("dl stream-one tls: skipped", 1, tls);
+    check("dl stream-one tls: reason", "xhttp: downloadSettings cannot be used in stream-one mode", n.skip_reason);
+    int rea = dl_link_as("type=xhttp&security=reality&pbk=" DL_PBK "&sni=m.example&path=%2Fxp&mode=stream-one",
+                         "{\"downloadSettings\":" DL_D "}", &n);
+    check_n("dl stream-one reality: skipped", 1, rea);
+    check("dl stream-one reality: reason", "xhttp: downloadSettings cannot be used in stream-one mode", n.skip_reason);
+    int one = dl_link_as("type=xhttp&security=reality&pbk=" DL_PBK "&sni=m.example&path=%2Fxp&mode=stream-one",
+                         "{\"seqKey\":\"q\"}", &n);
+    check_n("stream-one without a block: usable", 0, one);
+    int au = dl_link_as("type=xhttp&security=reality&pbk=" DL_PBK "&sni=m.example&path=%2Fxp&mode=auto",
+                        "{\"downloadSettings\":" DL_D "}", &n);
+    check_n("dl auto reality: usable, Xray picks stream-up", 0, au);
+}
+
+static void t_dl_block_checked_as_packet_up(void) {
+    struct vless_node n;
+    int rc = dl_link_as("type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=stream-up",
+                        "{\"downloadSettings\":" DL_X("{\"uplinkDataPlacement\":\"header\"}") "}", &n);
+    /* catches: the block's xhttp keys checked under the main mode, where the GET side checks them as packet-up */
+    check_n("dl packet-up check: usable under main stream-up", 0, rc);
+    check("dl packet-up check: block reason", "", dl_of(&n)->skip_reason);
+    check("dl packet-up check: block keys kept", "uplinkDataPlacement=header\n", xhx_of(dl_of(&n)));
+    rc = dl_link_as("type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=stream-up",
+                    "{\"downloadSettings\":" DL_X("{\"uplinkDataPlacement\":\"path\"}") "}", &n);
+    check_n("dl packet-up check: a key the GET side refuses, skipped", 1, rc);
+    check("dl packet-up check: its reason", "downloadSettings: xhttp: unsupported uplinkDataPlacement: path", n.skip_reason);
+}
+
+static void t_dl_full(void) {
+    struct vless_node b, n;
+    memset(&b, 0, sizeof b);
+    sl_intern_reset();
+    for (int i = 1; i <= 512; i++) {
+        b.port = (uint16_t)i;
+        sl_intern_node(&b);
+    }
+    int rc = dl_link(DL_D, &n);
+    sl_intern_reset();
+    /* catches: a full table read as a usable or empty block */
+    check_n("dl full: skipped", 1, rc);
+    check("dl full: marker", "(full)", dl_host(&n));
+    check("dl full: reason", "too many distinct download blocks", n.skip_reason);
+}
+
+static void t_dl_shared(void) {
+    struct vless_node a, b;
+    dl_link(DL_D, &a);
+    dl_link(DL_D, &b);
+    /* catches: a block allocated per node */
+    check_n("dl shared: one pointer for equal blocks", 1, a.dl && a.dl != &SL_DL_FULL && a.dl == b.dl);
+}
+
+#define DLC_MAIN "    server: m.example\n    port: 443\n    tls: true\n    servername: m.example\n    client-fingerprint: chrome\n"
+#define DLC_B0 "\n        server: d.example\n        port: 8443\n"
+#define DLC_PA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define DLC_PB "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define DLC_E1 "AAj+DQAEAQIDBA=="
+#define DLC_E2 "AAj+DQAEBQYHCA=="
+#define DLC_PBK1 "A84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw"
+
+static const char *dl_clash(const char *mainx, const char *mx, const char *block) {
+    static char y[8192];
+    struct vless_node out[4];
+    static struct vless_sub_stats st;
+    snprintf(y, sizeof y, "proxies:\n  - name: c\n    type: vless\n    uuid: " XHU "\n    network: xhttp\n%s"
+             "    xhttp-opts:\n      path: /xp\n%s      download-settings:%s", mainx, mx, block);
+    memset(&g_dl_last, 0, sizeof g_dl_last);
+    memset(&st, 0, sizeof st);
+    vless_set_node_hook(dl_hook, NULL);
+    size_t got = vless_parse_sub(y, out, 4, &st);
+    vless_set_node_hook(NULL, NULL);
+    return xhx_reason(got, &st);
+}
+
+static void t_dl_clash(void) {
+    const char *why = dl_clash(DLC_MAIN, "      host: h.example\n      headers: {X-M: \"2\"}\n      x-padding-bytes: 100-200\n"
+                               "      session-placement: header\n      session-length: 16\n      seq-key: sq\n",
+                               DLC_B0 "        tls: true\n        servername: dl.example\n        client-fingerprint: firefox\n"
+                               "        fingerprint: " DLC_PB "\n        skip-cert-verify: false\n        alpn: [h2]\n"
+                               "        ech-opts: {enable: true, config: \"" DLC_E2 "\"}\n        path: /dl\n"
+                               "        host: cdn.example\n        headers: {X-D: \"1\"}\n        x-padding-bytes: 20-40\n"
+                               "        session-placement: query\n        reuse-settings: {max-connections: 4}\n");
+    const struct vless_node *d = dl_of(&g_dl_last);
+    /* catches: the Clash block mapped to the wrong fields or not read */
+    check("dl clash: usable, as mihomo takes download-settings", "(usable)", why);
+    check("dl clash: block host", "d.example", dl_host(&g_dl_last));
+    check_n("dl clash: block port", 8443, d->port);
+    check("dl clash: block type", "xhttp", d->type);
+    check("dl clash: block security", "tls", d->security);
+    check("dl clash: block sni", "dl.example", d->sni);
+    check("dl clash: block fp", "firefox", d->fp);
+    check("dl clash: block pins", DLC_PB, d->pcs ? d->pcs : "(null)");
+    check_n("dl clash: block not insecure", 0, d->allow_insecure);
+    check("dl clash: block ech", DLC_E2, d->ech ? d->ech : "(null)");
+    check("dl clash: block http_host", "cdn.example", d->http_host);
+    check("dl clash: block path", "/dl", d->path);
+    check("dl clash: block headers", "X-D: 1\n", d->headers);
+    check_n("dl clash: pad from the main proxy, lower", 100, d->pad_from);
+    check_n("dl clash: pad from the main proxy, upper", 200, d->pad_to);
+    check("dl clash: xhttp keys from the main proxy", "sessionIDPlacement=header\nseqKey=sq\n", xhx_of(d));
+    check("dl clash: block mode", "", d->mode);
+    check("dl clash: block uuid", "", d->uuid);
+    check("dl clash: block name", "", d->name);
+    check_n("dl clash: block has no block", 1, d->dl == NULL);
+    check("dl clash: block reason", "", d->skip_reason);
+    check("dl clash: main http_host", "h.example", g_dl_last.http_host);
+    check("dl clash: main headers", "X-M: 2\n", g_dl_last.headers);
+    check("dl clash: main host", "m.example", g_dl_last.host);
+}
+
+static void t_dl_clash_reality(void) {
+    dl_clash(DLC_MAIN, "", DLC_B0 "        reality-opts: {public-key: " DL_PBK ", short-id: ab}\n");
+    const struct vless_node *d = dl_of(&g_dl_last);
+    /* catches: reality-opts of the block ignored */
+    check("dl clash reality: security", "reality", d->security);
+    check("dl clash reality: pbk", DL_PBK, d->pbk);
+    check("dl clash reality: sid", "ab", d->sid);
+    check("dl clash reality: block reason", "", d->skip_reason);
+}
+
+static char g_dlc_buf[160];
+
+static const char *dlc_host(const struct vless_node *d) { return d->host; }
+static const char *dlc_port(const struct vless_node *d) { snprintf(g_dlc_buf, sizeof g_dlc_buf, "%u", d->port); return g_dlc_buf; }
+static const char *dlc_security(const struct vless_node *d) { return d->security; }
+static const char *dlc_sni(const struct vless_node *d) { return d->sni; }
+static const char *dlc_fp(const struct vless_node *d) { return d->fp; }
+static const char *dlc_pcs(const struct vless_node *d) { return d->pcs ? d->pcs : "(null)"; }
+static const char *dlc_insecure(const struct vless_node *d) { return d->allow_insecure ? "1" : "0"; }
+static const char *dlc_ech(const struct vless_node *d) { return d->ech ? d->ech : "(null)"; }
+static const char *dlc_reason(const struct vless_node *d) { return d->skip_reason; }
+static const char *dlc_http_host(const struct vless_node *d) { return d->http_host; }
+static const char *dlc_path(const struct vless_node *d) { return d->path; }
+static const char *dlc_headers(const struct vless_node *d) { return d->headers; }
+static const char *dlc_reality(const struct vless_node *d) {
+    snprintf(g_dlc_buf, sizeof g_dlc_buf, "%s %s %s", d->security, d->pbk, d->sid);
+    return g_dlc_buf;
+}
+
+static void dl_inherit(const char *field, const char *mainx, const char *mx, const char *without, const char *with,
+                       const char *(*get)(const struct vless_node *), const char *mainv, const char *ownv) {
+    char name[96];
+    dl_clash(mainx, mx, without);
+    snprintf(name, sizeof name, "dl clash inherits %s: the main value", field);
+    check(name, mainv, get(dl_of(&g_dl_last)));
+    dl_clash(mainx, mx, with);
+    snprintf(name, sizeof name, "dl clash inherits %s: its own value", field);
+    check(name, ownv, get(dl_of(&g_dl_last)));
+}
+
+static void t_dl_clash_inherits_server(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("server", DLC_MAIN, "", "\n        port: 8443\n", DLC_B0, dlc_host, "m.example", "d.example");
+}
+
+static void t_dl_clash_inherits_port(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("port", DLC_MAIN, "", "\n        server: d.example\n", DLC_B0, dlc_port, "443", "8443");
+}
+
+static void t_dl_clash_inherits_tls(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("tls", DLC_MAIN, "", DLC_B0, DLC_B0 "        tls: false\n", dlc_security, "tls", "none");
+    dl_inherit("tls off", "    server: m.example\n    port: 443\n", "", DLC_B0 "        servername: dl.example\n",
+               DLC_B0 "        servername: dl.example\n        tls: true\n", dlc_security, "none", "tls");
+}
+
+static void t_dl_clash_inherits_servername(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("servername", DLC_MAIN, "", DLC_B0, DLC_B0 "        servername: dl.example\n", dlc_sni, "m.example", "dl.example");
+}
+
+static void t_dl_clash_inherits_client_fingerprint(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("client-fingerprint", DLC_MAIN, "", DLC_B0, DLC_B0 "        client-fingerprint: firefox\n", dlc_fp,
+               "chrome", "firefox");
+}
+
+static void t_dl_clash_inherits_fingerprint(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("fingerprint", DLC_MAIN "    fingerprint: " DLC_PA "\n", "", DLC_B0,
+               DLC_B0 "        fingerprint: " DLC_PB "\n", dlc_pcs, DLC_PA, DLC_PB);
+}
+
+static void t_dl_clash_inherits_skip_cert_verify(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("skip-cert-verify", DLC_MAIN "    skip-cert-verify: true\n", "", DLC_B0,
+               DLC_B0 "        skip-cert-verify: false\n", dlc_insecure, "1", "0");
+}
+
+static void t_dl_clash_inherits_ech_opts(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("ech-opts", DLC_MAIN "    ech-opts:\n      enable: true\n      config: \"" DLC_E1 "\"\n", "", DLC_B0,
+               DLC_B0 "        ech-opts: {enable: true, config: \"" DLC_E2 "\"}\n", dlc_ech, DLC_E1, DLC_E2);
+}
+
+static void t_dl_clash_inherits_reality_opts(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("reality-opts", DLC_MAIN "    reality-opts:\n      public-key: " DLC_PBK1 "\n      short-id: aa\n", "",
+               DLC_B0, DLC_B0 "        reality-opts: {public-key: " DL_PBK ", short-id: ab}\n", dlc_reality,
+               "reality " DLC_PBK1 " aa", "reality " DL_PBK " ab");
+    dl_inherit("reality-opts empty key", DLC_MAIN "    reality-opts:\n      public-key: " DLC_PBK1 "\n", "", DLC_B0,
+               DLC_B0 "        reality-opts: {public-key: \"\"}\n", dlc_reality, "reality " DLC_PBK1 " ", "tls  ");
+}
+
+static void t_dl_clash_inherits_alpn(void) {
+    /* catches: an alpn inherited from the main proxy refused, or the block's own h3 accepted */
+    dl_inherit("alpn", DLC_MAIN "    alpn: [h3]\n", "", DLC_B0, DLC_B0 "        alpn: [h3]\n", dlc_reason,
+               "", "alpn h3 is not supported");
+}
+
+static void t_dl_clash_inherits_host(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("host", DLC_MAIN, "      host: h.example\n", DLC_B0, DLC_B0 "        host: cdn.example\n", dlc_http_host,
+               "h.example", "cdn.example");
+}
+
+static void t_dl_clash_inherits_path(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("path", DLC_MAIN, "", DLC_B0, DLC_B0 "        path: /dl\n", dlc_path, "/xp", "/dl");
+}
+
+static void t_dl_clash_inherits_headers(void) {
+    /* catches: an inherited field left empty (refused) or a non-inherited one copied */
+    dl_inherit("headers", DLC_MAIN, "      headers: {X-M: \"2\"}\n", DLC_B0, DLC_B0 "        headers: {X-D: \"1\"}\n",
+               dlc_headers, "X-M: 2\n", "X-D: 1\n");
+}
+
+static void t_dl_clash_refusals(void) {
+    static const char *const cases[][3] = {
+        { DLC_MAIN, DLC_B0 "        tls: false\n        reality-opts: {public-key: " DL_PBK "}\n",
+          "downloadSettings: reality requires tls" },
+        { DLC_MAIN "    reality-opts:\n      public-key: " DL_PBK "\n", DLC_B0 "        tls: false\n",
+          "downloadSettings: reality requires tls" },
+        { DLC_MAIN, DLC_B0 "        reality-opts: {short-id: ab}\n", "downloadSettings: does not parse" },
+        { DLC_MAIN, DLC_B0 "        alpn: h2\n", "downloadSettings: does not parse" },
+        { DLC_MAIN, " x\n", "downloadSettings: does not parse" },
+        { DLC_MAIN, "\n        server: 0.0.0.0\n", "downloadSettings: 0.0.0.0: nobody to answer" },
+        { DLC_MAIN, DLC_B0 "        alpn:\n          - h3\n", "downloadSettings: alpn h3 is not supported" },
+        { DLC_MAIN, DLC_B0 "        alpn: [http/1.1]\n", "downloadSettings: alpn http/1.1 is not supported" },
+        { DLC_MAIN, DLC_B0 "        skip-cert-verify: true\n", "downloadSettings: allowInsecure: needs --insecure" },
+    };
+    char name[80];
+    vless_set_insecure(0);
+    /* catches: Clash refusals diverging from mihomo */
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        snprintf(name, sizeof name, "dl clash refusal %zu: reason", i);
+        check(name, cases[i][2], dl_clash(cases[i][0], "", cases[i][1]));
+    }
+    static const char *const ok[] = {
+        DLC_B0 "        alpn: [h3, h2]\n",
+        DLC_B0 "        network: ws\n",
+        DLC_B0 "        uplink-data-placement: header\n        mode: stream-one\n",
+        "\n        port: 8443\n",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof *ok; i++) {
+        snprintf(name, sizeof name, "dl clash accepted %zu: node reason", i);
+        check(name, "(usable)", dl_clash(DLC_MAIN, "", ok[i]));
+        snprintf(name, sizeof name, "dl clash accepted %zu: block reason", i);
+        check(name, "", dl_of(&g_dl_last)->skip_reason);
+    }
+    check("dl clash null: usable", "(usable)", dl_clash(DLC_MAIN, "", " null\n"));
+    check("dl clash null: no block", "(none)", dl_host(&g_dl_last));
+}
+
+static void t_xhttp_host_main_clash(void) {
+    struct vless_node out[4];
+    struct vless_sub_stats st;
+    size_t got = xhx_clash("      host: h.example\n", out, &st);
+    /* catches: Clash main host still dropped */
+    check("xhttp host main clash: usable", "(usable)", xhx_reason(got, &st));
+    check("xhttp host main clash: read", "h.example", got ? out[0].http_host : "");
+}
+
+static void t_tr_nodes(void) {
+    struct vless_node n;
+    struct tr_node t, td;
+    vless_set_insecure(1);
+    dl_link(DL_TLS(",\"fingerprint\":\"chrome\",\"pinnedPeerCertSha256\":\"" DLC_PB "\",\"allowInsecure\":true"), &n);
+    vless_set_insecure(0);
+    const struct vless_node *d = dl_of(&n);
+    /* catches: the fp override or the tls-only fields skipped on the download side */
+    vless_set_fp("firefox");
+    memset(&td, 0, sizeof td);
+    sl_tr_nodes(&n, &t, &td);
+    vless_set_fp(NULL);
+    check_n("tr nodes: dl points at the download node", 1, t.dl == &td);
+    check("tr nodes: download host", "d.example", td.host ? td.host : "(null)");
+    check_n("tr nodes: download port", 443, td.port);
+    check("tr nodes: download sni", "dl.example", td.sni ? td.sni : "(null)");
+    check("tr nodes: override fp on the download", "firefox", td.fp ? td.fp : "(null)");
+    check_n("tr nodes: download pins", 1, td.pcs && td.pcs == d->pcs);
+    check_n("tr nodes: download insecure", 1, td.insecure);
+    check("tr nodes: main host", "m.example", t.host);
+    memset(&td, 0, sizeof td);
+    sl_tr_nodes(&n, &t, &td);
+    check("tr nodes: the download's own fp", "chrome", td.fp ? td.fp : "(null)");
+    dl_link("null", &n);
+    t.dl = &td;
+    sl_tr_nodes(&n, &t, &td);
+    check_n("tr nodes: no block, no dl", 1, t.dl == NULL);
+}
+
+static void t_dl_all(void) {
+    t_intern_node_hook();
+    t_dl_link_extra();
+    t_dl_xray_json();
+    t_dl_extra_wins();
+    t_xhttp_host_main();
+    t_dl_refusals();
+    t_dl_accepted();
+    t_dl_stream_one_refused();
+    t_dl_block_checked_as_packet_up();
+    t_dl_full();
+    t_tr_nodes();
+    t_dl_shared();
+    t_dl_clash();
+    t_dl_clash_reality();
+    t_dl_clash_inherits_server();
+    t_dl_clash_inherits_port();
+    t_dl_clash_inherits_tls();
+    t_dl_clash_inherits_servername();
+    t_dl_clash_inherits_client_fingerprint();
+    t_dl_clash_inherits_fingerprint();
+    t_dl_clash_inherits_skip_cert_verify();
+    t_dl_clash_inherits_ech_opts();
+    t_dl_clash_inherits_reality_opts();
+    t_dl_clash_inherits_alpn();
+    t_dl_clash_inherits_host();
+    t_dl_clash_inherits_path();
+    t_dl_clash_inherits_headers();
+    t_dl_clash_refusals();
+    t_xhttp_host_main_clash();
 }
 
 int main(void) {
@@ -1134,7 +1762,8 @@ int main(void) {
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22xPaddingObfsMode%%22%%3Atrue%%7D#x", base);
         check_n("extra: xPaddingObfsMode, usable as Xray's obfuscated padding", 0, vless_parse_url(url, &n));
         snprintf(url, sizeof(url), "%s&extra=%%7B%%22downloadSettings%%22%%3A%%7B%%22address%%22%%3A%%22d.example%%22%%7D%%7D#x", base);
-        check_n("extra: downloadSettings, skipped as Xray's separate download", 1, vless_parse_url(url, &n));
+        check_n("extra: downloadSettings without a port, skipped as Xray refuses it", 1, vless_parse_url(url, &n));
+        check("extra: downloadSettings without a port, reason", "downloadSettings: no port", n.skip_reason);
     }
     {
         /* ---- xhttp modes -------------------------------------------------------
@@ -1670,6 +2299,9 @@ int main(void) {
     }
 
     t_xhx_all();
+    t_intern_blob();
+    t_intern_blob_full();
+    t_dl_all();
 
     printf("\n%d checks passed", g_pass);
     if (g_fail) {

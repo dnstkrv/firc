@@ -156,7 +156,8 @@ static bool is_sink(const struct vless_node *n)
 static void note_node(build_t *b, const struct vless_node *n)
 {
     b->seen++;
-    if (!is_sink(n) || b->sinks++ > 0) {
+    const struct vless_node *dl = vless_dl(n);
+    if (!(is_sink(n) || (dl != NULL && dl->port > 0 && is_sink(dl))) || b->sinks++ > 0) {
         return;
     }
     char said[sizeof n->name];

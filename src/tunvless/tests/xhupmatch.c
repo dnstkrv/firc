@@ -18,6 +18,8 @@
 
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "reality.h"
 #include "hpackread.h"
 
@@ -124,9 +126,9 @@ static void conn_init(struct transport *c, enum xhttp_mode xh, int fd) {
     c->xh.mode = xh;
     c->xh.up.link.fd = fd;
     c->xh.up.link.plain = 1;
-    snprintf(c->xh.authority, sizeof(c->xh.authority), "stand.example");
-    xh_opts_parse(NULL, "", NULL, 0, &c->xh.opts, NULL, 0);
-    snprintf(c->xh.base_path, sizeof(c->xh.base_path), "/xh/");
+    snprintf(c->xh.main_side.authority, sizeof(c->xh.main_side.authority), "stand.example");
+    xh_opts_parse(NULL, "", NULL, 0, &c->xh.main_side.opts, NULL, 0);
+    snprintf(c->xh.main_side.base_path, sizeof(c->xh.main_side.base_path), "/xh/");
     snprintf(c->xh.sid, sizeof(c->xh.sid), "0f1e2d3c");
 }
 
@@ -855,7 +857,238 @@ static void t_packet_window_follows_posts(void) {
     xclose(fds);
 }
 
+static struct tr_node dnode(void) {
+    struct tr_node d;
+    memset(&d, 0, sizeof d);
+    d.host = "10.0.0.2";
+    d.port = 443;
+    d.type = "xhttp";
+    d.security = "none";
+    d.sni = "";
+    d.path = "/dl?k=v";
+    d.http_host = "d";
+    d.mode = "";
+    d.xhx = "sessionIDPlacement=header\nxPaddingObfsMode=true\nxPaddingPlacement=header\n"
+            "xPaddingHeader=X-Dp\nxPaddingMethod=tokenish";
+    d.headers = "X-D: 1\n";
+    d.pad_from = 20;
+    d.pad_to = 40;
+    return d;
+}
+
+static int base62(const char *s) {
+    size_t k = strspn(s, "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+    return k && s[k] == '\0';
+}
+
+static void t_dl_get_from_download_side(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", "sessionIDPlacement=query", NULL), d = dnode();
+    n.dl = &d;
+    /* catches: GET built from the main side, POST from the download side, padding header/method not per side, or two session ids */
+    int rc = xopen(&c, &n, fds);
+    int db = down_block(&g_hb);
+    const char *a = fval(&g_hb, ":authority"), *p = fval(&g_hb, ":path"), *s = fval(&g_hb, "x-session");
+    const char *dp = fval(&g_hb, "x-dp"), *xd = fval(&g_hb, "x-d"), *m = fval(&g_hb, ":method");
+    size_t hl = dp ? xh_huff_len(dp, strlen(dp)) : 0;
+    check(rc == 0 && db == 0 && m && !strcmp(m, "GET") && a && !strcmp(a, "d") && p && !strcmp(p, "/dl/?k=v"),
+          "dl: the GET goes to :authority d, :path /dl/?k=v");
+    check(s && !strcmp(s, c.xh.sid), "dl: the GET's x-session is the connection's id");
+    check(dp && base62(dp) && hl >= 18 && hl <= 42, "dl: the GET's padding in x-dp, tokenish, 20-40");
+    check(xd && !strcmp(xd, "1") && hr_find(&g_hb, "referer") < 0 && hr_find(&g_hb, "x-padding") < 0,
+          "dl: the GET has x-d 1, no referer, no x-padding");
+    unsigned char pl[10] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    int wr = transport_write(&c, pl, sizeof pl);
+    srv_drain();
+    int ub = up_block(0, &g_hb);
+    char want[200];
+    snprintf(want, sizeof want, "/xp/0?x_session=%s", c.xh.sid);
+    a = fval(&g_hb, ":authority");
+    p = fval(&g_hb, ":path");
+    const char *ref = fval(&g_hb, "referer"), *pre = "https://a/xp/?x_padding=";
+    check(wr == 0 && ub == 0 && a && !strcmp(a, "a") && p && !strcmp(p, want),
+          "dl: the first POST goes to :authority a, :path /xp/0?x_session=<id>");
+    check(ref && !strncmp(ref, pre, strlen(pre)) && all_x(ref + strlen(pre), 100, 1000) &&
+          hr_find(&g_hb, "x-d") < 0 && hr_find(&g_hb, "x-dp") < 0,
+          "dl: the POST pads in referer, no x-d, no x-dp");
+    xclose(fds);
+}
+
+static void t_dl_sid_from_main_table(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", "sessionIDTable=hex\nsessionIDLength=16", NULL), d = dnode();
+    d.xhx = "sessionIDPlacement=header";
+    n.dl = &d;
+    /* catches: the id drawn from the download settings */
+    int rc = xopen(&c, &n, fds);
+    down_block(&g_hb);
+    char sid[64] = "";
+    const char *s = fval(&g_hb, "x-session");
+    if (s) snprintf(sid, sizeof sid, "%s", s);
+    int wr = transport_write(&c, piece, sizeof piece);
+    srv_drain();
+    up_block(0, &g_hb);
+    char want[200];
+    snprintf(want, sizeof want, "/xp/%s/0", sid);
+    const char *p = fval(&g_hb, ":path");
+    check(rc == 0 && wr == 0 && strlen(sid) == 16 && strspn(sid, "0123456789abcdef") == 16 && p &&
+          !strcmp(p, want), "dl: the GET's id is 16 hex characters, the POST's id");
+    xclose(fds);
+}
+
+static void t_dl_authority(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", NULL, NULL), d = dnode();
+    d.http_host = "";
+    d.sni = "s.example";
+    n.dl = &d;
+    /* catches: authority taken from the main node */
+    int rc = xopen(&c, &n, fds);
+    down_block(&g_hb);
+    const char *a = fval(&g_hb, ":authority");
+    check(rc == 0 && a && !strcmp(a, "s.example"), "dl: no host, :authority is the download sni");
+    xclose(fds);
+    d.sni = "";
+    d.host = "2001:db8::5";
+    rc = xopen(&c, &n, fds);
+    down_block(&g_hb);
+    a = fval(&g_hb, ":authority");
+    check(rc == 0 && a && !strcmp(a, "[2001:db8::5]"), "dl: no host, no sni, :authority the download address");
+    xclose(fds);
+}
+
+static void t_dl_opts_as_packet_up(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("stream-up", NULL, NULL), d = dnode();
+    d.xhx = "uplinkDataPlacement=header";
+    n.dl = &d;
+    /* catches: the download side's keys parsed under the main mode, failing a block the parser took */
+    int rc = xopen(&c, &n, fds);
+    check(rc == 0 && c.xh.mode == XH_STREAM_UP && c.xh.down_side.opts.data_place == XHP_HEADER,
+          "dl: a packet-up-only key on the download side opens under main stream-up");
+    xclose(fds);
+}
+
+static void t_mode_table(void) {
+    static const struct { const char *sec, *mode; int dl; enum xhttp_mode want; } cases[] = {
+        { "reality", "", 0, XH_STREAM_ONE },
+        { "reality", "", 1, XH_STREAM_UP },
+        { "reality", "auto", 1, XH_STREAM_UP },
+        { "tls", "", 1, XH_PACKET_UP },
+        { "none", "", 1, XH_PACKET_UP },
+        { "reality", "packet-up", 1, XH_PACKET_UP },
+        { "tls", "stream-up", 1, XH_STREAM_UP },
+    };
+    struct tr_node d = dnode();
+    int ok = 1;
+    /* catches: auto ignoring the block, or tls choosing stream-up */
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        struct tr_node n = xnode(cases[i].mode, NULL, NULL);
+        n.security = cases[i].sec;
+        n.dl = cases[i].dl ? &d : NULL;
+        if (xhttp_mode_of(&n) != cases[i].want) ok = 0;
+    }
+    check(ok, "dl: the mode table");
+}
+
+static int listen_lo(uint16_t *port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (s < 0 || bind(s, (struct sockaddr *)&a, sizeof a) || listen(s, 4) ||
+        getsockname(s, (struct sockaddr *)&a, &al)) {
+        if (s >= 0) close(s);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    return s;
+}
+
+static int accept_wait(int ls) {
+    struct pollfd p = { .fd = ls, .events = POLLIN, .revents = 0 };
+    return poll(&p, 1, 1000) > 0 ? accept(ls, NULL, NULL) : -1;
+}
+
+static size_t read_wait(int fd, unsigned char *buf, size_t cap, int ms) {
+    size_t n = 0;
+    struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
+    while (n < cap && poll(&p, 1, ms) > 0) {
+        ssize_t r = recv(fd, buf + n, cap - n, 0);
+        if (r <= 0) break;
+        n += (size_t)r;
+        ms = 100;
+    }
+    return n;
+}
+
+static void t_dl_link_to_download_node(void) {
+    uint16_t pa = 0, pb = 0;
+    int la = listen_lo(&pa), lb = listen_lo(&pb);
+    if (la < 0 || lb < 0) { check(0, "dl: loopback listeners"); return; }
+    struct tr_node n = xnode("packet-up", NULL, NULL), d = dnode();
+    n.host = "127.0.0.1";
+    n.port = pa;
+    d.host = "127.0.0.1";
+    d.port = pb;
+    n.dl = &d;
+    struct transport c;
+    /* catches: the download link dialled to the main node, or the upload to the download node */
+    int rc = transport_open(&c, &n, 2);
+    int fb = accept_wait(lb), fa = accept_wait(la);
+    static unsigned char bb[1 << 16], ab[1 << 16];
+    size_t bn = fb < 0 ? 0 : read_wait(fb, bb, sizeof bb, 1000);
+    int hb = hr_nth_headers(bb, bn, 0, &g_hb);
+    const char *m = hb ? NULL : fval(&g_hb, ":method");
+    check(rc == 0 && fb >= 0 && bn > 24 && !memcmp(bb, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) && m &&
+          !strcmp(m, "GET"), "dl: the download node gets the preface and the GET");
+    int wr = rc ? -1 : transport_write(&c, piece, sizeof piece);
+    size_t an = fa < 0 ? 0 : read_wait(fa, ab, sizeof ab, 1000);
+    int ha = hr_nth_headers(ab, an, 0, &g_hb);
+    m = ha ? NULL : fval(&g_hb, ":method");
+    size_t more = fb < 0 ? 1 : read_wait(fb, bb, sizeof bb, 200);
+    check(wr == 0 && fa >= 0 && m && !strcmp(m, "POST") && more == 0,
+          "dl: the main node gets the upload, the download node nothing more");
+    if (!rc) transport_close(&c);
+    if (fa >= 0) close(fa);
+    if (fb >= 0) close(fb);
+    close(la);
+    close(lb);
+}
+
+static void t_dl_only_xhttp(void) {
+    uint16_t pa = 0, pb = 0;
+    int la = listen_lo(&pa), lb = listen_lo(&pb);
+    if (la < 0 || lb < 0) { check(0, "dl: loopback listeners"); return; }
+    struct tr_node n = xnode("", NULL, NULL), d = dnode();
+    n.type = "tcp";
+    n.host = d.host = "127.0.0.1";
+    n.port = pa;
+    d.port = pb;
+    n.dl = &d;
+    struct transport c;
+    /* catches: a download block followed by a transport other than xhttp */
+    int rc = transport_open(&c, &n, 2);
+    int fa = accept_wait(la);
+    struct pollfd p = { .fd = lb, .events = POLLIN, .revents = 0 };
+    check(rc == 0 && fa >= 0 && poll(&p, 1, 0) == 0, "dl: a tcp node dials its own address");
+    if (!rc) transport_close(&c);
+    if (fa >= 0) close(fa);
+    close(la);
+    close(lb);
+}
+
 int main(void) {
+    t_dl_get_from_download_side();
+    t_dl_sid_from_main_table();
+    t_dl_authority();
+    t_mode_table();
+    t_dl_opts_as_packet_up();
+    t_dl_link_to_download_node();
+    t_dl_only_xhttp();
     t_seq_cookie_after_session();
     t_tokenish_without_obfs_is_repeat_x();
     t_xray_fields_replace_custom();

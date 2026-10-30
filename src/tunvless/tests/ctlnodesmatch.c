@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "unit.h"
+#include "sub-pq-samples.h"
 #include "../src/proto/transport/trdial.c"
 #include "../src/ctlnodes.h"
 #include "../src/ctlmap.h"
@@ -10,15 +11,17 @@
 #include <time.h>
 
 #define UUID "b831381d-6324-4d53-ad4f-8cda48b30811"
+#define PBK "K4ALTVxNnrDTywBj_Stb5bomQ21QlSWOlGGT44n9Nng"
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static int g_release[8], g_holding[8];
 
-static int g_six_resolves;
+static int g_six_resolves, g_dlpin_resolves;
 
 static unsigned fake_resolve(const char *host, struct tr_ip out[ADDR_MAX]) {
     if (!strncmp(host, "bad", 3)) return 0;
+    if (!strncmp(host, "dlpin", 5)) __atomic_add_fetch(&g_dlpin_resolves, 1, __ATOMIC_RELAXED);
     if (!strncmp(host, "six", 3)) {
         __atomic_add_fetch(&g_six_resolves, 1, __ATOMIC_RELAXED);
         memset(&out[0], 0, sizeof out[0]);
@@ -127,6 +130,28 @@ static void link_of(char *out, size_t n, const char *host, const char *name) {
     snprintf(out, n, "vless://" UUID "@%s:443?security=none&type=tcp#%s\n", host, name);
 }
 
+static void link_dl(char *out, size_t n, const char *host, const char *dl_host) {
+    snprintf(out, n,
+             "vless://" UUID "@%s:443?security=none&type=xhttp&path=%%2Fx&extra=%%7B%%22downloadSettings%%22%%3A%%7B"
+             "%%22address%%22%%3A%%22%s%%22%%2C%%22port%%22%%3A443%%2C%%22network%%22%%3A%%22xhttp%%22%%7D%%7D#%s\n",
+             host, dl_host, dl_host);
+}
+
+static void cmd_dl(const char *host, const char *dl_host) {
+    char l[512], buf[600] = "nodes\n";
+    link_dl(l, sizeof l, host, dl_host);
+    strcat(buf, l);
+    strcat(buf, "\n");
+    put(buf);
+}
+
+static int idx_dl(const char *host, const char *dl_host) {
+    char l[512];
+    link_dl(l, sizeof l, host, dl_host);
+    l[strlen(l) - 1] = 0;
+    return nodes_find(l);
+}
+
 static void cmd(const char *const *hosts, int n) {
     char buf[4096] = "nodes\n", l[256];
     for (int i = 0; i < n; i++) {
@@ -158,6 +183,7 @@ int main(void) {
     transport_pin_host("pinned1");
     transport_pin_host("pinned2");
     transport_pin_host("six1");
+    transport_pin_host("dlpin1");
     ctlmap_init(htonl(0xc6120000u), 15);
     static const struct ctln_hooks h = { on_select, on_ack, on_full, 2000, on_map_ack };
     check("resolver thread started", 0, ctln_start(&h));
@@ -228,6 +254,7 @@ int main(void) {
     check("the superseded set is never published", pubs + 1, g_pub_n);
 
     pubs = g_pub_n;
+    int six_before = g_six_resolves;
     cmd((const char *[]){ "pinned1", "six1", "hold5" }, 3);
     wait_for(&g_pub_n, pubs + 1, 2000);
     settle();
@@ -237,7 +264,69 @@ int main(void) {
     release(5);
     wait_for(&g_pub_n, pubs + 2, 2000);
     check("an IPv6-only pin then the resolved node", 1, pub_is(pubs + 1, 3, (int[]){ p1, s1, h5 }));
-    check("an IPv6-only pin is not resolved again", 1, g_six_resolves);
+    check("an IPv6-only pin is not resolved again", six_before, g_six_resolves);
+
+    pubs = g_pub_n;
+    char ep[] = "/tmp/ctlnodese-XXXXXX";
+    int efd = mkstemp(ep), se = dup(2);
+    unlink(ep);
+    dup2(efd, 2);
+    cmd_dl("pinned2", "bad5");
+    wait_for(&g_pub_n, pubs + 1, 2000);
+    fflush(stderr);
+    dup2(se, 2);
+    close(se);
+    char err[1024];
+    ssize_t ek = pread(efd, err, sizeof err - 1, 0);
+    err[ek > 0 ? ek : 0] = 0;
+    close(efd);
+    /* catches: the download host never pinned, or a node published when only its main host resolves */
+    check("a download host that does not resolve: the empty set", 1, pub_is(pubs, 0, NULL));
+    check("a download host that does not resolve: named", 1,
+          strstr(err, "bad5 does not resolve — left out of the candidates") != NULL);
+
+    pubs = g_pub_n;
+    cmd_dl("pinned2", "hold6");
+    settle();
+    /* catches: the download host never pinned, or a node published when only its main host resolves */
+    check("a download host resolving: nothing published", pubs, g_pub_n);
+    release(6);
+    wait_for(&g_pub_n, pubs + 1, 2000);
+    int d6 = idx_dl("pinned2", "hold6");
+    check("a download host resolved: the node published", 1, d6 >= 0 && pub_is(pubs, 1, &d6));
+
+    pubs = g_pub_n;
+    int dl_before = g_dlpin_resolves;
+    cmd_dl("pinned2", "dlpin1");
+    wait_for(&g_pub_n, pubs + 1, 1000);
+    settle();
+    int d1 = idx_dl("pinned2", "dlpin1");
+    /* catches: the download host never pinned, or a node published when only its main host resolves */
+    check("a pinned download host: published at once", 1, d1 >= 0 && g_pub_n == pubs + 1 && pub_is(pubs, 1, &d1));
+    check("a pinned download host: not resolved again", dl_before, g_dlpin_resolves);
+
+    acks = g_ack_n;
+    pubs = g_pub_n;
+    size_t bcap = 256 * 8192;
+    char *big = malloc(bcap);
+    size_t bo = (size_t)snprintf(big, bcap, "nodes\n");
+    for (int i = 0; i < 256; i++)
+        bo += (size_t)snprintf(big + bo, bcap - bo,
+                               "vless://" UUID "@pinned1:443?type=xhttp&security=reality&pbk=" PBK "&sid=01&sni=m.example"
+                               "&path=%%2Fxp&pqv=%s&encryption=%s&extra=%%7B%%22downloadSettings%%22%%3A%%7B%%22address%%22"
+                               "%%3A%%22pinned2%%22%%2C%%22port%%22%%3A443%%2C%%22network%%22%%3A%%22xhttp%%22%%2C%%22security"
+                               "%%22%%3A%%22reality%%22%%2C%%22realitySettings%%22%%3A%%7B%%22serverName%%22%%3A%%22rs.example"
+                               "%%22%%2C%%22fingerprint%%22%%3A%%22chrome%%22%%2C%%22publicKey%%22%%3A%%22" PBK "%%22%%2C"
+                               "%%22shortId%%22%%3A%%22ab%%22%%2C%%22mldsa65Verify%%22%%3A%%22%s%%22%%7D%%7D%%7D#pq%d\n",
+                               PQV_KEY, ENC_MLKEM, PQV_KEY, i);
+    bo += (size_t)snprintf(big + bo, bcap - bo, "\n");
+    put(big);
+    free(big);
+    wait_for(&g_ack_n, acks + 1, 20000);
+    wait_for(&g_pub_n, pubs + 1, 5000);
+    /* catches: the nodes command still cut at 1 MiB */
+    check("nodes_with_two_pqv_fit: 256 lines over 1 MiB, all taken", 1,
+          bo > (1u << 20) && g_ack_n == acks + 1 && g_acks[acks] == 256 && g_pub_n == pubs + 1 && g_pub[pubs].n == 256);
 
     pubs = g_pub_n;
     acks = g_ack_n;

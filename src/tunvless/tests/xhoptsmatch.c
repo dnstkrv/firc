@@ -323,8 +323,8 @@ static void t_unknown_values_accepted(void) {
     check_why("method zigzag: reason", "xhttp: unsupported xPaddingMethod: zigzag");
     check("seq body: refused", -1, parse("seqPlacement=body\n", "", "", 0, &o));
     check_why("seq body: reason", "xhttp: unsupported seqPlacement: body");
-    check("download: refused", -1, parse("downloadSettings=present\n", "", "", 0, &o));
-    check_why("download: reason", "xhttp: downloadSettings is not supported");
+    check("download: not an xhttp key", -1, parse("downloadSettings=present\n", "", "", 0, &o));
+    check_why("download: reason", "xhttp: unsupported xhttp key: downloadSettings=present");
     check("session body: refused", -1, parse("sessionIDPlacement=body\n", "", "", 0, &o));
     check("data path: refused", -1, parse("uplinkDataPlacement=path\n", "packet-up", "", 0, &o));
     check("padding placement body: refused", -1, parse("xPaddingPlacement=body\n", "", "", 0, &o));

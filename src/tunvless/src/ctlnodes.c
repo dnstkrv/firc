@@ -13,7 +13,6 @@
 #include "vless.h"
 #include "vlink.h"
 
-#define CTLN_MAX (1u << 20)
 #define LOG_W "tunvless[warn]: "
 
 static struct {
@@ -55,16 +54,22 @@ static int superseded(void *ud) {
     return r;
 }
 
+static int node_pinned(const struct vless_node *n) {
+    const struct vless_node *d = vless_dl(n);
+    return transport_pin_count(n->host) > 0 && (!d || transport_pin_count(d->host) > 0);
+}
+
 static void pinned(void *ud, const char *host, int ok) {
     struct ctln_job *j = ud;
     int more = 0, full = ok == TR_EPINFULL;
     for (size_t k = 0; k < j->n; k++) {
-        const struct vless_node *n = vnode(j->idx[k]);
-        if (strcmp(n->host, host)) continue;
-        if (ok > 0) { j->ok[k] = 1; more = 1; }
-        else if (full) fprintf(stderr, LOG_W "node %s: the pin table is full — left out\n", n->name);
+        const struct vless_node *n = vnode(j->idx[k]), *d = vless_dl(n);
+        if (strcmp(n->host, host) && (!d || strcmp(d->host, host))) continue;
+        if (ok > 0) {
+            if (node_pinned(n)) { j->ok[k] = 1; more = 1; }
+        } else if (full) fprintf(stderr, LOG_W "node %s: the pin table is full — left out\n", n->name);
         else fprintf(stderr, LOG_W "node %s: %s does not resolve — left out of the candidates\n",
-                     n->name, n->host);
+                     n->name, host);
     }
     if (full) {
         pthread_mutex_lock(&g_cn.mu);
@@ -79,16 +84,22 @@ static void pinned(void *ud, const char *host, int ok) {
     if (more) publish(j);
 }
 
+static void want_pin(const char **hosts, size_t *nh, const char *h) {
+    if (transport_pin_count(h) > 0) return;
+    for (size_t i = 0; i < *nh; i++)
+        if (!strcmp(hosts[i], h)) return;
+    hosts[(*nh)++] = h;
+}
+
 static void apply(struct ctln_job *j) {
-    const char **hosts = calloc(j->n ? j->n : 1, sizeof(*hosts));
+    const char **hosts = calloc(j->n ? 2 * j->n : 1, sizeof(*hosts));
     if (!hosts) return;
     size_t nh = 0;
     for (size_t k = 0; k < j->n; k++) {
-        const char *h = vnode(j->idx[k])->host;
-        if (transport_pin_count(h) > 0) { j->ok[k] = 1; continue; }
-        int dup = 0;
-        for (size_t i = 0; i < nh && !dup; i++) dup = !strcmp(hosts[i], h);
-        if (!dup) hosts[nh++] = h;
+        const struct vless_node *n = vnode(j->idx[k]), *d = vless_dl(n);
+        if (node_pinned(n)) { j->ok[k] = 1; continue; }
+        want_pin(hosts, &nh, n->host);
+        if (d) want_pin(hosts, &nh, d->host);
     }
     int any = 0;
     for (size_t k = 0; k < j->n; k++) any |= j->ok[k];
@@ -188,7 +199,7 @@ static int command(FILE *in, char **line, size_t *cap) {
         while (len > 0 && ((*line)[len - 1] == '\n' || (*line)[len - 1] == '\r')) (*line)[--len] = 0;
         if (len == 0) { ended = 1; break; }
         lineno++;
-        if (over || total > CTLN_MAX) { over = 1; continue; }
+        if (over || total > VLESS_CTL_NODES_MAX) { over = 1; continue; }
         struct vless_node nd;
         memset(&nd, 0, sizeof(nd));
         int r = vless_parse_url(*line, &nd);
@@ -227,7 +238,7 @@ static int command(FILE *in, char **line, size_t *cap) {
         return -1;
     }
     if (over)
-        fprintf(stderr, LOG_W "nodes over %u bytes — the lines after that are left out\n", CTLN_MAX);
+        fprintf(stderr, LOG_W "nodes over %zu bytes — the lines after that are left out\n", VLESS_CTL_NODES_MAX);
     g_cn.h.ack((int)n);
     post(idx, n);
     return 0;

@@ -20,15 +20,17 @@
 #include "xhreq.h"
 
 /* The node's xhttp mode. Empty and "auto" resolve as in Xray's client (splithttp/dialer.go):
- * stream-one with reality, packet-up otherwise (tls, none). A server may accept only the mode it
- * was set to, and a packet-up server answers 400 to stream-one, so auto must pick what Xray's
- * client would. Other modes are named in the link, and the node parser has dropped what we do
- * not support (sl_link_usable_post in sublink.c), so only these three arrive here. */
+ * with reality stream-one, or stream-up when the download goes to its own endpoint; packet-up
+ * otherwise (tls, none). A server may accept only the mode it was set to, and a packet-up server
+ * answers 400 to stream-one, so auto must pick what Xray's client would. Other modes are named
+ * in the link, and the node parser has dropped what we do not support (sl_link_usable_post in
+ * sublink.c), so only these three arrive here. */
 static enum xhttp_mode xhttp_mode_of(const struct tr_node *n) {
     if (!strcmp(n->mode, "packet-up")) return XH_PACKET_UP;
     if (!strcmp(n->mode, "stream-up")) return XH_STREAM_UP;
     if (!strcmp(n->mode, "stream-one")) return XH_STREAM_ONE;
-    return n->security && !strcmp(n->security, "reality") ? XH_STREAM_ONE : XH_PACKET_UP;
+    if (!n->security || strcmp(n->security, "reality")) return XH_PACKET_UP;
+    return n->dl ? XH_STREAM_UP : XH_STREAM_ONE;
 }
 
 /* ---- the second link, for the upload -------------------------------------------------- */
@@ -324,7 +326,7 @@ static void rq_custom(struct xh_rq *q, const char *h) {
     q->lead = q->main_n;
 }
 
-static size_t pad_worst(const struct xh_state *x) {
+static size_t pad_worst(const struct xh_side *x) {
     size_t hi = x->pad_to ? x->pad_to : 1000;
     return x->opts.obfs && x->opts.tokenish ? (hi * 5 + 3) / 4 + 150 : hi;
 }
@@ -332,7 +334,7 @@ static size_t pad_worst(const struct xh_state *x) {
 /* Each request gets its own length, not one per connection: packet-up sends a series of
  * requests, and the same padding length in all of them would turn the padding itself into a
  * signature, the very thing it is there against. */
-static size_t pad_len(const struct xh_state *x) {
+static size_t pad_len(const struct xh_side *x) {
     /* THE SERVER SETS THE RANGE, NOT US. It comes in the link as `xPaddingBytes` (see
      * sl_pad_range in sublink.c), and the server CHECKS it: outside the range means 400. A
      * fixed range that fits Xray's default fails every xhttp node of a provider that announces,
@@ -350,7 +352,7 @@ static size_t pad_len(const struct xh_state *x) {
     return pad;
 }
 
-static const char *rq_pad(struct xh_rq *q, const struct xh_state *x, const char *prefix, int worst) {
+static const char *rq_pad(struct xh_rq *q, const struct xh_side *x, const char *prefix, int worst) {
     char *b = ar_begin(&q->a);
     ar_cat(&q->a, prefix, strlen(prefix));
     size_t len = worst ? pad_worst(x) : pad_len(x);
@@ -371,7 +373,7 @@ static void rq_meta(struct xh_rq *q, enum xh_place p, const char *key, const cha
 }
 
 static int rq_build(struct transport *t, enum xh_kind k, const char *seq, int worst) {
-    struct xh_state *x = &t->xh;
+    const struct xh_side *x = k == XK_DOWN ? &t->xh.down_side : &t->xh.main_side;
     const struct xh_opts *o = &x->opts;
     struct xh_rq *q = rq_get();
     if (!q) return TR_EIO;
@@ -380,7 +382,7 @@ static int rq_build(struct transport *t, enum xh_kind k, const char *seq, int wo
     q->a = (struct xh_ar){ g_xs->arena, 0, sizeof g_xs->arena, 0 };
     rq_custom(q, x->headers);
 
-    const char *sid = k == XK_ONE ? NULL : x->sid;
+    const char *sid = k == XK_ONE ? NULL : t->xh.sid;
     int padq = o->obfs && o->pad_place == XHP_QUERY;
     int anyq = padq || (sid && o->sess_place == XHP_QUERY) || (seq && o->seq_place == XHP_QUERY);
     if (anyq) q_parse(q, x->query);
@@ -467,7 +469,7 @@ static size_t packet_cap(struct transport *t) {
         x->worst_base = h2_list_size(&look, &g_xs->q.r);
     }
     size_t hi = x->post_max ? x->post_max : XH_BLOCK;
-    return data_fit(&x->opts, x->worst_base, meta_budget(x), hi, NULL);
+    return data_fit(&x->main_side.opts, x->worst_base, meta_budget(x), hi, NULL);
 }
 
 static void b64_put(struct xh_ar *a, const unsigned char *d, size_t m, size_t from, size_t cnt) {
@@ -482,7 +484,7 @@ static void b64_put(struct xh_ar *a, const unsigned char *d, size_t m, size_t fr
 
 static int rq_data(struct transport *t, const unsigned char *d, size_t n, size_t *took) {
     struct xh_state *x = &t->xh;
-    const struct xh_opts *o = &x->opts;
+    const struct xh_opts *o = &x->main_side.opts;
     struct xh_rq *q = &g_xs->q;
     uint32_t cs[XH_PIECES], r[XH_PIECES];
     uint32_t span = o->chunk_to - o->chunk_from + 1;
@@ -554,35 +556,42 @@ static int down_request(struct transport *t) {
     return rc ? rc : h2_start_req(&t->h2, &io, &g_xs->q.r, 1);
 }
 
-static int xh_init(struct transport *t, const struct tr_node *n) {
-    struct xh_state *x = &t->xh;
+static int side_init(struct xh_side *s, const struct tr_node *n, const char *mode) {
     /* :authority as Xray's client builds the URL: the node's host setting, else the SNI (the
      * camouflage domain the server hides behind), else the address. A server with host set
      * compares it with :authority and answers 404 to anything else (hub.go). */
     char hostbuf[160];
     const char *authority = n->http_host && n->http_host[0] ? n->http_host
                           : n->sni[0] ? n->sni : tr_host_literal(n->host, hostbuf, sizeof(hostbuf));
-    x->mode = xhttp_mode_of(n);
-    if (xh_opts_parse(n->xhx, n->mode, n->headers, n->pad_to, &x->opts, NULL, 0)) return TR_EIO;
-    snprintf(x->authority, sizeof(x->authority), "%s", authority);
+    if (xh_opts_parse(n->xhx, mode, n->headers, n->pad_to, &s->opts, NULL, 0)) return TR_EIO;
+    snprintf(s->authority, sizeof(s->authority), "%s", authority);
     const char *p = n->path ? n->path : "";
     const char *qm = strchr(p, '?');
     size_t pn = qm ? (size_t)(qm - p) : strlen(p);
-    int slash = x->opts.sess_place == XHP_PATH || x->opts.seq_place == XHP_PATH;
-    if (snprintf(x->base_path, sizeof x->base_path, "%s%.*s", pn && p[0] == '/' ? "" : "/", (int)pn, p)
-        >= (int)sizeof x->base_path)
+    int slash = s->opts.sess_place == XHP_PATH || s->opts.seq_place == XHP_PATH;
+    if (snprintf(s->base_path, sizeof s->base_path, "%s%.*s", pn && p[0] == '/' ? "" : "/", (int)pn, p)
+        >= (int)sizeof s->base_path)
         return H2_ETOOBIG;
-    size_t bn = strlen(x->base_path);
-    if (slash && x->base_path[bn - 1] != '/') {
-        if (bn + 1 >= sizeof x->base_path) return H2_ETOOBIG;
-        x->base_path[bn] = '/';
-        x->base_path[bn + 1] = '\0';
+    size_t bn = strlen(s->base_path);
+    if (slash && s->base_path[bn - 1] != '/') {
+        if (bn + 1 >= sizeof s->base_path) return H2_ETOOBIG;
+        s->base_path[bn] = '/';
+        s->base_path[bn + 1] = '\0';
     }
-    snprintf(x->query, sizeof x->query, "%s", qm ? qm + 1 : "");
-    x->headers = n->headers;
+    snprintf(s->query, sizeof s->query, "%s", qm ? qm + 1 : "");
+    s->headers = n->headers;
+    s->pad_from = n->pad_from;
+    s->pad_to = n->pad_to;
+    return 0;
+}
+
+static int xh_init(struct transport *t, const struct tr_node *n) {
+    struct xh_state *x = &t->xh;
+    x->mode = xhttp_mode_of(n);
+    int rc = side_init(&x->main_side, n, n->mode);
+    if (!rc) rc = side_init(&x->down_side, n->dl ? n->dl : n, n->dl ? "packet-up" : n->mode);
+    if (rc) return rc;
     x->worst_base = 0;
-    x->pad_from = n->pad_from;
-    x->pad_to = n->pad_to;
     /* One value per connection from the node's range, as Xray's client picks it (dialer.go). */
     x->post_max = 0;
     if (n->post_to) {
@@ -591,7 +600,7 @@ static int xh_init(struct transport *t, const struct tr_node *n) {
         x->post_max = n->post_from + r % (n->post_to - n->post_from + 1);
     }
     x->sid[0] = '\0';
-    if (x->mode != XH_STREAM_ONE) xh_session_id(&x->opts, x->sid, sizeof(x->sid));
+    if (x->mode != XH_STREAM_ONE) xh_session_id(&x->main_side.opts, x->sid, sizeof(x->sid));
     return 0;
 }
 
@@ -639,7 +648,7 @@ static long packet_conn_room(const struct xh_up *u) {
 /* Chunks that may still be sent before the window over seq is full (see PACKET_INFLIGHT). The
  * stream ids go up by two per chunk. */
 static long packet_win(const struct xh_state *x) {
-    long w = x->opts.posts ? (long)x->opts.posts : PACKET_INFLIGHT;
+    long w = x->main_side.opts.posts ? (long)x->main_side.opts.posts : PACKET_INFLIGHT;
     long c = (long)h2_stream_cap(&x->up.h2);
     return w < c ? w : c;
 }
@@ -703,7 +712,7 @@ static int xhttp_write(struct transport *t, const unsigned char *d, size_t n) {
             return rc ? rc : dr;
         }
         case XH_PACKET_UP: {
-            if (data_meta(&x->opts)) return packet_meta_write(t, d, n);
+            if (data_meta(&x->main_side.opts)) return packet_meta_write(t, d, n);
             /* A chunk is a request of its own: open, write, close our half.
              *
              * NO BATCHING. Xray gathers small writes into chunks of up to a megabyte and says
@@ -791,7 +800,7 @@ static long xhttp_room(struct transport *t) {
             if (h2_room(&x->up.h2) < UP_ROOM_LOW) up_drain(&x->up);
             return h2_room(&x->up.h2);
         case XH_PACKET_UP: {
-            if (data_meta(&x->opts)) {
+            if (data_meta(&x->main_side.opts)) {
                 if (packet_slots(x) <= packet_win(x) / 2) up_drain(&x->up);
                 long slots = packet_slots(x);
                 long per = (long)packet_cap(t);

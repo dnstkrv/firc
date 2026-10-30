@@ -363,6 +363,63 @@ TEST nodes_at_a_sink_are_counted_with_the_first_name(void)
     PASS();
 }
 
+#define DL_EXTRA(addr)                                                                              \
+    "type=xhttp&security=none&path=%2Fx&extra=%7B%22downloadSettings%22%3A%7B%22address%22%3A%22" addr \
+    "%22%2C%22port%22%3A443%2C%22network%22%3A%22xhttp%22%7D%7D"
+
+/* catches: the sink count blind to the block, or the block lost in the row */
+TEST a_download_block_at_a_sink_counts_as_one(void)
+{
+    static const char body[] = "vless://" U "@stub.example:443?" DL_EXTRA("0.0.0.0") "#Stub\n"
+                               "vless://" U "@real.example:443?security=none#Real\n";
+    const firc_tunnel_t *t = tunnel(SUB_A, "");
+    ASSERT(t != NULL);
+    firc_tun_body_t b = {"https://a.example", 0, body, sizeof body - 1, 0};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    ASSERT_EQ(2u, g_nodes.seen);
+    ASSERT_EQ(1u, g_nodes.sinks);
+    ASSERT_STR_EQ("Stub", g_nodes.sink_name);
+    const char *want[] = {"aaaaaaaa:Real", "aaaaaaaa:Stub"};
+    ASSERT(keys_are(want, 2));
+    ASSERT(g_nodes.v[1].link == NULL);
+    ASSERT_STR_EQ("downloadSettings: 0.0.0.0: nobody to answer", g_nodes.v[1].skip_reason);
+    PASS();
+}
+
+/* catches: a block without a port told as a subscription stub */
+TEST a_download_block_without_a_port_is_no_stub(void)
+{
+    static const char body[] = "vless://" U "@m.example:443?type=xhttp&security=none&path=%2Fx&extra="
+                               "%7B%22downloadSettings%22%3A%7B%22address%22%3A%22d.example%22%2C%22network%22%3A%22xhttp%22%7D%7D#NoPort\n";
+    const firc_tunnel_t *t = tunnel(SUB_A, "");
+    ASSERT(t != NULL);
+    firc_tun_body_t b = {"https://a.example", 0, body, sizeof body - 1, 0};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    ASSERT_EQ(1u, g_nodes.seen);
+    ASSERT_EQ(0u, g_nodes.sinks);
+    ASSERT_STR_EQ("downloadSettings: no port", g_nodes.v[0].skip_reason);
+    PASS();
+}
+
+/* catches: the sink count blind to the block, or the block lost in the row */
+TEST a_node_with_a_download_block_is_sent_with_it(void)
+{
+    static const char body[] = "vless://" U "@m.example:443?" DL_EXTRA("d.example") "#Dl\n";
+    const firc_tunnel_t *t = tunnel(SUB_A, "");
+    ASSERT(t != NULL);
+    firc_tun_body_t b = {"https://a.example", 0, body, sizeof body - 1, 0};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    ASSERT_EQ(1u, g_nodes.n);
+    ASSERT(g_nodes.v[0].link != NULL);
+    ASSERT_EQ(0u, g_nodes.sinks);
+    struct vless_node n;
+    memset(&n, 0, sizeof n);
+    ASSERT_EQ(0, vless_parse_url(g_nodes.v[0].link, &n));
+    ASSERT(vless_dl(&n) != NULL);
+    ASSERT_STR_EQ("d.example", vless_dl(&n)->host);
+    PASS();
+}
+
 TEST a_node_the_parser_skips_is_listed_with_its_reason(void)
 {
     /* catches: a skipped node missing from the table, sent, or listed without a reason */
@@ -622,6 +679,9 @@ int main(int argc, char **argv)
     RUN_TEST(the_body_of_another_mark_is_not_used);
     RUN_TEST(the_body_of_other_headers_is_not_used);
     RUN_TEST(a_node_the_parser_skips_is_listed_with_its_reason);
+    RUN_TEST(a_download_block_at_a_sink_counts_as_one);
+    RUN_TEST(a_download_block_without_a_port_is_no_stub);
+    RUN_TEST(a_node_with_a_download_block_is_sent_with_it);
     RUN_TEST(an_ipv6_server_is_sent_as_a_bracketed_link);
     RUN_TEST(a_bracketed_ipv6_link_source_is_one_node);
     RUN_TEST(a_long_name_is_cut_to_100_bytes);

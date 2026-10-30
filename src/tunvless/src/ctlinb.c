@@ -97,7 +97,7 @@ static int endpoint(const char *s, size_t n, struct ib_cfg *c) {
     return 0;
 }
 
-static int parse_line(char *l, struct ib_cfg *c, char **host) {
+static int parse_line(char *l, struct ib_cfg *c, char **host, char **dl_host) {
     char *f[4];
     size_t len[4];
     char *p = l;
@@ -114,6 +114,7 @@ static int parse_line(char *l, struct ib_cfg *c, char **host) {
     if (endpoint(f[0], len[0], c) != 0) return -1;
     if (field(f[1], len[1], c->user) != 0 || field(f[2], len[2], c->pass) != 0) return -1;
     *host = NULL;
+    *dl_host = NULL;
     if (len[3] == 1 && f[3][0] == '-') {
         c->node = -1;
         return 0;
@@ -130,12 +131,13 @@ static int parse_line(char *l, struct ib_cfg *c, char **host) {
     if (i < 0) return -3;
     c->node = i;
     *host = strdup(nd.host);
+    if (vless_dl(&nd)) *dl_host = strdup(vless_dl(&nd)->host);
     return 0;
 }
 
 int ctlinb_read_cmd(FILE *in, char **line, size_t *cap) {
     struct ib_cfg buf[IB_MAX];
-    char *hosts[IB_MAX];
+    char *hosts[2 * IB_MAX];
     size_t n = 0, nh = 0, lineno = 0;
     int ended = 0;
     ssize_t len;
@@ -147,14 +149,16 @@ int ctlinb_read_cmd(FILE *in, char **line, size_t *cap) {
             fprintf(stderr, LOG_W "inbounds line %zu: more than %d inbounds — left out\n", lineno, IB_MAX);
             continue;
         }
-        char *host;
-        int r = parse_line(*line, &buf[n], &host);
+        char *got[2];
+        int r = parse_line(*line, &buf[n], &got[0], &got[1]);
         if (r == -2) fprintf(stderr, LOG_W "inbounds line %zu: not a usable vless:// link\n", lineno);
         else if (r == -3) fprintf(stderr, LOG_W "inbounds line %zu: no room for another node\n", lineno);
         else if (r != 0) fprintf(stderr, LOG_W "inbounds line %zu: malformed line\n", lineno);
         if (r != 0) continue;
         n++;
-        if (host) {
+        for (int h = 0; h < 2; h++) {
+            char *host = got[h];
+            if (!host) continue;
             int dup = 0;
             for (size_t k = 0; k < nh && !dup; k++) dup = !strcmp(hosts[k], host);
             if (dup) free(host);

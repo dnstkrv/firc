@@ -308,7 +308,11 @@ void sl_post_range(struct vless_node *n, const char *v) {
  * table is bounded: when it is full the node is unusable with a named reason, so a hostile
  * subscription with random keys cannot keep growing memory. */
 #define SUB_INTERN_MAX 256
+#define SUB_INTERN_DL_MAX 512
 static const char *g_intern[SUB_INTERN_MAX];
+static size_t g_intern_len[SUB_INTERN_MAX];
+static const char *g_intern_dl[SUB_INTERN_DL_MAX];
+static size_t g_intern_dl_len[SUB_INTERN_DL_MAX];
 static volatile int g_intern_lock;
 /* Markers of unusable values (did not parse, or the table is full); sl_link_usable_pre names
  * the reason. */
@@ -316,35 +320,43 @@ const char SL_BAD_PQV[] = "!pqv";
 const char SL_FULL[] = "!full";
 const char SL_BAD_XHX[] = "!xhx";
 const char SL_BAD_XHX_JSON[] = "!xhx-json";
+const struct vless_node SL_DL_FULL;
 
 static __thread const char *(*g_interner)(const char *v, size_t n);
 
 void sl_set_interner(const char *(*fn)(const char *v, size_t n)) { g_interner = fn; }
 
-const char *sl_intern(const char *v, size_t n) {
-    if (g_interner) {
-        const char *r = g_interner(v, n);
-        return r ? r : SL_FULL;
-    }
+static const char *intern_in(const char **tab, size_t *lens, int max, const char *v, size_t n) {
     while (__atomic_test_and_set(&g_intern_lock, __ATOMIC_ACQUIRE)) { }
-    const char *r = SL_FULL;
-    for (int i = 0; i < SUB_INTERN_MAX; i++) {
-        if (!g_intern[i]) {
+    const char *r = NULL;
+    for (int i = 0; i < max; i++) {
+        if (!tab[i]) {
             char *c = malloc(n + 1);
-            if (c) { memcpy(c, v, n); c[n] = '\0'; g_intern[i] = c; r = c; }
+            if (c) { memcpy(c, v, n); c[n] = '\0'; tab[i] = c; lens[i] = n; r = c; }
             break;
         }
-        if (strlen(g_intern[i]) == n && !memcmp(g_intern[i], v, n)) { r = g_intern[i]; break; }
+        if (lens[i] == n && !memcmp(tab[i], v, n)) { r = tab[i]; break; }
     }
     __atomic_clear(&g_intern_lock, __ATOMIC_RELEASE);
     return r;
+}
+
+const char *sl_intern(const char *v, size_t n) {
+    const char *r = g_interner ? g_interner(v, n) : intern_in(g_intern, g_intern_len, SUB_INTERN_MAX, v, n);
+    return r ? r : SL_FULL;
+}
+
+const struct vless_node *sl_intern_node(const struct vless_node *d) {
+    if (g_interner) return (const struct vless_node *)g_interner((const char *)d, sizeof *d);
+    return (const struct vless_node *)intern_in(g_intern_dl, g_intern_dl_len, SUB_INTERN_DL_MAX,
+                                                (const char *)d, sizeof *d);
 }
 
 static const char *const xh_names[] = {
     "sessionIDPlacement", "sessionPlacement", "sessionIDKey", "sessionKey", "sessionIDTable",
     "sessionIDLength", "seqPlacement", "seqKey", "uplinkDataPlacement", "uplinkDataKey",
     "uplinkChunkSize", "uplinkHTTPMethod", "xPaddingObfsMode", "xPaddingKey", "xPaddingHeader",
-    "xPaddingPlacement", "xPaddingMethod", "downloadSettings", "scMaxBufferedPosts",
+    "xPaddingPlacement", "xPaddingMethod", "scMaxBufferedPosts",
 };
 #define XH_NAMES (sizeof xh_names / sizeof *xh_names)
 
@@ -396,6 +408,10 @@ void sl_intern_reset(void) {
     for (int i = 0; i < SUB_INTERN_MAX; i++) {
         free((void *)g_intern[i]);
         g_intern[i] = NULL;
+    }
+    for (int i = 0; i < SUB_INTERN_DL_MAX; i++) {
+        free((void *)g_intern_dl[i]);
+        g_intern_dl[i] = NULL;
     }
     __atomic_clear(&g_intern_lock, __ATOMIC_RELEASE);
 }
@@ -826,6 +842,14 @@ int sl_link_usable_pre(struct vless_node *n) {
             snprintf(n->skip_reason, sizeof(n->skip_reason), "invalid headers for xhttp");
             return 1;
         }
+        if (n->dl == &SL_DL_FULL) {
+            snprintf(n->skip_reason, sizeof(n->skip_reason), "too many distinct download blocks");
+            return 1;
+        }
+        if (n->dl && n->dl->skip_reason[0]) {
+            snprintf(n->skip_reason, sizeof(n->skip_reason), "downloadSettings: %.77s", n->dl->skip_reason);
+            return 1;
+        }
         if (xh_opts_parse(n->xhx, n->mode, n->headers, n->pad_to, &o, n->skip_reason, sizeof(n->skip_reason)))
             return 1;
     }
@@ -929,13 +953,13 @@ int sl_link_usable_post(struct vless_node *n) {
 
     /* Supported xhttp modes (empty means auto):
      *
-     *   stream-one — one POST, the request body goes up and the response body down. The
-     *     cheapest, and Xray picks it for reality with mode=auto, so auto means stream-one;
+     *   stream-one — one POST, the request body goes up and the response body down. Xray picks
+     *     it for reality with mode=auto, stream-up when a download block is set;
      *   stream-up  — a GET for the download and a long POST for the upload;
      *   packet-up  — a GET for the download and a series of short POSTs, a chunk in each.
      *
-     * Anything else is rejected, stream-down included: it has no upload at all, being half of a
-     * pair with a separate download server, which the client does not support. */
+     * Anything else is rejected, stream-down included: it has no upload at all. stream-one has
+     * no GET, so a download block with it is refused, as Xray does. */
     if (!strcmp(n->type, "xhttp") && n->mode[0] &&
         strcmp(n->mode, "auto") != 0 && strcmp(n->mode, "stream-one") != 0 &&
         strcmp(n->mode, "stream-up") != 0 && strcmp(n->mode, "packet-up") != 0) {
@@ -943,7 +967,52 @@ int sl_link_usable_post(struct vless_node *n) {
                  "xhttp mode=%s is not supported", n->mode);
         return 1;
     }
+    if (!strcmp(n->type, "xhttp") && n->dl && !strcmp(n->mode, "stream-one")) {
+        snprintf(n->skip_reason, sizeof(n->skip_reason), "xhttp: downloadSettings cannot be used in stream-one mode");
+        return 1;
+    }
     return 0;
+}
+
+static int dl_refused(struct sl_dl *d) {
+    struct vless_node *b = &d->n;
+    const char *why = d->bad ? "does not parse" : !b->host[0] ? "no address" : !b->port ? "no port" : NULL;
+    if (!why && strcmp(b->type, "xhttp")) {
+        snprintf(b->skip_reason, sizeof(b->skip_reason), "network %s is not xhttp", b->type);
+        return 1;
+    }
+    if (!why) why = d->notls ? "reality requires tls" : d->finalmask ? "finalmask is not supported" :
+                    d->quic ? "quicParams is not supported" :
+                    d->alpn == 1 ? "alpn h3 is not supported" : d->alpn == 2 ? "alpn http/1.1 is not supported" : NULL;
+    if (why) snprintf(b->skip_reason, sizeof(b->skip_reason), "%s", why);
+    return why != NULL;
+}
+
+static void dl_drop_id(struct vless_node *b) {
+    if (!b->xhx || b->xhx == SL_BAD_XHX || b->xhx == SL_BAD_XHX_JSON || b->xhx == SL_FULL) return;
+    struct sl_xh a = { .n = 0 };
+    char key[32];
+    for (const char *l = b->xhx, *e; (e = strchr(l, '\n')); l = e + 1) {
+        const char *eq = memchr(l, '=', (size_t)(e - l));
+        if (!eq) continue;
+        snprintf(key, sizeof key, "%.*s", (int)(eq - l), l);
+        if (strcmp(key, "sessionIDTable") && strcmp(key, "sessionIDLength"))
+            sl_xh_put(&a, key, eq + 1, (size_t)(e - eq - 1));
+    }
+    sl_xh_done(b, &a);
+}
+
+void sl_dl_done(struct vless_node *n, struct sl_dl *d) {
+    struct vless_node *b = &d->n;
+    if (!b->type[0]) snprintf(b->type, sizeof(b->type), "tcp");
+    if (!dl_refused(d)) {
+        dl_drop_id(b);
+        snprintf(b->mode, sizeof(b->mode), "packet-up");
+        if (!sl_link_usable_pre(b)) sl_link_usable_post(b);
+    }
+    memset(b->mode, 0, sizeof(b->mode));
+    const struct vless_node *r = sl_intern_node(b);
+    n->dl = r ? r : &SL_DL_FULL;
 }
 
 /* The only place skipped grows, so the counter and the reasons always agree. */

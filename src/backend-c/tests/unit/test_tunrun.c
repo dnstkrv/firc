@@ -27,6 +27,7 @@
 #include "firc/tunrun.h"
 #include "firc/tunsubs.h"
 #include "firc/tunwatch.h"
+#include "../../../tunvless/tests/sub-pq-samples.h"
 
 #define FAKE "tests/unit/fixtures/fake_tunvless.sh"
 #define START 4200u
@@ -948,7 +949,7 @@ TEST a_list_past_the_stdin_limit_is_cut_from_the_end(void)
     const firc_tun_nodes_t *rows = firc_tunrun_nodes(f.run, "a");
     ASSERT(rows != NULL && rows->n == 4);
     ASSERT_STR_EQ("", rows->v[2].skip_reason);
-    ASSERT_STR_EQ("over tunvless's 1 MiB node list", rows->v[3].skip_reason);
+    ASSERT_STR_EQ("over tunvless's 4 MiB node list", rows->v[3].skip_reason);
     apply_yaml(&f, FOUR_LINKS);
     run_ms(&f, 400);
     firc_log_set_fd(STDOUT_FILENO);
@@ -965,6 +966,49 @@ TEST a_list_past_the_stdin_limit_is_cut_from_the_end(void)
     ASSERT(strstr(log, "WRN tunvless0: node list over 200 bytes, 2 nodes kept, 1 left out\n") != NULL);
     ASSERT(strstr(log, "WRN tunvless0: node list over 200 bytes, 2 nodes kept, 2 left out\n") != NULL);
     ASSERT_EQ(1, journal_count("tunvless0", "node list over 200 bytes, 2 nodes kept, 1 left out"));
+    fx_down(&f);
+    PASS();
+}
+
+#define PQ_PBK "K4ALTVxNnrDTywBj_Stb5bomQ21QlSWOlGGT44n9Nng"
+
+/* catches: fircd cutting the node list at 1 MiB while tunvless takes 4 MiB */
+TEST a_list_of_large_links_over_1_mib_is_sent_whole(void)
+{
+    static fx_t f;
+    ASSERT(fx_up(&f, 0));
+    char in[256];
+    snprintf(in, sizeof in, "%s/stdin", f.dir);
+    setenv("FAKE_STDIN_OUT", in, 1);
+    size_t cap = 150 * 8192 + 256;
+    char *doc = malloc(cap);
+    ASSERT(doc != NULL);
+    size_t o = (size_t)snprintf(doc, cap, "tunnels:\n  - id: a\n    device: tunvless0\n    sources:\n");
+    for (int i = 0; i < 150; i++) {
+        o += (size_t)snprintf(doc + o, cap - o,
+                              "      - id: %08x\n        link: \"vless://" U "@m.example:443?type=xhttp&security=reality&pbk="
+                              PQ_PBK "&sid=01&sni=m.example&path=%%2Fxp&pqv=%s&encryption=%s&extra=%%7B%%22downloadSettings"
+                              "%%22%%3A%%7B%%22address%%22%%3A%%22d.example%%22%%2C%%22port%%22%%3A443%%2C%%22network%%22%%3A"
+                              "%%22xhttp%%22%%2C%%22security%%22%%3A%%22reality%%22%%2C%%22realitySettings%%22%%3A%%7B"
+                              "%%22serverName%%22%%3A%%22rs.example%%22%%2C%%22fingerprint%%22%%3A%%22chrome%%22%%2C"
+                              "%%22publicKey%%22%%3A%%22" PQ_PBK "%%22%%2C%%22shortId%%22%%3A%%22ab%%22%%2C"
+                              "%%22mldsa65Verify%%22%%3A%%22%s%%22%%7D%%7D%%7D#pq%d\"\n",
+                              (unsigned)i + 1, PQV_KEY, ENC_MLKEM, PQV_KEY, i);
+    }
+    apply_yaml(&f, doc);
+    free(doc);
+    int starts = wait_starts(&f, "tunvless0", 1, 20000);
+    const firc_tun_nodes_t *rows = firc_tunrun_nodes(f.run, "a");
+    size_t sent = 0;
+    for (size_t i = 0; rows != NULL && i < rows->n; i++) {
+        sent += rows->v[i].skip_reason[0] == 0;
+    }
+    unsetenv("FAKE_STDIN_OUT");
+    unlink(in);
+    ASSERT_EQ(1, starts);
+    ASSERT(o > ((size_t)1 << 20));
+    ASSERT(rows != NULL && rows->n == 150);
+    ASSERT_EQ_FMT((size_t)150, sent, "%zu");
     fx_down(&f);
     PASS();
 }
@@ -2947,6 +2991,7 @@ SUITE(tunrun)
     RUN_TEST(a_filter_edit_keeps_tunvless_running);
     RUN_TEST(a_changed_sent_list_reaches_tunvless_without_a_restart);
     RUN_TEST(a_list_past_the_stdin_limit_is_cut_from_the_end);
+    RUN_TEST(a_list_of_large_links_over_1_mib_is_sent_whole);
     RUN_TEST(a_save_during_a_refresh_takes_the_new_config);
     RUN_TEST(a_body_change_updates_only_the_tunnel_using_it);
     RUN_TEST(an_apply_sweeps_unused_cache_files);

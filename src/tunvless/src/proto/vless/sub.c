@@ -297,7 +297,9 @@ static void xray_upg(struct sj *j, struct upg_cfg *u, int hu) {
 
 static int sj_bool(struct sj *j);
 
-struct xh_set { struct vless_node n; struct sl_xh a; struct upg_cfg h; };
+struct xh_set { struct vless_node n; struct sl_xh a; struct upg_cfg h; struct sl_dl *dl; };
+
+static void xray_stream(struct sj *j, struct vless_node *n, struct sl_dl *d);
 
 static const char XH_NOT_A_STRING[] = "\"";
 
@@ -349,13 +351,6 @@ static int xh_value(struct sj *j, struct sl_xh *a, const char *k) {
     char v[sizeof a->buf];
     sj_ws(j);
     if (!strncmp(j->p, "null", 4)) { j->p += 4; return 0; }
-    if (!strcmp(k, "downloadSettings")) {
-        const char *b = j->p;
-        sj_skip(j);
-        if (j->p == b) return -1;
-        sl_xh_put(a, k, "present", 7);
-        return 0;
-    }
     if (*j->p == '{' && (!strcmp(k, "uplinkChunkSize") || !strcmp(k, "sessionIDLength"))) {
         int r = xh_range_obj(j, v, sizeof v);
         if (r < 0) return -1;
@@ -377,13 +372,28 @@ static int xh_value(struct sj *j, struct sl_xh *a, const char *k) {
     return 0;
 }
 
-static int xh_obj(struct sj *j, struct xh_set *s, struct xh_set *ex, int *ex_on) {
+static int xh_dl(struct sj *j, struct xh_set *s, int dl_ok) {
+    const char *b = j->p;
+    if (!dl_ok) { sj_skip(j); return j->p == b ? -1 : 0; }
+    free(s->dl);
+    s->dl = NULL;
+    if (!strncmp(j->p, "null", 4)) { j->p += 4; return 0; }
+    s->dl = calloc(1, sizeof *s->dl);
+    if (!s->dl) return -1;
+    if (*j->p == '{') xray_stream(j, &s->dl->n, s->dl);
+    else { sj_skip(j); s->dl->bad = 1; }
+    return j->p == b ? -1 : 0;
+}
+
+static int xh_obj(struct sj *j, struct xh_set *s, struct xh_set *ex, int *ex_on, int dl_ok) {
     int f = 1, r;
     char k[64], v[48];
     while ((r = sj_obj_key(j, &f, k, sizeof k)) == 0) {
         sj_ws(j);
         if (ex && !strcmp(k, "path")) { if (sj_str(j, s->n.path, sizeof s->n.path)) return -1; }
         else if (ex && !strcmp(k, "mode")) { if (sj_str(j, s->n.mode, sizeof s->n.mode)) return -1; }
+        else if (ex && !strcmp(k, "host")) { if (sj_str(j, s->n.http_host, sizeof s->n.http_host)) return -1; }
+        else if (!strcmp(k, "downloadSettings")) { if (xh_dl(j, s, dl_ok)) return -1; }
         else if (!strcmp(k, "xPaddingBytes") || !strcmp(k, "scMaxEachPostBytes")) {
             if (*j->p == '{' ? xh_range_obj(j, v, sizeof v) < 0 : xh_token(j, v, sizeof v)) return -1;
             if (k[0] == 'x') sl_pad_range(&s->n, v); else sl_post_range(&s->n, v);
@@ -393,10 +403,11 @@ static int xh_obj(struct sj *j, struct xh_set *s, struct xh_set *ex, int *ex_on)
             else { sj_skip(j); s->h.bad = 1; }
         }
         else if (ex && !strcmp(k, "extra")) {
+            free(ex->dl);
             memset(ex, 0, sizeof *ex);
             *ex_on = 1;
             if (!strncmp(j->p, "null", 4)) j->p += 4;
-            else if (xh_obj(j, ex, NULL, NULL)) return -1;
+            else if (xh_obj(j, ex, NULL, NULL, dl_ok)) return -1;
         }
         else if (xh_value(j, &s->a, k)) return -1;
     }
@@ -411,26 +422,36 @@ static void xh_apply(struct vless_node *n, const struct xh_set *s) {
         n->headers_bad = s->h.bad;
     }
     sl_xh_done(n, &s->a);
+    if (s->dl) sl_dl_done(n, s->dl);
 }
 
 void sl_parse_extra(struct vless_node *n, const char *extra) {
     struct xh_set *s = calloc(1, sizeof *s);
     if (!s) { n->xhx = SL_BAD_XHX_JSON; return; }
     struct sj j = { extra };
-    int bad = xh_obj(&j, s, NULL, NULL);
+    int bad = xh_obj(&j, s, NULL, NULL, 1);
     sj_ws(&j);
     if (bad || *j.p) n->xhx = SL_BAD_XHX_JSON;
     else xh_apply(n, s);
+    free(s->dl);
     free(s);
 }
 
 struct xh_cfg { struct xh_set s[2]; int ex_on, bad; };
 
-static struct xh_cfg *xh_settings(struct sj *j, struct xh_cfg *c) {
-    if (!c) c = malloc(sizeof *c);
+static void xh_cfg_free(struct xh_cfg *c) {
+    if (!c) return;
+    free(c->s[0].dl);
+    free(c->s[1].dl);
+    free(c);
+}
+
+static struct xh_cfg *xh_settings(struct sj *j, struct xh_cfg *c, int dl_ok) {
+    if (c) { free(c->s[0].dl); free(c->s[1].dl); }
+    else c = malloc(sizeof *c);
     if (!c) { sj_skip(j); return NULL; }
     memset(c, 0, sizeof *c);
-    c->bad = xh_obj(j, &c->s[0], &c->s[1], &c->ex_on);
+    c->bad = xh_obj(j, &c->s[0], &c->s[1], &c->ex_on, dl_ok);
     return c;
 }
 
@@ -439,11 +460,56 @@ static void xh_settings_apply(struct vless_node *n, const struct xh_cfg *c, int 
     if (!c || c->bad) { n->xhx = SL_BAD_XHX_JSON; return; }
     snprintf(n->path, sizeof(n->path), "%s", c->s[0].n.path);
     snprintf(n->mode, sizeof(n->mode), "%s", c->s[0].n.mode);
+    snprintf(n->http_host, sizeof(n->http_host), "%s", c->s[0].n.http_host);
     xh_apply(n, &c->s[c->ex_on]);
 }
 
+static uint16_t xray_port(struct sj *j) {
+    sj_ws(j);
+    char num[16] = "";
+    if (*j->p == '"') sj_str(j, num, sizeof(num));
+    else {
+        size_t i = 0;
+        while (*j->p >= '0' && *j->p <= '9' && i + 1 < sizeof(num)) num[i++] = *j->p++;
+        num[i] = '\0';
+        if (!i) sj_skip(j);
+    }
+    return sl_port_of(num);
+}
+
+static int xray_present(struct sj *j) {
+    sj_ws(j);
+    if (!strncmp(j->p, "null", 4)) { j->p += 4; return 0; }
+    sj_skip(j);
+    return 1;
+}
+
+static uint8_t alpn_of(const char *v) {
+    return !strcmp(v, "h3") ? 1 : !strcmp(v, "http/1.1") ? 2 : 0;
+}
+
+static void xray_alpn(struct sj *j, struct sl_dl *d) {
+    char v[64] = "";
+    sj_ws(j);
+    if (*j->p == '"') {
+        sj_str(j, v, sizeof v);
+        d->alpn = alpn_of(v);
+        return;
+    }
+    if (*j->p != '[') { sj_skip(j); return; }
+    int f = 1;
+    size_t cnt = 0;
+    while (sj_arr_next(j, &f) == 0) {
+        cnt++;
+        sj_ws(j);
+        if (*j->p != '"') { sj_skip(j); d->bad = 1; continue; }
+        if (sj_str(j, v, sizeof v)) break;
+    }
+    d->alpn = cnt == 1 ? alpn_of(v) : 0;
+}
+
 /* streamSettings: the transport, security and everything that depends on them. */
-static void xray_stream(struct sj *j, struct vless_node *n) {
+static void xray_stream(struct sj *j, struct vless_node *n, struct sl_dl *d) {
     int first = 1;
     char k[64];
     struct upg_cfg ws, hu;
@@ -458,7 +524,12 @@ static void xray_stream(struct sj *j, struct vless_node *n) {
             if (!strcmp(n->type, "raw")) snprintf(n->type, sizeof(n->type), "tcp");
             /* websocket is another name for ws in Xray (infra/conf: case "ws", "websocket"). */
             if (!strcmp(n->type, "websocket")) snprintf(n->type, sizeof(n->type), "ws");
+            if (d && !strcmp(n->type, "splithttp")) snprintf(n->type, sizeof(n->type), "xhttp");
         }
+        else if (d && !strcmp(k, "address")) { sj_str(j, n->host, sizeof(n->host)); sl_host_unbracket(n->host); }
+        else if (d && !strcmp(k, "port")) n->port = xray_port(j);
+        else if (d && !strcmp(k, "finalmask")) d->finalmask = (uint8_t)xray_present(j);
+        else if (d && !strcmp(k, "quicParams")) d->quic = (uint8_t)xray_present(j);
         else if (!strcmp(k, "tcpSettings") || !strcmp(k, "rawSettings")) {
             int f2 = 1;
             char k2[64];
@@ -476,6 +547,7 @@ static void xray_stream(struct sj *j, struct vless_node *n) {
         else if (!strcmp(k, "httpupgradeSettings")) xray_upg(j, &hu, 1);
         else if (!strcmp(k, "security")) sj_str(j, n->security, sizeof(n->security));
         else if (!strcmp(k, "realitySettings") || !strcmp(k, "tlsSettings")) {
+            int tls = k[0] == 't';
             /* Both carry serverName and fingerprint; only reality has publicKey and shortId.
              * One parser serves both because the field names do not clash and a node declares
              * exactly one of the two. */
@@ -502,6 +574,7 @@ static void xray_stream(struct sj *j, struct vless_node *n) {
                     sl_set_vcn(n, vv);
                 }
                 else if (!strcmp(k2, "allowInsecure")) { if (sj_bool(j)) n->allow_insecure = 1; }
+                else if (d && tls && !strcmp(k2, "alpn")) xray_alpn(j, d);
                 else if (!strcmp(k2, "echConfigList")) {
                     char ev[1400] = "";
                     sj_str(j, ev, sizeof ev);
@@ -518,12 +591,12 @@ static void xray_stream(struct sj *j, struct vless_node *n) {
             }
         } else if (!strcmp(k, "xhttpSettings") || !strcmp(k, "splithttpSettings")) {
             /* splithttpSettings is the old name of xhttpSettings; some panels still use it. */
-            xc = xh_settings(j, xc);
+            xc = xh_settings(j, xc, !d);
             xc_seen = 1;
         } else sj_skip(j);
     }
     xh_settings_apply(n, xc, xc_seen);
-    free(xc);
+    xh_cfg_free(xc);
     const struct upg_cfg *u = !strcmp(n->type, "ws") ? &ws : !strcmp(n->type, "httpupgrade") ? &hu : NULL;
     if (u) {
         snprintf(n->path, sizeof(n->path), "%s", u->path);
@@ -553,19 +626,7 @@ static void xray_settings(struct sj *j, struct vless_node *n) {
         if (!strcmp(k, "id")) { sj_str(j, n->uuid, sizeof(n->uuid)); continue; }
         if (!strcmp(k, "flow")) { sj_str(j, n->flow, sizeof(n->flow)); continue; }
         if (!strcmp(k, "encryption")) { json_encryption(j, n); continue; }
-        if (!strcmp(k, "port")) {
-            sj_ws(j);
-            char num[16];
-            if (*j->p == '"') sj_str(j, num, sizeof(num));
-            else {
-                size_t i = 0;
-                while (*j->p >= '0' && *j->p <= '9' && i + 1 < sizeof(num)) num[i++] = *j->p++;
-                num[i] = '\0';
-                if (!i) sj_skip(j);
-            }
-            n->port = sl_port_of(num);
-            continue;
-        }
+        if (!strcmp(k, "port")) { n->port = xray_port(j); continue; }
         if (strcmp(k, "vnext") != 0) { sj_skip(j); continue; }
         int fa = 1, taken = 0;
         while (sj_arr_next(j, &fa) == 0) {
@@ -575,21 +636,8 @@ static void xray_settings(struct sj *j, struct vless_node *n) {
             char k2[64];
             while (sj_obj_key(j, &fo, k2, sizeof(k2)) == 0) {
                 if (!strcmp(k2, "address")) { sj_str(j, n->host, sizeof(n->host)); sl_host_unbracket(n->host); }
-                else if (!strcmp(k2, "port")) {
-                    sj_ws(j);
-                    char num[16];
-                    /* A number, or a number as a string: panels write both. Anything else is
-                     * skipped as a value, so the parse stays in step with the object. */
-                    if (*j->p == '"') sj_str(j, num, sizeof(num));
-                    else {
-                        size_t i = 0;
-                        while (*j->p >= '0' && *j->p <= '9' && i + 1 < sizeof(num))
-                            num[i++] = *j->p++;
-                        num[i] = '\0';
-                        if (!i) sj_skip(j);
-                    }
-                    n->port = sl_port_of(num);
-                } else if (!strcmp(k2, "users")) {
+                else if (!strcmp(k2, "port")) n->port = xray_port(j);
+                else if (!strcmp(k2, "users")) {
                     int fu = 1, u_taken = 0;
                     while (sj_arr_next(j, &fu) == 0) {
                         if (u_taken) { sj_skip(j); continue; }
@@ -821,7 +869,7 @@ static int xray_outbound(struct sj *j, struct vless_node *n) {
          * same way. */
         else if (!strcmp(k, "tag")) { sj_str(j, n->name, sizeof(n->name)); sl_utf8_trim_tail(n->name); }
         else if (!strcmp(k, "settings")) xray_settings(j, n);
-        else if (!strcmp(k, "streamSettings")) xray_stream(j, n);
+        else if (!strcmp(k, "streamSettings")) xray_stream(j, n, NULL);
         else sj_skip(j);
     }
     is_vless = !strcmp(proto, "vless");
@@ -1118,6 +1166,95 @@ static const char *y_item(struct yflat *f, const char *p, const char *end, size_
     return p;
 }
 
+static int clash_tls(const char *v) {
+    return v && (!strcmp(v, "true") || !strcmp(v, "True"));
+}
+
+#define DS "xhttp-opts.download-settings."
+
+static const char *ds_get(const struct yflat *f, const char *k) {
+    char p[96];
+    snprintf(p, sizeof p, DS "%s", k);
+    return yf_get(f, p);
+}
+
+static int ds_has(const struct yflat *f, const char *k) {
+    char p[96];
+    size_t l = (size_t)snprintf(p, sizeof p, DS "%s.", k);
+    for (size_t i = 0; i < f->n; i++) if (!strncmp(f->kv[i].k, p, l)) return 1;
+    return 0;
+}
+
+static int clash_alpn(const struct yflat *f, const char *key, uint8_t *code) {
+    char p[96];
+    if (yf_get(f, key)) return -1;
+    snprintf(p, sizeof p, "%s.0", key);
+    const char *v0 = yf_get(f, p);
+    if (!v0) return 0;
+    snprintf(p, sizeof p, "%s.1", key);
+    *code = yf_get(f, p) ? 0 : alpn_of(v0);
+    return 1;
+}
+
+static void clash_dl(const struct yflat *f, const struct vless_node *main, struct vless_node *n) {
+    struct sl_dl *d = calloc(1, sizeof *d);
+    if (!d) { n->dl = &SL_DL_FULL; return; }
+    struct vless_node *b = &d->n;
+    const char *v;
+    snprintf(b->type, sizeof b->type, "xhttp");
+    if (yf_get(f, "xhttp-opts.download-settings")) d->bad = 1;
+    if ((v = ds_get(f, "server"))) { sl_set_field(b->host, sizeof b->host, v, strlen(v)); sl_host_unbracket(b->host); }
+    else memcpy(b->host, main->host, sizeof b->host);
+    b->port = (v = ds_get(f, "port")) ? sl_port_of(v) : main->port;
+    if ((v = ds_get(f, "servername"))) sl_set_field(b->sni, sizeof b->sni, v, strlen(v));
+    else memcpy(b->sni, main->sni, sizeof b->sni);
+    if ((v = ds_get(f, "client-fingerprint"))) sl_set_field(b->fp, sizeof b->fp, v, strlen(v));
+    else memcpy(b->fp, main->fp, sizeof b->fp);
+    if ((v = ds_get(f, "fingerprint"))) { if (v[0]) sl_add_pins(b, v, 0); }
+    else { b->pcs = main->pcs; b->pks = main->pks; }
+    b->allow_insecure = (v = ds_get(f, "skip-cert-verify")) ? (uint8_t)sl_truthy(v) : main->allow_insecure;
+    if (ds_has(f, "ech-opts")) { if ((v = ds_get(f, "ech-opts.config")) && v[0]) sl_set_ech(b, v); }
+    else b->ech = main->ech;
+    if (ds_has(f, "reality-opts")) {
+        const char *pbk = ds_get(f, "reality-opts.public-key");
+        if (!pbk) d->bad = 1;
+        else if (pbk[0]) {
+            sl_set_field(b->pbk, sizeof b->pbk, pbk, strlen(pbk));
+            if ((v = ds_get(f, "reality-opts.short-id"))) sl_set_field(b->sid, sizeof b->sid, v, strlen(v));
+            if ((v = ds_get(f, "reality-opts.mldsa65-verify")) || (v = ds_get(f, "reality-opts.pqv"))) sl_set_pqv(b, v);
+        }
+    } else {
+        memcpy(b->pbk, main->pbk, sizeof b->pbk);
+        memcpy(b->sid, main->sid, sizeof b->sid);
+        b->pqv = main->pqv;
+    }
+    int tls = clash_tls((v = ds_get(f, "tls")) ? v : yf_get(f, "tls"));
+    if (b->pbk[0] && !tls) d->notls = 1;
+    snprintf(b->security, sizeof b->security, "%s", b->pbk[0] ? "reality" : tls ? "tls" : "none");
+    if (clash_alpn(f, DS "alpn", &d->alpn) < 0) d->bad = 1;
+    if ((v = ds_get(f, "path"))) sl_set_field(b->path, sizeof b->path, v, strlen(v));
+    else memcpy(b->path, main->path, sizeof b->path);
+    if ((v = ds_get(f, "host"))) sl_set_field(b->http_host, sizeof b->http_host, v, strlen(v));
+    else memcpy(b->http_host, main->http_host, sizeof b->http_host);
+    if (ds_has(f, "headers")) {
+        for (size_t i = 0; i < f->n; i++) {
+            const char *k = f->kv[i].k;
+            if (strncmp(k, DS "headers.", strlen(DS "headers.")) != 0) continue;
+            k += strlen(DS "headers.");
+            if (ci_eq(k, "host") || hdr_append(b->headers, sizeof b->headers, k, f->kv[i].v) != 0) b->headers_bad = 1;
+        }
+    } else {
+        memcpy(b->headers, main->headers, sizeof b->headers);
+        b->headers_bad = main->headers_bad;
+    }
+    b->pad_from = main->pad_from;
+    b->pad_to = main->pad_to;
+    b->xhx = main->xhx;
+    sl_dl_done(n, d);
+    free(d);
+}
+#undef DS
+
 /* A flattened node into a vless node. 1 — it is vless, written into n. */
 static int clash_node(const struct yflat *f, struct vless_node *n) {
     memset(n, 0, sizeof *n);
@@ -1143,8 +1280,7 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
         if ((v = yf_get(f, "reality-opts.mldsa65-verify")) || (v = yf_get(f, "reality-opts.pqv"))) sl_set_pqv(n, v);
         snprintf(n->security, sizeof n->security, "reality");
     } else {
-        v = yf_get(f, "tls");
-        snprintf(n->security, sizeof n->security, "%s", v && (!strcmp(v, "true") || !strcmp(v, "True")) ? "tls" : "none");
+        snprintf(n->security, sizeof n->security, "%s", clash_tls(yf_get(f, "tls")) ? "tls" : "none");
     }
     if ((v = yf_get(f, "encryption"))) set_encryption(n, v);
     const char *net = yf_get(f, "network");
@@ -1179,6 +1315,7 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
     } else if (!strcmp(n->type, "xhttp")) {
         if ((v = yf_get(f, "xhttp-opts.path"))) sl_set_field(n->path, sizeof n->path, v, strlen(v));
         if ((v = yf_get(f, "xhttp-opts.mode"))) sl_set_field(n->mode, sizeof n->mode, v, strlen(v));
+        if ((v = yf_get(f, "xhttp-opts.host"))) sl_set_field(n->http_host, sizeof n->http_host, v, strlen(v));
         if ((v = yf_get(f, "xhttp-opts.x-padding-bytes"))) sl_pad_range(n, v);
         static const char *const map[][2] = {
             { "x-padding-obfs-mode", "xPaddingObfsMode" }, { "x-padding-key", "xPaddingKey" },
@@ -1192,13 +1329,14 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
         };
         struct sl_xh a;
         memset(&a, 0, sizeof a);
+        int ds = 0;
         for (size_t i = 0; i < f->n; i++) {
             const char *k = f->kv[i].k;
             if (strncmp(k, "xhttp-opts.", 11) != 0) continue;
             k += 11;
             if (!strncmp(k, "download-settings.", 18) ||
                 (!strcmp(k, "download-settings") && f->kv[i].v[0] && strcmp(f->kv[i].v, "null"))) {
-                sl_xh_put(&a, "downloadSettings", "present", 7);
+                ds = 1;
                 continue;
             }
             if (!strncmp(k, "headers.", 8)) {
@@ -1210,6 +1348,7 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
                 if (!strcmp(k, map[m][0])) sl_xh_put(&a, map[m][1], f->kv[i].v, strlen(f->kv[i].v));
         }
         sl_xh_done(n, &a);
+        if (ds) clash_dl(f, n, n);
     }
     return 1;
 }

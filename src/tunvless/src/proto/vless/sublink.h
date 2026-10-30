@@ -51,6 +51,8 @@ extern const char SL_BAD_PQV[], SL_FULL[], SL_BAD_PIN[], SL_BAD_ECH[], SL_ECH_DN
 /* Shared table of long strings (pqv, encryption, pins, vcn, ech): equal values share one copy.
  * Bounded: when it is full (or memory runs out), SL_FULL is returned. */
 const char *sl_intern(const char *v, size_t n);
+/* A node blob in its own table of 512, compared whole; NULL when it is full or memory runs out. */
+const struct vless_node *sl_intern_node(const struct vless_node *d);
 void sl_set_pqv(struct vless_node *n, const char *v);
 void sl_add_pins(struct vless_node *n, const char *v, int spki);
 void sl_set_vcn(struct vless_node *n, const char *v);
@@ -62,6 +64,8 @@ void sl_parse_extra(struct vless_node *n, const char *extra);
 struct sl_xh { char buf[768]; size_t n; uint8_t bad; };
 void sl_xh_put(struct sl_xh *a, const char *key, const char *val, size_t vlen);
 void sl_xh_done(struct vless_node *n, const struct sl_xh *a);
+struct sl_dl { struct vless_node n; uint8_t bad, finalmask, quic, alpn, notls; };
+void sl_dl_done(struct vless_node *n, struct sl_dl *d);
 
 /* ---- the whole link -------------------------------------------------------------------------- */
 
@@ -125,6 +129,14 @@ static inline void sl_tr_node(const struct vless_node *n, struct tr_node *t) {
     t->insecure = tls && n->insecure;
     t->encryption = n->encryption;
     t->xhx = n->xhx;
+    t->dl = NULL;
+}
+
+static inline void sl_tr_nodes(const struct vless_node *n, struct tr_node *t, struct tr_node *td) {
+    sl_tr_node(n, t);
+    if (!n->dl || n->dl == &SL_DL_FULL) return;
+    sl_tr_node(n->dl, td);
+    t->dl = td;
 }
 
 #endif

@@ -14,8 +14,8 @@
 #include "firc/tunnodes.h"
 #include "firc/tunvless_name.h"
 #include "firc/tunwatch.h"
+#include "vlink.h"
 
-#define TUNVLESS_STDIN_MAX ((size_t)1 << 20)
 #define WATCH_MS 15000
 
 typedef struct {
@@ -821,7 +821,7 @@ firc_tunrun_t *firc_tunrun_new(firc_loop_t *loop, firc_rtnl_t *r, uint32_t start
     }
     t->loop = loop;
     t->r = r;
-    t->list_max = TUNVLESS_STDIN_MAX;
+    t->list_max = VLESS_CTL_NODES_MAX;
     t->start = start_table;
     t->now = mono_ms;
     t->sup = firc_tunsup_new(loop, binary, on_event, t);
@@ -929,7 +929,7 @@ static size_t fit_stdin(const firc_tunnel_t *tun, firc_tun_src_t *v, size_t k, f
         free(v[p].link);
         v[p].link = NULL;
         snprintf(nodes->v[row_of[p]].skip_reason, sizeof nodes->v[row_of[p]].skip_reason, "%s",
-                 "over tunvless's 1 MiB node list");
+                 "over tunvless's 4 MiB node list");
     }
     firc_log_from(FIRC_LOG_WARN, tun->device, "node list over %zu bytes, %zu nodes kept, %zu left out", max, keep, k - keep);
     return keep;

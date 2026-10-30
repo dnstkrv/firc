@@ -41,7 +41,9 @@ ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp
            xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
            xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data
            v6-carry-tcp v6-carry-xhttp v6-second v6-none
-           node6-tcp node6-xhttp node6-name node6-dual"
+           node6-tcp node6-xhttp node6-name node6-dual
+           xhttp-dl-reality-auto xhttp-dl-packet-tls xhttp-dl-none xhttp-dl-extra xhttp-dl-post-main
+           xhttp-dl-name xhttp-dl-route xhttp-dl-neg-path xhttp-dl-neg-sess"
 CASES="${CASES:-$ALL_CASES}"
 XRAY="${XRAY:-$(command -v xray 2>/dev/null || true)}"
 
@@ -56,7 +58,7 @@ ip netns add "grpc-probe-$$" 2>/dev/null || { echo "run-xray: SKIPPED — ip net
 ip netns delete "grpc-probe-$$"
 
 NSC="grpcc$$"; NSS="grpcs$$"
-S_IP=10.93.0.1; C_IP=10.93.0.2; TARGET=203.0.113.9
+S_IP=10.93.0.1; C_IP=10.93.0.2; S_IP2=10.93.0.3; TARGET=203.0.113.9
 C_IP6=2001:db8:93::2; S_IP6=2001:db8:93::1
 TARGET6=2001:db8:9::9; CHK6A=2606:4700:4700::1111; CHK6B=2001:4860:4860::8888
 PORT=18443; MASK=mask.grpc.test; SVC=grpcsvc
@@ -89,6 +91,7 @@ ip -n "$NSC" link set lo up; ip -n "$NSS" link set lo up
 ip link add grc0 netns "$NSC" type veth peer name grs0 netns "$NSS"
 ip -n "$NSC" addr add "$C_IP/24" dev grc0
 ip -n "$NSS" addr add "$S_IP/24" dev grs0
+ip -n "$NSS" addr add "$S_IP2/24" dev grs0
 ip -n "$NSC" addr add "$C_IP6/64" dev grc0 nodad
 ip -n "$NSS" addr add "$S_IP6/64" dev grs0 nodad
 ip -n "$NSC" link set grc0 up; ip -n "$NSS" link set grs0 up
@@ -126,15 +129,42 @@ table inet grpccnt { chain in { type filter hook input priority -300; policy acc
     iifname "grs0" tcp dport $PORT tcp flags & (syn | ack) == syn counter comment "syn" } }
 NFT
 fi
+DLNFT=""
+if command -v nft >/dev/null 2>&1; then
+    ip netns exec "$NSS" nft -f - >/dev/null 2>&1 <<NFT && DLNFT=1 || true
+table inet dlcnt {
+    chain in { type filter hook input priority -300; policy accept;
+        iifname "grs0" ip daddr $S_IP tcp dport $PORT counter comment "in1"
+        iifname "grs0" ip daddr $S_IP2 tcp dport $PORT counter comment "in2"
+        iifname "grs0" ip daddr $S_IP tcp dport $PORT tcp flags & (syn | ack) == syn counter comment "syn1"
+        iifname "grs0" ip daddr $S_IP2 tcp dport $PORT tcp flags & (syn | ack) == syn counter comment "syn2"; }
+    chain out { type filter hook output priority -300; policy accept;
+        oifname "grs0" ip saddr $S_IP tcp sport $PORT counter comment "out1"
+        oifname "grs0" ip saddr $S_IP2 tcp sport $PORT counter comment "out2"; }
+}
+NFT
+fi
 
 FAIL=0; SKIPPED=""
 # One case: NET (streamSettings without security), SEC (reality | tls), Q (the link's transport
 # parameters) and TUN_ARGS (extra client flags). Defaults are Xray's own.
 enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 xh() { XP="{\"path\":\"/xp/\",\"mode\":\"$1\",$2}"; Q="type=xhttp&path=%2Fxp%2F&mode=$1&extra=$(enc "{$2}")"; }
+dl() { DL=1; SEC=$1; XM=$2; LM=$3; SX=$4; MX=$4; BX=$4; }
+dl_cfg() {
+    XP="{\"path\":\"/xp/\"${XM:+,\"mode\":\"$XM\"}${SX:+,$SX}}"
+    case "$SEC" in
+    reality) BS="\"security\":\"reality\",\"realitySettings\":{\"serverName\":\"$MASK\",\"publicKey\":\"$PUB\",\"shortId\":\"$SID\",\"fingerprint\":\"chrome\"}" ;;
+    tls)     BS="\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$MASK\"}" ;;
+    *)       BS='"security":"none"' ;;
+    esac
+    BLK="{\"address\":\"$DH\",\"port\":$PORT,\"network\":\"xhttp\",$BS,\"xhttpSettings\":{\"path\":\"$BP\"${BX:+,$BX}}}"
+    Q="type=xhttp&path=%2Fxp%2F${LM:+&mode=$LM}&extra=$(enc "{${MX:+$MX,}\"downloadSettings\":$BLK}")"
+}
 neg() { EXPECT=fail; XP="{\"path\":\"/xp/\",\"mode\":\"packet-up\",$1}"; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up"; }
 case_cfg() {
     SEC=reality; TUN_ARGS=""; EXPECT=ok; V6=""; NODE=v4
+    DL=""; DH="$S_IP2"; BP=/xp/
     XP='{"path":"/xp/"}'
     case "$1" in
     grpc-gun|grpc-multi)
@@ -196,10 +226,23 @@ case_cfg() {
     xhttp-neg-obfs)          neg '"xPaddingObfsMode":true,"xPaddingPlacement":"cookie"' ;;
     xhttp-neg-sess)          neg '"sessionIDPlacement":"header"' ;;
     xhttp-neg-data)          neg '"uplinkDataPlacement":"cookie"' ;;
+    # One inbound on two addresses: the GET goes to $S_IP2 (downloadSettings), the POSTs to $S_IP.
+    xhttp-dl-reality-auto)   dl reality stream-up "" "" ;;
+    xhttp-dl-packet-tls)     dl tls packet-up packet-up ""; TUN_ARGS="--ca $W/mask.pem" ;;
+    xhttp-dl-none)           dl none packet-up packet-up '"sessionIDPlacement":"query"' ;;
+    xhttp-dl-extra)          dl reality packet-up packet-up '"sessionIDPlacement":"header","xPaddingObfsMode":true,"xPaddingPlacement":"cookie","xPaddingKey":"pad"' ;;
+    xhttp-dl-post-main)      dl reality packet-up packet-up '"uplinkDataPlacement":"body"'; BX='"uplinkDataPlacement":"cookie"' ;;
+    xhttp-dl-name)           dl reality packet-up packet-up ""; DH=dl.test ;;
+    xhttp-dl-route)          dl reality packet-up packet-up ""; TUN_ARGS="--route 10.93.0.2/31" ;;
+    xhttp-dl-neg-path)       dl none packet-up packet-up '"sessionIDPlacement":"query"'; EXPECT=fail; BP=/wrong/ ;;
+    xhttp-dl-neg-sess)       dl none packet-up packet-up '"sessionIDPlacement":"query"'; EXPECT=fail; BX='"sessionIDPlacement":"header"' ;;
     *) echo "run-xray: unknown case $1"; exit 2 ;;
     esac
+    [ -z "$DL" ] || dl_cfg
     case "$1" in xhttp-*|v6-carry-xhttp|node6-xhttp) NET="\"network\":\"xhttp\",\"xhttpSettings\":$XP" ;; esac
-    if [ "$SEC" = reality ]; then
+    if [ "$SEC" = none ]; then
+        SECJ='"security":"none"'; LSEC="security=none"
+    elif [ "$SEC" = reality ]; then
         SECJ="\"security\":\"reality\",\"realitySettings\":{\"show\":false,\"dest\":\"$S_IP:8443\",\"xver\":0,\"serverNames\":[\"$MASK\"],\"privateKey\":\"$PRIV\",\"shortIds\":[\"$SID\"]}"
         LSEC="security=reality&sni=$MASK&pbk=$PUB&sid=$SID&fp=chrome"
     else
@@ -240,6 +283,41 @@ v6_routes_clean() {
     echo "run-xray: IPv6 routes clean"
 }
 
+dl_snap() {
+    ip netns exec "$NSS" nft list table inet dlcnt 2>/dev/null | awk '
+        { for (i = 1; i < NF; i++) { if ($i == "packets") p = $(i + 1); if ($i == "bytes") b = $(i + 1) } }
+        NF > 1 && $(NF - 1) == "comment" { k = $NF; gsub(/"/, "", k); v[k] = k ~ /^syn/ ? p : b }
+        END { printf "%.0f %.0f %.0f %.0f %.0f %.0f\n", v["in1"], v["in2"], v["out1"], v["out2"], v["syn1"], v["syn2"] }'
+}
+dl_delta() { printf '%s %s\n' "$1" "$2" | awk '{ for (i = 1; i <= 6; i++) printf "%.0f ", $(i + 6) - $i; print "" }'; }
+dl_load() {
+    a=$(dl_snap)
+    ip netns exec "$NSC" python3 tests/grpc-load.py --target "$TARGET:8080" --dur 10 \
+        --down "$1" --up "$2" --rate 0 --report 5 || return 1
+    read -r din1 din2 dout1 dout2 _ _ <<EOF
+$(dl_delta "$a" "$(dl_snap)")
+EOF
+}
+dl_checks() {
+    r=0
+    if dl_load 0 2; then
+        echo "run-xray: upload only: into $S_IP $din1 bytes, into $S_IP2 $din2 bytes"
+        [ "$din1" -gt 0 ] && [ $((din2 * 20)) -lt "$din1" ] || {
+            echo "run-xray: FAIL — the upload did not go to $S_IP (into $S_IP2 must be under 1/20)"; r=1; }
+    else r=1; fi
+    if dl_load 2 0; then
+        echo "run-xray: download only: out of $S_IP $dout1 bytes, out of $S_IP2 $dout2 bytes"
+        [ "$dout2" -gt $((dout1 * 20)) ] || {
+            echo "run-xray: FAIL — the download did not come from $S_IP2 (over 20 times $S_IP)"; r=1; }
+    else r=1; fi
+    read -r _ _ _ _ dsyn1 dsyn2 <<EOF
+$(dl_delta "$D0" "$(dl_snap)")
+EOF
+    echo "run-xray: TCP connections to $S_IP: $dsyn1, to $S_IP2: $dsyn2"
+    [ "$dsyn1" -gt 0 ] && [ "$dsyn2" -gt 0 ] || { echo "run-xray: FAIL — not both addresses were connected to"; r=1; }
+    return $r
+}
+
 etc_writable() { mkdir -p /etc/netns 2>/dev/null && : > /etc/netns/.w 2>/dev/null && rm -f /etc/netns/.w; }
 
 for MODE in $CASES; do
@@ -265,12 +343,24 @@ for MODE in $CASES; do
             printf 'precedence ::/0 100\nprecedence ::ffff:0:0/96 10\n' > "/etc/netns/$NSC/gai.conf"
         fi ;;
     esac
+    if [ -n "$DL" ] && [ -z "$DLNFT" ]; then
+        echo "run-xray: case $MODE — SKIPPED (no nft counters in the server namespace; not passed)"
+        SKIPPED="$SKIPPED $MODE"; continue
+    fi
+    if [ "$DH" = dl.test ]; then
+        if ! etc_writable; then
+            echo "run-xray: case $MODE — SKIPPED (no writable /etc for the hosts file; not passed)"
+            SKIPPED="$SKIPPED $MODE"; continue
+        fi
+        mkdir -p "/etc/netns/$NSC"; printf '%s dl.test\n' "$S_IP2" > "/etc/netns/$NSC/hosts"
+    fi
     INB1="\"port\":$PORT,\"protocol\":\"vless\",\"settings\":{\"clients\":[{\"id\":\"$UUID\"}],\"decryption\":\"none\"},\"streamSettings\":{$NET,$SECJ}"
     case "$NODE" in
     v6|name6) INB="{\"listen\":\"$S_IP6\",$INB1}" ;;
     dual)     INB="{\"listen\":\"$S_IP\",$INB1},{\"listen\":\"$S_IP6\",$INB1}" ;;
     *)        INB="{\"listen\":\"$S_IP\",$INB1}" ;;
     esac
+    [ -z "$DL" ] || INB="{\"listen\":\"0.0.0.0\",$INB1}"
     FR="{\"action\":\"allow\",\"ip\":[\"$TARGET/32\"]}"
     case "$V6" in
     carry)  FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
@@ -286,6 +376,7 @@ JSON
     XPID=$!; PIDS="$PIDS $XPID"
     for _ in $(seq 40); do ip netns exec "$NSS" ss -ltn 2>/dev/null | grep -q ":$PORT " && break; sleep 0.25; done
     ip netns exec "$NSS" ss -ltn 2>/dev/null | grep -q ":$PORT " || { echo "run-xray: Xray did not start:"; tail -5 "$W/xray-$MODE.log"; exit 1; }
+    [ -z "$DL" ] || D0=$(dl_snap)
 
     printf '%s\n' "vless://$UUID@$HOST:$PORT?encryption=none&$Q&$LSEC#$MODE" > "$W/sub.txt"
     probe() { ip netns exec "$NSC" "$BIN" --probe --timeout 5 $TUN_ARGS "$W/sub.txt" 2>&1 || true; }
@@ -302,8 +393,17 @@ JSON
     done
     if [ "$EXPECT" = fail ]; then
         kill "$XPID" 2>/dev/null || true; sleep 0.5
+        [ -z "$DL" ] || read -r _ _ _ _ _ dsyn2 <<EOF
+$(dl_delta "$D0" "$(dl_snap)")
+EOF
         if [ "$warm" -eq 1 ]; then
             echo "run-xray: FAIL — the server accepted a request it must refuse: $out"; FAIL=1
+            echo "run-xray: case $MODE — FAIL"
+        elif [ -n "$DL" ] && [ "$dsyn2" -eq 0 ]; then
+            echo "run-xray: FAIL — refused before the GET reached $S_IP2: $out"; FAIL=1
+            echo "run-xray: case $MODE — FAIL"
+        elif [ -n "$DL" ] && ! printf '%s' "$out" | grep -q 'server answered 4'; then
+            echo "run-xray: FAIL — refused, but not by the server: $out"; FAIL=1
             echo "run-xray: case $MODE — FAIL"
         else
             echo "run-xray: refused as expected: $out"; echo "run-xray: case $MODE — ok"
@@ -337,6 +437,7 @@ JSON
         echo "run-xray: FAIL — the tunnel vl did not come up:"; tail -8 "$W/tun-$MODE.log"; FAIL=1
         kill "$SPID" "$XPID" 2>/dev/null || true; continue; }
     ip netns exec "$NSC" ip route replace "$TARGET/32" dev vl
+    [ "$DH" != dl.test ] || : > "/etc/netns/$NSC/hosts"
     rc=0
     [ "$NODE" = v4 ] || v6_routes_clean || rc=1
     if [ -n "$V6" ]; then
@@ -410,6 +511,18 @@ for size in (1, 200, 1200):
         echo "run-xray: FAIL — the pool declared the node dead, a flow did not open, or data was refused:"
         printf '%s\n' "$bad_log" | head -5 | sed 's/^/    /'
         rc=1
+    fi
+    if [ -n "$DL" ]; then
+        dl_checks || rc=1
+        if grep -q "does not resolve" "$W/tun-$MODE.log"; then
+            echo "run-xray: FAIL — a name did not resolve:"; grep "does not resolve" "$W/tun-$MODE.log" | head -3; rc=1
+        fi
+        case "$TUN_ARGS" in
+        *--route*)
+            if grep -qF "server $S_IP2 keeps its route outside the tunnel" "$W/tun-$MODE.log"; then
+                echo "run-xray: server $S_IP2 keeps its route outside the tunnel"
+            else echo "run-xray: FAIL — the download address did not keep its route"; rc=1; fi ;;
+        esac
     fi
     if [ "$NODE" != v4 ]; then
         n4=$(grep -Fc "from $C_IP:" "$W/xray-access-$MODE.log" || true)

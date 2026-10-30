@@ -24,12 +24,14 @@ static const char *const g_fields[] = {
     "name", "host", "port", "uuid", "type", "security", "sni", "fp", "pbk", "sid", "flow", "path",
     "service", "mode", "http_host", "headers", "pad_from", "pad_to", "post_from", "post_to", "pqv",
     "encryption", "tcp_http", "pcs", "pks", "vcn", "ech", "allow_insecure", "insecure", "xhx",
+    "dl",
 };
 #define NFIELDS (sizeof g_fields / sizeof *g_fields)
 static unsigned g_cover[NFIELDS];
-static int g_bad;
+static int g_bad, g_in_dl;
 
 static void hit(const char *f) {
+    if (g_in_dl) return;
     for (size_t i = 0; i < NFIELDS; i++)
         if (!strcmp(g_fields[i], f)) { g_cover[i]++; return; }
     printf("no coverage slot for %s\n", f);
@@ -58,6 +60,15 @@ static const char *diff(const struct vless_node *n, const struct vless_node *m) 
     FN(pad_from); FN(pad_to); FN(post_from); FN(post_to); FP(pqv); FP(encryption);
     FN(tcp_http); FP(pcs); FP(pks); FP(vcn); FP(ech); FN(allow_insecure);
     FN(insecure); FP(xhx);
+    if (!n->dl != !m->dl || (n->dl == &SL_DL_FULL) != (m->dl == &SL_DL_FULL)) bad = "dl";
+    else if (n->dl && n->dl != &SL_DL_FULL) {
+        static char why[48];
+        hit("dl");
+        g_in_dl++;
+        const char *d = diff(n->dl, m->dl);
+        g_in_dl--;
+        if (d) { snprintf(why, sizeof why, "dl.%s", d); bad = why; }
+    }
     if (n->headers_bad != m->headers_bad) bad = "headers_bad";
     if (strcmp(n->skip_reason, m->skip_reason)) bad = "skip_reason";
     if (marker(n->pcs) || marker(n->pks) || marker(n->vcn) || marker(n->ech))
@@ -149,6 +160,17 @@ static char *fmt(const char *f, ...) {
     return s;
 }
 
+static char *xlink(const char *main, const char *json) {
+    char *s = malloc(32768);
+    size_t o = (size_t)snprintf(s, 32768, "vless://" UUID "@m.example:443?%s&extra=", main);
+    for (const unsigned char *p = (const unsigned char *)json; *p && o + 4 < 32768; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) s[o++] = (char)*p;
+        else o += (size_t)snprintf(s + o, 32768 - o, "%%%02X", *p);
+    }
+    snprintf(s + o, 32768 - o, "#d");
+    return s;
+}
+
 static const char *g_own_last;
 static int g_own_calls, g_own_fail;
 static const char *own_intern(const char *v, size_t n) {
@@ -212,7 +234,7 @@ int main(void) {
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingMethod%22%3A%22tokenish%22%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingObfsMode%22%3Atrue%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22downloadSettings%22%3A%7B"
-            "%22address%22%3A%22d.example%22%7D%7D#x",
+            "%22address%22%3A%22d.example%22%2C%22port%22%3A443%2C%22network%22%3A%22xhttp%22%7D%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=auto#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=stream-one#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=stream-up#x",
@@ -339,6 +361,136 @@ int main(void) {
         /* catches: allowInsecure and the --insecure mark not carried by the link */
         links("certificate links, --insecure", v, N(v));
         vless_set_insecure(0);
+    }
+    {
+        const char *v[] = {
+            xlink("type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up",
+                  "{\"downloadSettings\":{\"address\":\"d.example\",\"port\":8443,\"network\":\"xhttp\",\"security\":\"tls\","
+                  "\"tlsSettings\":{\"serverName\":\"dl.example\",\"fingerprint\":\"firefox\",\"pinnedPeerCertSha256\":\"" H1 "\","
+                  "\"verifyPeerCertByName\":\"a.example,b.example\",\"echConfigList\":\"" ECH "\"}}}"),
+            fmt("vless://" UUID "@m.example:443?type=xhttp&security=reality&pbk=" PBK "&sid=01&sni=m.example&path=%%2Fxp"
+                "&pqv=%s&extra=%%7B%%22downloadSettings%%22%%3A%%7B%%22address%%22%%3A%%22r.example%%22%%2C%%22port%%22%%3A443"
+                "%%2C%%22network%%22%%3A%%22xhttp%%22%%2C%%22security%%22%%3A%%22reality%%22%%2C%%22realitySettings%%22%%3A%%7B"
+                "%%22serverName%%22%%3A%%22rs.example%%22%%2C%%22fingerprint%%22%%3A%%22chrome%%22%%2C%%22publicKey%%22%%3A%%22"
+                PBK "%%22%%2C%%22shortId%%22%%3A%%22ab%%22%%2C%%22mldsa65Verify%%22%%3A%%22%s%%22%%7D%%7D%%7D#r", PQV_KEY, PQV_KEY),
+            xlink("type=xhttp&security=none&path=%2Fxp&mode=packet-up",
+                  "{\"downloadSettings\":{\"address\":\"[2001:db8::5]\",\"port\":443,\"network\":\"xhttp\",\"xhttpSettings\":"
+                  "{\"host\":\"cdn.example\",\"path\":\"/dl?k=v\",\"headers\":{\"X-Q\":\"a\\\"b\\\\c\",\"X-T\":\"1\\t2\"},"
+                  "\"xPaddingBytes\":\"20-40\",\"scMaxEachPostBytes\":\"500-900\"}}}"),
+            xlink("type=xhttp&security=none&path=%2Fxp",
+                  "{\"downloadSettings\":{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"xhttpSettings\":"
+                  "{\"path\":\"/a\\\"b\\\\c\"}}}"),
+            xlink("type=xhttp&security=none&path=%2Fxp&mode=packet-up",
+                  "{\"sessionIDTable\":\"hex\",\"sessionIDLength\":\"16-20\",\"downloadSettings\":{\"address\":\"d.example\","
+                  "\"port\":443,\"network\":\"xhttp\",\"xhttpSettings\":{\"sessionIDPlacement\":\"header\",\"sessionIDKey\":\"X-S\","
+                  "\"seqPlacement\":\"header\",\"seqKey\":\"X-Q\",\"uplinkDataPlacement\":\"header\",\"uplinkDataKey\":\"X-D\","
+                  "\"uplinkChunkSize\":\"100-200\",\"uplinkHTTPMethod\":\"GET\",\"xPaddingObfsMode\":true,\"xPaddingKey\":\"pk\","
+                  "\"xPaddingHeader\":\"X-P\",\"xPaddingPlacement\":\"header\",\"xPaddingMethod\":\"tokenish\","
+                  "\"scMaxBufferedPosts\":40}}}"),
+            xlink("type=xhttp&security=none&path=%2Fxp",
+                  "{\"xPaddingBytes\":\"30-60\",\"downloadSettings\":{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\","
+                  "\"xhttpSettings\":{\"sessionPlacement\":\"cookie\",\"sessionKey\":\"sid\",\"xPaddingObfsMode\":false}}}"),
+            xlink("type=xhttp&security=tls&sni=m.example&path=%2Fxp",
+                  "{\"downloadSettings\":{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"security\":\"tls\","
+                  "\"tlsSettings\":{\"serverName\":\"dl.example\",\"allowInsecure\":true}}}"),
+        };
+        /* catches: a block field lost or an unescaped quote breaking the JSON on the way to tunvless */
+        links("xhttp-download", v, N(v));
+        vless_set_insecure(1);
+        links("xhttp-download, --insecure", v, N(v));
+        struct vless_node n, m;
+        char buf[512];
+        int w = vless_parse_url(v[N(v) - 1], &n);
+        size_t l = w ? 0 : vless_node_link(&n, buf, sizeof buf);
+        vless_set_insecure(0);
+        int r = l ? vless_parse_url(buf, &m) : -2;
+        /* catches: an allowInsecure block written under --insecure taken by a reader without it */
+        check("xhttp-download: insecure block written under --insecure", 1, w == 0 && l > 0);
+        check("xhttp-download: insecure block read without --insecure, skipped", 1, r);
+        check_str("xhttp-download: insecure block read without --insecure, reason",
+                  "downloadSettings: allowInsecure: needs --insecure", r == 1 ? m.skip_reason : "");
+        for (size_t i = 0; i < N(v); i++) free((void *)v[i]);
+    }
+    {
+        static const char *const v[] = {
+            "proxies:\n  - name: cdl\n    type: vless\n    server: m.example\n    port: 443\n    uuid: " UUID "\n"
+            "    network: xhttp\n    tls: true\n    servername: m.example\n    client-fingerprint: chrome\n"
+            "    xhttp-opts:\n      path: /xp\n      download-settings:\n        server: d.example\n        path: /dl\n",
+        };
+        /* catches: a Clash block's inherited port, tls, servername or fingerprint lost on the way to tunvless */
+        subs("xhttp-download Clash", v, N(v));
+    }
+    {
+        static const char *const v[] = {
+            "{\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"xn\",\"settings\":{\"vnext\":[{\"address\":\"m.example\","
+            "\"port\":443,\"users\":[{\"id\":\"" UUID "\"}]}]},\"streamSettings\":{\"network\":\"xhttp\",\"security\":\"tls\","
+            "\"tlsSettings\":{\"serverName\":\"m.example\"},\"xhttpSettings\":{\"path\":\"/xp\",\"downloadSettings\":"
+            "{\"address\":\"d.example\",\"port\":443,\"network\":\"xhttp\",\"security\":\"none\","
+            "\"tlsSettings\":{\"serverName\":\"dl.example\"}}}}}]}",
+        };
+        /* catches: a block's tls fields dropped when its security is none or reality */
+        subs("xhttp-download Xray none block", v, N(v));
+    }
+    {
+        static const char *const v[] = {
+            "proxies:\n  - name: cdr\n    type: vless\n    server: m.example\n    port: 443\n    uuid: " UUID "\n"
+            "    network: xhttp\n    tls: true\n    servername: m.example\n    client-fingerprint: chrome\n"
+            "    fingerprint: " H1 "\n    skip-cert-verify: true\n    ech-opts:\n      enable: true\n      config: \"" ECH "\"\n"
+            "    reality-opts:\n      public-key: " PBK "\n      short-id: ab\n"
+            "    xhttp-opts:\n      path: /xp\n      download-settings:\n        server: d.example\n        port: 8443\n",
+        };
+        vless_set_insecure(1);
+        /* catches: a block's tls fields dropped when its security is none or reality */
+        subs("xhttp-download Clash reality block", v, N(v));
+        vless_set_insecure(0);
+    }
+    {
+        static const char want[] =
+            "vless://u@m.example:443?type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up&extra="
+            "%7B%22downloadSettings%22%3A%7B%22address%22%3A%222001%3Adb8%3A%3A5%22%2C%22port%22%3A8443%2C"
+            "%22network%22%3A%22xhttp%22%2C%22security%22%3A%22tls%22%2C%22tlsSettings%22%3A%7B%22serverName%22%3A"
+            "%22d.example%22%7D%2C%22xhttpSettings%22%3A%7B%22host%22%3A%22cdn.example%22%2C%22path%22%3A"
+            "%22%2Fdl%3Fk%3Dv%22%2C%22headers%22%3A%7B%22X-Q%22%3A%22a%5C%22b%5C%5Cc%22%2C%22X-T%22%3A"
+            "%221%5Cu00092%22%7D%2C%22xPaddingBytes%22%3A%2220-40%22%2C%22seqKey%22%3A%22q%22%7D%7D%7D#d";
+        static const char want0[] =
+            "vless://u@h:443?type=xhttp&security=reality&sni=a.com&pbk=K&path=%2Fx&extra=%7B%22xPaddingBytes%22%3A%2250-150%22%7D#x";
+        struct vless_node n;
+        char buf[2048];
+        int rc = vless_parse_url(
+            "vless://u@m.example:443?mode=packet-up&path=/xp&sni=m.example&security=tls&type=xhttp&extra="
+            "%7B%22downloadSettings%22%3A%7B%22network%22%3A%22xhttp%22%2C%22xhttpSettings%22%3A%7B%22seqKey%22%3A"
+            "%22q%22%2C%22headers%22%3A%7B%22X-Q%22%3A%22a%5Cu0022b%5C%5Cc%22%2C%22X-T%22%3A%221%5Ct2%22%7D%2C"
+            "%22path%22%3A%22%2Fdl%3Fk%3Dv%22%2C%22host%22%3A%22cdn.example%22%2C%22xPaddingBytes%22%3A%2220-40%22%7D"
+            "%2C%22port%22%3A8443%2C%22tlsSettings%22%3A%7B%22serverName%22%3A%22d.example%22%7D%2C%22security%22%3A"
+            "%22tls%22%2C%22address%22%3A%22%5B2001%3Adb8%3A%3A5%5D%22%7D%7D#d", &n);
+        size_t l = rc ? 0 : vless_node_link(&n, buf, sizeof buf);
+        /* catches: a block member out of order, unescaped, or escaped another way than JSON */
+        check("xhttp-download: the block written as JSON members in order", 0, l ? strcmp(buf, want) : -1);
+        rc = vless_parse_url("vless://u@m.example:443?type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up"
+                             "&extra=%7B%22downloadSettings%22%3A%7B%22address%22%3A%22d.example%22%2C%22port%22%3A443%2C"
+                             "%22network%22%3A%22xhttp%22%2C%22tlsSettings%22%3A%7B%7D%2C%22xhttpSettings%22%3A%7B%7D%7D%7D#d", &n);
+        l = rc ? 0 : vless_node_link(&n, buf, sizeof buf);
+        /* catches: an empty tlsSettings or xhttpSettings written into the block */
+        check("xhttp-download: a bare block written without empty objects", 0, l ? strcmp(buf,
+              "vless://u@m.example:443?type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up&extra="
+              "%7B%22downloadSettings%22%3A%7B%22address%22%3A%22d.example%22%2C%22port%22%3A443%2C"
+              "%22network%22%3A%22xhttp%22%2C%22security%22%3A%22none%22%7D%7D#d") : -1);
+        rc = vless_parse_url("vless://u@m.example:443?type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up"
+                             "&extra=%7B%22downloadSettings%22%3A%7B%22security%22%3A%22none%22%2C%22tlsSettings%22%3A%7B"
+                             "%22serverName%22%3A%22dl.example%22%7D%2C%22address%22%3A%22d.example%22%2C%22port%22%3A443%2C"
+                             "%22network%22%3A%22xhttp%22%7D%7D#d", &n);
+        l = rc ? 0 : vless_node_link(&n, buf, sizeof buf);
+        /* catches: a none block's serverName written under another object name or dropped */
+        check("xhttp-download: a none block keeps its serverName in tlsSettings", 0, l ? strcmp(buf,
+              "vless://u@m.example:443?type=xhttp&security=tls&sni=m.example&path=%2Fxp&mode=packet-up&extra="
+              "%7B%22downloadSettings%22%3A%7B%22address%22%3A%22d.example%22%2C%22port%22%3A443%2C"
+              "%22network%22%3A%22xhttp%22%2C%22security%22%3A%22none%22%2C%22tlsSettings%22%3A%7B"
+              "%22serverName%22%3A%22dl.example%22%7D%7D%7D#d") : -1);
+        rc = vless_parse_url("vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx"
+                             "&extra=%7B%22xPaddingBytes%22%3A%2250-150%22%7D#x", &n);
+        l = rc ? 0 : vless_node_link(&n, buf, sizeof buf);
+        /* catches: a node without a block given any downloadSettings member */
+        check("xhttp-download: a node without a block keeps its bytes", 0, l ? strcmp(buf, want0) : -1);
     }
     {
         static const char *const v[] = {

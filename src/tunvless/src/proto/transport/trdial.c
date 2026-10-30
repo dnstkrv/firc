@@ -119,7 +119,7 @@ void transport_set_bind_dev(const char *ifname) {
 /* Addresses of the nodes resolved once, at startup (transport_pin_host). Once the routes point into
  * the tunnel, the DNS query for a node's name would itself go into the tunnel and wait for a
  * connection that is waiting for that query. */
-#define PIN_MAX 512
+#define PIN_MAX 1024
 #define PIN_PAR 16
 #define PIN_POLL_MS 100
 #define PIN_STACK (1024 * 1024)

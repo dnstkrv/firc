@@ -66,38 +66,146 @@ static int xh_bare(const char *v, size_t l) {
     return (l == 4 && !memcmp(v, "true", 4)) || (l == 5 && !memcmp(v, "false", 5));
 }
 
-static void extra(struct wbuf *w, const struct vless_node *n) {
+struct jbuf { char *p; size_t n, cap; int bad; };
+
+static void jb_put(struct jbuf *b, const char *s, size_t l) {
+    if (b->bad) return;
+    if (b->n + l + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256;
+        while (c < b->n + l + 1) c *= 2;
+        char *p = realloc(b->p, c);
+        if (!p) { b->bad = 1; return; }
+        b->p = p;
+        b->cap = c;
+    }
+    memcpy(b->p + b->n, s, l);
+    b->n += l;
+    b->p[b->n] = '\0';
+}
+
+static void js_strn(struct jbuf *b, const char *s, size_t l) {
+    jb_put(b, "\"", 1);
+    for (const unsigned char *p = (const unsigned char *)s; p < (const unsigned char *)s + l; p++) {
+        char e[8];
+        if (*p == '"' || *p == '\\') { e[0] = '\\'; e[1] = (char)*p; jb_put(b, e, 2); }
+        else if (*p < 0x20 || *p == 0x7f) { snprintf(e, sizeof e, "\\u%04X", *p); jb_put(b, e, 6); }
+        else jb_put(b, (const char *)p, 1);
+    }
+    jb_put(b, "\"", 1);
+}
+
+static void js_str(struct jbuf *b, const char *s) { js_strn(b, s, strlen(s)); }
+
+static void js_key(struct jbuf *b, int *k, const char *key, size_t l) {
+    if ((*k)++) jb_put(b, ",", 1);
+    js_strn(b, key, l);
+    jb_put(b, ":", 1);
+}
+
+static void js_field(struct jbuf *b, int *k, const char *key, const char *v) {
+    if (!v || !v[0] || is_marker(v)) return;
+    js_key(b, k, key, strlen(key));
+    js_str(b, v);
+}
+
+static void xh_members(struct jbuf *b, int *k, const struct vless_node *n) {
     const char *x = n->xhx && !is_marker(n->xhx) ? n->xhx : "";
-    size_t cap = 8 * (strlen(x) + 1) + 160, o = 0;
-    char *js = malloc(cap), r[32];
-    if (!js) { w->over = 1; return; }
-    js[0] = '\0';
+    char r[32];
     if (n->pad_to) {
         range(r, sizeof r, n->pad_from, n->pad_to);
-        o += (size_t)snprintf(js + o, cap - o, "%s\"xPaddingBytes\":\"%s\"", o ? "," : "", r);
+        js_field(b, k, "xPaddingBytes", r);
     }
     if (n->post_to) {
         range(r, sizeof r, n->post_from, n->post_to);
-        o += (size_t)snprintf(js + o, cap - o, "%s\"scMaxEachPostBytes\":\"%s\"", o ? "," : "", r);
+        js_field(b, k, "scMaxEachPostBytes", r);
     }
     for (const char *p = x; *p;) {
         const char *e = strchr(p, '\n'), *eq = e ? memchr(p, '=', (size_t)(e - p)) : NULL;
-        if (!eq) { w->over = 1; free(js); return; }
-        size_t kl = (size_t)(eq - p), vl = (size_t)(e - eq - 1);
-        const char *q = xh_bare(eq + 1, vl) ? "" : "\"";
-        o += (size_t)snprintf(js + o, cap - o, "%s\"%.*s\":%s%.*s%s", o ? "," : "", (int)kl, p, q, (int)vl, eq + 1, q);
+        if (!eq) { b->bad = 1; return; }
+        size_t vl = (size_t)(e - eq - 1);
+        js_key(b, k, p, (size_t)(eq - p));
+        if (xh_bare(eq + 1, vl)) jb_put(b, eq + 1, vl);
+        else js_strn(b, eq + 1, vl);
         p = e + 1;
     }
-    if (o) {
-        char *obj = malloc(o + 3);
-        if (!obj) w->over = 1;
-        else {
-            snprintf(obj, o + 3, "{%s}", js);
-            param(w, "extra", obj);
-            free(obj);
+}
+
+static void js_headers(struct jbuf *b, const char *h) {
+    int k = 0;
+    jb_put(b, "{", 1);
+    for (const char *p = h; *p;) {
+        const char *e = strchr(p, '\n');
+        if (!e) e = p + strlen(p);
+        const char *c = memchr(p, ':', (size_t)(e - p));
+        if (c) {
+            const char *v = c + 1 < e && c[1] == ' ' ? c + 2 : c + 1;
+            js_key(b, &k, p, (size_t)(c - p));
+            js_strn(b, v, (size_t)(e - v));
         }
+        p = *e ? e + 1 : e;
     }
-    free(js);
+    jb_put(b, "}", 1);
+}
+
+static void js_open(struct jbuf *b, int *k, const char *key, size_t *at, int *kat) {
+    *at = b->n;
+    *kat = *k;
+    js_key(b, k, key, strlen(key));
+    jb_put(b, "{", 1);
+}
+
+static void js_close(struct jbuf *b, int *k, int inner, size_t at, int kat) {
+    if (inner || b->bad) { jb_put(b, "}", 1); return; }
+    b->n = at;
+    b->p[at] = '\0';
+    *k = kat;
+}
+
+static void dl_json(struct jbuf *b, const struct vless_node *d) {
+    char port[8];
+    size_t at;
+    int k = 0, s = 0, kat;
+    jb_put(b, "{", 1);
+    js_field(b, &k, "address", d->host);
+    snprintf(port, sizeof port, "%u", d->port);
+    js_key(b, &k, "port", 4);
+    jb_put(b, port, strlen(port));
+    js_field(b, &k, "network", "xhttp");
+    js_field(b, &k, "security", d->security);
+    js_open(b, &k, strcmp(d->security, "reality") ? "tlsSettings" : "realitySettings", &at, &kat);
+    js_field(b, &s, "serverName", d->sni);
+    js_field(b, &s, "fingerprint", d->fp);
+    js_field(b, &s, "publicKey", d->pbk);
+    js_field(b, &s, "shortId", d->sid);
+    js_field(b, &s, "mldsa65Verify", d->pqv);
+    js_field(b, &s, "pinnedPeerCertSha256", d->pcs);
+    js_field(b, &s, "verifyPeerCertByName", d->vcn);
+    js_field(b, &s, "echConfigList", d->ech);
+    if (d->allow_insecure) { js_key(b, &s, "allowInsecure", 13); jb_put(b, "true", 4); }
+    js_close(b, &k, s, at, kat);
+    s = 0;
+    js_open(b, &k, "xhttpSettings", &at, &kat);
+    js_field(b, &s, "host", d->http_host);
+    js_field(b, &s, "path", d->path);
+    if (d->headers[0]) { js_key(b, &s, "headers", 7); js_headers(b, d->headers); }
+    xh_members(b, &s, d);
+    js_close(b, &k, s, at, kat);
+    jb_put(b, "}", 1);
+}
+
+static void extra(struct wbuf *w, const struct vless_node *n) {
+    struct jbuf b = { NULL, 0, 0, 0 };
+    int k = 0;
+    jb_put(&b, "{", 1);
+    xh_members(&b, &k, n);
+    if (n->dl && n->dl != &SL_DL_FULL) {
+        js_key(&b, &k, "downloadSettings", 16);
+        dl_json(&b, n->dl);
+    }
+    jb_put(&b, "}", 1);
+    if (b.bad) w->over = 1;
+    else if (k) param(w, "extra", b.p);
+    free(b.p);
 }
 
 static int clean(const char *s, const char *bad) {

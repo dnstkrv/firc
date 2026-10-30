@@ -14,6 +14,7 @@ static struct {
     unsigned char *chunk[NODES_CHUNKS];
     struct nodes_key *keys[NODES_CHUNKS];
     char **str;
+    size_t *str_len;
     size_t str_n, str_cap;
 } g_ns;
 
@@ -33,7 +34,9 @@ int nodes_init(size_t size) {
     }
     for (size_t i = 0; i < g_ns.str_n; i++) free(g_ns.str[i]);
     free(g_ns.str);
+    free(g_ns.str_len);
     g_ns.str = NULL;
+    g_ns.str_len = NULL;
     g_ns.str_n = g_ns.str_cap = 0;
     g_ns.size = size;
     __atomic_store_n(&g_ns.n, 0, __ATOMIC_RELEASE);
@@ -81,18 +84,22 @@ const void *node_at(int i) {
 
 const char *nodes_intern(const char *v, size_t n) {
     for (size_t i = 0; i < g_ns.str_n; i++)
-        if (strlen(g_ns.str[i]) == n && !memcmp(g_ns.str[i], v, n)) return g_ns.str[i];
+        if (g_ns.str_len[i] == n && !memcmp(g_ns.str[i], v, n)) return g_ns.str[i];
     if (g_ns.str_n == g_ns.str_cap) {
         size_t cap = g_ns.str_cap ? g_ns.str_cap * 2 : 16;
         char **p = realloc(g_ns.str, cap * sizeof *p);
         if (!p) return NULL;
         g_ns.str = p;
+        size_t *l = realloc(g_ns.str_len, cap * sizeof *l);
+        if (!l) return NULL;
+        g_ns.str_len = l;
         g_ns.str_cap = cap;
     }
     char *c = malloc(n + 1);
     if (!c) return NULL;
     memcpy(c, v, n);
     c[n] = '\0';
+    g_ns.str_len[g_ns.str_n] = n;
     g_ns.str[g_ns.str_n++] = c;
     return c;
 }

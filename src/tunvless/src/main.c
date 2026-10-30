@@ -492,21 +492,33 @@ static int named(void) {
     return g_sel_n == 1 && (g.want_n || g_links_only);
 }
 
-/* Resolve every candidate's name once, before any route points into the device (trdial.c says
- * why). A candidate whose name does not resolve is left out: the pool could not reach it later
+/* Resolve every candidate's names once, before any route points into the device (trdial.c says
+ * why). A candidate whose name or download name does not resolve is left out: the pool could not reach it later
  * without a DNS query that may itself go into the tunnel. -1 — none resolves. */
 static int pin_candidates(void) {
     unsigned step = 5;
     char *ok = calloc(g_sel_n, 1);
-    if (!ok) return -1;
+    const char **bad = calloc(g_sel_n, sizeof(*bad));
+    if (!ok || !bad) {
+        free(ok);
+        free(bad);
+        return -1;
+    }
     for (;;) {
         size_t n_ok = 0;
         const char *failed = NULL;
         for (size_t k = 0; k < g_sel_n; k++) {
-            int rc = transport_pin_host(vnode(g_sel[k])->host);
+            const struct vless_node *n = vnode(g_sel[k]), *d = vless_dl(n);
+            const char *h = n->host;
+            int rc = transport_pin_host(h);
+            if (rc > 0 && d) {
+                h = d->host;
+                rc = transport_pin_host(h);
+            }
             ok[k] = rc > 0 ? 1 : rc == TR_EPINFULL ? 2 : 0;
+            bad[k] = h;
             if (ok[k] == 1) n_ok++;
-            else failed = vnode(g_sel[k])->host;
+            else failed = h;
         }
         if (n_ok) {
             size_t w = 0;
@@ -518,13 +530,14 @@ static int pin_candidates(void) {
                                         "candidates\n", n->name);
                     else
                         fprintf(stderr, LOG_W "node %s: %s does not resolve — left out of the "
-                                        "candidates\n", n->name, n->host);
+                                        "candidates\n", n->name, bad[k]);
                     continue;
                 }
                 g_sel[w++] = g_sel[k];
             }
             g_sel_n = w;
             free(ok);
+            free(bad);
             return 0;
         }
         char what[192];
@@ -533,6 +546,7 @@ static int pin_candidates(void) {
         if (!retry_wait(&step, what)) {
             fprintf(stderr, LOG_E "%s\n", what);
             free(ok);
+            free(bad);
             return -1;
         }
     }
@@ -596,8 +610,10 @@ static int server_addrs(uint32_t **out) {
     int n = 0, cap = 0;
     uint32_t *all = NULL;
     for (size_t k = 0; k < g_sel_n; k++) {
-        uint32_t a[16];
-        int an = transport_pinned_addrs(vnode(g_sel[k])->host, a, 16);
+        const struct vless_node *nd = vnode(g_sel[k]), *d = vless_dl(nd);
+        uint32_t a[32];
+        int an = transport_pinned_addrs(nd->host, a, 16);
+        if (d) an += transport_pinned_addrs(d->host, a + an, 16);
         for (int i = 0; i < an; i++) {
             int dup = 0;
             for (int j = 0; j < n && !dup; j++) dup = all[j] == a[i];

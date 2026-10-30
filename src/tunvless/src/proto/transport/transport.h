@@ -70,7 +70,7 @@ struct tr_node {
     const char *type;          /* tcp | grpc | xhttp | ws | httpupgrade */
     const char *security;      /* none | tls | reality */
     const char *sni;           /* SNI in the ClientHello; for reality, the camouflage domain */
-    /* Browser fingerprint. Not read: the ClientHello always looks like Chrome (reality.h). */
+    /* Browser fingerprint of the ClientHello: firefox, anything else Chrome (reality.h). */
     const char *fp;
     const char *pbk;           /* Reality public key, base64url */
     const char *sid;           /* Reality short id, hex */
@@ -101,6 +101,7 @@ struct tr_node {
      * none. trvenc.c parses and runs it over the open transport. */
     const char *encryption;
     const char *xhx;
+    const struct tr_node *dl;
 };
 
 /* A link: the socket and the security over it, one protected byte stream.
@@ -164,22 +165,26 @@ struct xh_up {
     int started;               /* HEADERS of the first request sent */
 };
 
+struct xh_side {
+    char authority[128];       /* repeated in every request of the series */
+    struct xh_opts opts;
+    char base_path[256];
+    char query[256];
+    const char *headers;
+    /* Padding length announced by the node. Kept here because the packet-up upload requests are
+     * built without the node at hand, and each needs padding: the server checks it on EVERY
+     * request, not only the first. */
+    uint16_t pad_from, pad_to;
+};
+
 /* xhttp state. stream-one uses only mode. */
 struct xh_state {
     enum xhttp_mode mode;
     struct xh_up up;           /* upload of stream-up and packet-up */
     uint64_t seq;              /* packet-up chunk number, from 0 */
-    char authority[128];       /* repeated in every request of the series */
-    struct xh_opts opts;
-    char base_path[256];
-    char query[256];
+    struct xh_side main_side, down_side;
     char sid[136];
-    const char *headers;
     size_t worst_base;
-    /* Padding length announced by the node. Kept here because the packet-up upload requests are
-     * built without the node at hand, and each needs padding: the server checks it on EVERY
-     * request, not only the first. */
-    uint16_t pad_from, pad_to;
     /* packet-up: the most one POST carries on this connection, picked from the node's range at
      * open (as Xray's client does); a write larger than that goes as several chunks. 0: no
      * limit. */

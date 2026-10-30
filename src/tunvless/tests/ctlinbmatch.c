@@ -180,6 +180,16 @@ int main(void) {
     /* catches: an inbound link changing the pool selection */
     check("the pool selection is untouched", sel, g_sel);
 
+    feed("192.168.1.1:1083 - - vless://" UUID "@dlmain:443?security=none&type=xhttp&path=%2Fx&extra=%7B%22downloadSettings"
+         "%22%3A%7B%22address%22%3A%22dlin%22%2C%22port%22%3A443%2C%22network%22%3A%22xhttp%22%7D%7D#D\n\n");
+    int dlin = 0;
+    for (int i = 0; i < 20 && !dlin; i++) {
+        nanosleep(&(struct timespec){ 0, 100000000 }, NULL);
+        dlin = transport_pin_count("dlin") > 0;
+    }
+    /* catches: an inbound's download host left to a live lookup */
+    check("an inbound's download host is pinned", 1, dlin);
+
     int fd = ctlinb_wake_fd();
     check("a wake fd exists", 1, fd >= 0);
     uint64_t v = 0;

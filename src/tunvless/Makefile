@@ -217,7 +217,7 @@ $(T)/dialmatch: tests/dialmatch.c src/proto/transport/trdial.c $(HDR)
 
 CTLN_SRC := src/ctlnodes.c src/ctlmap.c src/ctlinb.c src/control.c src/tunnel/nodes.c src/proto/vless/vlink.c src/proto/vless/sub.c \
             src/proto/vless/vless_proto.c $(SUB_SRC)
-$(T)/ctlnodesmatch: tests/ctlnodesmatch.c src/proto/transport/trdial.c $(CTLN_SRC) $(HDR)
+$(T)/ctlnodesmatch: tests/ctlnodesmatch.c tests/sub-pq-samples.h src/proto/transport/trdial.c $(CTLN_SRC) $(HDR)
 	@mkdir -p $(T)
 	$(CC) $(T_CFLAGS) -o $@ tests/ctlnodesmatch.c $(CTLN_SRC) -lpthread
 

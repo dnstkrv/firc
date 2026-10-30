@@ -65,6 +65,7 @@ struct vless_node {
      * tcp_http — tcp HTTP camouflage header (headerType=http). */
     uint8_t tcp_http;
     const char *xhx;
+    const struct vless_node *dl;
     /* Certificate check of a security=tls node (Xray-core: pinnedPeerCertSha256 / `pcs`,
      * verifyPeerCertByName / `vcn`; sing-box: certificate_public_key_sha256). Interned strings
      * (sl_intern), NULL — no such field. pcs and pks — lowercase hex SHA-256, comma separated:
@@ -132,6 +133,11 @@ typedef void (*vless_node_fn)(void *ud, const struct vless_node *n, const char *
 void vless_set_node_hook(vless_node_fn fn, void *ud);
 void sl_intern_reset(void);
 void sl_set_interner(const char *(*fn)(const char *v, size_t n));
+extern const struct vless_node SL_DL_FULL;
+
+static inline const struct vless_node *vless_dl(const struct vless_node *n) {
+    return n->dl && n->dl != &SL_DL_FULL ? n->dl : NULL;
+}
 
 /* Turn a subscription file as read into text for vless_parse_sub: a JSON or YAML config and a
  * list of links are returned as is, base64 is decoded into dec. Details in sub.c. */
