@@ -523,11 +523,14 @@ int main(void) {
     fd = attempt_logged(&lo6, p6);
     char dev[IFNAMSIZ] = "";
     socklen_t dl = sizeof dev;
-    int gr = fd >= 0 ? getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl) : -1;
-    if (gr == 0 || (errno != EOPNOTSUPP && errno != ENOPROTOOPT))
+    if (fd < 0) {
+        const char *pre = "tunvless[warn]: cannot bind a socket for the node to lo";
+        check("IPv6 socket without its device is not used", 1, !strncmp(g_err, pre, strlen(pre)));
+    } else if (getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl) == 0 || (errno != EOPNOTSUPP && errno != ENOPROTOOPT)) {
         check_str("IPv6 socket bound to the device", "lo", dev);
-    else
+    } else {
         printf("dialmatch: the device of a socket cannot be read here (qemu-user), not checked\n");
+    }
     if (fd >= 0) close(fd);
     transport_set_bind_dev(NULL);
 
