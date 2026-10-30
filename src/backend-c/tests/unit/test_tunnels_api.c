@@ -646,7 +646,7 @@ static bool wait_for_cached(int ms)
     return false;
 }
 
-/* catches: preview rows ignoring the draft's filter, order or exclude, fetching, or carrying a link */
+/* catches: preview rows ignoring the draft's filter, order or exclude, listing a key no body gives, fetching, or carrying a link */
 TEST preview_follows_the_draft_from_cached_bodies_without_links(void)
 {
     ASSERT(hx_start(SUB_TUN, 0) != NULL);
@@ -666,13 +666,11 @@ TEST preview_follows_the_draft_from_cached_bodies_without_links(void)
     ASSERT(same_json(ans,
                      "{\"nodes\":["
                      "{\"key\":\"0000000b:C\",\"name\":\"C\",\"source\":\"P\",\"isNew\":false,\"excluded\":false,"
-                     "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"},"
-                     "{\"key\":\"0000000b:Z\",\"name\":\"Z\",\"source\":\"P\",\"isNew\":false,\"excluded\":false,"
-                     "\"missing\":true,\"overCap\":false,\"skipReason\":\"\"},"
+                     "\"overCap\":false,\"skipReason\":\"\"},"
                      "{\"key\":\"0000000b:A\",\"name\":\"A\",\"source\":\"P\",\"isNew\":true,\"excluded\":false,"
-                     "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"},"
+                     "\"overCap\":false,\"skipReason\":\"\"},"
                      "{\"key\":\"0000000b:B\",\"name\":\"B\",\"source\":\"P\",\"isNew\":true,\"excluded\":true,"
-                     "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}],"
+                     "\"overCap\":false,\"skipReason\":\"\"}],"
                      "\"matched\":3,\"total\":4,"
                      "\"subscriptions\":[{\"name\":\"P\",\"cached\":true},{\"name\":\"Q\",\"cached\":false}]}"));
     cJSON_Delete(ans);
@@ -693,13 +691,13 @@ TEST preview_follows_the_draft_from_cached_bodies_without_links(void)
 #define SUB_ROWS                                                                                    \
     "{\"nodes\":["                                                                                   \
     "{\"key\":\"0000000b:A\",\"name\":\"A\",\"source\":\"P\",\"isNew\":true,\"excluded\":false,"         \
-    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"},"                                         \
+    "\"overCap\":false,\"skipReason\":\"\"},"                                         \
     "{\"key\":\"0000000b:B\",\"name\":\"B\",\"source\":\"P\",\"isNew\":true,\"excluded\":false,"         \
-    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"},"                                         \
+    "\"overCap\":false,\"skipReason\":\"\"},"                                         \
     "{\"key\":\"0000000b:C\",\"name\":\"C\",\"source\":\"P\",\"isNew\":true,\"excluded\":false,"         \
-    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"},"                                         \
+    "\"overCap\":false,\"skipReason\":\"\"},"                                         \
     "{\"key\":\"0000000b:D\",\"name\":\"D\",\"source\":\"P\",\"isNew\":true,\"excluded\":false,"         \
-    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}],"                                        \
+    "\"overCap\":false,\"skipReason\":\"\"}],"                                        \
     "\"matched\":4,\"total\":4,\"subscriptions\":[{\"name\":\"P\",\"cached\":true}]}"
 
 /* catches: the node table emptied in the editor while the draft names another uplink than the saved one */
@@ -727,7 +725,7 @@ TEST preview_lists_a_bracketed_ipv6_link_as_usable(void)
                             &ans));
     ASSERT(same_json(ans,
                      "{\"nodes\":[{\"key\":\"0000000a:six\",\"name\":\"six\",\"source\":\"link\",\"isNew\":true,"
-                     "\"excluded\":false,\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}],"
+                     "\"excluded\":false,\"overCap\":false,\"skipReason\":\"\"}],"
                      "\"matched\":1,\"total\":1,\"subscriptions\":[]}"));
     cJSON_Delete(ans);
     PASS();
@@ -755,9 +753,9 @@ TEST preview_of_a_disabled_tunnel_shows_its_held_nodes(void)
 
 #define ROW_OF(k) \
     "{\"key\":\"0000000b:" k "\",\"name\":\"" k "\",\"source\":\"P\",\"isNew\":false,\"excluded\":false," \
-    "\"missing\":false,\"overCap\":false,\"skipReason\":\"\"}"
+    "\"overCap\":false,\"skipReason\":\"\"}"
 
-/* catches: a saved reversed order previewed with nodes repeated or marked missing */
+/* catches: a saved reversed order previewed with nodes repeated or dropped */
 TEST a_saved_reversed_order_previews_every_node_once_in_that_order(void)
 {
     ASSERT(hx_start(SUB_TUN, 0) != NULL);
@@ -782,6 +780,34 @@ TEST a_saved_reversed_order_previews_every_node_once_in_that_order(void)
     ASSERT(same_json(ans, "{\"nodes\":[" ROW_OF("D") "," ROW_OF("C") "," ROW_OF("B") "," ROW_OF("A") "],"
                           "\"matched\":4,\"total\":4,\"subscriptions\":[{\"name\":\"P\",\"cached\":true}]}"));
     cJSON_Delete(ans);
+    PASS();
+}
+
+/* catches: a saved key its subscription no longer gives listed in the state, or dropped from the saved order or exclude */
+TEST a_saved_key_no_body_gives_stays_in_the_file_but_not_in_the_nodes(void)
+{
+    ASSERT(hx_start(SUB_TUN, 0) != NULL);
+    ASSERT(wait_for_cached(5000));
+    ASSERT_EQ(200, call_api("PUT", "/api/v1/tunnels",
+                            "{\"tunnels\":[{\"id\":\"s\",\"device\":\"tunvless2\",\"sources\":["
+                            "{\"id\":\"0000000b\",\"kind\":\"subscription\",\"name\":\"P\",\"url\":\"" SUB_URL
+                            "\",\"interval\":3600}],"
+                            "\"order\":[\"0000000b:Z\",\"0000000b:C\"],\"exclude\":[\"0000000b:Z\"]}]}",
+                            NULL));
+    cJSON *got = NULL;
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels", NULL, &got));
+    const cJSON *s = tunnel_named(got, "s");
+    ASSERT(same_json(at(s, "order"), "[\"0000000b:Z\",\"0000000b:C\"]"));
+    ASSERT(same_json(at(s, "exclude"), "[\"0000000b:Z\"]"));
+    cJSON_Delete(got);
+    ASSERT_EQ(200, call_api("GET", "/api/v1/tunnels/state", NULL, &got));
+    const cJSON *nodes = at(tunnel_named(got, "s"), "nodes");
+    ASSERT_EQ(4, cJSON_GetArraySize(nodes));
+    ASSERT_STR_EQ("0000000b:C", at(cJSON_GetArrayItem(nodes, 0), "key")->valuestring);
+    for (int i = 0; i < cJSON_GetArraySize(nodes); i++) {
+        ASSERT(strcmp("0000000b:Z", at(cJSON_GetArrayItem(nodes, i), "key")->valuestring) != 0);
+    }
+    cJSON_Delete(got);
     PASS();
 }
 
@@ -1882,6 +1908,7 @@ SUITE(tunnels_api)
     RUN_TEST(preview_of_a_disabled_tunnel_shows_its_held_nodes);
     RUN_TEST(preview_lists_a_bracketed_ipv6_link_as_usable);
     RUN_TEST(a_saved_reversed_order_previews_every_node_once_in_that_order);
+    RUN_TEST(a_saved_key_no_body_gives_stays_in_the_file_but_not_in_the_nodes);
     RUN_TEST(state_lists_every_tunnel_with_its_nodes_groups_and_subscriptions);
     RUN_TEST(a_node_down_shows_as_down_with_its_since);
     RUN_TEST(only_an_active_v6_node_carries_v6_true);

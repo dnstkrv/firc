@@ -1096,7 +1096,6 @@ app.post(`${API_BASE}/tunnels/preview`, async (c) => {
     name: row.name,
     source: row.src.kind === "link" ? "link" : row.src.name,
     isNew: !(draft.order ?? []).includes(row.key),
-    missing: false,
     excluded: (draft.exclude ?? []).includes(row.key),
     overCap: false,
     skipReason: "",

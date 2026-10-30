@@ -26,7 +26,6 @@
 
   const look = $derived.by(() => {
     if (excluded) return { dot: "", text: t("excluded by hand") };
-    if (row.missing) return { dot: "", text: t("not in the sources") };
     if (row.skipReason) return { dot: "red", text: row.skipReason };
     if (row.overCap) return { dot: "", text: t("past the 256-node cap") };
     switch (live?.state) {
@@ -69,7 +68,7 @@
   <div class="grip" title={t("Drag node")}><Grip size={16} /></div>
   <div class="nm">
     <span class="name" title={row.name}>{row.name}</span>
-    {#if row.isNew && !row.missing}<span class="badge blue">{t("new")}</span>{/if}
+    {#if row.isNew}<span class="badge blue">{t("new")}</span>{/if}
     {#if live?.state === "active" && live.v6}<span class="badge v6">IPv6</span>{/if}
     {#each ports as port (port)}<span class="badge port">:{port}</span>{/each}
   </div>

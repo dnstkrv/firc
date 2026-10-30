@@ -417,62 +417,6 @@ static cand_t *find_key(const build_t *b, cand_t *const *ix, const char *key)
     return NULL;
 }
 
-static int hexval(char ch)
-{
-    if (ch >= '0' && ch <= '9') {
-        return ch - '0';
-    }
-    if (ch >= 'a' && ch <= 'f') {
-        return ch - 'a' + 10;
-    }
-    if (ch >= 'A' && ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-    return -1;
-}
-
-static void pct_decode(char *s)
-{
-    char *w = s;
-    for (const char *r = s; *r != 0; r++) {
-        int hi = r[0] == '%' ? hexval(r[1]) : -1;
-        int lo = hi >= 0 ? hexval(r[2]) : -1;
-        if (lo >= 0) {
-            *w++ = (char)(hi * 16 + lo);
-            r += 2;
-        } else {
-            *w++ = *r;
-        }
-    }
-    *w = 0;
-}
-
-static void missing_row(const firc_tunnel_t *t, const char *key, firc_tun_node_t *row)
-{
-    memset(row, 0, sizeof *row);
-    snprintf(row->key, sizeof row->key, "%s", key);
-    row->missing = true;
-    const char *colon = strchr(key, ':');
-    if (colon == NULL) {
-        return;
-    }
-    char name[192];
-    snprintf(name, sizeof name, "%s", colon + 1);
-    char *hash = strchr(name, '#');
-    if (hash != NULL) {
-        *hash = 0;
-    }
-    pct_decode(name);
-    vless_name_cut(name);
-    snprintf(row->name, sizeof row->name, "%.100s", name);
-    for (size_t i = 0; i < t->n_src; i++) {
-        size_t idl = strlen(t->src[i].id);
-        if ((size_t)(colon - key) == idl && strncmp(key, t->src[i].id, idl) == 0) {
-            snprintf(row->source, sizeof row->source, "%s", source_label(&t->src[i]));
-        }
-    }
-}
-
 typedef struct {
     firc_tun_nodes_t *out;
     char **excl;
@@ -512,22 +456,10 @@ static bool order_seen(const firc_tunnel_t *t, size_t i)
     return false;
 }
 
-static bool of_link(const firc_tunnel_t *t, const char *key)
-{
-    const char *colon = strchr(key, ':');
-    for (size_t i = 0; colon != NULL && i < t->n_src; i++) {
-        size_t idl = strlen(t->src[i].id);
-        if ((size_t)(colon - key) == idl && strncmp(key, t->src[i].id, idl) == 0) {
-            return t->src[i].kind == FIRC_TUN_SRC_LINK;
-        }
-    }
-    return false;
-}
-
 static void assemble(build_t *b, firc_tun_nodes_t *out)
 {
     const firc_tunnel_t *t = b->t;
-    out->v = calloc(b->n + t->n_order + 1, sizeof *out->v);
+    out->v = calloc(b->n + 1, sizeof *out->v);
     cand_t **ix = sorted_index(b, 0, b->n, by_key);
     char **excl = t->n_exclude > 0 ? malloc(t->n_exclude * sizeof *excl) : NULL;
     if (out->v == NULL || ix == NULL || (t->n_exclude > 0 && excl == NULL)) {
@@ -546,14 +478,7 @@ static void assemble(build_t *b, firc_tun_nodes_t *out)
             continue;
         }
         cand_t *c = find_key(b, ix, t->order[i]);
-        if (c == NULL) {
-            if (of_link(t, t->order[i])) {
-                continue;
-            }
-            firc_tun_node_t row;
-            missing_row(t, t->order[i], &row);
-            emit(&e, &row, false);
-        } else if (!c->used) {
+        if (c != NULL && !c->used) {
             c->used = true;
             if (!c->filtered) {
                 emit(&e, &c->row, false);

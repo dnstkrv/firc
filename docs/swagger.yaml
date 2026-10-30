@@ -1545,7 +1545,7 @@ definitions:
         example: 60
         type: integer
       order:
-        description: 'Node keys listed first, in this order'
+        description: 'Node keys listed first, in this order; a key no source gives now is kept and not listed'
         items:
           type: string
         type: array
@@ -1627,7 +1627,6 @@ definitions:
         - down
         - reserve
         - excluded
-        - missing
         - skipped
         example: active
         type: string
@@ -1791,10 +1790,6 @@ definitions:
       key:
         example: 0000000a:NL-1
         type: string
-      missing:
-        description: 'Named in order but in no source'
-        example: false
-        type: boolean
       name:
         example: NL-1
         type: string

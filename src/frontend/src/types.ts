@@ -248,7 +248,7 @@ export type TunnelNodeState = {
   key: string;
   name: string;
   source: string;
-  state: "active" | "down" | "reserve" | "excluded" | "missing" | "skipped";
+  state: "active" | "down" | "reserve" | "excluded" | "skipped";
   since: number;
   skipReason?: string;
   v6?: boolean;
@@ -295,7 +295,6 @@ export type TunnelPreviewRow = {
   name: string;
   source: string;
   isNew: boolean;
-  missing: boolean;
   excluded: boolean;
   overCap: boolean;
   skipReason?: string;

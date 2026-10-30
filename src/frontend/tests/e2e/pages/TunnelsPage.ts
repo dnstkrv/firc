@@ -180,7 +180,6 @@ export async function stubDaemon(page: Page, init: Partial<Daemon> = {}): Promis
         source: n.source,
         excluded: (body.tunnel.exclude ?? []).includes(n.key),
         isNew: false,
-        missing: false,
         overCap: false,
         skipReason: "",
       }));

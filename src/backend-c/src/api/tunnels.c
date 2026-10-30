@@ -886,8 +886,6 @@ static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *s
     bool v6 = false;
     if (row->excluded) {
         state = "excluded";
-    } else if (row->missing) {
-        state = "missing";
     } else if (row->over_cap || row->skip_reason[0] != 0) {
         state = "skipped";
         skip = row->over_cap ? "over the 256-node limit" : row->skip_reason;
@@ -1285,7 +1283,6 @@ static cJSON *preview_json(const firc_tunnel_t *t, const firc_tun_nodes_t *nodes
              cJSON_AddStringToObject(x, "source", r->source) != NULL &&
              cJSON_AddBoolToObject(x, "isNew", r->is_new) != NULL &&
              cJSON_AddBoolToObject(x, "excluded", r->excluded) != NULL &&
-             cJSON_AddBoolToObject(x, "missing", r->missing) != NULL &&
              cJSON_AddBoolToObject(x, "overCap", r->over_cap) != NULL &&
              cJSON_AddStringToObject(x, "skipReason", r->skip_reason) != NULL && cJSON_AddItemToArray(rows, x);
         if (!ok) {

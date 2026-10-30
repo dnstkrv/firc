@@ -105,7 +105,7 @@ TEST a_base64_list_gives_its_nodes_in_order(void)
     for (size_t i = 0; i < 3; i++) {
         const firc_tun_node_t *r = &g_nodes.v[i];
         ASSERT_STR_EQ("P", r->source);
-        ASSERT(r->is_new && !r->excluded && !r->missing && r->skip_reason[0] == 0);
+        ASSERT(r->is_new && !r->excluded && r->skip_reason[0] == 0);
         ASSERT(r->link != NULL && strncmp(r->link, "vless://" U "@", 45) == 0);
         ASSERT_EQ(strlen(r->link), r->link_len);
     }
@@ -211,23 +211,44 @@ TEST a_name_with_control_bytes_gets_a_key_the_config_takes(void)
     const char *want[] = {"aaaaaaaa:a%0Ab%09c%7Fd%1F", "aaaaaaaa:x"};
     ASSERT(keys_are(want, 2));
     ASSERT_STR_EQ("a\nb\tc\x7f" "d\x1f", g_nodes.v[0].name);
-    ASSERT_FALSE(g_nodes.v[0].missing);
     PASS();
 }
 
-TEST an_ordered_key_no_source_has_is_a_missing_row(void)
+TEST an_ordered_key_its_subscription_no_longer_gives_is_not_listed(void)
 {
-    /* catches: a vanished ordered node dropped silently, or sent */
-    const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:Gone%3A1#2\", \"aaaaaaaa:C\"]\n");
+    /* catches: an ordered key of a renamed node kept as a row on top while its new name lands at the end */
+    const char *names[] = {"A", "B", "\xd0\x9b\xd0\xb0\xd1\x82\xd0\xb2\xd0\xb8\xd1\x8f [FAST]"};
+    char *body = names_body(names, 3);
+    const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:\xe2\x9a\xa1 \xd0\x9b\xd0\xb0\xd1\x82\xd0\xb2\xd0\xb8\xd1\x8f [FAST]\", \"aaaaaaaa:B\"]\n"
+                                           "    exclude: [\"aaaaaaaa:\xe2\x9a\xa1 \xd0\x9b\xd0\xb0\xd1\x82\xd0\xb2\xd0\xb8\xd1\x8f [FAST]\"]\n");
+    ASSERT(t != NULL);
+    firc_tun_body_t b = {"https://a.example", 0, body, strlen(body), 0};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
+    free(body);
+    const char *want[] = {"aaaaaaaa:B", "aaaaaaaa:A", "aaaaaaaa:\xd0\x9b\xd0\xb0\xd1\x82\xd0\xb2\xd0\xb8\xd1\x8f [FAST]"};
+    ASSERT(keys_are(want, 3));
+    ASSERT(g_nodes.v[2].is_new && !g_nodes.v[2].excluded);
+    ASSERT_EQ(3u, sendable());
+    PASS();
+}
+
+TEST a_node_back_under_its_saved_key_takes_its_place_and_exclusion(void)
+{
+    /* catches: an unlisted key dropped from order or exclude, so the node coming back lands at the end and is sent */
+    const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:Z\", \"aaaaaaaa:C\"]\n    exclude: [\"aaaaaaaa:Z\"]\n");
+    ASSERT(t != NULL);
     firc_tun_body_t b = {"https://a.example", 0, B64_ABC, sizeof B64_ABC - 1, 0};
     ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
-    const char *want[] = {"aaaaaaaa:Gone%3A1#2", "aaaaaaaa:C", "aaaaaaaa:A", "aaaaaaaa:B"};
+    const char *gone[] = {"aaaaaaaa:C", "aaaaaaaa:A", "aaaaaaaa:B"};
+    ASSERT(keys_are(gone, 3));
+    const char *names[] = {"A", "B", "C", "Z"};
+    char *body = names_body(names, 4);
+    firc_tun_body_t back = {"https://a.example", 0, body, strlen(body), 0};
+    ASSERT_EQ(FIRC_OK, build(t, 0, &back, 1));
+    free(body);
+    const char *want[] = {"aaaaaaaa:Z", "aaaaaaaa:C", "aaaaaaaa:A", "aaaaaaaa:B"};
     ASSERT(keys_are(want, 4));
-    ASSERT(g_nodes.v[0].missing);
-    ASSERT(g_nodes.v[0].link == NULL);
-    ASSERT_STR_EQ("Gone:1", g_nodes.v[0].name);
-    ASSERT_STR_EQ("P", g_nodes.v[0].source);
-    ASSERT(!g_nodes.v[1].missing);
+    ASSERT(!g_nodes.v[0].is_new && g_nodes.v[0].excluded && g_nodes.v[0].link == NULL);
     ASSERT_EQ(3u, sendable());
     PASS();
 }
@@ -568,12 +589,12 @@ TEST subscriptions_keep_their_config_order(void)
 
 TEST a_key_repeated_in_order_counts_once(void)
 {
-    /* catches: a repeated order entry listing a node or a missing row twice */
+    /* catches: a repeated order entry listing a node twice */
     const firc_tunnel_t *t = tunnel(SUB_A, "    order: [\"aaaaaaaa:B\", \"aaaaaaaa:Z\", \"aaaaaaaa:B\", \"aaaaaaaa:Z\"]\n");
     firc_tun_body_t b = {"https://a.example", 0, B64_ABC, sizeof B64_ABC - 1, 0};
     ASSERT_EQ(FIRC_OK, build(t, 0, &b, 1));
-    const char *want[] = {"aaaaaaaa:B", "aaaaaaaa:Z", "aaaaaaaa:A", "aaaaaaaa:C"};
-    ASSERT(keys_are(want, 4));
+    const char *want[] = {"aaaaaaaa:B", "aaaaaaaa:A", "aaaaaaaa:C"};
+    ASSERT(keys_are(want, 3));
     PASS();
 }
 
@@ -609,7 +630,7 @@ TEST a_body_reads_at_most_1024_nodes(void)
 static int flat_and_unique(void)
 {
     for (size_t i = 0; i < g_nodes.n; i++) {
-        if (g_nodes.v[i].missing || g_nodes.v[i].is_new) {
+        if (g_nodes.v[i].is_new) {
             return 0;
         }
         for (size_t j = 0; j < i; j++) {
@@ -672,7 +693,8 @@ int main(int argc, char **argv)
     RUN_TEST(duplicate_names_in_one_source_get_a_number);
     RUN_TEST(a_name_with_key_characters_is_encoded);
     RUN_TEST(a_name_with_control_bytes_gets_a_key_the_config_takes);
-    RUN_TEST(an_ordered_key_no_source_has_is_a_missing_row);
+    RUN_TEST(an_ordered_key_its_subscription_no_longer_gives_is_not_listed);
+    RUN_TEST(a_node_back_under_its_saved_key_takes_its_place_and_exclusion);
     RUN_TEST(a_link_key_its_link_no_longer_names_gives_no_row);
     RUN_TEST(a_link_source_counts_whatever_the_filter);
     RUN_TEST(at_most_256_nodes_are_sent);

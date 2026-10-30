@@ -24,7 +24,7 @@ typedef struct {
     char key[192];
     char name[101];
     char source[64];
-    bool is_new, excluded, missing, over_cap;
+    bool is_new, excluded, over_cap;
     char skip_reason[96];
     size_t link_len;
     char *link;

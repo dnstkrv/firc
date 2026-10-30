@@ -10,6 +10,11 @@ const SUB = {
   url: "https://sub.example/feed",
   interval: 21600,
 };
+const RENAMED = [
+  { key: "0000000a:A", name: "A", source: "Provider" },
+  { key: "0000000a:B", name: "B", source: "Provider" },
+  { key: "0000000a:Латвия [FAST]", name: "Латвия [FAST]", source: "Provider" },
+];
 const LINK = { id: "l1", kind: "link", link: "vless://u@h.example:443#Solo" };
 
 async function saved(page: import("@playwright/test").Page, extra = {}, rows = 3) {
@@ -407,7 +412,6 @@ test.describe("Tunnel editor", () => {
       source: "Provider",
       excluded: false,
       isNew: false,
-      missing: false,
       overCap: false,
       skipReason: "",
       ...extra,
@@ -424,7 +428,7 @@ test.describe("Tunnel editor", () => {
           subscriptions: [],
           nodes: [
             row("0000000a:C", "C"),
-            row("0000000a:A", "A", { missing: true }),
+            row("0000000a:A", "A"),
             row("0000000a:A", "A", { isNew: true }),
             row("0000000a:B", "B"),
           ],
@@ -434,8 +438,37 @@ test.describe("Tunnel editor", () => {
     await tunnels.open();
     await tunnels.expand("a");
     await expect(tunnels.nodeNames("a")).toHaveText(["C", "A", "B"]);
-    await expect(tunnels.nodeRows("a").nth(1)).toContainText("not in the sources");
+    await expect(tunnels.nodeRows("a").nth(1)).not.toContainText("new");
     expect(errors).toEqual([]);
+  });
+
+  // Catches a drop writing away the key of a renamed node, so the node coming back loses its place and its exclusion.
+  test("a renamed node's old key stays in order and exclude after a drop", async ({ page }) => {
+    const old = "0000000a:⚡ Латвия [FAST]";
+    const daemon = await stubDaemon(page, {
+      tunnels: [
+        tunnel("a", "tunvless0", { sources: [SUB], order: [old, "0000000a:B"], exclude: [old] }),
+      ],
+      states: [state("a", "tunvless0")],
+      nodes: RENAMED,
+    });
+    const tunnels = new TunnelsPage(page);
+    await tunnels.open();
+    await tunnels.expand("a");
+    await expect(tunnels.nodeNames("a")).toHaveText(["B", "A", "Латвия [FAST]"]);
+
+    await tunnels.drag(tunnels.nodeRows("a").nth(1), tunnels.nodeRows("a").nth(0), "before");
+    await expect(tunnels.nodeNames("a")).toHaveText(["A", "B", "Латвия [FAST]"]);
+    await tunnels.save.click();
+    await expect(page.getByText("Saved")).toBeVisible();
+
+    expect(daemon.puts[0].tunnels[0].order).toEqual([
+      "0000000a:A",
+      "0000000a:B",
+      "0000000a:Латвия [FAST]",
+      old,
+    ]);
+    expect(daemon.puts[0].tunnels[0].exclude).toEqual([old]);
   });
 
   // Catches the list blanking or repeating rows after a latency sort is saved and reopened.
