@@ -160,7 +160,7 @@ struct h2_req {
 int h2_start_req(struct h2 *h, const struct h2_io *io, const struct h2_req *r, int browser);
 int h2_next_req(struct h2 *h, const struct h2_req *r);
 size_t h2_list_size(const struct h2 *h, const struct h2_req *r);
-uint32_t h2_header_budget(const struct h2 *h);
+uint32_t h2_header_budget(const struct h2 *h, uint32_t server_max);
 
 /* Closes our half of the current stream: an empty DATA with END_STREAM. */
 int h2_end_stream(struct h2 *h);

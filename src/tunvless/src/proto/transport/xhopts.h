@@ -14,8 +14,8 @@ struct xh_opts {
     uint16_t id_len_from, id_len_to;
     uint32_t chunk_from, chunk_to;
     char method[16];
-    uint8_t obfs, tokenish;
-    uint32_t posts;
+    uint8_t obfs, tokenish, no_grpc;
+    uint32_t posts, max_hdr;
 };
 
 int xh_opts_parse(const char *xhx, const char *mode, const char *headers, uint16_t pad_to,

@@ -555,6 +555,66 @@ static void t_data_budget_after_settings(void) {
     xclose(fds);
 }
 
+static struct tr_node dnode(void);
+
+static size_t budget_run(const char *xhx, int settings, const struct tr_node *dl, size_t *largest, int *whole) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("packet-up", xhx, NULL);
+    n.dl = dl;
+    n.post_from = n.post_to = 1000000;
+    int rc = xopen(&c, &n, fds);
+    size_t before = 0;
+    if (settings) {
+        rc |= transport_write(&c, piece, sizeof piece);
+        unsigned char st[15] = { 0, 0, 6, 0x04, 0, 0, 0, 0, 0, 0, 0x06, 0, 0, 0x17, 0x70 };
+        if (write(g_srv, st, sizeof st) != (ssize_t)sizeof st) { perror("write"); exit(2); }
+        srv_drain();
+        before = g_seen_n;
+    }
+    static unsigned char pl[16000];
+    for (size_t i = 0; i < sizeof pl; i++) pl[i] = (unsigned char)(i * 131 + 7);
+    rc |= transport_write(&c, pl, sizeof pl);
+    srv_drain();
+    int first = hr_count_frames(g_seen, before, 0x01);
+    int reqs = hr_count_frames(g_seen, g_seen_n, 0x01);
+    *largest = 0;
+    for (int k = first; k < reqs; k++) {
+        if (up_block(k, &g_hb)) { rc = -1; break; }
+        if (hr_list_size(&g_hb) > *largest) *largest = hr_list_size(&g_hb);
+    }
+    static unsigned char dec[20000];
+    int bad;
+    size_t dn = decode_reqs(first, reqs, dec, sizeof dec, &bad);
+    *whole = !rc && !bad && dn == sizeof pl && !memcmp(dec, pl, sizeof pl);
+    xclose(fds);
+    return (size_t)(reqs - first);
+}
+
+static void t_server_max_header_bytes_before_settings(void) {
+    size_t big;
+    int whole;
+    /* catches: serverMaxHeaderBytes 4096 not lowering the budget before the server's SETTINGS */
+    size_t reqs = budget_run("uplinkDataPlacement=header\nserverMaxHeaderBytes=4096\n", 0, NULL, &big, &whole);
+    check(whole && reqs > 1 && big <= 4096 && big > 3000,
+          "serverMaxHeaderBytes 4096 before SETTINGS: every request within 4096, bytes whole");
+    /* catches: serverMaxHeaderBytes 16384 raising the budget above 8192 before SETTINGS */
+    reqs = budget_run("uplinkDataPlacement=header\nserverMaxHeaderBytes=16384\n", 0, NULL, &big, &whole);
+    check(whole && reqs > 1 && big <= 8192 && big > 4096,
+          "serverMaxHeaderBytes 16384 before SETTINGS: within 8192, above 4096");
+    /* catches: serverMaxHeaderBytes 4096 still ruling after SETTINGS 0x06=6000 */
+    reqs = budget_run("uplinkDataPlacement=header\nserverMaxHeaderBytes=4096\n", 1, NULL, &big, &whole);
+    check(whole && reqs > 1 && big <= 6000 && big > 4096,
+          "serverMaxHeaderBytes 4096 after SETTINGS 0x06=6000: within 6000, above 4096");
+    struct tr_node d = dnode();
+    /* catches: the upload's budget taken from the download block's serverMaxHeaderBytes */
+    reqs = budget_run("uplinkDataPlacement=header\nserverMaxHeaderBytes=4096\n", 0, &d, &big, &whole);
+    check(whole && reqs > 1 && big <= 4096, "dl: main serverMaxHeaderBytes 4096, block none: uploads within 4096");
+    d.xhx = "serverMaxHeaderBytes=4096\n";
+    reqs = budget_run("uplinkDataPlacement=header\n", 0, &d, &big, &whole);
+    check(whole && reqs > 1 && big <= 8192 && big > 4096, "dl: block serverMaxHeaderBytes 4096, main none: uploads above 4096");
+}
+
 static void t_budget_too_small_fails_with_reason(void) {
     int fds[2];
     struct transport c;
@@ -732,6 +792,72 @@ static void t_xray_fields_replace_custom(void) {
     check(t >= 0 && hr_find_from(&g_hb, "content-type", t + 1) < 0 &&
           !strcmp(g_hb.f[t].value, "application/grpc"),
           "custom Content-Type: one content-type, application/grpc");
+    xclose(fds);
+}
+
+static const char *ctype_of(const char *mode, const char *xhx, const char *headers, int up, const char **down) {
+    static char got[2][64];
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode(mode, xhx, headers);
+    int rc = xopen(&c, &n, fds);
+    unsigned char pl[4] = { 1, 2, 3, 4 };
+    if (!rc && !strcmp(mode, "packet-up")) rc = transport_write(&c, pl, sizeof pl);
+    srv_drain();
+    int db = down_block(&g_hb);
+    int dn = hr_find(&g_hb, "content-type"), dn2 = dn < 0 ? -1 : hr_find_from(&g_hb, "content-type", dn + 1);
+    snprintf(got[0], sizeof got[0], "%s", rc || db || dn2 >= 0 ? "(bad)" : dn < 0 ? "(none)" : g_hb.f[dn].value);
+    *down = got[0];
+    snprintf(got[1], sizeof got[1], "(none)");
+    if (up) {
+        int ub = up_block(0, &g_hb);
+        int un = hr_find(&g_hb, "content-type"), un2 = un < 0 ? -1 : hr_find_from(&g_hb, "content-type", un + 1);
+        snprintf(got[1], sizeof got[1], "%s", ub || un2 >= 0 ? "(bad)" : un < 0 ? "(none)" : g_hb.f[un].value);
+    }
+    xclose(fds);
+    return got[1];
+}
+
+static void t_no_grpc_header_per_mode(void) {
+    const char *down, *up;
+    /* catches: noGRPCHeader ignored on stream-one, or the grpc type dropped without it */
+    ctype_of("stream-one", "noGRPCHeader=true\n", NULL, 0, &down);
+    check(!strcmp(down, "(none)"), "noGRPCHeader stream-one: no content-type");
+    ctype_of("stream-one", "noGRPCHeader=false\n", NULL, 0, &down);
+    check(!strcmp(down, "application/grpc"), "noGRPCHeader false stream-one: application/grpc");
+    /* catches: noGRPCHeader ignored on the stream-up upload, or a content-type put on its GET */
+    up = ctype_of("stream-up", "noGRPCHeader=true\n", NULL, 1, &down);
+    check(!strcmp(up, "(none)") && !strcmp(down, "(none)"), "noGRPCHeader stream-up: no content-type up or down");
+    up = ctype_of("stream-up", NULL, NULL, 1, &down);
+    check(!strcmp(up, "application/grpc") && !strcmp(down, "(none)"),
+          "stream-up default: application/grpc on the upload only");
+    /* catches: packet-up given a content-type by noGRPCHeader false */
+    up = ctype_of("packet-up", "noGRPCHeader=false\n", NULL, 1, &down);
+    check(!strcmp(up, "(none)") && !strcmp(down, "(none)"), "noGRPCHeader false packet-up: no content-type");
+    /* catches: a custom Content-Type still shadowed when no grpc type is sent */
+    up = ctype_of("stream-up", "noGRPCHeader=true\n", "Content-Type: text/plain\n", 1, &down);
+    check(!strcmp(up, "text/plain"), "noGRPCHeader stream-up: the custom Content-Type goes once");
+}
+
+static void t_no_grpc_header_from_the_main_side(void) {
+    int fds[2];
+    struct transport c;
+    struct tr_node n = xnode("stream-up", "noGRPCHeader=true\n", NULL), d = dnode();
+    d.xhx = "noGRPCHeader=false\n";
+    n.dl = &d;
+    /* catches: the upload's content-type taken from the download block's noGRPCHeader */
+    int rc = xopen(&c, &n, fds);
+    int ub = up_block(0, &g_hb);
+    check(rc == 0 && ub == 0 && hr_find(&g_hb, "content-type") < 0,
+          "dl: main noGRPCHeader true, block false: the upload has no content-type");
+    xclose(fds);
+    n.xhx = "noGRPCHeader=false\n";
+    d.xhx = "noGRPCHeader=true\n";
+    rc = xopen(&c, &n, fds);
+    ub = up_block(0, &g_hb);
+    const char *ct = fval(&g_hb, "content-type");
+    check(rc == 0 && ub == 0 && ct && !strcmp(ct, "application/grpc"),
+          "dl: main noGRPCHeader false, block true: the upload has application/grpc");
     xclose(fds);
 }
 
@@ -1092,6 +1218,8 @@ int main(void) {
     t_seq_cookie_after_session();
     t_tokenish_without_obfs_is_repeat_x();
     t_xray_fields_replace_custom();
+    t_no_grpc_header_per_mode();
+    t_no_grpc_header_from_the_main_side();
     t_custom_data_header_replaced();
     t_data_cookie();
     t_data_cookie_budget();
@@ -1107,6 +1235,7 @@ int main(void) {
     t_data_budget_first_request();
     t_data_budget_after_settings();
     t_budget_too_small_fails_with_reason();
+    t_server_max_header_bytes_before_settings();
     t_custom_headers_first();
     t_custom_accept_replaces();
     t_ipv6_authority_in_brackets();

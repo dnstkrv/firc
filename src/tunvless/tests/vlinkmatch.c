@@ -264,8 +264,26 @@ int main(void) {
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22xPaddingBytes%22%3A%22100-200%22%2C%22scMaxEachPostBytes%22%3A%22500-900%22%2C%22uplinkChunkSize%22%3A%2210-20%22%2C%22xPaddingObfsMode%22%3Atrue%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22uplinkHTTPMethod%22%3A%22GET%22%7D#x",
             "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22scMaxBufferedPosts%22%3A40%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=stream-up&extra=%7B%22noGRPCHeader%22%3Atrue%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&extra=%7B%22noGRPCHeader%22%3Afalse%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22serverMaxHeaderBytes%22%3A4096%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22scMinPostsIntervalMs%22%3A%2210-50%22%7D#x",
+            "vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=packet-up&extra=%7B%22scMinPostsIntervalMs%22%3A%22-5--1%22%7D#x",
         };
         links("xhttp-extra", v, N(v));
+    }
+    {
+        struct vless_node n;
+        char buf[1024];
+        int rc = vless_parse_url("vless://u@h:443?type=xhttp&security=reality&pbk=K&sni=a.com&path=%2Fx&mode=stream-up"
+                                 "&extra=%7B%22scMinPostsIntervalMs%22%3A%7B%22from%22%3A50%2C%22to%22%3A10%7D%2C%22serverMaxHeaderBytes%22"
+                                 "%3A4096%2C%22noGRPCHeader%22%3Atrue%2C%22seqKey%22%3A%22q%22%7D#x", &n);
+        size_t l = rc ? 0 : vless_node_link(&n, buf, sizeof buf);
+        /* catches: noGRPCHeader, serverMaxHeaderBytes or scMinPostsIntervalMs lost on the way to tunvless, or out of order */
+        check("xhttp-extra: noGRPCHeader bare, the server limit and the interval after it", 0, l ? strcmp(buf,
+              "vless://u@h:443?type=xhttp&security=reality&sni=a.com&pbk=K&path=%2Fx&mode=stream-up"
+              "&extra=%7B%22seqKey%22%3A%22q%22%2C%22noGRPCHeader%22%3Atrue%2C%22serverMaxHeaderBytes%22%3A%224096%22"
+              "%2C%22scMinPostsIntervalMs%22%3A%2250-10%22%7D#x") : -1);
     }
     {
         static char big[2048] = "%7B%22headers%22%3A%7B";

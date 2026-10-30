@@ -38,7 +38,7 @@ ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp
            xhttp-sess-header xhttp-sess-cookie xhttp-sess-query xhttp-seq-header xhttp-seq-cookie-key
            xhttp-old-names xhttp-data-header xhttp-data-cookie xhttp-data-cookie-small
            xhttp-obfs-header xhttp-obfs-cookie xhttp-obfs-query xhttp-obfs-qih xhttp-tokenish
-           xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
+           xhttp-method-put xhttp-method-get xhttp-table xhttp-headers xhttp-no-grpc xhttp-max-hdr
            xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data
            v6-carry-tcp v6-carry-xhttp v6-second v6-none v6-noroute
            node6-tcp node6-xhttp node6-name node6-dual
@@ -215,6 +215,8 @@ case_cfg() {
     xhttp-method-get)        xh packet-up '"uplinkHTTPMethod":"GET"' ;;
     xhttp-table)             xh packet-up '"sessionIDTable":"Base62","sessionIDLength":12' ;;
     xhttp-headers)           xh packet-up '"headers":{"X-Custom":"v1","User-Agent":"tv-test"}' ;;
+    xhttp-no-grpc)           xh stream-up '"noGRPCHeader":true' ;;
+    xhttp-max-hdr)           xh packet-up '"uplinkDataPlacement":"header","serverMaxHeaderBytes":4096,"scMinPostsIntervalMs":"10-50"' ;;
     v6-carry-tcp)      V6=carry; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-second)         V6=second; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-none)           V6=none; NET='"network":"tcp"'; Q="type=tcp" ;;

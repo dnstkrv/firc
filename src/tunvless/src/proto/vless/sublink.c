@@ -356,7 +356,8 @@ static const char *const xh_names[] = {
     "sessionIDPlacement", "sessionPlacement", "sessionIDKey", "sessionKey", "sessionIDTable",
     "sessionIDLength", "seqPlacement", "seqKey", "uplinkDataPlacement", "uplinkDataKey",
     "uplinkChunkSize", "uplinkHTTPMethod", "xPaddingObfsMode", "xPaddingKey", "xPaddingHeader",
-    "xPaddingPlacement", "xPaddingMethod", "scMaxBufferedPosts",
+    "xPaddingPlacement", "xPaddingMethod", "scMaxBufferedPosts", "noGRPCHeader",
+    "serverMaxHeaderBytes", "scMinPostsIntervalMs",
 };
 #define XH_NAMES (sizeof xh_names / sizeof *xh_names)
 

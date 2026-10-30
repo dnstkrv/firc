@@ -197,16 +197,40 @@ static void t_budget_follows_peer_settings(void) {
     unsigned char out[H2_MIN_READ_CAP];
     size_t got = 0;
     h2_open(&h, &io);
-    check("budget before the peer's SETTINGS", 8192, (int)h2_header_budget(&h));
+    check("budget before the peer's SETTINGS", 8192, (int)h2_header_budget(&h, 0));
     io.feed = feed; io.feed_pos = 0;
     io.feed_n = settings_frame(feed, 0x0006, 9000);
     h2_read(&h, out, sizeof(out), &got);
-    check("budget after MAX_HEADER_LIST_SIZE 9000", 9000, (int)h2_header_budget(&h));
+    check("budget after MAX_HEADER_LIST_SIZE 9000", 9000, (int)h2_header_budget(&h, 0));
     h2_open(&h, &io);
     io.feed = feed; io.feed_pos = 0;
     io.feed_n = settings_frame(feed, 0x0004, 70000);
     h2_read(&h, out, sizeof(out), &got);
-    check("budget after a SETTINGS without 0x06", 16384, (int)h2_header_budget(&h));
+    check("budget after a SETTINGS without 0x06", 16384, (int)h2_header_budget(&h, 0));
+}
+
+static void t_budget_before_settings_follows_the_server_limit(void) {
+    struct h2 h;
+    struct fake_io io;
+    unsigned char feed[64];
+    unsigned char out[H2_MIN_READ_CAP];
+    size_t got = 0;
+    h2_open(&h, &io);
+    /* catches: a server limit below 8192 ignored before SETTINGS, or one above 8192 taken */
+    check("server limit 4096: budget before SETTINGS", 4096, (int)h2_header_budget(&h, 4096));
+    check("server limit 8191: budget before SETTINGS", 8191, (int)h2_header_budget(&h, 8191));
+    check("server limit 16384: budget before SETTINGS stays 8192", 8192, (int)h2_header_budget(&h, 16384));
+    io.feed = feed; io.feed_pos = 0;
+    io.feed_n = settings_frame(feed, 0x0006, 9000);
+    h2_read(&h, out, sizeof(out), &got);
+    /* catches: the server limit capping the budget after the announced one */
+    check("server limit 4096: budget after 0x06 9000", 9000, (int)h2_header_budget(&h, 4096));
+    check("server limit 16384: budget after 0x06 9000", 9000, (int)h2_header_budget(&h, 16384));
+    h2_open(&h, &io);
+    io.feed = feed; io.feed_pos = 0;
+    io.feed_n = settings_frame(feed, 0x0004, 70000);
+    h2_read(&h, out, sizeof(out), &got);
+    check("server limit 4096: budget after a SETTINGS without 0x06", 16384, (int)h2_header_budget(&h, 4096));
 }
 
 static void t_budget_reset_by_a_later_settings(void) {
@@ -222,7 +246,7 @@ static void t_budget_reset_by_a_later_settings(void) {
     h2_read(&h, out, sizeof(out), &got);
     if (io.feed_pos < io.feed_n) h2_read(&h, out, sizeof(out), &got);
     check("later SETTINGS without 0x06: whole feed read", (int)io.feed_n, (int)io.feed_pos);
-    check("later SETTINGS without 0x06: budget stays 9000", 9000, (int)h2_header_budget(&h));
+    check("later SETTINGS without 0x06: budget stays 9000", 9000, (int)h2_header_budget(&h, 0));
 }
 
 static void t_failed_next_req_moves_stream_state(void) {
@@ -412,6 +436,7 @@ int main(void) {
     t_list_size_browser_matches_decoded_block();
     t_budget_follows_peer_settings();
     t_budget_reset_by_a_later_settings();
+    t_budget_before_settings_follows_the_server_limit();
     t_failed_next_req_moves_stream_state();
     t_next_req_block_over_16384_sent();
     t_block_too_big_writes_nothing();

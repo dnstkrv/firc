@@ -360,6 +360,58 @@ static void t_buffered_posts_read_or_refused(void) {
     check("posts -5: refused", -1, parse("scMaxBufferedPosts=-5\n", "packet-up", "", 0, &o));
 }
 
+static void t_no_grpc_header_read_or_refused(void) {
+    struct xh_opts o;
+    /* catches: noGRPCHeader not read, read inverted, or a non-bool value taken */
+    check("noGRPCHeader true: parse", 0, parse("noGRPCHeader=true\n", "stream-up", "", 0, &o));
+    check("noGRPCHeader true: set", 1, o.no_grpc);
+    check("noGRPCHeader false: parse", 0, parse("noGRPCHeader=false\n", "stream-up", "", 0, &o));
+    check("noGRPCHeader false: clear", 0, o.no_grpc);
+    check("noGRPCHeader absent: clear", 0, (parse("", "stream-up", "", 0, &o), o.no_grpc));
+    check("noGRPCHeader yes: refused", -1, parse("noGRPCHeader=yes\n", "stream-up", "", 0, &o));
+    check_why("noGRPCHeader yes: reason", "xhttp: unsupported noGRPCHeader: yes");
+    check("noGRPCHeader 1: refused", -1, parse("noGRPCHeader=1\n", "", "", 0, &o));
+}
+
+static void t_server_max_header_bytes_read_or_refused(void) {
+    struct xh_opts o;
+    /* catches: serverMaxHeaderBytes not read, or a value that is not a non-negative integer taken */
+    check("serverMaxHeaderBytes 4096: parse", 0, parse("serverMaxHeaderBytes=4096\n", "packet-up", "", 0, &o));
+    check("serverMaxHeaderBytes 4096: kept", 4096, (long)o.max_hdr);
+    check("serverMaxHeaderBytes 0: parse", 0, parse("serverMaxHeaderBytes=0\n", "packet-up", "", 0, &o));
+    check("serverMaxHeaderBytes 0: 0", 0, (long)o.max_hdr);
+    check("serverMaxHeaderBytes absent: 0", 0, (parse("", "", "", 0, &o), (long)o.max_hdr));
+    check("serverMaxHeaderBytes -1: refused", -1, parse("serverMaxHeaderBytes=-1\n", "", "", 0, &o));
+    check_why("serverMaxHeaderBytes -1: reason", "xhttp: unsupported serverMaxHeaderBytes: -1");
+    check("serverMaxHeaderBytes 4k: refused", -1, parse("serverMaxHeaderBytes=4k\n", "", "", 0, &o));
+    check("serverMaxHeaderBytes 1-2: refused", -1, parse("serverMaxHeaderBytes=1-2\n", "", "", 0, &o));
+}
+
+static void t_min_posts_interval_accepted_or_refused(void) {
+    struct xh_opts o;
+    /* catches: scMinPostsIntervalMs refused as an unknown key, or a value that is not a range taken */
+    check("scMinPostsIntervalMs 30: parse", 0, parse("scMinPostsIntervalMs=30\n", "packet-up", "", 0, &o));
+    check("scMinPostsIntervalMs 10-50: parse", 0, parse("scMinPostsIntervalMs=10-50\n", "packet-up", "", 0, &o));
+    check("scMinPostsIntervalMs 50-10: parse", 0, parse("scMinPostsIntervalMs=50-10\n", "packet-up", "", 0, &o));
+    check("scMinPostsIntervalMs abc: refused", -1, parse("scMinPostsIntervalMs=abc\n", "packet-up", "", 0, &o));
+    check_why("scMinPostsIntervalMs abc: reason", "xhttp: unsupported scMinPostsIntervalMs: abc");
+    check("scMinPostsIntervalMs 10-: refused", -1, parse("scMinPostsIntervalMs=10-\n", "packet-up", "", 0, &o));
+    /* catches: a negative interval refused although Xray takes it, or a form Xray refuses taken */
+    static const char *const ok[] = { "-1", "-5--1", "-114-514", "5--1", "+5", "0" };
+    static const char *const bad[] = { "-", "--5", "5-", "-5-", "1-2-3", "1.5", "-5-x" };
+    char line[64], what[96];
+    for (size_t i = 0; i < sizeof ok / sizeof *ok; i++) {
+        snprintf(line, sizeof line, "scMinPostsIntervalMs=%s\n", ok[i]);
+        snprintf(what, sizeof what, "scMinPostsIntervalMs %s: parse", ok[i]);
+        check(what, 0, parse(line, "packet-up", "", 0, &o));
+    }
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        snprintf(line, sizeof line, "scMinPostsIntervalMs=%s\n", bad[i]);
+        snprintf(what, sizeof what, "scMinPostsIntervalMs %s: refused", bad[i]);
+        check(what, -1, parse(line, "packet-up", "", 0, &o));
+    }
+}
+
 static void t_query_padding_overflows_path(void) {
     struct xh_opts o;
     check("query pad 1368: parse", 0, parse("xPaddingObfsMode=true\nxPaddingPlacement=query\n", "", "", 1368, &o));
@@ -398,5 +450,8 @@ int main(void) {
     t_unknown_values_accepted();
     t_query_padding_overflows_path();
     t_buffered_posts_read_or_refused();
+    t_no_grpc_header_read_or_refused();
+    t_server_max_header_bytes_read_or_refused();
+    t_min_posts_interval_accepted_or_refused();
     return unit_done("xhoptsmatch");
 }

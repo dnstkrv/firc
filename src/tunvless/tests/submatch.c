@@ -239,7 +239,7 @@ static void t_xhx_clash_every_key_reaches_its_xray_name(void) {
           "sessionIDPlacement=query\nsessionIDKey=sk\nsessionIDTable=hex\nsessionIDLength=16\n"
           "seqPlacement=header\nseqKey=X-Sq\nuplinkDataPlacement=body\nuplinkDataKey=dk\n"
           "uplinkChunkSize=100-200\nuplinkHTTPMethod=PUT\nxPaddingObfsMode=true\nxPaddingKey=xk\n"
-          "xPaddingHeader=X-Pk\nxPaddingPlacement=header\nxPaddingMethod=tokenish\n",
+          "xPaddingHeader=X-Pk\nxPaddingPlacement=header\nxPaddingMethod=tokenish\nnoGRPCHeader=true\n",
           got ? xhx_of(&out[0]) : "");
     check_n("xhx clash map: pad upper", 200, got ? out[0].pad_to : -1);
 }
@@ -370,7 +370,70 @@ static void t_xhx_full_intern_table_is_named(void) {
     check("xhx full table: reason", "too many distinct keys", n.skip_reason);
 }
 
+static void t_xhx_no_grpc_header_from_every_format(void) {
+    struct vless_node n, out[4];
+    struct vless_sub_stats st;
+    /* catches: noGRPCHeader dropped by the collector of one format, or out of the canonical order */
+    xhx_link("&mode=stream-up", "{\"noGRPCHeader\":true,\"seqKey\":\"q\"}", &n);
+    check("xhx noGRPCHeader link: kept after the other keys", "seqKey=q\nnoGRPCHeader=true\n", xhx_of(&n));
+    size_t got = xhx_xray("{\"path\":\"/x\",\"mode\":\"stream-up\",\"noGRPCHeader\":false}", out, &st);
+    check("xhx noGRPCHeader xray: kept", "noGRPCHeader=false\n", got ? xhx_of(&out[0]) : xhx_reason(got, &st));
+    got = xhx_clash("      mode: stream-up\n      no-grpc-header: true\n", out, &st);
+    check("xhx noGRPCHeader clash: mapped", "noGRPCHeader=true\n", got ? xhx_of(&out[0]) : xhx_reason(got, &st));
+    /* catches: a non-bool noGRPCHeader listed as usable, or its reason not naming the key */
+    xhx_link("", "{\"noGRPCHeader\":\"yes\"}", &n);
+    check("xhx noGRPCHeader link yes: reason", "xhttp: unsupported noGRPCHeader: yes", n.skip_reason);
+    check("xhx noGRPCHeader xray 1: reason", "xhttp: unsupported noGRPCHeader: 1",
+          xhx_reason(xhx_xray("{\"path\":\"/x\",\"noGRPCHeader\":1}", out, &st), &st));
+    check("xhx noGRPCHeader clash maybe: reason", "xhttp: unsupported noGRPCHeader: maybe",
+          xhx_reason(xhx_clash("      no-grpc-header: maybe\n", out, &st), &st));
+    xhx_link("", "{\"noGRPCHeader\":[true]}", &n);
+    check("xhx noGRPCHeader array: refused", "xhttp: invalid extra value", n.skip_reason);
+}
+
+static void t_xhx_server_max_header_bytes_from_link_and_xray(void) {
+    struct vless_node n, out[4];
+    struct vless_sub_stats st;
+    /* catches: serverMaxHeaderBytes dropped by the link or Xray JSON collector */
+    xhx_link("&mode=packet-up", "{\"serverMaxHeaderBytes\":4096,\"noGRPCHeader\":true}", &n);
+    check("xhx serverMaxHeaderBytes link: kept after noGRPCHeader", "noGRPCHeader=true\nserverMaxHeaderBytes=4096\n",
+          xhx_of(&n));
+    size_t got = xhx_xray("{\"path\":\"/x\",\"serverMaxHeaderBytes\":\"6000\"}", out, &st);
+    check("xhx serverMaxHeaderBytes xray: kept", "serverMaxHeaderBytes=6000\n", got ? xhx_of(&out[0]) : xhx_reason(got, &st));
+    /* catches: a bad serverMaxHeaderBytes listed as usable */
+    xhx_link("", "{\"serverMaxHeaderBytes\":-5}", &n);
+    check("xhx serverMaxHeaderBytes -5: reason", "xhttp: unsupported serverMaxHeaderBytes: -5", n.skip_reason);
+    check("xhx serverMaxHeaderBytes xray true: reason", "xhttp: unsupported serverMaxHeaderBytes: true",
+          xhx_reason(xhx_xray("{\"path\":\"/x\",\"serverMaxHeaderBytes\":true}", out, &st), &st));
+}
+
+static void t_xhx_min_posts_interval_from_link_and_xray(void) {
+    struct vless_node n, out[4];
+    struct vless_sub_stats st;
+    /* catches: scMinPostsIntervalMs dropped, or its number, string or object form not read as a range */
+    check_n("xhx scMinPostsIntervalMs link: usable", 0,
+            xhx_link("&mode=packet-up", "{\"scMinPostsIntervalMs\":30,\"serverMaxHeaderBytes\":4096}", &n));
+    check("xhx scMinPostsIntervalMs link: kept last", "serverMaxHeaderBytes=4096\nscMinPostsIntervalMs=30\n", xhx_of(&n));
+    xhx_link("&mode=packet-up", "{\"scMinPostsIntervalMs\":{\"from\":10,\"to\":50}}", &n);
+    check("xhx scMinPostsIntervalMs object: a range", "scMinPostsIntervalMs=10-50\n", xhx_of(&n));
+    size_t got = xhx_xray("{\"path\":\"/x\",\"mode\":\"packet-up\",\"scMinPostsIntervalMs\":\"20-40\"}", out, &st);
+    check("xhx scMinPostsIntervalMs xray: kept", "scMinPostsIntervalMs=20-40\n", got ? xhx_of(&out[0]) : xhx_reason(got, &st));
+    /* catches: a negative scMinPostsIntervalMs, which Xray takes as pacing off, making the node unusable */
+    check_n("xhx scMinPostsIntervalMs -1: usable", 0, xhx_link("&mode=packet-up", "{\"scMinPostsIntervalMs\":-1}", &n));
+    check("xhx scMinPostsIntervalMs -1: kept", "scMinPostsIntervalMs=-1\n", xhx_of(&n));
+    got = xhx_xray("{\"path\":\"/x\",\"mode\":\"packet-up\",\"scMinPostsIntervalMs\":\"-5--1\"}", out, &st);
+    check("xhx scMinPostsIntervalMs xray -5--1: kept", "scMinPostsIntervalMs=-5--1\n", got ? xhx_of(&out[0]) : xhx_reason(got, &st));
+    /* catches: a bad scMinPostsIntervalMs listed as usable */
+    xhx_link("", "{\"scMinPostsIntervalMs\":\"soon\"}", &n);
+    check("xhx scMinPostsIntervalMs soon: reason", "xhttp: unsupported scMinPostsIntervalMs: soon", n.skip_reason);
+    xhx_link("", "{\"scMinPostsIntervalMs\":{\"from\":10}}", &n);
+    check("xhx scMinPostsIntervalMs object without to: refused", "xhttp: invalid extra value", n.skip_reason);
+}
+
 static void t_xhx_all(void) {
+    t_xhx_min_posts_interval_from_link_and_xray();
+    t_xhx_server_max_header_bytes_from_link_and_xray();
+    t_xhx_no_grpc_header_from_every_format();
     t_xhx_line_that_fills_the_buffer_exactly_is_refused();
     t_xhx_null_extra_resets_to_defaults_keeping_path();
     t_xhx_settings_reach_only_xhttp_nodes();
@@ -503,6 +566,15 @@ static const char *dl_xray(const char *xhttp) {
     size_t got = xhx_xray(xhttp, out, &st);
     vless_set_node_hook(NULL, NULL);
     return xhx_reason(got, &st);
+}
+
+static void t_dl_no_grpc_header_in_the_block(void) {
+    struct vless_node n;
+    /* catches: noGRPCHeader dropped from a download block, or a bad one there not refusing the node */
+    dl_link(DL_X("{\"noGRPCHeader\":true}"), &n);
+    check("dl noGRPCHeader: block xhx", "noGRPCHeader=true\n", xhx_of(dl_of(&n)));
+    dl_link(DL_X("{\"noGRPCHeader\":\"x\"}"), &n);
+    check("dl noGRPCHeader x: reason", "downloadSettings: xhttp: unsupported noGRPCHeader: x", n.skip_reason);
 }
 
 static void t_dl_link_extra(void) {
@@ -983,6 +1055,7 @@ static void t_tr_nodes(void) {
 static void t_dl_all(void) {
     t_intern_node_hook();
     t_dl_link_extra();
+    t_dl_no_grpc_header_in_the_block();
     t_dl_xray_json();
     t_dl_extra_wins();
     t_xhttp_host_main();
