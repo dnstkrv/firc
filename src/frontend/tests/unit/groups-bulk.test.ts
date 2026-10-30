@@ -185,8 +185,9 @@ describe("the selection, as pure functions", () => {
     assert.strictEqual(selectionCountText(3, "en", en), "3 groups selected");
   });
 
-  it("takes the domain rules of the groups in order, once each", () => {
-    const rule = (text: string, type: string) => ({ rule: text, type });
+  // Catches a non-domain, disabled, blank or repeated rule in the copied lines.
+  it("takes the enabled domain rules of the groups in order, once each", () => {
+    const rule = (text: string, type: string, enable = true) => ({ rule: text, type, enable });
     const groups = [
       {
         rules: [
@@ -197,6 +198,7 @@ describe("the selection, as pure functions", () => {
         ],
       },
       { rules: [rule("*.ccc.com", "wildcard"), rule("aaa.com", "domain"), rule("", "domain")] },
+      { rules: [rule("off.com", "domain", false)] },
       { rules: [rule("2001:db8::/32", "subnet6")] },
     ];
     assert.deepStrictEqual(domainLines(groups), ["aaa.com", "bbb.com", "*.ccc.com"]);
