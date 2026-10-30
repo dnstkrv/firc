@@ -1194,8 +1194,6 @@ static bool info_path(fx_t *f, char *buf, size_t cap)
     return true;
 }
 
-/* Catches: the provider's traffic and end date dropped, read in the wrong fields, or lost on a restart before the
-   next fetch. */
 TEST the_provider_userinfo_is_kept_across_a_restart(void)
 {
     static fx_t f;
@@ -1230,8 +1228,6 @@ TEST the_provider_userinfo_is_kept_across_a_restart(void)
     PASS();
 }
 
-/* Catches: an ended plan's placeholder dropping the end date the server sent with it, or an answer without the
-   header leaving the old numbers and their file behind. */
 TEST the_userinfo_follows_a_placeholder_and_goes_with_the_header(void)
 {
     static fx_t f;
@@ -1269,7 +1265,6 @@ TEST the_userinfo_follows_a_placeholder_and_goes_with_the_header(void)
     PASS();
 }
 
-/* Catches: a provider that writes the line into the body instead of a header going unread. */
 TEST the_userinfo_line_at_the_top_of_the_body_is_read(void)
 {
     static fx_t f;
@@ -1291,7 +1286,6 @@ TEST the_userinfo_line_at_the_top_of_the_body_is_read(void)
     PASS();
 }
 
-/* Catches: the sweep leaving a dropped subscription's .info behind, or taking a kept one's. */
 TEST the_sweep_removes_an_unused_info_file(void)
 {
     static fx_t f;

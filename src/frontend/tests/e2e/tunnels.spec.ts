@@ -237,8 +237,6 @@ test.describe("Tunnels page", () => {
     await expect(tunnels.card("t3")).toContainText("(last good)");
   });
 
-  // Catches the provider's traffic and end date missing from the source row, an ending plan not warned about on the
-  // card's head line, or a warning shown for a subscription the provider said nothing about.
   test("a subscription shows its traffic and end date and warns before it ends", async ({
     page,
   }) => {

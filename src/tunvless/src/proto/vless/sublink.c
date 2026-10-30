@@ -228,20 +228,9 @@ size_t sl_unescape(const char *p, int yaml, char out[4], size_t *olen) {
     return 1;
 }
 
-/* Node name: the one field where a subscription puts anything, UTF-8 included, so a cut by bytes
- * shows. Order matters: drop a percent escape the cut left incomplete, decode, then drop an
- * incomplete UTF-8 sequence (it may come from the percent form or from raw bytes in the
- * fragment). */
+/* Node name: decoded before the cut, then a character the cut split is dropped. */
 void sl_set_name(char *dst, size_t n, const char *src) {
-    size_t len = strlen(src);
-    int cut = len >= n;
-    sl_set_field(dst, n, src, len);
-    if (cut) {
-        size_t l = strlen(dst);
-        if (l >= 1 && dst[l - 1] == '%') dst[l - 1] = '\0';
-        else if (l >= 2 && dst[l - 2] == '%') dst[l - 2] = '\0';
-    }
-    sl_pct_decode(dst);
+    sl_set_pct(dst, n, src, strlen(src));
     sl_utf8_trim_tail(dst);
 }
 

@@ -56,7 +56,6 @@ test.describe("Tunnel inbounds", () => {
     ]);
   });
 
-  // Catches the whole group missing from the node list, or sent as anything but "*".
   test("a port can carry the whole group", async ({ page }) => {
     const { daemon, tunnels } = await open(page);
     await tunnels.card("a").getByRole("button", { name: "Add port" }).click();
@@ -70,7 +69,6 @@ test.describe("Tunnel inbounds", () => {
     ]);
   });
 
-  // Catches a saved whole-group port shown as a raw "*" instead of its name.
   test("a saved whole-group port names the group", async ({ page }) => {
     const { tunnels } = await open(page, [saved({ node: "*" })]);
     const row = tunnels.inboundRows("a").first();

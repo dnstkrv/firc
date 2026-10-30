@@ -1325,20 +1325,18 @@ int main(void) {
         check_n("short name: node parses", 0, vless_parse_url(url, &n));
         check("short name not cut", "Узел", n.name);
 
-        /* A cut inside an escape: a prefix of five or six letters leaves "%D" or "%" at the
-         * end, which is dropped rather than shown as text; the 20 whole letters stay. */
         for (int pre = 5; pre <= 6; pre++) {
-            char cut[512], want[64];
+            char cut[512], want[160];
             snprintf(cut, sizeof(cut), "%.*s", pre, "nodexy");
             snprintf(want, sizeof(want), "%.*s", pre, "nodexy");
             for (int i = 0; i < 70; i++) strcat(cut, "%D0%9F");
-            for (int i = 0; i < 20; i++) strcat(want, "\xD0\x9F");
+            for (int i = 0; i < (pre == 5 ? 61 : 60); i++) strcat(want, "\xD0\x9F");
             snprintf(url, sizeof(url),
                      "vless://11111111-2222-3333-4444-555555555555@example.com:8443"
                      "?security=reality&sni=a.example&pbk=k&fp=chrome#%s", cut);
             vless_parse_url(url, &n);
-            check(pre == 5 ? "long name cut after \"%D\": the fragment dropped"
-                           : "long name cut after \"%\": the fragment dropped", want, n.name);
+            check(pre == 5 ? "long name: decoded, then cut to whole letters"
+                           : "long name: decoded, then a split letter dropped", want, n.name);
         }
     }
 

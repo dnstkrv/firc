@@ -16,7 +16,6 @@ const GiB = 2 ** 30;
 const NOW = 1_800_000_000;
 
 describe("formatSize", () => {
-  // Catches decimal units where providers count in 1024s, or a unit switch one step off.
   it("counts in powers of 1024", () => {
     assert.strictEqual(formatSize(100 * GiB, id), "100 GB");
     assert.strictEqual(formatSize(12.5 * GiB, id), "12.5 GB");
@@ -27,7 +26,6 @@ describe("formatSize", () => {
 });
 
 describe("traffic and expiry", () => {
-  // Catches a zero total shown as a limit of nothing, or a zero expire shown as 1970.
   it("names no limit and no end date", () => {
     const u = { used: 3 * GiB, total: 0, expire: 0 };
     assert.strictEqual(trafficText(u, id), "3 GB, no limit");
@@ -36,7 +34,6 @@ describe("traffic and expiry", () => {
     assert.strictEqual(expiryTone(u, NOW), "");
   });
 
-  // Catches the thresholds off by one at either side.
   it("turns orange at 90% and three days, red at the end", () => {
     const at = (used: number, expire: number) => ({ used, total: 100, expire });
     assert.strictEqual(trafficTone(at(89, 0)), "");
@@ -53,7 +50,6 @@ describe("traffic and expiry", () => {
 });
 
 describe("usageAlert", () => {
-  // Catches a warning for a healthy plan, or the lesser trouble shown over an ended one.
   it("warns of the worst trouble only", () => {
     assert.strictEqual(usageAlert(null, NOW, id), null);
     assert.strictEqual(
