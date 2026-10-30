@@ -523,8 +523,11 @@ int main(void) {
     fd = attempt_logged(&lo6, p6);
     char dev[IFNAMSIZ] = "";
     socklen_t dl = sizeof dev;
-    if (fd >= 0) getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl);
-    check_str("IPv6 socket bound to the device", "lo", dev);
+    int gr = fd >= 0 ? getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, dev, &dl) : -1;
+    if (gr == 0 || (errno != EOPNOTSUPP && errno != ENOPROTOOPT))
+        check_str("IPv6 socket bound to the device", "lo", dev);
+    else
+        printf("dialmatch: the device of a socket cannot be read here (qemu-user), not checked\n");
     if (fd >= 0) close(fd);
     transport_set_bind_dev(NULL);
 
