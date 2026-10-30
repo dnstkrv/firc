@@ -96,7 +96,7 @@
   }
 </script>
 
-<div class="autolist-group {changed}" class:invalid>
+<div class="autolist-group" class:invalid>
   <Select
     {options}
     selected={wantNew ? NEW : value}
@@ -104,7 +104,8 @@
     onValueChange={pick}
     {ariaLabel}
     disabled={!loaded}
-    class="group-select"
+    showSelectedDescription={false}
+    class="autolist-select {changed}"
   />
   {#if !wantNew && value === "" && loaded}
     <span class="hint">{t("Not chosen: nothing is added")}</span>
@@ -116,7 +117,8 @@
         selected={iface}
         onValueChange={(v: string) => (iface = v)}
         ariaLabel={t("Interface of the new group")}
-        class="iface-select"
+        showSelectedDescription={false}
+        class="autolist-select"
       />
       <button type="button" class="create" disabled={iface === "" || creating} onclick={create}>
         {t("Create")}
@@ -130,29 +132,63 @@
   .autolist-group {
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 6px;
     width: 100%;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    min-width: 0;
   }
-  .autolist-group.changed-live {
+  .autolist-group :global(.autolist-select) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .autolist-group :global(.autolist-select [data-select-root]) {
+    width: 100%;
+  }
+  .autolist-group :global(.autolist-select [data-select-trigger]) {
+    width: 100%;
+    height: 2.25rem;
+    padding: 0 10px;
+    border-radius: 8px;
+    background: var(--bg-light);
+    border: 1px solid var(--bg-light);
+    box-sizing: border-box;
+  }
+  .autolist-group :global(.autolist-select [data-select-trigger] > .selected) {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .autolist-group :global(.autolist-select .selected-value) {
+    padding-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .autolist-group :global(.autolist-select.changed-live [data-select-trigger]) {
+    background: var(--bg-dark);
     border-color: var(--accent);
   }
-  .autolist-group.invalid {
+  .autolist-group.invalid :global(.autolist-select [data-select-trigger]) {
     border-color: var(--danger);
   }
   .new {
     display: flex;
     gap: 8px;
     align-items: center;
+    min-width: 0;
+  }
+  .new :global(.autolist-select) {
+    flex: 1;
   }
   .hint {
     font-size: 0.8rem;
     color: var(--text-2);
+    text-align: left;
   }
   .create {
     flex: none;
-    padding: 6px 12px;
+    height: 2.25rem;
+    padding: 0 12px;
     border-radius: 8px;
     border: 1px solid var(--accent);
     background: transparent;

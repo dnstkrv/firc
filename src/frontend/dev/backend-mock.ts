@@ -1273,6 +1273,12 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.check.wanUrl": "",
   "app.check.interval": 30,
   "app.check.timeout": 5,
+  "app.autolist.enabled": false,
+  "app.autolist.group": "",
+  "app.autolist.failThreshold": 3,
+  "app.autolist.failTime": 60,
+  "app.autolist.retransThreshold": 3,
+  "app.autolist.exclude": [],
 };
 const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.address",
@@ -1285,6 +1291,12 @@ const SETTINGS_LIVE = new Set([
   "app.check.wanUrl",
   "app.check.interval",
   "app.check.timeout",
+  "app.autolist.enabled",
+  "app.autolist.group",
+  "app.autolist.failThreshold",
+  "app.autolist.failTime",
+  "app.autolist.retransThreshold",
+  "app.autolist.exclude",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
 let RUNNING: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -1717,6 +1729,15 @@ app.get(`${API_BASE}/system/dnsstats`, (c) => {
 });
 
 app.get(`${API_BASE}/system/netfilter`, (c) => c.json(NETFILTER));
+
+app.get(`${API_BASE}/system/autolist`, (c) =>
+  c.json({
+    enabled: SAVED["app.autolist.enabled"] === true,
+    running: SAVED["app.autolist.enabled"] === true,
+    failures: 0,
+    listed: 0,
+  }),
+);
 
 app.put("/dev/live", async (c) => {
   const body = await c.req.json();

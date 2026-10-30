@@ -15,6 +15,8 @@ typedef struct {
     firc_autolist_flow_t key;
 } flow_t;
 
+#define BAD_ADDRS 8
+
 typedef struct {
     bool used;
     uint32_t hash;
@@ -22,6 +24,9 @@ typedef struct {
     uint32_t fails;
     int64_t last_fail;
     int64_t seen;
+    firc_ip_t bad[BAD_ADDRS];
+    uint8_t n_bad;
+    uint8_t next_bad;
     char name[FIRC_AUTOLIST_NAME_MAX];
 } host_t;
 
@@ -202,13 +207,37 @@ static flow_t *flow_slot(firc_autolist_t *a, int64_t now) {
     return oldest;
 }
 
+static void host_restart(host_t *h) {
+    h->fails = 0;
+    h->n_bad = 0;
+    h->next_bad = 0;
+}
+
+static bool host_bad_at(const host_t *h, const firc_ip_t *server) {
+    for (uint8_t i = 0; i < h->n_bad; i++) {
+        if (ip_eq(&h->bad[i], server)) { return true; }
+    }
+    return false;
+}
+
+static void host_note_bad(host_t *h, const firc_ip_t *server) {
+    if (host_bad_at(h, server)) { return; }
+    if (h->n_bad < BAD_ADDRS) {
+        h->bad[h->n_bad++] = *server;
+        return;
+    }
+    h->bad[h->next_bad] = *server;
+    h->next_bad = (uint8_t)((h->next_bad + 1u) % BAD_ADDRS);
+}
+
 static bool fail(firc_autolist_t *a, flow_t *f, firc_autolist_why_t why, int64_t now, firc_autolist_failure_t *out) {
     f->judged = true;
     host_t *h = host_of(a, f);
     if (h == NULL) { return false; }
-    if (!host_counting(a, h, now)) { h->fails = 0; }
+    if (!host_counting(a, h, now)) { host_restart(h); }
     h->fails++;
     h->last_fail = now;
+    host_note_bad(h, &f->key.server);
     if (out != NULL) {
         memset(out, 0, sizeof(*out));
         memcpy(out->host, h->name, sizeof(out->host));
@@ -217,7 +246,7 @@ static bool fail(firc_autolist_t *a, flow_t *f, firc_autolist_why_t why, int64_t
         out->why = (uint8_t)why;
         out->listed = h->fails >= a->p.fail_threshold;
     }
-    if (h->fails >= a->p.fail_threshold) { h->fails = 0; }
+    if (h->fails >= a->p.fail_threshold) { host_restart(h); }
     return true;
 }
 
@@ -257,7 +286,7 @@ bool firc_autolist_reply(firc_autolist_t *a, const firc_autolist_flow_t *key, bo
     if (rst) { return fail(a, f, FIRC_AUTOLIST_RESET, now, out); }
     f->judged = true;
     host_t *h = host_of(a, f);
-    if (h != NULL) { h->fails = 0; }
+    if (h != NULL && host_bad_at(h, &f->key.server)) { host_restart(h); }
     return false;
 }
 

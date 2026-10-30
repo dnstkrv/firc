@@ -17,6 +17,12 @@ static firc_autolist_flow_t flow(uint8_t client_last, uint16_t client_port) {
     return f;
 }
 
+static firc_autolist_flow_t flow_to(uint16_t client_port, uint8_t server_last) {
+    firc_autolist_flow_t f = flow(10, client_port);
+    f.server.b[3] = server_last;
+    return f;
+}
+
 static bool hello_times(firc_autolist_t *a, const firc_autolist_flow_t *f, const char *sni, int times, int64_t now,
                         firc_autolist_failure_t *out) {
     bool failed = false;
@@ -103,6 +109,38 @@ TEST a_working_connection_clears_the_count(void) {
     ASSERT_EQ(1u, out.fails);
     ASSERT_FALSE(out.listed);
     ASSERTm("and a reset after it worked is no failure", !firc_autolist_reply(a, &f3, true, 113, &out));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST a_working_address_does_not_clear_another_s_failures(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_failure_t out;
+    firc_autolist_flow_t bad1 = flow_to(50001, 41), good = flow_to(50002, 215), bad2 = flow_to(50003, 41),
+                         bad3 = flow_to(50004, 41);
+    ASSERT(hello_times(a, &bad1, "www.linkedin.com", 4, 100, &out));
+    ASSERT_FALSE(hello_times(a, &good, "www.linkedin.com", 1, 110, &out));
+    ASSERT_FALSE(firc_autolist_reply(a, &good, false, 111, &out));
+    ASSERT(hello_times(a, &bad2, "www.linkedin.com", 4, 112, &out));
+    ASSERT_EQ(2u, out.fails);
+    ASSERT(hello_times(a, &bad3, "www.linkedin.com", 4, 120, &out));
+    ASSERT(out.listed);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST a_failed_address_that_works_again_clears_the_count(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_failure_t out;
+    firc_autolist_flow_t on_a = flow_to(50001, 41), on_b = flow_to(50002, 215), b_again = flow_to(50003, 215),
+                         later = flow_to(50004, 41);
+    ASSERT(hello_times(a, &on_a, "x.example", 4, 100, &out));
+    ASSERT(hello_times(a, &on_b, "x.example", 4, 105, &out));
+    ASSERT_EQ(2u, out.fails);
+    ASSERT_FALSE(hello_times(a, &b_again, "x.example", 1, 110, &out));
+    ASSERT_FALSE(firc_autolist_reply(a, &b_again, false, 111, &out));
+    ASSERT(hello_times(a, &later, "x.example", 4, 112, &out));
+    ASSERT_EQ(1u, out.fails);
     firc_autolist_free(a);
     PASS();
 }
@@ -200,6 +238,8 @@ int main(int argc, char **argv) {
     RUN_TEST(failures_too_far_apart_start_over);
     RUN_TEST(an_early_reset_is_a_failure);
     RUN_TEST(a_working_connection_clears_the_count);
+    RUN_TEST(a_working_address_does_not_clear_another_s_failures);
+    RUN_TEST(a_failed_address_that_works_again_clears_the_count);
     RUN_TEST(a_reply_to_a_connection_never_seen_is_ignored);
     RUN_TEST(a_hello_without_sni_takes_its_name_from_the_dns_answer);
     RUN_TEST(another_device_s_answer_names_nothing);
