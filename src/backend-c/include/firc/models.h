@@ -235,6 +235,15 @@ typedef struct firc_app_config {
         firc_duration_t interval;
         firc_duration_t timeout;
     } check;
+    struct {
+        bool enabled;
+        char *group;
+        uint32_t fail_threshold;
+        firc_duration_t fail_time;
+        uint32_t retrans_threshold;
+        char **exclude;
+        size_t n_exclude;
+    } autolist;
 } firc_app_config_t;
 
 /* Whole-application state produced by config load (defaults + overlay). */

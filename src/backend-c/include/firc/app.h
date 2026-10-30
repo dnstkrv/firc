@@ -408,6 +408,20 @@ void firc_app_devices_changed(firc_app_t *app);
 /* stages the capture's chain when one runs; every pass does this */
 firc_err_t firc_app_stage_tap(firc_app_t *app);
 
+firc_err_t firc_app_stage_autolist(firc_app_t *app);
+
+firc_err_t firc_app_autolist_apply(firc_app_t *app);
+
+typedef struct firc_autolist_status {
+    bool enabled;
+    bool running;
+    const char *why_off;
+    uint64_t failures;
+    uint64_t listed;
+} firc_autolist_status_t;
+
+void firc_app_autolist_status(const firc_app_t *app, firc_autolist_status_t *out);
+
 firc_err_t firc_app_rebuild_netfilter(firc_app_t *app, firc_cancel_t *cancel);
 
 /* full writes every table again and puts our jumps back in place (firmware rewrite, first pass); otherwise a table unchanged since firc wrote it is skipped */

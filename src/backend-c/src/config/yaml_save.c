@@ -416,6 +416,25 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     emit_plain(ctx, "timeout");
     emit_duration(ctx, a->check.timeout);
     map_end(ctx);
+    emit_plain(ctx, "autolist");
+    map_start(ctx);
+    emit_plain(ctx, "enabled");
+    emit_bool(ctx, a->autolist.enabled);
+    emit_plain(ctx, "group");
+    emit_string(ctx, a->autolist.group != NULL ? a->autolist.group : "");
+    emit_plain(ctx, "failThreshold");
+    emit_u64(ctx, a->autolist.fail_threshold);
+    emit_plain(ctx, "failTime");
+    emit_duration(ctx, a->autolist.fail_time);
+    emit_plain(ctx, "retransThreshold");
+    emit_u64(ctx, a->autolist.retrans_threshold);
+    emit_plain(ctx, "exclude");
+    seq_start(ctx, a->autolist.n_exclude == 0);
+    for (size_t i = 0; i < a->autolist.n_exclude; i++) {
+        emit_string(ctx, a->autolist.exclude[i]);
+    }
+    seq_end(ctx);
+    map_end(ctx);
     map_end(ctx); /* app */
 }
 

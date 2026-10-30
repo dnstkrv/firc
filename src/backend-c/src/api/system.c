@@ -337,6 +337,24 @@ static void handle_netfilter(firc_http_req_t *req, firc_http_res_t *res, void *u
     firc_http_res_write_json(res, 200, out);
 }
 
+static void handle_autolist(firc_http_req_t *req, firc_http_res_t *res, void *ud) {
+    (void)req;
+    firc_system_ctx_t *ctx = ud;
+    firc_autolist_status_t st;
+    firc_app_autolist_status(ctx->app, &st);
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || cJSON_AddBoolToObject(out, "enabled", st.enabled) == NULL ||
+        cJSON_AddBoolToObject(out, "running", st.running) == NULL ||
+        cJSON_AddNumberToObject(out, "failures", (double)st.failures) == NULL ||
+        cJSON_AddNumberToObject(out, "listed", (double)st.listed) == NULL ||
+        (st.why_off != NULL && cJSON_AddStringToObject(out, "whyOff", st.why_off) == NULL)) {
+        cJSON_Delete(out);
+        firc_http_res_write_error(res, 500, firc_err_str(FIRC_ERR_NOMEM));
+        return;
+    }
+    firc_http_res_write_json(res, 200, out);
+}
+
 void firc_system_name_tunnels(firc_iface_info_t *ifaces, size_t n, const firc_tunnels_t *ts) {
     for (size_t i = 0; ts != NULL && i < ts->n; i++) {
         if (ts->t[i].description[0] == '\0') { continue; }
@@ -1108,6 +1126,7 @@ void firc_system_register_routes(firc_httpd_t *h, firc_system_ctx_t *ctx) {
     must_route(h, "GET", "/api/v1/system/hosts", handle_hosts, ctx);
     must_route(h, "GET", "/api/v1/system/resolvers", handle_resolvers, ctx);
     must_route(h, "GET", "/api/v1/system/netfilter", handle_netfilter, ctx);
+    must_route(h, "GET", "/api/v1/system/autolist", handle_autolist, ctx);
     must_route(h, "POST", "/api/v1/system/config/save", handle_save_config, ctx);
     must_route(h, "POST", "/api/v1/system/hooks/netfilterd", handle_netfilterd_hook, ctx);
     must_route(h, "POST", "/api/v1/system/hooks/iflayer", handle_iflayer_hook, ctx);

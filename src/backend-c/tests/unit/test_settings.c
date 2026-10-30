@@ -36,7 +36,9 @@ static const char EVERY_FIELD[] =
     "    maxNames: 4096\n"
     "  link: [br0, br1]\n"
     "  update: {check: true}\n"
-    "  check: {url: 'https://check.example/204', wanUrl: 'http://wan.example/204', interval: 45s, timeout: 3s}\n";
+    "  check: {url: 'https://check.example/204', wanUrl: 'http://wan.example/204', interval: 45s, timeout: 3s}\n"
+    "  autolist: {enabled: true, group: 0a0b0c0d, failThreshold: 5, failTime: 2m, retransThreshold: 4,\n"
+    "             exclude: [example.com]}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -333,6 +335,48 @@ TEST a_disabled_webui_host_is_not_checked(void) {
     PASS();
 }
 
+TEST the_autolist_values_are_checked(void) {
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    const char *field = NULL, *why = NULL;
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
+
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.group, "not-an-id"));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.group", field);
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.group, "0a0b0c0d"));
+
+    cfg.app.autolist.fail_threshold = 0;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.failThreshold", field);
+    cfg.app.autolist.fail_threshold = 3;
+
+    cfg.app.autolist.fail_time = 5 * FIRC_DURATION_SEC;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.failTime", field);
+    cfg.app.autolist.fail_time = 60 * FIRC_DURATION_SEC;
+
+    cfg.app.autolist.retrans_threshold = 9;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.retransThreshold", field);
+    cfg.app.autolist.retrans_threshold = 3;
+
+    static const char *const dup[] = {"example.com", "example.com"};
+    cfg.app.autolist.exclude = (char **)dup;
+    cfg.app.autolist.n_exclude = 2;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.exclude", field);
+    static const char *const bad[] = {"*.example.com"};
+    cfg.app.autolist.exclude = (char **)bad;
+    cfg.app.autolist.n_exclude = 1;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    cfg.app.autolist.exclude = NULL;
+    cfg.app.autolist.n_exclude = 0;
+
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 /* Catches: a row's live or restart class flipped, or a live row losing its apply kind. */
 TEST each_row_has_the_specs_class_and_apply(void) {
     static const struct {
@@ -349,6 +393,12 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.check.wanUrl", FIRC_APPLY_CHECK},
         {"app.check.interval", FIRC_APPLY_CHECK},
         {"app.check.timeout", FIRC_APPLY_CHECK},
+        {"app.autolist.enabled", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.group", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.failThreshold", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.failTime", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.retransThreshold", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.exclude", FIRC_APPLY_AUTOLIST},
     };
     size_t n_live = 0;
     for (size_t i = 0; i < FIRC_SETTINGS_COUNT; i++) {
@@ -436,6 +486,10 @@ static const field_t NUMERIC[] = {
     FIELD("app.check.interval", check.interval),
     FIELD("app.check.timeout", check.timeout),
     FIELD("app.httpWeb.host.port", http_web.host.port),
+    FIELD("app.autolist.enabled", autolist.enabled),
+    FIELD("app.autolist.failThreshold", autolist.fail_threshold),
+    FIELD("app.autolist.failTime", autolist.fail_time),
+    FIELD("app.autolist.retransThreshold", autolist.retrans_threshold),
 };
 
 static bool is_numeric(firc_setting_kind_t k) {
@@ -487,6 +541,7 @@ int main(int argc, char **argv) {
     RUN_TEST(wan_url_takes_a_url_or_empty);
     RUN_TEST(the_check_settings_default_to_the_spec_and_are_live);
     RUN_TEST(a_disabled_webui_host_is_not_checked);
+    RUN_TEST(the_autolist_values_are_checked);
     RUN_TEST(each_row_has_the_specs_class_and_apply);
     RUN_TEST(the_update_check_is_live_off_by_default_and_applies_nothing);
     RUN_TEST(every_numeric_setting_copies_exactly_the_bytes_of_its_field);

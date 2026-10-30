@@ -372,7 +372,7 @@ TEST the_two_halves_hold_the_whole_config(void)
 
     ASSERTm("settings carry the app block", strstr(settings, "\napp:\n") != NULL);
     ASSERT_FALSEm("and not the groups", strstr(settings, "\ngroups:") != NULL);
-    ASSERT_FALSEm("nor a list", strstr(settings, "list:") != NULL);
+    ASSERT_FALSEm("nor a list", strstr(settings, "\n  list:") != NULL);
     ASSERTm("groups carry the groups", strstr(groups, "\ngroups:\n") != NULL);
     ASSERTm("and their lists with them", strstr(groups, "\n  list:\n") != NULL);
     ASSERT_FALSEm("and not the app block", strstr(groups, "\napp:") != NULL);
@@ -497,6 +497,13 @@ TEST save_shape_matches_committed_fixture(void)
         "    wanUrl: \"\"\n"
         "    interval: 30s\n"
         "    timeout: 5s\n"
+        "  autolist:\n"
+        "    enabled: false\n"
+        "    group: \"\"\n"
+        "    failThreshold: 3\n"
+        "    failTime: 1m0s\n"
+        "    retransThreshold: 3\n"
+        "    exclude: []\n"
         "groups:\n"
         "- id: d663876a\n"
         "  name: Example\n"

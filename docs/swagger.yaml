@@ -91,7 +91,14 @@ definitions:
           array of strings; startMarkTableIndex is a string like 0x66697263.
           app.dnsProxy.disableStats (live, false by default) turns the DNS
           stats off: nothing is counted and the counts are dropped; turned on
-          again, they start empty.
+          again, they start empty. app.autolist.* (all live) is the automatic
+          list: enabled switches it, group is the id of the group blocked
+          domains are added to ("" none), failThreshold (1-20) failed
+          connections in a row with at most failTime (10-3600 s) between two
+          add a host, retransThreshold (1-8) is how many times a ClientHello
+          is sent again before the connection counts as failed, exclude lists
+          names never added (each with its subdomains). What is added is the
+          host's registrable domain as a namespace rule.
         example:
           app.dnsProxy.upstream.address: 127.0.0.1
           app.dnsProxy.upstream.port: 53
@@ -101,6 +108,12 @@ definitions:
           app.check.wanUrl: ""
           app.check.interval: 30
           app.check.timeout: 5
+          app.autolist.enabled: false
+          app.autolist.group: ""
+          app.autolist.failThreshold: 3
+          app.autolist.failTime: 60
+          app.autolist.retransThreshold: 3
+          app.autolist.exclude: []
         type: object
       classes:
         additionalProperties:
@@ -1117,6 +1130,34 @@ definitions:
         items:
           $ref: '#/definitions/types.InterfaceResolvers'
         type: array
+    type: object
+  types.AutolistRes:
+    properties:
+      enabled:
+        description: 'The app.autolist.enabled setting'
+        example: true
+        type: boolean
+      running:
+        description: 'Its readers and kernel rules are up and connections are watched'
+        example: true
+        type: boolean
+      whyOff:
+        description: 'Present only when enabled but not running: why it could not start'
+        example: 'no address pool: the daemon is not routing yet'
+        type: string
+      failures:
+        description: 'Failed connections seen since it started'
+        example: 12
+        type: integer
+      listed:
+        description: 'Hosts that failed failThreshold times in a row since it started; each was added unless excluded, already there or past 30 additions an hour'
+        example: 2
+        type: integer
+    required:
+    - enabled
+    - running
+    - failures
+    - listed
     type: object
   types.NetfilterRes:
     properties:
@@ -3009,6 +3050,26 @@ paths:
           schema:
             $ref: '#/definitions/types.NetfilterRes'
       summary: 'Netfilter write state'
+      tags:
+      - system
+  /api/v1/system/autolist:
+    get:
+      description: >-
+        The automatic list's state. While it runs, TLS connections from the
+        devices the chosen group routes that go around firc are watched: a
+        ClientHello sent again and again with no answer, or a reset in the
+        first 4 KB of the reply, is a failure; a reply past 4 KB clears the
+        host's count. A host that fails often enough has its registrable
+        domain (cdn.example.com -> example.com) added to the group as a
+        namespace rule, and groups.yaml is saved.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.AutolistRes'
+      summary: 'Automatic list state'
       tags:
       - system
   /api/v1/system/events:

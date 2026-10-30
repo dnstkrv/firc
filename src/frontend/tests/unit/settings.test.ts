@@ -5,6 +5,7 @@ import {
   changedKeys,
   followUrl,
   groupChanges,
+  parseNames,
   pluralForm,
   putBody,
   rebaseDraft,
@@ -165,5 +166,23 @@ describe("followUrl", () => {
   it("brackets an IPv6 literal host", () => {
     const v6 = { protocol: "http:", hostname: "fd00::1", port: "8080", pathname: "/" };
     assert.strictEqual(followUrl(v6, { [port]: 8081 }, [port]), "http://[fd00::1]:8081/");
+  });
+});
+
+describe("parseNames", () => {
+  it("takes one name a line, or a pasted list split any way", () => {
+    assert.deepStrictEqual(parseNames("example.com\nOther.org.\n\n a.net, b.net;c.net"), [
+      "example.com",
+      "other.org",
+      "a.net",
+      "b.net",
+      "c.net",
+    ]);
+  });
+  it("keeps a name once", () => {
+    assert.deepStrictEqual(parseNames("x.com\nX.com"), ["x.com"]);
+  });
+  it("an empty text is no names", () => {
+    assert.deepStrictEqual(parseNames("  \n"), []);
   });
 });

@@ -5,6 +5,7 @@
   import Placeholder from "../../components/ui/Placeholder.svelte";
   import Tooltip from "../../components/ui/Tooltip.svelte";
   import { locale, t } from "../../data/locale.svelte";
+  import AutolistStatus from "./AutolistStatus.svelte";
   import SaveDialog from "./SaveDialog.svelte";
   import SettingRow from "./SettingRow.svelte";
   import {
@@ -124,6 +125,7 @@
       <section class="panel" data-section={section.id}>
         <header>
           <span class="title">{section.title()}</span>
+          {#if section.id === "autolist"}<AutolistStatus />{/if}
           {#if wholeRestart(section)}
             <span class="whole"
               ><RotateCw size={16} color="var(--yellow-bright)" />{t(

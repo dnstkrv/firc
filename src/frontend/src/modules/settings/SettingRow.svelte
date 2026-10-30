@@ -1,8 +1,10 @@
 <script lang="ts">
   import Switch from "../../components/ui/Switch.svelte";
   import { t } from "../../data/locale.svelte";
+  import AutolistGroup from "./AutolistGroup.svelte";
   import LanCoverage from "./LanCoverage.svelte";
   import LanPicker from "./LanPicker.svelte";
+  import NamesInput from "./NamesInput.svelte";
   import { settings } from "./settings.svelte";
 
   import type { Row } from "./catalogue";
@@ -52,6 +54,23 @@
         <LanPicker
           ariaLabel={field.label()}
           values={settings.draft[field.key] as string[]}
+          onchange={(v) => (settings.draft[field.key] = v)}
+          invalid={invalid(field.key)}
+          changed={changedClass(field.key)}
+        />
+      {:else if c.kind === "group"}
+        <AutolistGroup
+          ariaLabel={field.label()}
+          value={String(settings.draft[field.key] ?? "")}
+          onchange={(v) => (settings.draft[field.key] = v)}
+          invalid={invalid(field.key)}
+          changed={changedClass(field.key)}
+        />
+      {:else if c.kind === "names"}
+        <NamesInput
+          ariaLabel={field.label()}
+          placeholder={c.placeholder?.()}
+          values={(settings.draft[field.key] as string[] | undefined) ?? []}
           onchange={(v) => (settings.draft[field.key] = v)}
           invalid={invalid(field.key)}
           changed={changedClass(field.key)}

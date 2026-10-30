@@ -1,3 +1,4 @@
+import { knownGroups } from "../../data/known-groups.svelte";
 import { t } from "../../data/locale.svelte";
 
 import type { SettingValue } from "./settings";
@@ -11,7 +12,9 @@ export type Control =
     }
   | { kind: "number"; unit?: () => string; width?: string }
   | { kind: "switch"; invert?: boolean; caption?: string }
-  | { kind: "tags" };
+  | { kind: "tags" }
+  | { kind: "group" }
+  | { kind: "names"; placeholder?: () => string };
 
 export type Field = { key: string; label: () => string; control: Control };
 export type Row = { label: () => string; hint: () => string; fields: Field[]; joiner?: string };
@@ -258,6 +261,87 @@ export const SECTIONS: Section[] = [
     ],
   },
   {
+    id: "autolist",
+    title: () => t("Automatic list"),
+    rows: [
+      row(
+        () => t("Add blocked domains automatically"),
+        () =>
+          t(
+            "Watches TLS connections that go around firc; a domain whose connections keep failing is added to the group below",
+          ),
+        [
+          {
+            key: "app.autolist.enabled",
+            label: () => t("Add blocked domains automatically"),
+            control: { kind: "switch" },
+          },
+        ],
+      ),
+      row(
+        () => t("Group to add to"),
+        () =>
+          t(
+            "A new group of its own, or one of yours; a domain is added as example.com with its subdomains",
+          ),
+        [
+          {
+            key: "app.autolist.group",
+            label: () => t("Group to add to"),
+            control: { kind: "group" },
+          },
+        ],
+      ),
+      row(
+        () => t("Failures in a row"),
+        () => t("How many failed connections add a domain, 1 to 20"),
+        [
+          {
+            key: "app.autolist.failThreshold",
+            label: () => t("Failures in a row"),
+            control: { kind: "number", width: "5.5rem" },
+          },
+        ],
+      ),
+      row(
+        () => t("Time between failures"),
+        () => t("A longer pause starts the count over, 10 to 3600 seconds"),
+        [
+          {
+            key: "app.autolist.failTime",
+            label: () => t("Time between failures"),
+            control: { kind: "number", unit: () => t("s") },
+          },
+        ],
+      ),
+      row(
+        () => t("ClientHello resent"),
+        () =>
+          t(
+            "How many times the device sends the ClientHello again with no answer before the connection counts as failed, 1 to 8",
+          ),
+        [
+          {
+            key: "app.autolist.retransThreshold",
+            label: () => t("ClientHello resent"),
+            control: { kind: "number", width: "5.5rem" },
+          },
+        ],
+      ),
+      row(
+        () => t("Never add"),
+        () => t("One domain a line; its subdomains are kept out too"),
+        [
+          {
+            key: "app.autolist.exclude",
+            label: () => t("Never add"),
+            control: { kind: "names", placeholder: () => "example.com" },
+          },
+        ],
+      ),
+    ],
+  },
+  {
     id: "check",
     title: () => t("Interface check"),
     rows: [
@@ -377,7 +461,12 @@ export function formatValue(key: string, value: SettingValue | undefined): strin
     const shown = control?.kind === "switch" && control.invert ? !value : value;
     return shown ? t("on") : t("off");
   }
-  if (Array.isArray(value)) return value.join(", ");
+  if (Array.isArray(value))
+    return value.length === 0 && control?.kind === "names" ? t("none") : value.join(", ");
+  if (control?.kind === "group") {
+    if (value === "") return t("not chosen");
+    return knownGroups.list.find((g) => g.id === value)?.name || String(value);
+  }
   if (value === "" && key === "app.addressPool.v6.pool") return t("auto");
   const unit = control?.kind === "number" && control.unit ? ` ${control.unit()}` : "";
   return `${value}${unit}`;

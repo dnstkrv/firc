@@ -22,6 +22,15 @@ export function sameValue(a: SettingValue | undefined, b: SettingValue | undefin
   return a === b;
 }
 
+export function parseNames(text: string): string[] {
+  const seen = new Set<string>();
+  for (const part of text.split(/[\s,;]+/)) {
+    const name = part.trim().toLowerCase().replace(/\.$/, "");
+    if (name !== "") seen.add(name);
+  }
+  return [...seen];
+}
+
 export function changedKeys(saved: SettingsMap, draft: SettingsMap): string[] {
   return Object.keys(saved).filter((k) => k in draft && !sameValue(saved[k], draft[k]));
 }

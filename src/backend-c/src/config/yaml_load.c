@@ -464,6 +464,32 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
         GET_OR_FAIL(get_duration(map_get(doc, cn, "interval"), &c->check.interval, &err));
         GET_OR_FAIL(get_duration(map_get(doc, cn, "timeout"), &c->check.timeout, &err));
     }
+    node_t *al = map_get(doc, app, "autolist");
+    if (al != NULL && !node_is_null(al)) {
+        if (al->type != YAML_MAPPING_NODE) {
+            return FIRC_ERR_INVAL;
+        }
+        GET_OR_FAIL(get_bool(map_get(doc, al, "enabled"), &c->autolist.enabled, &err));
+        GET_OR_FAIL(get_string(map_get(doc, al, "group"), &c->autolist.group, &err));
+        uint64_t v;
+        getter_res_t r = get_uint64(map_get(doc, al, "failThreshold"), UINT32_MAX, &v, &err);
+        if (r == GET_ERR) {
+            return err;
+        }
+        if (r == GET_OK) {
+            c->autolist.fail_threshold = (uint32_t)v;
+        }
+        GET_OR_FAIL(get_duration(map_get(doc, al, "failTime"), &c->autolist.fail_time, &err));
+        r = get_uint64(map_get(doc, al, "retransThreshold"), UINT32_MAX, &v, &err);
+        if (r == GET_ERR) {
+            return err;
+        }
+        if (r == GET_OK) {
+            c->autolist.retrans_threshold = (uint32_t)v;
+        }
+        GET_OR_FAIL(get_string_list(doc, map_get(doc, al, "exclude"), &c->autolist.exclude,
+                                    &c->autolist.n_exclude, &err));
+    }
     /* runs unconditionally: a later overlay that omits a block must not leave an earlier value unchecked */
     const char *field = NULL, *why = NULL;
     firc_err_t chk = firc_app_config_check(c, &field, &why);
