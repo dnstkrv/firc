@@ -54,7 +54,7 @@ TEST the_rules_go_in_a_chain_of_their_own(void) {
                   "-m mark ! --mark 0x40000000/0x40000000 "
                   "-m tcp --dport 443 --tcp-flags SYN,ACK ACK "
                   "-m length --length 100:65535 "
-                  "-m connbytes --connbytes 2:12 --connbytes-mode packets --connbytes-dir original "
+                  "-m connbytes --connbytes 2:128 --connbytes-mode packets --connbytes-dir original "
                   "-m string --hex-string \"|1603|\" --algo bm --from 40 --to 84 "
                   "-m limit --limit 500/sec --limit-burst 500 "
                   "-j NFLOG --nflog-group 6 --nflog-threshold 1\n"

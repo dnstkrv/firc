@@ -11,7 +11,7 @@
 
 #define AL_PORT "443"
 
-#define AL_HELLO_PACKETS "2:12"
+#define AL_HELLO_PACKETS "2:128"
 
 #define AL_LENGTH "100:"
 
