@@ -56,6 +56,21 @@ export function moveBlock<T extends WithId>(
   return [...rest.slice(0, at), ...block, ...rest.slice(at)];
 }
 
+const DOMAIN_TYPES = new Set(["namespace", "wildcard", "domain"]);
+
+export function domainLines(
+  groups: readonly { rules: readonly { rule: string; type: string }[] }[],
+): string[] {
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const rule of group.rules) {
+      const text = rule.rule.trim();
+      if (text && DOMAIN_TYPES.has(rule.type)) seen.add(text);
+    }
+  }
+  return [...seen];
+}
+
 export function selectionCountText(n: number, locale: string, t: (key: string) => string): string {
   return counted(
     n,

@@ -3,6 +3,7 @@ import { describe, it } from "jsr:@std/testing@1.0.19/bdd";
 
 import ru from "../../src/locales/ru.json" with { type: "json" };
 import {
+  domainLines,
   moveBlock,
   rangeIds,
   selectableIds,
@@ -182,6 +183,24 @@ describe("the selection, as pure functions", () => {
     for (const [n, text] of want) assert.strictEqual(selectionCountText(n, "ru", tr), text);
     assert.strictEqual(selectionCountText(1, "en", en), "1 group selected");
     assert.strictEqual(selectionCountText(3, "en", en), "3 groups selected");
+  });
+
+  it("takes the domain rules of the groups in order, once each", () => {
+    const rule = (text: string, type: string) => ({ rule: text, type });
+    const groups = [
+      {
+        rules: [
+          rule("aaa.com", "namespace"),
+          rule("^ads\\.", "regex"),
+          rule("10.0.0.0/8", "subnet"),
+          rule(" bbb.com ", "domain"),
+        ],
+      },
+      { rules: [rule("*.ccc.com", "wildcard"), rule("aaa.com", "domain"), rule("", "domain")] },
+      { rules: [rule("2001:db8::/32", "subnet6")] },
+    ];
+    assert.deepStrictEqual(domainLines(groups), ["aaa.com", "bbb.com", "*.ccc.com"]);
+    assert.deepStrictEqual(domainLines([]), []);
   });
 });
 
