@@ -210,11 +210,12 @@ bool firc_autolist_wan_check(const firc_autolist_check_opts_t *o, _Atomic bool *
     }
     size_t used = strlen(pin);
     snprintf(pin + used, sizeof(pin) - used, "%.63s", addr);
+    bool literal = strcmp(addr, name) == 0 || strchr(addr, ':') != NULL;
     char curl_err[CURL_ERROR_SIZE] = "";
     firc_sub_fetch_info_t info = {0};
     firc_sub_fetch_opts_t fo = {.timeout_s = left,
                                 .no_redirects = true,
-                                .resolve = pin,
+                                .resolve = literal ? NULL : pin,
                                 .progress = wan_progress,
                                 .progress_ud = stop,
                                 .errbuf = curl_err,
