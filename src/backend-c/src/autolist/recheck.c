@@ -173,7 +173,8 @@ void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t
     if (p.stalled) {
         snprintf(out->error, sizeof(out->error), "no byte for %d s after %u bytes", PROBE_STALL_S, (unsigned)bytes);
     } else if (err == FIRC_ERR_IO) {
-        snprintf(out->error, sizeof(out->error), "%s", curl_err[0] != '\0' ? curl_err : "the request failed");
+        snprintf(out->error, sizeof(out->error), "%.*s", (int)sizeof(out->error) - 1,
+                 curl_err[0] != '\0' ? curl_err : "the request failed");
     } else if (err != FIRC_OK && !p.capped && status <= 0) {
         snprintf(out->error, sizeof(out->error), "%s", firc_err_str(err));
     }
