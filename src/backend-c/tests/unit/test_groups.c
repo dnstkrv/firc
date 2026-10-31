@@ -789,36 +789,183 @@ TEST a_rules_comment_round_trips_through_the_api(void) {
     PASS();
 }
 
-TEST a_rules_autolist_host_round_trips_through_the_api(void) {
+static const char *stored_marker(harness_t *h, size_t i) {
+    return firc_ruleset_group(only_group(h))->rules[i]->autolist;
+}
+
+static void seed_marker(harness_t *h, size_t i, const char *host) {
+    if (firc_strset(&firc_ruleset_group_mut(only_group(h))->rules[i]->autolist, host) != FIRC_OK) { abort(); }
+}
+
+static void add_rule_via_post(const char *path, const char *rule, bool enable, char *id, size_t cap) {
+    cJSON *out = NULL;
+    char body[160];
+    snprintf(body, sizeof(body), "{\"type\":\"domain\",\"rule\":\"%s\",\"enable\":%s}", rule, enable ? "true" : "false");
+    if (do_request("POST", path, body, &out) != 200) { abort(); }
+    snprintf(id, cap, "%s", jstr(out, "id"));
+    cJSON_Delete(out);
+}
+
+static void group_id_of(harness_t *h, char *id) {
+    firc_id_format(firc_ruleset_group(only_group(h))->id, id);
+}
+
+TEST request_autolist_field_is_ignored(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
     char path[96];
     make_rules_path("g", path, sizeof(path));
     cJSON *out = NULL;
     ASSERT_EQ_FMT(200, do_request("POST", path,
-                                  "{\"type\":\"namespace\",\"rule\":\"example.com\",\"enable\":false,"
-                                  "\"autolist\":\"www.example.com\"}",
-                                  &out), "%d");
-    ASSERT_STR_EQ("www.example.com", or_none(jstr(out, "autolist")));
-    char rule_path[160];
-    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, jstr(out, "id"));
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,"
+                                  "\"autolist\":\"x.test\"}", &out), "%d");
+    ASSERTm("the answer carries no marker", cJSON_GetObjectItem(out, "autolist") == NULL);
     cJSON_Delete(out);
-    ASSERT_EQ(200, do_request("GET", rule_path, NULL, &out));
-    ASSERT_STR_EQ("www.example.com", or_none(jstr(out, "autolist")));
-    cJSON_Delete(out);
-
-    ASSERT_EQ_FMT(200, do_request("POST", path, "{\"type\":\"domain\",\"rule\":\"example.org\",\"enable\":true}", &out),
-                  "%d");
-    ASSERTm("a rule added by hand has no key", cJSON_GetObjectItem(out, "autolist") == NULL);
-    cJSON_Delete(out);
-    ASSERT_EQ_FMT(400, do_request("POST", path,
-                                  "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true,\"autolist\":\"a b\"}",
-                                  &out), "%d");
-    cJSON_Delete(out);
-    ASSERT_EQ_FMT(400, do_request("POST", path,
+    ASSERT(stored_marker(h, 0) == NULL);
+    ASSERT_EQ_FMT(200, do_request("POST", path,
                                   "{\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true,\"autolist\":5}", &out),
                   "%d");
     cJSON_Delete(out);
+    ASSERT(stored_marker(h, 1) == NULL);
+    seed_marker(h, 0, "www.example.com");
+    char rule_path[160];
+    char id[FIRC_ID_STR_LEN];
+    firc_id_format(firc_ruleset_group(only_group(h))->rules[0]->id, id);
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, id);
+    ASSERT_EQ(200, do_request("GET", rule_path, NULL, &out));
+    ASSERT_STR_EQ("www.example.com", or_none(jstr(out, "autolist")));
+    cJSON_Delete(out);
+    harness_stop(h);
+    PASS();
+}
+
+TEST put_rule_switch_off_drops_marker(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char id[FIRC_ID_STR_LEN];
+    add_rule_via_post(path, "example.com", true, id, sizeof(id));
+    seed_marker(h, 0, "x.test");
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, id);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("PUT", rule_path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":false,"
+                                  "\"autolist\":\"x.test\"}", &out), "%d");
+    ASSERTm("the answer carries no marker", cJSON_GetObjectItem(out, "autolist") == NULL);
+    cJSON_Delete(out);
+    ASSERT(stored_marker(h, 0) == NULL);
+    harness_stop(h);
+    PASS();
+}
+
+TEST put_rule_same_keeps_marker(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char id[FIRC_ID_STR_LEN];
+    add_rule_via_post(path, "example.com", true, id, sizeof(id));
+    seed_marker(h, 0, "x.test");
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, id);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("PUT", rule_path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,"
+                                  "\"autolist\":\"other.test\"}", &out), "%d");
+    ASSERT_STR_EQ("x.test", or_none(jstr(out, "autolist")));
+    cJSON_Delete(out);
+    ASSERT_STR_EQ("x.test", or_none(stored_marker(h, 0)));
+    harness_stop(h);
+    PASS();
+}
+
+TEST put_rules_edit_pattern_drops_marker(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char id0[FIRC_ID_STR_LEN];
+    char id1[FIRC_ID_STR_LEN];
+    add_rule_via_post(path, "example.com", true, id0, sizeof(id0));
+    add_rule_via_post(path, "example.net", true, id1, sizeof(id1));
+    seed_marker(h, 0, "a.test");
+    seed_marker(h, 1, "b.test");
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"rules\":[{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.org\",\"enable\":true,"
+             "\"autolist\":\"a.test\"},{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true}]}",
+             id0, id1);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("PUT", path, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERT(stored_marker(h, 0) == NULL);
+    ASSERT_STR_EQ("b.test", or_none(stored_marker(h, 1)));
+    harness_stop(h);
+    PASS();
+}
+
+TEST put_group_untouched_rules_keep_markers(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char id[FIRC_ID_STR_LEN];
+    add_rule_via_post(path, "example.com", true, id, sizeof(id));
+    seed_marker(h, 0, "x.test");
+    char gid[FIRC_ID_STR_LEN];
+    group_id_of(h, gid);
+    char gpath[96];
+    snprintf(gpath, sizeof(gpath), "/api/v1/groups/%s", gid);
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"id\":\"%s\",\"name\":\"g\",\"interface\":\"lo\",\"enable\":true,\"rules\":[{\"id\":\"%s\","
+             "\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,\"autolist\":\"y.test\"}]}",
+             gid, id);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("PUT", gpath, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERT_STR_EQ("x.test", or_none(stored_marker(h, 0)));
+    snprintf(body, sizeof(body), "{\"id\":\"%s\",\"name\":\"g2\",\"interface\":\"lo\",\"enable\":true}", gid);
+    ASSERT_EQ_FMT(200, do_request("PUT", gpath, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERT_STR_EQ("x.test", or_none(stored_marker(h, 0)));
+    snprintf(body, sizeof(body),
+             "{\"id\":\"%s\",\"name\":\"g2\",\"interface\":\"lo\",\"enable\":true,\"rules\":[{\"id\":\"%s\","
+             "\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":false}]}",
+             gid, id);
+    ASSERT_EQ_FMT(200, do_request("PUT", gpath, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERT(stored_marker(h, 0) == NULL);
+    harness_stop(h);
+    PASS();
+}
+
+TEST put_groups_switch_drops_marker(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    char id0[FIRC_ID_STR_LEN];
+    char id1[FIRC_ID_STR_LEN];
+    add_rule_via_post(path, "example.com", true, id0, sizeof(id0));
+    add_rule_via_post(path, "example.net", true, id1, sizeof(id1));
+    seed_marker(h, 0, "a.test");
+    seed_marker(h, 1, "b.test");
+    char gid[FIRC_ID_STR_LEN];
+    group_id_of(h, gid);
+    char body[768];
+    snprintf(body, sizeof(body),
+             "{\"groups\":[{\"id\":\"%s\",\"name\":\"g\",\"interface\":\"lo\",\"enable\":true,\"rules\":["
+             "{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":false,\"autolist\":\"a.test\"},"
+             "{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.net\",\"enable\":true}]}]}",
+             gid, id0, id1);
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("PUT", "/api/v1/groups", body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERT(stored_marker(h, 0) == NULL);
+    ASSERT_STR_EQ("b.test", or_none(stored_marker(h, 1)));
     harness_stop(h);
     PASS();
 }
@@ -2491,7 +2638,12 @@ int main(int argc, char **argv) {
     RUN_TEST(a_rule_the_daemon_cannot_use_is_refused);
     RUN_TEST(proto_and_ports_are_kept_or_refused);
     RUN_TEST(a_rules_comment_round_trips_through_the_api);
-    RUN_TEST(a_rules_autolist_host_round_trips_through_the_api);
+    RUN_TEST(request_autolist_field_is_ignored);
+    RUN_TEST(put_rule_switch_off_drops_marker);
+    RUN_TEST(put_rule_same_keeps_marker);
+    RUN_TEST(put_rules_edit_pattern_drops_marker);
+    RUN_TEST(put_group_untouched_rules_keep_markers);
+    RUN_TEST(put_groups_switch_drops_marker);
     RUN_TEST(a_comment_with_a_newline_or_257_bytes_is_400);
     RUN_TEST(a_comment_of_exactly_256_bytes_is_kept);
     RUN_TEST(an_unusable_rule_names_the_group_and_the_rule);

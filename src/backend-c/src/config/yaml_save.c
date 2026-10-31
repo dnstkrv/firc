@@ -426,6 +426,8 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     emit_bool(ctx, a->autolist.enabled);
     emit_plain(ctx, "group");
     emit_string(ctx, a->autolist.group != NULL ? a->autolist.group : "");
+    emit_plain(ctx, "mode");
+    emit_string(ctx, a->autolist.mode != NULL ? a->autolist.mode : "candidates");
     emit_plain(ctx, "failThreshold");
     emit_u64(ctx, a->autolist.fail_threshold);
     emit_plain(ctx, "failTime");
@@ -442,8 +444,8 @@ static void emit_app(emitter_ctx_t *ctx, const firc_app_config_t *a)
     emit_bool(ctx, a->autolist.recheck);
     emit_plain(ctx, "recheckInterval");
     emit_duration(ctx, a->autolist.recheck_interval);
-    emit_plain(ctx, "recheckInterface");
-    emit_string(ctx, a->autolist.recheck_iface != NULL ? a->autolist.recheck_iface : "");
+    emit_plain(ctx, "checkInterface");
+    emit_string(ctx, a->autolist.check_iface != NULL ? a->autolist.check_iface : "");
     map_end(ctx);
     map_end(ctx); /* app */
 }

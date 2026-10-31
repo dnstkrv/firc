@@ -6,15 +6,37 @@
   import { t } from "../../data/locale.svelte";
 
   import { ifaceTitle, isSink } from "../../data/iface-choices";
+  import { fetcher } from "../../utils/fetcher";
+  import { groupInterfaces } from "./settings";
 
   type Props = {
     value: string;
     onchange: (id: string) => void;
     ariaLabel: string;
+    groupId?: string;
     invalid?: boolean;
     changed?: string;
   };
-  let { value, onchange, ariaLabel, invalid = false, changed = "" }: Props = $props();
+  let { value, onchange, ariaLabel, groupId = "", invalid = false, changed = "" }: Props = $props();
+
+  type GroupItem = { id: string; name: string; interface?: string | string[] };
+  let groups = $state<GroupItem[]>([]);
+
+  async function loadGroups() {
+    try {
+      const res = await fetcher.get<{ groups?: GroupItem[] }>("/groups", { quiet: true });
+      groups = res?.groups ?? [];
+    } catch (error) {
+      console.error("Failed to load groups:", error);
+    }
+  }
+
+  $effect(() => {
+    if (groupId !== "" && !groups.some((g) => g.id === groupId)) void loadGroups();
+  });
+
+  const group = $derived(groups.find((g) => g.id === groupId));
+  const taken = $derived(group ? groupInterfaces(group) : []);
 
   const DEFAULT = "-";
 
@@ -30,7 +52,13 @@
     { value: DEFAULT, label: t("Default route") },
     ...offered.map((i) => {
       const { title, sub } = ifaceTitle(i);
-      return { value: i.id, label: title, description: sub, mono: true };
+      return {
+        value: i.id,
+        label: title,
+        description: sub,
+        mono: true,
+        disabled: taken.includes(i.id),
+      };
     }),
     ...(value !== "" && !offered.some((i) => i.id === value)
       ? [{ value, label: value, missing: true }]
@@ -47,12 +75,28 @@
     showSelectedDescription={false}
     class="iface-picker-select {changed}"
   />
+  {#if group && taken.length > 0}
+    <span class="hint">
+      {t("Interfaces of group «{group}» are unavailable: a site always opens through them").replace(
+        "{group}",
+        group.name || group.id,
+      )}
+    </span>
+  {/if}
 </div>
 
 <style>
   .iface-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     width: 100%;
     min-width: 0;
+  }
+  .hint {
+    font-size: 0.8rem;
+    color: var(--text-2);
+    text-align: left;
   }
   .iface-picker :global(.iface-picker-select),
   .iface-picker :global(.iface-picker-select [data-select-root]) {

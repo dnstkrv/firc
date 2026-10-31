@@ -249,7 +249,7 @@ export type TunnelNodeState = {
   key: string;
   name: string;
   source: string;
-  state: "active" | "down" | "reserve" | "excluded" | "missing" | "skipped";
+  state: "active" | "down" | "reserve" | "excluded" | "skipped";
   since: number;
   skipReason?: string;
   v6?: boolean;
@@ -296,7 +296,6 @@ export type TunnelPreviewRow = {
   name: string;
   source: string;
   isNew: boolean;
-  missing: boolean;
   excluded: boolean;
   overCap: boolean;
   skipReason?: string;
@@ -315,4 +314,52 @@ export type TunnelProbeRow = {
   why: string;
   handshakeMs: number | null;
   firstByteMs: number | null;
+};
+
+export type AutolistWhy = "no-answer" | "reset" | "freeze";
+
+export type AutolistCandidateState = "candidate" | "checking" | "added" | "off";
+
+export type AutolistCandidate = {
+  domain: string;
+  host: string;
+  why: string;
+  fails: number;
+  clients: string[];
+  lastAt: number;
+  state: AutolistCandidateState;
+  notes: number;
+};
+
+export type AutolistProbeResult = {
+  host: string;
+  verdict: "open" | "short" | "blocked" | "unknown";
+  why: string;
+  bytes: number;
+  at: number;
+  error: string;
+};
+
+export type AutolistRes = {
+  enabled: boolean;
+  running: boolean;
+  whyOff?: string;
+  mode: "candidates" | "add";
+  group: string | null;
+  failures: number;
+  failuresDay: number;
+  listed: number;
+  addedHour: number;
+  checking: boolean;
+  checkedAt: number;
+  switchedOff: number;
+  switchedOn: number;
+  bypassed: { client: string; fails: number }[];
+  candidates: AutolistCandidate[];
+  probes: {
+    usedHour: number;
+    queued: number;
+    running: string | null;
+    results: AutolistProbeResult[];
+  };
 };

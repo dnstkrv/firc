@@ -12,7 +12,7 @@
 #include "firc/log.h"
 #include "firc/tappacket.h"
 
-#define READERS 3
+#define READERS 4
 
 struct firc_autolist_svc;
 
@@ -45,9 +45,14 @@ static void addr_text(const firc_ip_t *ip, char *out, size_t cap) {
 }
 
 static void failed(firc_autolist_svc_t *s, const firc_autolist_failure_t *f) {
-    s->failures++;
     char client[INET6_ADDRSTRLEN];
     addr_text(&f->client, client, sizeof(client));
+    if (f->bypass) {
+        FIRC_DEBUG("autolist: %s, which never asked firc for the name, failed: %s", client, why_name(f->why));
+        if (s->deps.bypassed != NULL) { s->deps.bypassed(s->deps.ud, f); }
+        return;
+    }
+    s->failures++;
     FIRC_DEBUG("autolist: %s failed for %s: %s (%u in a row)", f->host, client, why_name(f->why),
                (unsigned)f->fails);
     if (!f->listed) { return; }
@@ -64,7 +69,7 @@ static void on_hello(firc_autolist_svc_t *s, const uint8_t *pkt, size_t len, int
     if (!firc_tls_client_hello_sni(p.payload, p.payload_len, sni, sizeof(sni))) { sni[0] = '\0'; }
     firc_autolist_flow_t key = {p.src, p.dst, p.src_port, p.dst_port};
     firc_autolist_failure_t f;
-    if (firc_autolist_hello(s->judge, &key, p.seq, sni, now, &f)) { failed(s, &f); }
+    if (firc_autolist_hello(s->judge, &key, p.seq, p.ack, sni, now, &f)) { failed(s, &f); }
 }
 
 static void on_reply(firc_autolist_svc_t *s, bool rst, const uint8_t *pkt, size_t len, int64_t now) {
@@ -76,6 +81,19 @@ static void on_reply(firc_autolist_svc_t *s, bool rst, const uint8_t *pkt, size_
     if (firc_autolist_reply(s->judge, &key, rst, now, &f)) { failed(s, &f); }
 }
 
+static void on_fin(firc_autolist_svc_t *s, const uint8_t *pkt, size_t len, int64_t now) {
+    firc_tap_packet_t p;
+    if (!firc_tap_packet_parse(pkt, len, &p)) { return; }
+    if ((p.flags & 0x01u) == 0) { return; }
+    firc_autolist_flow_t key = {p.src, p.dst, p.src_port, p.dst_port};
+    firc_autolist_nomination_t n;
+    if (!firc_autolist_fin(s->judge, &key, p.ack, now, &n)) { return; }
+    char client[INET6_ADDRSTRLEN];
+    addr_text(&n.client, client, sizeof(client));
+    FIRC_DEBUG("autolist: %s stalled twice for %s after %u bytes", n.host, client, (unsigned)n.received);
+    if (s->deps.nominated != NULL) { s->deps.nominated(s->deps.ud, &n); }
+}
+
 void firc_autolist_svc_packet(firc_autolist_svc_t *s, int which, const uint8_t *pkt, size_t len) {
     if (s == NULL || pkt == NULL) { return; }
     int64_t now = svc_now(s);
@@ -83,6 +101,8 @@ void firc_autolist_svc_packet(firc_autolist_svc_t *s, int which, const uint8_t *
         on_hello(s, pkt, len, now);
     } else if (which == 1 || which == 2) {
         on_reply(s, which == 1, pkt, len, now);
+    } else if (which == 3) {
+        on_fin(s, pkt, len, now);
     }
 }
 
@@ -145,8 +165,9 @@ firc_autolist_svc_t *firc_autolist_svc_start(const firc_autolist_deps_t *deps, f
     }
 
     static const uint16_t groups[READERS] = {FIRC_AUTOLIST_GROUP_HELLO, FIRC_AUTOLIST_GROUP_RESET,
-                                             FIRC_AUTOLIST_GROUP_WORKS};
-    static const uint16_t ranges[READERS] = {FIRC_TAP_COPY_RANGE, FIRC_TAP_HEAD_RANGE, FIRC_TAP_HEAD_RANGE};
+                                             FIRC_AUTOLIST_GROUP_ANSWERED, FIRC_AUTOLIST_GROUP_FIN};
+    static const uint16_t ranges[READERS] = {FIRC_TAP_COPY_RANGE, FIRC_TAP_HEAD_RANGE, FIRC_TAP_HEAD_RANGE,
+                                             FIRC_TAP_HEAD_RANGE};
     for (int w = 0; w < READERS; w++) {
         reader_t *r = &s->readers[w];
         r->svc = s;
@@ -198,4 +219,12 @@ void firc_autolist_svc_hint(firc_autolist_svc_t *s, const firc_ip_t *client, con
 void firc_autolist_svc_counts(const firc_autolist_svc_t *s, uint64_t *failures, uint64_t *listed) {
     if (failures != NULL) { *failures = s != NULL ? s->failures : 0; }
     if (listed != NULL) { *listed = s != NULL ? s->listed : 0; }
+}
+
+size_t firc_autolist_svc_bypassed(const firc_autolist_svc_t *s, firc_ip_t *clients, uint32_t *fails, size_t cap) {
+    return s != NULL ? firc_autolist_bypassed(s->judge, svc_now(s), clients, fails, cap) : 0;
+}
+
+uint32_t firc_autolist_svc_failures_day(const firc_autolist_svc_t *s) {
+    return s != NULL ? firc_autolist_failures_day(s->judge, svc_now(s)) : 0;
 }

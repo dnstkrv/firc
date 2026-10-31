@@ -351,7 +351,8 @@ static int xh_value(struct sj *j, struct sl_xh *a, const char *k) {
     char v[sizeof a->buf];
     sj_ws(j);
     if (!strncmp(j->p, "null", 4)) { j->p += 4; return 0; }
-    if (*j->p == '{' && (!strcmp(k, "uplinkChunkSize") || !strcmp(k, "sessionIDLength"))) {
+    if (*j->p == '{' && (!strcmp(k, "uplinkChunkSize") || !strcmp(k, "sessionIDLength") ||
+                         !strcmp(k, "scMinPostsIntervalMs"))) {
         int r = xh_range_obj(j, v, sizeof v);
         if (r < 0) return -1;
         if (r) { sl_xh_put(a, k, XH_NOT_A_STRING, 1); return 0; }
@@ -1325,7 +1326,7 @@ static int clash_node(const struct yflat *f, struct vless_node *n) {
             { "session-table", "sessionIDTable" }, { "session-length", "sessionIDLength" },
             { "seq-placement", "seqPlacement" }, { "seq-key", "seqKey" },
             { "uplink-data-placement", "uplinkDataPlacement" }, { "uplink-data-key", "uplinkDataKey" },
-            { "uplink-chunk-size", "uplinkChunkSize" },
+            { "uplink-chunk-size", "uplinkChunkSize" }, { "no-grpc-header", "noGRPCHeader" },
         };
         struct sl_xh a;
         memset(&a, 0, sizeof a);

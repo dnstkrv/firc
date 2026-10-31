@@ -414,7 +414,7 @@ static int rq_build(struct transport *t, enum xh_kind k, const char *seq, int wo
     q->r.authority = x->authority;
     q->r.path = q->path;
     q->r.method = k == XK_DOWN ? "GET" : o->method;
-    q->r.content_type = k == XK_ONE || k == XK_UP ? "application/grpc" : NULL;
+    q->r.content_type = (k == XK_ONE || k == XK_UP) && !o->no_grpc ? "application/grpc" : NULL;
     q->r.end_stream = k == XK_DOWN;
     rq_join(q, 0);
     return 0;
@@ -457,7 +457,7 @@ static size_t data_fit(const struct xh_opts *o, size_t base, size_t budget, size
 }
 
 static size_t meta_budget(const struct xh_state *x) {
-    uint32_t b = h2_header_budget(&x->up.h2);
+    uint32_t b = h2_header_budget(&x->up.h2, x->main_side.opts.max_hdr);
     return b < XH_BLOCK ? b : XH_BLOCK;
 }
 

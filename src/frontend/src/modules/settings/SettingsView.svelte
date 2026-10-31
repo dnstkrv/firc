@@ -5,7 +5,6 @@
   import Placeholder from "../../components/ui/Placeholder.svelte";
   import Tooltip from "../../components/ui/Tooltip.svelte";
   import { locale, t } from "../../data/locale.svelte";
-  import AutolistStatus from "./AutolistStatus.svelte";
   import SaveDialog from "./SaveDialog.svelte";
   import SettingRow from "./SettingRow.svelte";
   import {
@@ -20,7 +19,7 @@
   import { CircleCheck, RotateCw, Save, Undo2 } from "../../components/ui/icons";
   import { counted as countedIn } from "../../utils/plural";
   import { SECTIONS, type Row, type Section } from "./catalogue";
-  import { changedKeys, groupChanges } from "./settings";
+  import { autolistTtlWarning, changedKeys, groupChanges } from "./settings";
   import { running } from "./update";
 
   let { active }: { active: boolean } = $props();
@@ -125,7 +124,6 @@
       <section class="panel" data-section={section.id}>
         <header>
           <span class="title">{section.title()}</span>
-          {#if section.id === "autolist"}<AutolistStatus />{/if}
           {#if wholeRestart(section)}
             <span class="whole"
               ><RotateCw size={16} color="var(--yellow-bright)" />{t(
@@ -158,6 +156,13 @@
           {/if}
         {/if}
       </section>
+      {#if section.id === "autolist" && autolistTtlWarning(settings.draft)}
+        <div class="banner warn" role="status" data-testid="autolist-ttl-warning">
+          {t(
+            "«TTL of answers outside the rules» must be above 0 (DNS proxy section): otherwise devices hold the old address for long and an added site will not open for them.",
+          )}
+        </div>
+      {/if}
     {/each}
   {/if}
   <SaveDialog

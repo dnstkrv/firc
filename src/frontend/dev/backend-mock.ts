@@ -1096,7 +1096,6 @@ app.post(`${API_BASE}/tunnels/preview`, async (c) => {
     name: row.name,
     source: row.src.kind === "link" ? "link" : row.src.name,
     isNew: !(draft.order ?? []).includes(row.key),
-    missing: false,
     excluded: (draft.exclude ?? []).includes(row.key),
     overCap: false,
     skipReason: "",
@@ -1274,6 +1273,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.check.interval": 30,
   "app.check.timeout": 5,
   "app.autolist.enabled": false,
+  "app.autolist.mode": "candidates",
   "app.autolist.group": "",
   "app.autolist.failThreshold": 3,
   "app.autolist.failTime": 60,
@@ -1281,7 +1281,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   "app.autolist.exclude": [],
   "app.autolist.recheck": false,
   "app.autolist.recheckInterval": 21600,
-  "app.autolist.recheckInterface": "",
+  "app.autolist.checkInterface": "",
 };
 const SETTINGS_LIVE = new Set([
   "app.dnsProxy.upstream.address",
@@ -1295,6 +1295,7 @@ const SETTINGS_LIVE = new Set([
   "app.check.interval",
   "app.check.timeout",
   "app.autolist.enabled",
+  "app.autolist.mode",
   "app.autolist.group",
   "app.autolist.failThreshold",
   "app.autolist.failTime",
@@ -1302,7 +1303,7 @@ const SETTINGS_LIVE = new Set([
   "app.autolist.exclude",
   "app.autolist.recheck",
   "app.autolist.recheckInterval",
-  "app.autolist.recheckInterface",
+  "app.autolist.checkInterface",
 ]);
 let SAVED: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
 let RUNNING: Record<string, unknown> = structuredClone(SETTINGS_DEFAULTS);
@@ -1616,6 +1617,9 @@ const STATS_SEED: [string, string, number, number, string][] = [
   ["ads.doubleclick.net", "192.168.1.42", 32, 32, "ad5ad5ad"],
   ["ads.doubleclick.net", "192.168.1.7", 16, 16, "ad5ad5ad"],
   ["github.com", "192.168.1.42", 71, 0, ""],
+  ["medium.com", "192.168.1.7", 40, 0, ""],
+  ["some-vps.de", "192.168.1.42", 33, 0, ""],
+  ["tiny-api.io", "192.168.1.51", 12, 0, ""],
   ["icloud.com", "192.168.1.7", 34, 0, ""],
   ["icloud.com", "192.168.1.51", 29, 0, ""],
   ["graph.facebook.com", "192.168.1.51", 30, 0, "g1g1g1g1"],
@@ -1737,25 +1741,173 @@ app.get(`${API_BASE}/system/dnsstats`, (c) => {
 app.get(`${API_BASE}/system/netfilter`, (c) => c.json(NETFILTER));
 
 let AUTOLIST_CHECKED_AT = 0;
+const AUTOLIST_ADDED_HOUR = 2;
+const autolistAgo = (s: number) => NOW() - s;
+const autolistSeed = () => [
+  {
+    domain: "rutracker.org",
+    host: "rutracker.org",
+    why: "no-answer",
+    fails: 3,
+    clients: ["192.168.1.51"],
+    lastAt: autolistAgo(120),
+    state: "candidate",
+    notes: 0,
+  },
+  {
+    domain: "linkedin.com",
+    host: "www.linkedin.com",
+    why: "reset",
+    fails: 5,
+    clients: ["192.168.1.42", "192.168.1.7"],
+    lastAt: autolistAgo(5),
+    state: "candidate",
+    notes: 0,
+  },
+  {
+    domain: "some-vps.de",
+    host: "cdn.some-vps.de",
+    why: "freeze",
+    fails: 0,
+    clients: ["192.168.1.42"],
+    lastAt: autolistAgo(360),
+    state: "candidate",
+    notes: 0,
+  },
+  {
+    domain: "medium.com",
+    host: "medium.com",
+    why: "freeze",
+    fails: 0,
+    clients: ["192.168.1.7"],
+    lastAt: autolistAgo(60),
+    state: "checking",
+    notes: 2,
+  },
+];
+let AUTOLIST_CANDS: any[] = autolistSeed();
+let AUTOLIST_RESULTS: any[] = [
+  {
+    host: "cdn.some-vps.de",
+    verdict: "blocked",
+    why: "freeze",
+    bytes: 15360,
+    at: autolistAgo(900),
+    error: "",
+  },
+];
+const AUTOLIST_VERDICTS: Record<string, [string, string, number, string]> = {
+  "some-vps.de": ["blocked", "freeze", 15360, ""],
+  "api.telegram.org": ["open", "", 65536, ""],
+  "tiny-api.io": ["short", "", 3072, ""],
+  "github.com": ["unknown", "", 0, "no route to host"],
+};
+const AUTOLIST_PROBE_MS = 2500;
+let AUTOLIST_RUNNING: string | null = null;
+const autolistOn = () => SAVED["app.autolist.enabled"] === true;
 const autolistState = () => ({
-  enabled: SAVED["app.autolist.enabled"] === true,
-  running: SAVED["app.autolist.enabled"] === true,
-  failures: 0,
-  listed: 0,
+  enabled: autolistOn(),
+  running: autolistOn(),
+  mode: SAVED["app.autolist.mode"],
+  group: SAVED["app.autolist.group"] || null,
+  failures: autolistOn() ? 40 : 0,
+  failuresDay: autolistOn() ? 23 : 0,
+  listed: autolistOn() ? AUTOLIST_CANDS.length : 0,
+  addedHour: autolistOn() ? AUTOLIST_ADDED_HOUR : 0,
   checking: false,
   checkedAt: AUTOLIST_CHECKED_AT,
   switchedOff: 0,
   switchedOn: 0,
+  bypassed: autolistOn() ? [{ client: "192.168.1.5", fails: 6 }] : [],
+  candidates: autolistOn() ? AUTOLIST_CANDS : [],
+  probes: {
+    usedHour: autolistOn() ? 4 : 0,
+    queued: autolistOn() ? 2 : 0,
+    running: AUTOLIST_RUNNING,
+    results: autolistOn() ? AUTOLIST_RESULTS : [],
+  },
 });
 
 app.get(`${API_BASE}/system/autolist`, (c) => c.json(autolistState()));
 
 app.post(`${API_BASE}/system/autolist/check`, (c) => {
-  if (SAVED["app.autolist.enabled"] !== true) {
+  if (!autolistOn()) {
     return c.json({ error: "the automatic list is not running" }, 409);
   }
   AUTOLIST_CHECKED_AT = Math.floor(Date.now() / 1000);
   return c.json(autolistState());
+});
+
+app.post(`${API_BASE}/system/autolist/candidates/:domain/:action{add|dismiss}`, (c) => {
+  if (!autolistOn()) return c.json({ error: "the automatic list is not running" }, 409);
+  const domain = c.req.param("domain");
+  const action = c.req.param("action");
+  const cand = AUTOLIST_CANDS.find((x) => x.domain === domain);
+  if (!cand) return c.json({ error: "no such candidate" }, 404);
+  if (action === "dismiss") {
+    AUTOLIST_CANDS = AUTOLIST_CANDS.filter((x) => x.domain !== domain);
+    return c.json(autolistState());
+  }
+  const group = DATA.groups.find((g: any) => g.id === SAVED["app.autolist.group"]);
+  if (!group) return c.json({ error: "the rule could not be added" }, 500);
+  if (group.rules.some((r: any) => r.rule === domain)) {
+    return c.json({ error: "the domain is already a rule of the group" }, 409);
+  }
+  group.rules.unshift({
+    id: Math.random().toString(16).slice(2, 10).padEnd(8, "0"),
+    enable: true,
+    rule: domain,
+    type: "namespace",
+    autolist: cand.host,
+  });
+  cand.state = "added";
+  cand.lastAt = NOW();
+  return c.json(autolistState());
+});
+
+app.post(`${API_BASE}/system/autolist/probe`, async (c) => {
+  if (!autolistOn()) return c.json({ error: "the automatic list is not running" }, 409);
+  const body = await c.req.json().catch(() => null);
+  const host = typeof body?.host === "string" ? body.host : "";
+  if (!/^[a-z0-9.-]+$/i.test(host)) return c.json({ error: "not a host name" }, 400);
+  if (AUTOLIST_RUNNING) return c.json({ error: "another check is running" }, 409);
+  if (AUTOLIST_RESULTS.length >= 30) {
+    return c.json({ error: "the hourly limit of router checks is used up" }, 429);
+  }
+  const cand = AUTOLIST_CANDS.find((x) => x.host === host);
+  if (cand && cand.state === "candidate") cand.state = "checking";
+  AUTOLIST_RUNNING = host;
+  setTimeout(() => {
+    const [verdict, why, bytes, error] = AUTOLIST_VERDICTS[host] ?? ["open", "", 65536, ""];
+    AUTOLIST_RESULTS = [
+      { host, verdict, why, bytes, at: NOW(), error },
+      ...AUTOLIST_RESULTS.filter((r) => r.host !== host),
+    ];
+    const c2 = AUTOLIST_CANDS.find((x) => x.host === host);
+    if (c2 && c2.state === "checking") c2.state = "candidate";
+    if (verdict === "blocked" && !c2) {
+      AUTOLIST_CANDS.push({
+        domain: host.split(".").slice(-2).join("."),
+        host,
+        why,
+        fails: 0,
+        clients: [],
+        lastAt: NOW(),
+        state: "candidate",
+        notes: 0,
+      });
+    }
+    AUTOLIST_RUNNING = null;
+  }, AUTOLIST_PROBE_MS);
+  return c.json(autolistState(), 202);
+});
+
+app.delete(`${API_BASE}/groups/:id/rules/:ruleId`, (c) => {
+  const group = DATA.groups.find((g: any) => g.id === c.req.param("id"));
+  const at = group?.rules.findIndex((r: any) => r.id === c.req.param("ruleId")) ?? -1;
+  if (!group || at < 0) return c.json({ error: "not found" }, 404);
+  group.rules.splice(at, 1);
+  return c.json({});
 });
 
 app.put("/dev/live", async (c) => {

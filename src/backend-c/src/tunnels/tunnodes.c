@@ -37,6 +37,8 @@ typedef struct {
     size_t total, matched;
     size_t seen, sinks;
     char sink_name[FIRC_TUN_SAID_MAX + 1];
+    bool *known;
+    bool refused;
     firc_err_t err;
 } build_t;
 
@@ -72,6 +74,7 @@ static void encode_name(char *dst, size_t cap, const char *name)
 static cand_t *push(build_t *b)
 {
     if (b->n >= ROWS_MAX) {
+        b->refused = true;
         return NULL;
     }
     if (b->n == b->cap) {
@@ -374,13 +377,19 @@ static void collect(build_t *b, uint32_t mark, const firc_tun_body_t *bodies, si
                 continue;
             }
             size_t from = b->n;
+            b->refused = false;
+            bool have = true;
             if (kind == FIRC_TUN_SRC_LINK) {
                 parse_link(b, src);
             } else {
                 const firc_tun_body_t *body = find_body(bodies, n_bodies, src->sub.url, mark, firc_tun_sub_headers_sig(&src->sub));
-                if (body != NULL) {
+                have = body != NULL;
+                if (have) {
                     parse_body(b, src, body);
                 }
+            }
+            if (b->known != NULL) {
+                b->known[i] = have && !b->refused;
             }
             if (b->err == FIRC_OK && b->n > from) {
                 number_source(b, from, b->n);
@@ -415,62 +424,6 @@ static cand_t *find_key(const build_t *b, cand_t *const *ix, const char *key)
         }
     }
     return NULL;
-}
-
-static int hexval(char ch)
-{
-    if (ch >= '0' && ch <= '9') {
-        return ch - '0';
-    }
-    if (ch >= 'a' && ch <= 'f') {
-        return ch - 'a' + 10;
-    }
-    if (ch >= 'A' && ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-    return -1;
-}
-
-static void pct_decode(char *s)
-{
-    char *w = s;
-    for (const char *r = s; *r != 0; r++) {
-        int hi = r[0] == '%' ? hexval(r[1]) : -1;
-        int lo = hi >= 0 ? hexval(r[2]) : -1;
-        if (lo >= 0) {
-            *w++ = (char)(hi * 16 + lo);
-            r += 2;
-        } else {
-            *w++ = *r;
-        }
-    }
-    *w = 0;
-}
-
-static void missing_row(const firc_tunnel_t *t, const char *key, firc_tun_node_t *row)
-{
-    memset(row, 0, sizeof *row);
-    snprintf(row->key, sizeof row->key, "%s", key);
-    row->missing = true;
-    const char *colon = strchr(key, ':');
-    if (colon == NULL) {
-        return;
-    }
-    char name[192];
-    snprintf(name, sizeof name, "%s", colon + 1);
-    char *hash = strchr(name, '#');
-    if (hash != NULL) {
-        *hash = 0;
-    }
-    pct_decode(name);
-    vless_name_cut(name);
-    snprintf(row->name, sizeof row->name, "%.100s", name);
-    for (size_t i = 0; i < t->n_src; i++) {
-        size_t idl = strlen(t->src[i].id);
-        if ((size_t)(colon - key) == idl && strncmp(key, t->src[i].id, idl) == 0) {
-            snprintf(row->source, sizeof row->source, "%s", source_label(&t->src[i]));
-        }
-    }
 }
 
 typedef struct {
@@ -512,22 +465,10 @@ static bool order_seen(const firc_tunnel_t *t, size_t i)
     return false;
 }
 
-static bool of_link(const firc_tunnel_t *t, const char *key)
-{
-    const char *colon = strchr(key, ':');
-    for (size_t i = 0; colon != NULL && i < t->n_src; i++) {
-        size_t idl = strlen(t->src[i].id);
-        if ((size_t)(colon - key) == idl && strncmp(key, t->src[i].id, idl) == 0) {
-            return t->src[i].kind == FIRC_TUN_SRC_LINK;
-        }
-    }
-    return false;
-}
-
 static void assemble(build_t *b, firc_tun_nodes_t *out)
 {
     const firc_tunnel_t *t = b->t;
-    out->v = calloc(b->n + t->n_order + 1, sizeof *out->v);
+    out->v = calloc(b->n + 1, sizeof *out->v);
     cand_t **ix = sorted_index(b, 0, b->n, by_key);
     char **excl = t->n_exclude > 0 ? malloc(t->n_exclude * sizeof *excl) : NULL;
     if (out->v == NULL || ix == NULL || (t->n_exclude > 0 && excl == NULL)) {
@@ -546,14 +487,7 @@ static void assemble(build_t *b, firc_tun_nodes_t *out)
             continue;
         }
         cand_t *c = find_key(b, ix, t->order[i]);
-        if (c == NULL) {
-            if (of_link(t, t->order[i])) {
-                continue;
-            }
-            firc_tun_node_t row;
-            missing_row(t, t->order[i], &row);
-            emit(&e, &row, false);
-        } else if (!c->used) {
+        if (c != NULL && !c->used) {
             c->used = true;
             if (!c->filtered) {
                 emit(&e, &c->row, false);
@@ -659,6 +593,64 @@ firc_err_t firc_tun_nodes_links_of(const firc_tunnel_t *t, uint32_t mark, const 
         free(links[k]);
         links[k] = NULL;
     }
+    return err;
+}
+
+static bool key_given(const build_t *b, cand_t *const *ix, const char *key)
+{
+    const firc_tunnel_t *t = b->t;
+    const char *colon = strchr(key, ':');
+    for (size_t i = 0; colon != NULL && i < t->n_src; i++) {
+        if (strlen(t->src[i].id) == (size_t)(colon - key) && strncmp(t->src[i].id, key, (size_t)(colon - key)) == 0) {
+            return !b->known[i] || find_key(b, ix, key) != NULL;
+        }
+    }
+    return true;
+}
+
+static size_t drop_ungiven(const build_t *b, cand_t *const *ix, char **keys, size_t *n)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < *n; i++) {
+        if (key_given(b, ix, keys[i])) {
+            keys[kept++] = keys[i];
+        } else {
+            free(keys[i]);
+        }
+    }
+    size_t gone = *n - kept;
+    *n = kept;
+    return gone;
+}
+
+firc_err_t firc_tun_nodes_prune(firc_tunnel_t *t, uint32_t mark, const firc_tun_body_t *bodies, size_t n_bodies,
+                                size_t *dropped)
+{
+    *dropped = 0;
+    build_t b = {.t = t, .err = FIRC_OK};
+    b.buf = malloc(LINK_BUF);
+    b.known = calloc(t->n_src + 1, sizeof *b.known);
+    if (b.buf == NULL || b.known == NULL) {
+        free(b.known);
+        build_free(&b);
+        return FIRC_ERR_NOMEM;
+    }
+    pthread_mutex_lock(&firc_tun_parse_mutex);
+    sl_intern_reset();
+    vless_set_insecure(t->insecure ? 1 : 0);
+    collect(&b, mark, bodies, n_bodies);
+    g_parses++;
+    vless_set_insecure(0);
+    sl_intern_reset();
+    pthread_mutex_unlock(&firc_tun_parse_mutex);
+    cand_t **ix = b.err == FIRC_OK ? sorted_index(&b, 0, b.n, by_key) : NULL;
+    if (ix != NULL) {
+        *dropped = drop_ungiven(&b, ix, t->order, &t->n_order) + drop_ungiven(&b, ix, t->exclude, &t->n_exclude);
+    }
+    free(ix);
+    free(b.known);
+    firc_err_t err = b.err;
+    build_free(&b);
     return err;
 }
 

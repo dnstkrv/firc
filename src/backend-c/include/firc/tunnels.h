@@ -73,6 +73,8 @@ typedef struct {
 typedef struct {
     firc_tunnel_t *t;
     size_t n;
+    bool file_known;
+    uint8_t file_sha[32];
 } firc_tunnels_t;
 
 typedef struct {
@@ -84,11 +86,14 @@ typedef struct {
 firc_err_t firc_tunnels_load_buffer(firc_tunnels_t *out, const char *buf, size_t len,
                                     firc_tun_err_t *err);
 
-/* Like load_buffer from a file; a missing file is FIRC_OK with no tunnels. */
+/* Like load_buffer from a file; a missing file is FIRC_OK with no tunnels. Records the sha256 of what it read. */
 firc_err_t firc_tunnels_load_file(firc_tunnels_t *out, const char *path, firc_tun_err_t *err);
 
-/* Writes the file atomically with mode 0600 (links are secrets). */
-firc_err_t firc_tunnels_save_file(const firc_tunnels_t *in, const char *path);
+/* Writes the file atomically with mode 0600 (links are secrets); records the sha256 of what it wrote. */
+firc_err_t firc_tunnels_save_file(firc_tunnels_t *in, const char *path);
+
+/* True when path holds exactly what t was last loaded from or saved as; false when that is not known. */
+bool firc_tunnels_file_unchanged(const firc_tunnels_t *t, const char *path);
 
 void firc_tunnels_free(firc_tunnels_t *t);
 

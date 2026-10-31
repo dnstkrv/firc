@@ -66,7 +66,8 @@ const firc_setting_t firc_settings[] = {
      FIRC_APPLY_AUTOLIST},
     {"app.autolist.recheck", FIRC_SK_BOOL, LIVE, AT(autolist.recheck), 0, FIRC_APPLY_AUTOLIST},
     {"app.autolist.recheckInterval", FIRC_SK_SEC, LIVE, AT(autolist.recheck_interval), 0, FIRC_APPLY_AUTOLIST},
-    {"app.autolist.recheckInterface", FIRC_SK_STRING, LIVE, AT(autolist.recheck_iface), 0, FIRC_APPLY_AUTOLIST},
+    {"app.autolist.checkInterface", FIRC_SK_STRING, LIVE, AT(autolist.check_iface), 0, FIRC_APPLY_AUTOLIST},
+    {"app.autolist.mode", FIRC_SK_STRING, LIVE, AT(autolist.mode), 0, FIRC_APPLY_AUTOLIST},
 };
 _Static_assert(sizeof(firc_settings) / sizeof(firc_settings[0]) == FIRC_SETTINGS_COUNT,
                "FIRC_SETTINGS_COUNT is the number of rows");
@@ -387,6 +388,17 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
             REFUSE("app.autolist.group", "empty, or a group's id: 8 hex digits");
         }
     }
+    if (c->autolist.mode == NULL ||
+        (strcmp(c->autolist.mode, "candidates") != 0 && strcmp(c->autolist.mode, "add") != 0)) {
+        REFUSE("app.autolist.mode", "candidates or add");
+    }
+    if (c->autolist.enabled && (c->autolist.group == NULL || c->autolist.group[0] == '\0')) {
+        REFUSE("app.autolist.group", "a group is needed while the automatic list is on");
+    }
+    if (c->autolist.enabled && c->dns_proxy.unmatched_ttl == 0) {
+        REFUSE("app.autolist.enabled",
+               "needs app.dnsProxy.unmatchedTtl above 0: without it devices keep the old address");
+    }
     if (c->autolist.fail_threshold < 1 || c->autolist.fail_threshold > 20) {
         REFUSE("app.autolist.failThreshold", "1 to 20 failures");
     }
@@ -400,9 +412,9 @@ firc_err_t firc_app_config_check(const firc_app_config_t *c, const char **field,
         c->autolist.recheck_interval > 7 * 86400 * FIRC_DURATION_SEC) {
         REFUSE("app.autolist.recheckInterval", "600 seconds to 7 days");
     }
-    if (c->autolist.recheck_iface != NULL && c->autolist.recheck_iface[0] != '\0' &&
-        !firc_is_interface_name(c->autolist.recheck_iface)) {
-        REFUSE("app.autolist.recheckInterface", "empty for the default route, or an interface name");
+    if (c->autolist.check_iface != NULL && c->autolist.check_iface[0] != '\0' &&
+        !firc_is_interface_name(c->autolist.check_iface)) {
+        REFUSE("app.autolist.checkInterface", "empty for the default route, or an interface name");
     }
     if (c->autolist.n_exclude > FIRC_AUTOLIST_EXCLUDE_MAX) {
         REFUSE("app.autolist.exclude", "at most 1000 names");

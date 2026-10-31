@@ -328,6 +328,35 @@ TEST a_subnet_rule_keeps_its_proto_and_ports(void)
     PASS();
 }
 
+TEST check_interface_round_trips(void) {
+    firc_config_t cfg, back;
+    firc_config_init_defaults(&cfg);
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.99.0\napp:\n  autolist: {checkInterface: ppp0, mode: add}\n"));
+    ASSERT_STR_EQ("ppp0", cfg.app.autolist.check_iface);
+    ASSERT_STR_EQ("add", cfg.app.autolist.mode);
+    char *out = NULL;
+    size_t len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.99.0", FIRC_CFG_SETTINGS, &out, &len));
+    ASSERT(strstr(out, "checkInterface: ppp0") != NULL);
+    firc_config_init_defaults(&back);
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    ASSERT_STR_EQ("ppp0", back.app.autolist.check_iface);
+    ASSERT_STR_EQ("add", back.app.autolist.mode);
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST recheck_interface_key_is_gone(void) {
+    firc_config_t cfg;
+    firc_config_init_defaults(&cfg);
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, "configVersion: 0.99.0\napp:\n  autolist: {recheckInterface: wan}\n"));
+    ASSERT_STR_EQ("", cfg.app.autolist.check_iface);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 TEST a_rule_keeps_the_host_the_autolist_added_it_for(void)
 {
     firc_config_t cfg;
@@ -531,13 +560,14 @@ TEST save_shape_matches_committed_fixture(void)
         "  autolist:\n"
         "    enabled: false\n"
         "    group: \"\"\n"
+        "    mode: candidates\n"
         "    failThreshold: 3\n"
         "    failTime: 1m0s\n"
         "    retransThreshold: 3\n"
         "    exclude: []\n"
         "    recheck: false\n"
         "    recheckInterval: 6h0m0s\n"
-        "    recheckInterface: \"\"\n"
+        "    checkInterface: \"\"\n"
         "groups:\n"
         "- id: d663876a\n"
         "  name: Example\n"
@@ -2241,6 +2271,8 @@ int main(int argc, char **argv)
     RUN_TEST(two_zero_rule_ids_fail_and_one_loads);
     RUN_TEST(type_mismatch_fails);
     RUN_TEST(corrupt_yaml_fails);
+    RUN_TEST(check_interface_round_trips);
+    RUN_TEST(recheck_interface_key_is_gone);
     RUN_TEST(a_rule_keeps_the_host_the_autolist_added_it_for);
     RUN_TEST(the_two_halves_hold_the_whole_config);
     RUN_TEST(a_subnet_rule_keeps_its_proto_and_ports);

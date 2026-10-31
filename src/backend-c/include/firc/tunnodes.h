@@ -24,7 +24,7 @@ typedef struct {
     char key[192];
     char name[101];
     char source[64];
-    bool is_new, excluded, missing, over_cap;
+    bool is_new, excluded, over_cap;
     char skip_reason[96];
     size_t link_len;
     char *link;
@@ -47,6 +47,11 @@ firc_err_t firc_tun_nodes_build(const firc_tunnel_t *t, uint32_t mark, const fir
                                 size_t n_bodies, firc_tun_nodes_t *out);
 
 void firc_tun_nodes_free(firc_tun_nodes_t *n);
+
+/* Drops from t's order and exclude every key of a source whose nodes are known (a link, a subscription with its body
+   among bodies) and that gives no node of that key, filtered out or not; *dropped is how many keys went. */
+firc_err_t firc_tun_nodes_prune(firc_tunnel_t *t, uint32_t mark, const firc_tun_body_t *bodies, size_t n_bodies,
+                                size_t *dropped);
 
 /* links[i] is the malloc'd link of the node keyed keys[i] among every node t's sources and bodies give, before
    filter, exclude and the node cap, NULL when no such node can be sent; one parse for all keys. On an error every

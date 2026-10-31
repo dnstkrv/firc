@@ -39,7 +39,7 @@ static const char EVERY_FIELD[] =
     "  check: {url: 'https://check.example/204', wanUrl: 'http://wan.example/204', interval: 45s, timeout: 3s}\n"
     "  autolist: {enabled: true, group: 0a0b0c0d, failThreshold: 5, failTime: 2m, retransThreshold: 4,\n"
     "             exclude: [example.com], recheck: true, recheckInterval: 2h,\n"
-    "             recheckInterface: ppp0}\n";
+    "             checkInterface: ppp0, mode: add}\n";
 
 static char *emit_settings(const firc_app_config_t *app) {
     firc_config_t shell;
@@ -336,6 +336,58 @@ TEST a_disabled_webui_host_is_not_checked(void) {
     PASS();
 }
 
+TEST mode_defaults_to_candidates(void) {
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    ASSERT_STR_EQ("candidates", cfg.app.autolist.mode);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST mode_other_than_two_refused(void) {
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    const char *field = NULL, *why = NULL;
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.mode, "auto"));
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.mode", field);
+    ASSERT_STR_EQ("candidates or add", why);
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.mode, "add"));
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST enabled_without_group_refused(void) {
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    const char *field = NULL, *why = NULL;
+    cfg.app.autolist.enabled = true;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.group", field);
+    ASSERT_STR_EQ("a group is needed while the automatic list is on", why);
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.group, "0a0b0c0d"));
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
+    firc_config_clear(&cfg);
+    PASS();
+}
+
+TEST enabled_with_unmatched_ttl_zero_refused(void) {
+    firc_config_t cfg;
+    ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
+    const char *field = NULL, *why = NULL;
+    cfg.app.autolist.enabled = true;
+    ASSERT_EQ(FIRC_OK, firc_strset(&cfg.app.autolist.group, "0a0b0c0d"));
+    cfg.app.dns_proxy.unmatched_ttl = 0;
+    ASSERT_EQ(FIRC_ERR_INVAL, firc_app_config_check(&cfg.app, &field, &why));
+    ASSERT_STR_EQ("app.autolist.enabled", field);
+    ASSERT_STR_EQ("needs app.dnsProxy.unmatchedTtl above 0: without it devices keep the old address", why);
+    cfg.app.autolist.enabled = false;
+    ASSERT_EQ(FIRC_OK, firc_app_config_check(&cfg.app, &field, &why));
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 TEST the_autolist_values_are_checked(void) {
     firc_config_t cfg;
     ASSERT_EQ(FIRC_OK, firc_config_init_defaults(&cfg));
@@ -400,7 +452,8 @@ TEST each_row_has_the_specs_class_and_apply(void) {
         {"app.autolist.exclude", FIRC_APPLY_AUTOLIST},
         {"app.autolist.recheck", FIRC_APPLY_AUTOLIST},
         {"app.autolist.recheckInterval", FIRC_APPLY_AUTOLIST},
-        {"app.autolist.recheckInterface", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.checkInterface", FIRC_APPLY_AUTOLIST},
+        {"app.autolist.mode", FIRC_APPLY_AUTOLIST},
         {"app.autolist.failTime", FIRC_APPLY_AUTOLIST},
         {"app.autolist.retransThreshold", FIRC_APPLY_AUTOLIST},
     };
@@ -547,6 +600,10 @@ int main(int argc, char **argv) {
     RUN_TEST(wan_url_takes_a_url_or_empty);
     RUN_TEST(the_check_settings_default_to_the_spec_and_are_live);
     RUN_TEST(a_disabled_webui_host_is_not_checked);
+    RUN_TEST(mode_defaults_to_candidates);
+    RUN_TEST(mode_other_than_two_refused);
+    RUN_TEST(enabled_without_group_refused);
+    RUN_TEST(enabled_with_unmatched_ttl_zero_refused);
     RUN_TEST(the_autolist_values_are_checked);
     RUN_TEST(each_row_has_the_specs_class_and_apply);
     RUN_TEST(the_update_check_is_live_off_by_default_and_applies_nothing);

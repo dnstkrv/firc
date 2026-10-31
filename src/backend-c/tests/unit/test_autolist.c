@@ -25,8 +25,16 @@ static firc_autolist_flow_t flow_to(uint16_t client_port, uint8_t server_last) {
 
 static bool hello_times(firc_autolist_t *a, const firc_autolist_flow_t *f, const char *sni, int times, int64_t now,
                         firc_autolist_failure_t *out) {
+    if (sni != NULL && sni[0] != '\0') { firc_autolist_hint(a, &f->client, sni, &f->server, 1, now); }
     bool failed = false;
-    for (int i = 0; i < times; i++) { failed = firc_autolist_hello(a, f, 1000, sni, now + i, out) || failed; }
+    for (int i = 0; i < times; i++) { failed = firc_autolist_hello(a, f, 1000, 0, sni, now + i, out) || failed; }
+    return failed;
+}
+
+static bool bare_hello_times(firc_autolist_t *a, const firc_autolist_flow_t *f, const char *sni, int times,
+                             int64_t now, firc_autolist_failure_t *out) {
+    bool failed = false;
+    for (int i = 0; i < times; i++) { failed = firc_autolist_hello(a, f, 1000, 0, sni, now + i, out) || failed; }
     return failed;
 }
 
@@ -36,7 +44,7 @@ TEST a_hello_sent_once_is_no_failure(void) {
     firc_autolist_flow_t f = flow(10, 50000);
     firc_autolist_failure_t out;
     ASSERT_FALSE(hello_times(a, &f, "blocked.example", 1, 100, &out));
-    ASSERT_EQ(0u, (unsigned)firc_autolist_counting(a, 100));
+    ASSERT_EQ(0u, firc_autolist_failures_day(a, 100));
     firc_autolist_free(a);
     PASS();
 }
@@ -65,7 +73,9 @@ TEST three_failed_connections_list_the_host(void) {
     }
     ASSERT(out.listed);
     ASSERT_EQ(3u, out.fails);
-    ASSERTm("the count starts over once listed", firc_autolist_counting(a, 130) == 0);
+    firc_autolist_flow_t next = flow(10, 50003);
+    ASSERT(hello_times(a, &next, "blocked.example", 4, 130, &out));
+    ASSERTm("the count starts over once listed", out.fails == 1 && !out.listed);
     firc_autolist_free(a);
     PASS();
 }
@@ -190,12 +200,14 @@ TEST a_new_handshake_on_a_reused_port_starts_its_own_count(void) {
     firc_autolist_t *a = firc_autolist_new();
     firc_autolist_flow_t f = flow(10, 50000);
     firc_autolist_failure_t out;
-    ASSERT_FALSE(firc_autolist_hello(a, &f, 1000, "x.example", 100, &out));
-    ASSERT_FALSE(firc_autolist_hello(a, &f, 1000, "x.example", 101, &out));
-    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, "x.example", 102, &out));
-    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, "x.example", 103, &out));
-    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, "x.example", 104, &out));
-    ASSERT(firc_autolist_hello(a, &f, 2000, "x.example", 105, &out));
+    firc_autolist_hint(a, &f.client, "x.example", &f.server, 1, 100);
+    ASSERT_FALSE(firc_autolist_hello(a, &f, 1000, 0, "x.example", 100, &out));
+    ASSERT_FALSE(firc_autolist_hello(a, &f, 1000, 0, "x.example", 101, &out));
+    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, 0, "x.example", 102, &out));
+    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, 0, "x.example", 103, &out));
+    ASSERT_FALSE(firc_autolist_hello(a, &f, 2000, 0, "x.example", 104, &out));
+    ASSERT(firc_autolist_hello(a, &f, 2000, 0, "x.example", 105, &out));
+    ASSERT_FALSE(out.bypass);
     firc_autolist_free(a);
     PASS();
 }
@@ -219,11 +231,202 @@ TEST more_connections_than_slots_do_not_break_it(void) {
         firc_autolist_flow_t f = flow((uint8_t)(i % 200), (uint16_t)(10000 + i));
         char name[32];
         snprintf(name, sizeof(name), "h%u.example", (unsigned)(i % (FIRC_AUTOLIST_HOSTS * 2)));
-        (void)firc_autolist_hello(a, &f, i, name, 100, &out);
+        (void)firc_autolist_hello(a, &f, i, 0, name, 100, &out);
     }
     firc_autolist_flow_t f = flow(250, 60000);
     ASSERT(hello_times(a, &f, "late.example", 4, 100, &out));
     ASSERT_STR_EQ("late.example", out.host);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST no_hint_is_bypass_not_failure(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_flow_t f = flow(10, 50000);
+    firc_autolist_failure_t out;
+    ASSERT(bare_hello_times(a, &f, "a.test", 4, 100, &out));
+    ASSERT(out.bypass);
+    ASSERT_FALSE(out.listed);
+    ASSERT_EQ(0u, firc_autolist_failures_day(a, 104));
+    firc_ip_t clients[4];
+    uint32_t fails[4];
+    ASSERT_EQ(1u, (unsigned)firc_autolist_bypassed(a, 104, clients, fails, 4));
+    ASSERT_EQ(4, clients[0].len);
+    ASSERT_EQ(0, memcmp(clients[0].b, f.client.b, 4));
+    ASSERT_EQ(1u, fails[0]);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST hint_with_other_name_is_bypass(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_flow_t f = flow(10, 50000);
+    firc_autolist_hint(a, &f.client, "b.test", &f.server, 1, 90);
+    firc_autolist_failure_t out;
+    ASSERT(bare_hello_times(a, &f, "a.test", 4, 100, &out));
+    ASSERT(out.bypass);
+    ASSERT_EQ(0u, firc_autolist_failures_day(a, 104));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST two_names_on_one_address_both_count(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_flow_t f = flow(10, 50000);
+    firc_autolist_hint(a, &f.client, "a.test", &f.server, 1, 90);
+    firc_autolist_hint(a, &f.client, "b.test", &f.server, 1, 91);
+    firc_autolist_failure_t out;
+    ASSERT(bare_hello_times(a, &f, "a.test", 4, 100, &out));
+    ASSERT_FALSE(out.bypass);
+    ASSERT_STR_EQ("a.test", out.host);
+    ASSERT_EQ(1u, out.fails);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST failures_day_counts_and_expires(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_failure_t out;
+    const int64_t t = 3600 * 1000;
+    for (uint16_t i = 0; i < 3; i++) {
+        firc_autolist_flow_t f = flow(10, (uint16_t)(50000 + i));
+        firc_autolist_hint(a, &f.client, "day.test", &f.server, 1, t);
+        ASSERT(bare_hello_times(a, &f, "day.test", 4, t, &out));
+    }
+    ASSERT_EQ(3u, firc_autolist_failures_day(a, t + 86399));
+    ASSERT_EQ(0u, firc_autolist_failures_day(a, t + 86400));
+    ASSERT_EQ(0u, firc_autolist_failures_day(a, t + 86400 + 3600));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST hint_same_name_counts(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_failure_t out;
+    for (uint16_t i = 0; i < 3; i++) {
+        firc_autolist_flow_t f = flow(10, (uint16_t)(50000 + i));
+        firc_autolist_hint(a, &f.client, "a.test", &f.server, 1, 100);
+        ASSERT(bare_hello_times(a, &f, "a.test", 4, 100 + i * 20, &out));
+        ASSERT_FALSE(out.bypass);
+    }
+    ASSERT(out.listed);
+    ASSERT_STR_EQ("a.test", out.host);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST no_sni_uses_hint(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_flow_t f = flow(10, 50000);
+    firc_autolist_hint(a, &f.client, "a.test", &f.server, 1, 90);
+    firc_autolist_failure_t out;
+    ASSERT(bare_hello_times(a, &f, "", 4, 100, &out));
+    ASSERT_FALSE(out.bypass);
+    ASSERT_STR_EQ("a.test", out.host);
+    firc_autolist_free(a);
+    PASS();
+}
+
+static bool stalled(firc_autolist_t *a, uint16_t port, uint32_t ack0, uint32_t fin_ack, int64_t at, int64_t held,
+                    firc_autolist_nomination_t *nom) {
+    firc_autolist_flow_t f = flow(10, port);
+    firc_autolist_hint(a, &f.client, "freeze.test", &f.server, 1, at);
+    firc_autolist_failure_t out;
+    (void)firc_autolist_hello(a, &f, 7, ack0, "freeze.test", at, &out);
+    (void)firc_autolist_reply(a, &f, false, at + 1, &out);
+    return firc_autolist_fin(a, &f, fin_ack, at + held, nom);
+}
+
+TEST fin_in_window_after_ten_seconds_notes(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 16384, 100, 11, &nom));
+    ASSERT(stalled(a, 50002, 1000, 1000 + 16384, 150, 11, &nom));
+    ASSERT_STR_EQ("freeze.test", nom.host);
+    ASSERT_EQ(16384u, nom.received);
+    ASSERT_EQ(10, nom.client.b[3]);
+    ASSERTm("the notes are cleared", !stalled(a, 50003, 1000, 1000 + 16384, 170, 11, &nom));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST fin_too_soon_is_no_note(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 16384, 100, 9, &nom));
+    ASSERT_FALSE(stalled(a, 50002, 1000, 1000 + 16384, 150, 9, &nom));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST fin_outside_window_is_no_note(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 4096, 100, 11, &nom));
+    ASSERT_FALSE(stalled(a, 50002, 1000, 1000 + 4096, 150, 11, &nom));
+    ASSERT_FALSE(stalled(a, 50003, 1000, 1000 + 40000, 160, 11, &nom));
+    ASSERT_FALSE(stalled(a, 50004, 1000, 1000 + 40000, 170, 11, &nom));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST fin_window_edges_are_in(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 8192, 100, 10, &nom));
+    ASSERT(stalled(a, 50002, 1000, 1000 + 32768, 150, 10, &nom));
+    ASSERT_EQ(32768u, nom.received);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST fin_wraps_mod_2_32(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 0xfffff000u, 0x00003000u, 100, 11, &nom));
+    ASSERT(stalled(a, 50002, 0xfffff000u, 0x00003000u, 150, 11, &nom));
+    ASSERT_EQ(0x4000u, nom.received);
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST notes_older_than_two_minutes_do_not_pair(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 16384, 100, 11, &nom));
+    ASSERT_FALSE(stalled(a, 50002, 1000, 1000 + 16384, 100 + 121, 11, &nom));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST notes_two_minutes_apart_pair(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 16384, 100, 11, &nom));
+    ASSERT(stalled(a, 50002, 1000, 1000 + 16384, 100 + 120, 11, &nom));
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST a_bypass_flow_s_fin_is_no_note(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    firc_autolist_failure_t out;
+    for (uint16_t port = 50001; port <= 50002; port++) {
+        firc_autolist_flow_t f = flow(10, port);
+        (void)firc_autolist_hello(a, &f, 7, 1000, "freeze.test", 100 + port - 50001, &out);
+        ASSERT_FALSE(firc_autolist_fin(a, &f, 1000 + 16384, 120 + port - 50001, &nom));
+    }
+    firc_autolist_free(a);
+    PASS();
+}
+
+TEST a_fin_sent_again_is_one_note(void) {
+    firc_autolist_t *a = firc_autolist_new();
+    firc_autolist_nomination_t nom;
+    firc_autolist_flow_t f = flow(10, 50001);
+    ASSERT_FALSE(stalled(a, 50001, 1000, 1000 + 16384, 100, 11, &nom));
+    ASSERT_FALSE(firc_autolist_fin(a, &f, 1000 + 16384, 112, &nom));
     firc_autolist_free(a);
     PASS();
 }
@@ -247,5 +450,20 @@ int main(int argc, char **argv) {
     RUN_TEST(a_new_handshake_on_a_reused_port_starts_its_own_count);
     RUN_TEST(the_thresholds_can_be_set);
     RUN_TEST(more_connections_than_slots_do_not_break_it);
+    RUN_TEST(no_hint_is_bypass_not_failure);
+    RUN_TEST(hint_with_other_name_is_bypass);
+    RUN_TEST(two_names_on_one_address_both_count);
+    RUN_TEST(failures_day_counts_and_expires);
+    RUN_TEST(hint_same_name_counts);
+    RUN_TEST(no_sni_uses_hint);
+    RUN_TEST(fin_in_window_after_ten_seconds_notes);
+    RUN_TEST(fin_too_soon_is_no_note);
+    RUN_TEST(fin_outside_window_is_no_note);
+    RUN_TEST(fin_window_edges_are_in);
+    RUN_TEST(fin_wraps_mod_2_32);
+    RUN_TEST(notes_older_than_two_minutes_do_not_pair);
+    RUN_TEST(notes_two_minutes_apart_pair);
+    RUN_TEST(a_bypass_flow_s_fin_is_no_note);
+    RUN_TEST(a_fin_sent_again_is_one_note);
     GREATEST_MAIN_END();
 }

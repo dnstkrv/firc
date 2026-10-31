@@ -472,6 +472,7 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
         }
         GET_OR_FAIL(get_bool(map_get(doc, al, "enabled"), &c->autolist.enabled, &err));
         GET_OR_FAIL(get_string(map_get(doc, al, "group"), &c->autolist.group, &err));
+        GET_OR_FAIL(get_string(map_get(doc, al, "mode"), &c->autolist.mode, &err));
         uint64_t v;
         getter_res_t r = get_uint64(map_get(doc, al, "failThreshold"), UINT32_MAX, &v, &err);
         if (r == GET_ERR) {
@@ -492,7 +493,7 @@ static firc_err_t load_app(yaml_document_t *doc, node_t *app,
                                     &c->autolist.n_exclude, &err));
         GET_OR_FAIL(get_bool(map_get(doc, al, "recheck"), &c->autolist.recheck, &err));
         GET_OR_FAIL(get_duration(map_get(doc, al, "recheckInterval"), &c->autolist.recheck_interval, &err));
-        GET_OR_FAIL(get_string(map_get(doc, al, "recheckInterface"), &c->autolist.recheck_iface, &err));
+        GET_OR_FAIL(get_string(map_get(doc, al, "checkInterface"), &c->autolist.check_iface, &err));
     }
     /* runs unconditionally: a later overlay that omits a block must not leave an earlier value unchecked */
     const char *field = NULL, *why = NULL;

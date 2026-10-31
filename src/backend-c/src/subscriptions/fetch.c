@@ -1,6 +1,7 @@
 #define _GNU_SOURCE /* NOLINT(bugprone-reserved-identifier) */
 #include "firc/sub_fetch.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
 #include <stdbool.h>
@@ -232,6 +233,26 @@ static struct curl_slist *build_headers(const char *const *headers, bool drop_cr
     return list;
 }
 
+static void fill_info(CURL *curl, CURLcode rc, firc_sub_fetch_info_t *info) {
+    if (info == NULL) { return; }
+    long os_errno = 0;
+    curl_easy_getinfo(curl, CURLINFO_OS_ERRNO, &os_errno);
+#if LIBCURL_VERSION_NUM < 0x073d00
+    double connect = 0, app = 0;
+    curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &connect);
+    curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &app);
+#else
+    curl_off_t connect = 0, app = 0;
+    curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME_T, &connect);
+    curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME_T, &app);
+#endif
+    info->connected = connect > 0;
+    info->tls_done = app > 0;
+    info->reset =
+        (rc == CURLE_RECV_ERROR || rc == CURLE_SEND_ERROR || rc == CURLE_SSL_CONNECT_ERROR) && os_errno == ECONNRESET;
+    info->timed_out = rc == CURLE_OPERATION_TIMEDOUT;
+}
+
 bool firc_sub_fetch_is_redirect(long status) {
     return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
@@ -239,6 +260,7 @@ bool firc_sub_fetch_is_redirect(long status) {
 firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, firc_sub_fetch_sink_fn sink,
                              void *sink_ud, long *out_status) {
     if (out_status) { *out_status = 0; }
+    if (o->info != NULL) { *o->info = (firc_sub_fetch_info_t){0}; }
     set_err(o, "");
     if (url == NULL || !url_allowed(o, url)) { return FIRC_ERR_INVAL; }
 
@@ -328,6 +350,7 @@ firc_err_t firc_sub_fetch_to(const char *url, const firc_sub_fetch_opts_t *o, fi
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, o->progress ? 0L : 1L);
 
         CURLcode rc = curl_easy_perform(curl);
+        fill_info(curl, rc, o->info);
         long status = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
         if (out_status) { *out_status = status; }

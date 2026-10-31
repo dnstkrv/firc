@@ -7,7 +7,8 @@ struct xh_val { const char *p; size_t n; };
 
 struct xh_raw {
     struct xh_val sess_id_place, sess_place, sess_id_key, sess_key, table, id_len, seq_place, seq_key,
-        data_place, data_key, chunk, method, obfs, pad_key, pad_header, pad_place, pad_method, posts;
+        data_place, data_key, chunk, method, obfs, pad_key, pad_header, pad_place, pad_method, posts, no_grpc, max_hdr,
+        interval;
 };
 
 static const struct { const char *name; size_t off; } xh_keys[] = {
@@ -29,6 +30,9 @@ static const struct { const char *name; size_t off; } xh_keys[] = {
     { "xPaddingPlacement", offsetof(struct xh_raw, pad_place) },
     { "xPaddingMethod", offsetof(struct xh_raw, pad_method) },
     { "scMaxBufferedPosts", offsetof(struct xh_raw, posts) },
+    { "noGRPCHeader", offsetof(struct xh_raw, no_grpc) },
+    { "serverMaxHeaderBytes", offsetof(struct xh_raw, max_hdr) },
+    { "scMinPostsIntervalMs", offsetof(struct xh_raw, interval) },
 };
 
 static const struct { const char *name, *alphabet; } xh_tables[] = {
@@ -82,6 +86,21 @@ static int range(struct xh_val v, uint32_t *from, uint32_t *to) {
     if (num(v.p, a, from) || num(dash + 1, v.n - a - 1, to)) return -1;
     if (*from > *to) { uint32_t t = *from; *from = *to; *to = t; }
     return 0;
+}
+
+static int snum(const char *p, size_t n) {
+    uint32_t x;
+    if (n && (*p == '-' || *p == '+')) p++, n--;
+    return num(p, n, &x);
+}
+
+static int srange(struct xh_val v) {
+    if (!snum(v.p, v.n)) return 0;
+    size_t skip = v.n && v.p[0] == '-';
+    const char *dash = memchr(v.p + skip, '-', v.n - skip);
+    if (!dash) return -1;
+    size_t a = (size_t)(dash - v.p);
+    return snum(v.p, a) || snum(dash + 1, v.n - a - 1) ? -1 : 0;
 }
 
 static int place(struct xh_val v, const char *const *names, const enum xh_place *vals, size_t n,
@@ -183,6 +202,9 @@ int xh_opts_parse(const char *xhx, const char *mode, const char *headers, uint16
     if (split(xhx, &r, why, why_n)) return -1;
 
     if (r.posts.n && num(r.posts.p, r.posts.n, &o->posts)) return unsupported(why, why_n, "scMaxBufferedPosts", r.posts);
+    if (r.max_hdr.n && num(r.max_hdr.p, r.max_hdr.n, &o->max_hdr))
+        return unsupported(why, why_n, "serverMaxHeaderBytes", r.max_hdr);
+    if (r.interval.n && srange(r.interval)) return unsupported(why, why_n, "scMinPostsIntervalMs", r.interval);
 
     struct xh_val sp = r.sess_id_place.n ? r.sess_id_place : r.sess_place;
     const char *sp_name = r.sess_id_place.n ? "sessionIDPlacement" : "sessionPlacement";
@@ -260,6 +282,8 @@ int xh_opts_parse(const char *xhx, const char *mode, const char *headers, uint16
 
     if (r.obfs.n && !is(r.obfs, "true") && !is(r.obfs, "false")) return unsupported(why, why_n, "xPaddingObfsMode", r.obfs);
     o->obfs = is(r.obfs, "true");
+    if (r.no_grpc.n && !is(r.no_grpc, "true") && !is(r.no_grpc, "false")) return unsupported(why, why_n, "noGRPCHeader", r.no_grpc);
+    o->no_grpc = is(r.no_grpc, "true");
 
     snprintf(o->pad_key, sizeof o->pad_key, "x_padding");
     snprintf(o->pad_header, sizeof o->pad_header, "X-Padding");

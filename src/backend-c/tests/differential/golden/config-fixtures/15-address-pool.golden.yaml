@@ -46,11 +46,12 @@ app:
   autolist:
     enabled: false
     group: ""
+    mode: candidates
     failThreshold: 3
     failTime: 1m0s
     retransThreshold: 3
     exclude: []
     recheck: false
     recheckInterval: 6h0m0s
-    recheckInterface: ""
+    checkInterface: ""
 groups: []

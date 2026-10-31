@@ -43,6 +43,8 @@ firc_err_t firc_tunrun_apply(firc_tunrun_t *t, firc_tunnels_t *want);
 /* Takes subscription bodies from subs from the next apply on; NULL detaches. */
 void firc_tunrun_set_subs(firc_tunrun_t *t, firc_tunsubs_t *subs);
 
+/* Where a refresh that drops keys of gone nodes writes the running set; kept, not copied; NULL writes nothing. */
+void firc_tunrun_set_path(firc_tunrun_t *t, const char *path);
 /* The changed() of firc_tunsubs_new, ud the tunrun: rebuilds every node list from the running config and
    sends the new list to the tunnels whose list changed. */
 void firc_tunrun_bodies_changed(void *ud);

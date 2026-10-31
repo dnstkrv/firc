@@ -15,11 +15,19 @@
     onchange: (id: string) => void;
     ariaLabel: string;
     invalid?: boolean;
+    required?: boolean;
     changed?: string;
   };
-  let { value, onchange, ariaLabel, invalid = false, changed = "" }: Props = $props();
+  let {
+    value,
+    onchange,
+    ariaLabel,
+    invalid = false,
+    required = false,
+    changed = "",
+  }: Props = $props();
 
-  type GroupItem = { id: string; name: string; list?: unknown };
+  type GroupItem = { id: string; name: string; interface?: string | string[] };
 
   const NEW = "new";
   const AUTOLIST_NAME = $derived(t("Autolist"));
@@ -46,20 +54,26 @@
     if (interfaces.list.length === 0) void fetchInterfaces();
   });
 
-  const manual = $derived(groups.filter((g) => g.list === undefined || g.list === null));
-  const known = $derived(value === "" || groups.some((g) => g.id === value));
+  const offered = $derived(groups.filter((g) => g.interface !== "block"));
+  const current = $derived(groups.find((g) => g.id === value));
   const tunnels = $derived([
     ...interfaces.list.filter((i) => i.role === "tunnel"),
     ...interfaces.list.filter((i) => i.role !== "tunnel" && i.role !== "lan" && !isSink(i.id)),
   ]);
 
-  const haveOwn = $derived(hasGroupNamed(manual, ["Autolist", AUTOLIST_NAME]));
+  const haveOwn = $derived(hasGroupNamed(offered, ["Autolist", AUTOLIST_NAME]));
   const options = $derived([
     ...(haveOwn
       ? []
       : [{ value: NEW, label: t("New group {name}").replace("{name}", AUTOLIST_NAME) }]),
-    ...manual.map((g) => ({ value: g.id, label: g.name || g.id, description: g.id, mono: true })),
-    ...(known ? [] : [{ value, label: t("A group that no longer exists"), missing: true }]),
+    ...offered.map((g) => ({ value: g.id, label: g.name || g.id, description: g.id, mono: true })),
+    ...(current && !offered.includes(current)
+      ? [{ value, label: current.name || current.id, hidden: true }]
+      : []),
+    ...(value === "" || current
+      ? []
+      : [{ value, label: t("A group that no longer exists"), missing: true }]),
+    { value: "", label: t("not chosen"), hidden: true },
   ]);
   const ifaceOptions = $derived(
     tunnels.map((i) => {
@@ -104,14 +118,18 @@
   <Select
     {options}
     selected={wantNew ? NEW : value}
-    shown={wantNew ? NEW : value === "" ? undefined : value}
+    shown={wantNew ? NEW : value}
     onValueChange={pick}
     {ariaLabel}
     disabled={!loaded}
     showSelectedDescription={false}
     class="autolist-select {changed}"
   />
-  {#if !wantNew && value === "" && loaded}
+  {#if required}
+    <span class="hint error" role="alert">
+      {t("Choose a group: automatic adding will not turn on without one")}
+    </span>
+  {:else if !wantNew && value === "" && loaded}
     <span class="hint">{t("Not chosen: nothing is added")}</span>
   {/if}
   {#if wantNew}
@@ -188,6 +206,9 @@
     font-size: 0.8rem;
     color: var(--text-2);
     text-align: left;
+  }
+  .hint.error {
+    color: var(--danger);
   }
   .create {
     flex: none;

@@ -695,6 +695,33 @@ static void handle_get(firc_http_req_t *req, firc_http_res_t *res, void *ud)
     firc_http_res_write_json(res, 200, o);
 }
 
+static const firc_tunnel_t *saved_tunnel(firc_tunnels_ctx_t *ctx, const char *id)
+{
+    const firc_tunnels_t *cur = firc_tunrun_config(ctx->run);
+    for (size_t i = 0; id != NULL && i < cur->n; i++) {
+        if (strcmp(cur->t[i].id, id) == 0) {
+            return &cur->t[i];
+        }
+    }
+    return NULL;
+}
+
+static void prune_held(firc_tunnels_ctx_t *ctx, firc_tunnels_t *set)
+{
+    for (size_t i = 0; i < set->n; i++) {
+        firc_tunnel_t *t = &set->t[i];
+        firc_tun_body_t *b = calloc(t->n_src + 1, sizeof *b);
+        if (b == NULL) {
+            continue;
+        }
+        const firc_tunnel_t *saved = saved_tunnel(ctx, t->id);
+        size_t nb = firc_tunsubs_held(ctx->subs, saved != NULL ? saved : t, t, b, t->n_src);
+        size_t dropped = 0;
+        (void)firc_tun_nodes_prune(t, 0, b, nb, &dropped);
+        free(b);
+    }
+}
+
 static void handle_put(firc_http_req_t *req, firc_http_res_t *res, void *ud)
 {
     firc_tunnels_ctx_t *ctx = ud;
@@ -726,6 +753,7 @@ static void handle_put(firc_http_req_t *req, firc_http_res_t *res, void *ud)
         write_load_error(res, err, &le);
         return;
     }
+    prune_held(ctx, &set);
     err = firc_tunnels_save_file(&set, ctx->path);
     if (err != FIRC_OK) {
         firc_tunnels_free(&set);
@@ -886,8 +914,6 @@ static cJSON *node_state_json(firc_tunnels_ctx_t *ctx, const firc_tun_state_t *s
     bool v6 = false;
     if (row->excluded) {
         state = "excluded";
-    } else if (row->missing) {
-        state = "missing";
     } else if (row->over_cap || row->skip_reason[0] != 0) {
         state = "skipped";
         skip = row->over_cap ? "over the 256-node limit" : row->skip_reason;
@@ -1127,17 +1153,6 @@ static void handle_state(firc_http_req_t *req, firc_http_res_t *res, void *ud)
     firc_http_res_write_json(res, 200, o);
 }
 
-static const firc_tunnel_t *saved_tunnel(firc_tunnels_ctx_t *ctx, const char *id)
-{
-    const firc_tunnels_t *cur = firc_tunrun_config(ctx->run);
-    for (size_t i = 0; id != NULL && i < cur->n; i++) {
-        if (strcmp(cur->t[i].id, id) == 0) {
-            return &cur->t[i];
-        }
-    }
-    return NULL;
-}
-
 static void handle_refresh(firc_http_req_t *req, firc_http_res_t *res, void *ud)
 {
     firc_tunnels_ctx_t *ctx = ud;
@@ -1285,7 +1300,6 @@ static cJSON *preview_json(const firc_tunnel_t *t, const firc_tun_nodes_t *nodes
              cJSON_AddStringToObject(x, "source", r->source) != NULL &&
              cJSON_AddBoolToObject(x, "isNew", r->is_new) != NULL &&
              cJSON_AddBoolToObject(x, "excluded", r->excluded) != NULL &&
-             cJSON_AddBoolToObject(x, "missing", r->missing) != NULL &&
              cJSON_AddBoolToObject(x, "overCap", r->over_cap) != NULL &&
              cJSON_AddStringToObject(x, "skipReason", r->skip_reason) != NULL && cJSON_AddItemToArray(rows, x);
         if (!ok) {

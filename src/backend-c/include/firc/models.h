@@ -246,7 +246,8 @@ typedef struct firc_app_config {
         size_t n_exclude;
         bool recheck;
         firc_duration_t recheck_interval;
-        char *recheck_iface;
+        char *check_iface;
+        char *mode;
     } autolist;
 } firc_app_config_t;
 

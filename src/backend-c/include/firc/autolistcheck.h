@@ -9,6 +9,7 @@
 #include "firc/autolist.h"
 #include "firc/id.h"
 #include "firc/loop.h"
+#include "firc/sub_fetch.h"
 
 typedef enum {
     FIRC_AUTOLIST_UNKNOWN = 0,
@@ -16,12 +17,19 @@ typedef enum {
     FIRC_AUTOLIST_BLOCKED,
 } firc_autolist_verdict_t;
 
+typedef struct firc_autolist_result {
+    uint8_t verdict;
+    uint8_t why;
+    bool short_body;
+    uint32_t bytes;
+    char error[160];
+} firc_autolist_result_t;
+
 typedef struct firc_autolist_probe {
     firc_id_t group;
     firc_id_t rule;
     char host[FIRC_AUTOLIST_NAME_MAX];
-    uint8_t verdict;
-    char error[160];
+    firc_autolist_result_t result;
 } firc_autolist_probe_t;
 
 typedef struct firc_autolist_check_opts {
@@ -31,15 +39,20 @@ typedef struct firc_autolist_check_opts {
     uint32_t timeout_s;
 } firc_autolist_check_opts_t;
 
-typedef firc_autolist_verdict_t (*firc_autolist_probe_fn)(const char *host, const firc_autolist_check_opts_t *o,
-                                                          _Atomic bool *stop, char *error, size_t cap);
+typedef void (*firc_autolist_probe_fn)(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,
+                                      firc_autolist_result_t *out);
 
 typedef void (*firc_autolist_checked_fn)(void *ud, uint64_t gen, const firc_autolist_probe_t *probes, size_t n);
 
 typedef struct firc_autolist_check firc_autolist_check_t;
 
-firc_autolist_verdict_t firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t *o,
-                                                 _Atomic bool *stop, char *error, size_t cap);
+/* Judges one probe from how far it got; why is a firc_al_why_t, 0 unless blocked. Pure. */
+void firc_autolist_classify(const firc_sub_fetch_info_t *info, uint32_t bytes, bool stalled, bool complete,
+                            firc_autolist_result_t *out);
+
+/* Fetches https://host/ through o and judges it into out. */
+void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,
+                              firc_autolist_result_t *out);
 
 firc_autolist_check_t *firc_autolist_check_start(firc_loop_t *loop, const firc_autolist_check_opts_t *o,
                                                  const firc_autolist_probe_t *probes, size_t n, uint64_t gen,
@@ -47,5 +60,10 @@ firc_autolist_check_t *firc_autolist_check_start(firc_loop_t *loop, const firc_a
                                                  void *ud);
 
 void firc_autolist_check_free(firc_autolist_check_t *c);
+
+typedef firc_err_t (*firc_autolist_post_fn)(firc_loop_t *loop, firc_post_cb cb, void *ud, firc_post_drop_cb drop);
+
+/* NULL restores firc_loop_post_with_drop. */
+void firc_autolist_check_set_post_for_test(firc_autolist_post_fn post);
 
 #endif

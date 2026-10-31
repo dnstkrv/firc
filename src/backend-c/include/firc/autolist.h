@@ -10,13 +10,23 @@
 #define FIRC_AUTOLIST_FLOWS 1024
 #define FIRC_AUTOLIST_HOSTS 512
 #define FIRC_AUTOLIST_HINTS 512
-#define FIRC_AUTOLIST_FLOW_SECS 60
+#define FIRC_AUTOLIST_FLOW_SECS 300
 #define FIRC_AUTOLIST_HINT_SECS 600
 #define FIRC_AUTOLIST_NAME_MAX 254
 
 #define FIRC_AUTOLIST_FAIL_THRESHOLD 3
 #define FIRC_AUTOLIST_FAIL_SECS 60
 #define FIRC_AUTOLIST_RETRANS_THRESHOLD 3
+
+#define FIRC_AUTOLIST_STALL_MIN_BYTES 8192
+#define FIRC_AUTOLIST_STALL_MAX_BYTES 32768
+#define FIRC_AUTOLIST_STALL_MIN_SECS 10
+#define FIRC_AUTOLIST_NOTES 2
+#define FIRC_AUTOLIST_NOTE_SECS 120
+
+#define FIRC_AUTOLIST_BYPASS_CLIENTS 16
+#define FIRC_AUTOLIST_DAY_SECS 86400
+#define FIRC_AUTOLIST_DAY_HOURS 24
 
 typedef struct firc_autolist firc_autolist_t;
 
@@ -42,7 +52,14 @@ typedef struct firc_autolist_failure {
     uint32_t fails;
     uint8_t why;
     bool listed;
+    bool bypass;
 } firc_autolist_failure_t;
+
+typedef struct {
+    char host[FIRC_AUTOLIST_NAME_MAX];
+    firc_ip_t client;
+    uint32_t received;
+} firc_autolist_nomination_t;
 
 firc_autolist_t *firc_autolist_new(void);
 void firc_autolist_free(firc_autolist_t *a);
@@ -52,12 +69,18 @@ void firc_autolist_set_params(firc_autolist_t *a, const firc_autolist_params_t *
 void firc_autolist_hint(firc_autolist_t *a, const firc_ip_t *client, const char *name, const firc_ip_t *reals,
                         size_t n_reals, int64_t now);
 
-bool firc_autolist_hello(firc_autolist_t *a, const firc_autolist_flow_t *f, uint32_t seq, const char *sni,
-                         int64_t now, firc_autolist_failure_t *out);
+bool firc_autolist_hello(firc_autolist_t *a, const firc_autolist_flow_t *f, uint32_t seq, uint32_t ack,
+                         const char *sni, int64_t now, firc_autolist_failure_t *out);
 
 bool firc_autolist_reply(firc_autolist_t *a, const firc_autolist_flow_t *f, bool rst, int64_t now,
                          firc_autolist_failure_t *out);
 
-size_t firc_autolist_counting(const firc_autolist_t *a, int64_t now);
+bool firc_autolist_fin(firc_autolist_t *a, const firc_autolist_flow_t *f, uint32_t ack, int64_t now,
+                       firc_autolist_nomination_t *out);
+
+size_t firc_autolist_bypassed(const firc_autolist_t *a, int64_t now, firc_ip_t *clients, uint32_t *fails,
+                              size_t cap);
+
+uint32_t firc_autolist_failures_day(const firc_autolist_t *a, int64_t now);
 
 #endif

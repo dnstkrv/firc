@@ -38,9 +38,9 @@ ALL_CASES="grpc-gun grpc-multi xhttp-auto xhttp-stream-one xhttp-stream-up xhttp
            xhttp-sess-header xhttp-sess-cookie xhttp-sess-query xhttp-seq-header xhttp-seq-cookie-key
            xhttp-old-names xhttp-data-header xhttp-data-cookie xhttp-data-cookie-small
            xhttp-obfs-header xhttp-obfs-cookie xhttp-obfs-query xhttp-obfs-qih xhttp-tokenish
-           xhttp-method-put xhttp-method-get xhttp-table xhttp-headers
+           xhttp-method-put xhttp-method-get xhttp-table xhttp-headers xhttp-no-grpc xhttp-max-hdr
            xhttp-neg-obfs xhttp-neg-sess xhttp-neg-data
-           v6-carry-tcp v6-carry-xhttp v6-second v6-none
+           v6-carry-tcp v6-carry-xhttp v6-second v6-none v6-noroute
            node6-tcp node6-xhttp node6-name node6-dual
            xhttp-dl-reality-auto xhttp-dl-packet-tls xhttp-dl-none xhttp-dl-extra xhttp-dl-post-main
            xhttp-dl-name xhttp-dl-route xhttp-dl-neg-path xhttp-dl-neg-sess"
@@ -215,9 +215,12 @@ case_cfg() {
     xhttp-method-get)        xh packet-up '"uplinkHTTPMethod":"GET"' ;;
     xhttp-table)             xh packet-up '"sessionIDTable":"Base62","sessionIDLength":12' ;;
     xhttp-headers)           xh packet-up '"headers":{"X-Custom":"v1","User-Agent":"tv-test"}' ;;
+    xhttp-no-grpc)           xh stream-up '"noGRPCHeader":true' ;;
+    xhttp-max-hdr)           xh packet-up '"uplinkDataPlacement":"header","serverMaxHeaderBytes":4096,"scMinPostsIntervalMs":"10-50"' ;;
     v6-carry-tcp)      V6=carry; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-second)         V6=second; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-none)           V6=none; NET='"network":"tcp"'; Q="type=tcp" ;;
+    v6-noroute)        V6=noroute; NET='"network":"tcp"'; Q="type=tcp" ;;
     v6-carry-xhttp)    V6=carry; Q="type=xhttp&path=%2Fxp%2F&mode=packet-up" ;;
     node6-tcp)         NODE=v6; NET='"network":"tcp"'; Q="type=tcp" ;;
     node6-name)        NODE=name6; NET='"network":"tcp"'; Q="type=tcp" ;;
@@ -320,8 +323,14 @@ EOF
 
 etc_writable() { mkdir -p /etc/netns 2>/dev/null && : > /etc/netns/.w 2>/dev/null && rm -f /etc/netns/.w; }
 
+srv_v6() {
+    for a in "$TARGET6" "$CHK6A" "$CHK6B"; do ip -n "$NSS" addr "$1" "$a/128" dev lo nodad; done
+    ip -n "$NSS" addr "$1" "$S_IP6/64" dev grs0 nodad
+}
+
 for MODE in $CASES; do
     rm -rf "/etc/netns/$NSC" 2>/dev/null || true
+    srv_v6 replace
     case_cfg "$MODE"
     echo "run-xray: ==== case $MODE ===="
     HOST="$S_IP"
@@ -363,10 +372,19 @@ for MODE in $CASES; do
     [ -z "$DL" ] || INB="{\"listen\":\"0.0.0.0\",$INB1}"
     FR="{\"action\":\"allow\",\"ip\":[\"$TARGET/32\"]}"
     case "$V6" in
-    carry)  FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
+    carry|noroute)
+            FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
     none)   FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\"]},{\"action\":\"block\",\"ip\":[\"$CHK6A/128\",\"$CHK6B/128\"]}" ;;
     second) FR="$FR,{\"action\":\"allow\",\"ip\":[\"$TARGET6/128\",\"$CHK6B/128\"]},{\"action\":\"block\",\"ip\":[\"$CHK6A/128\"]}" ;;
     esac
+    if [ "$V6" = noroute ]; then
+        srv_v6 del
+        if ip netns exec "$NSS" ip -6 route get "$CHK6A" >/dev/null 2>&1 || ip netns exec "$NSS" ip -6 route get "$CHK6B" >/dev/null 2>&1; then
+            echo "run-xray: FAIL — the server namespace still routes IPv6:"; ip -n "$NSS" -6 route show table all | sed 's/^/    /'
+            FAIL=1; echo "run-xray: case $MODE — FAIL"; continue
+        fi
+        echo "run-xray: the server namespace has no IPv6 route to the check targets"
+    fi
     cat > "$W/xray.json" <<JSON
 {"log":{"loglevel":"warning","access":"$W/xray-access-$MODE.log"},
  "inbounds":[$INB],
@@ -449,12 +467,20 @@ EOF
             sleep 0.25
         done
         v6_routes_clean || rc=1
-        if [ "$V6" = none ]; then
+        if [ "$V6" = none ] || [ "$V6" = noroute ]; then
             if [ "$got6" -eq 1 ]; then echo "run-xray: FAIL — the device got an IPv6 address on a node that reaches no IPv6 check"; rc=1
             else echo "run-xray: no IPv6 address on vl after 30 s, as expected"; fi
             tried=$(seen "$W/xray-access-$MODE.log" "$markx" | grep -n "accepted tcp:\[$CHK6A\]:80" | head -1)
             if [ -z "$tried" ]; then echo "run-xray: FAIL — Xray saw no attempt to [$CHK6A]:80"; rc=1
             else echo "run-xray: Xray saw the check go to [$CHK6A]:80"; fi
+            if [ "$V6" = noroute ]; then
+                xl=$(seen "$W/xray-access-$MODE.log" "$markx")
+                n1=$(printf '%s\n' "$xl" | grep -n "accepted tcp:\[$CHK6A\]:80" | head -1 | cut -d: -f1)
+                n2=$(printf '%s\n' "$xl" | grep -n "accepted tcp:\[$CHK6B\]:80" | head -1 | cut -d: -f1)
+                if [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" -lt "$n2" ]; then
+                    echo "run-xray: Xray saw [$CHK6A]:80 tried (line $n1), then [$CHK6B]:80 (line $n2)"
+                else echo "run-xray: FAIL — the unroutable first target did not lead to the second (lines '$n1' '$n2')"; rc=1; fi
+            fi
             reached="$(seen "$W/probe1-6.log" "$mark1")$(seen "$W/probe2-6.log" "$mark2")"
             [ -z "$reached" ] || { echo "run-xray: FAIL — a blocked IPv6 check target was reached:"; printf '%s\n' "$reached"; rc=1; }
         elif [ "$got6" -ne 1 ]; then

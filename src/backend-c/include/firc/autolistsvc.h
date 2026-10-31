@@ -18,6 +18,8 @@ typedef struct firc_autolist_deps {
     int64_t (*now)(void);
     bool (*eligible)(void *ud, const firc_ip_t *client);
     void (*listed)(void *ud, const firc_autolist_failure_t *f);
+    void (*bypassed)(void *ud, const firc_autolist_failure_t *f);
+    void (*nominated)(void *ud, const firc_autolist_nomination_t *n);
     void *ud;
 } firc_autolist_deps_t;
 
@@ -34,5 +36,9 @@ void firc_autolist_svc_packet(firc_autolist_svc_t *s, int which, const uint8_t *
 firc_err_t firc_autolist_svc_drain(firc_autolist_svc_t *s, int which);
 
 void firc_autolist_svc_counts(const firc_autolist_svc_t *s, uint64_t *failures, uint64_t *listed);
+
+size_t firc_autolist_svc_bypassed(const firc_autolist_svc_t *s, firc_ip_t *clients, uint32_t *fails, size_t cap);
+
+uint32_t firc_autolist_svc_failures_day(const firc_autolist_svc_t *s);
 
 #endif

@@ -295,8 +295,9 @@ uint32_t h2_stream_cap(const struct h2 *h) {
     return h->peer_max_streams && h->peer_max_streams < H2_OPEN_MAX ? h->peer_max_streams : H2_OPEN_MAX;
 }
 
-uint32_t h2_header_budget(const struct h2 *h) {
-    return h->peer_settings_seen ? h->peer_hdr_list : 8192;
+uint32_t h2_header_budget(const struct h2 *h, uint32_t server_max) {
+    if (h->peer_settings_seen) return h->peer_hdr_list;
+    return server_max && server_max < 8192 ? server_max : 8192;
 }
 
 static int put_headers(struct h2 *h, struct wbuf *b, const struct h2_req *r) {

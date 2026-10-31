@@ -100,3 +100,30 @@ export function followUrl(
   const host = loc.hostname.includes(":") ? `[${loc.hostname}]` : loc.hostname;
   return `${loc.protocol}//${host}:${port}${loc.pathname}`;
 }
+
+export const AUTOLIST_MODES = ["candidates", "add"] as const;
+
+export const AUTOLIST_ENABLED = "app.autolist.enabled";
+export const AUTOLIST_GROUP = "app.autolist.group";
+export const UNMATCHED_TTL = "app.dnsProxy.unmatchedTtl";
+
+export function autolistGroupMissing(draft: SettingsMap): boolean {
+  return draft[AUTOLIST_ENABLED] === true && String(draft[AUTOLIST_GROUP] ?? "") === "";
+}
+
+export function autolistTtlWarning(draft: SettingsMap): boolean {
+  return draft[AUTOLIST_ENABLED] === true && draft[UNMATCHED_TTL] === 0;
+}
+
+export function groupInterfaces(g: { interface?: string | string[] }): string[] {
+  const list = Array.isArray(g.interface) ? g.interface : [g.interface ?? ""];
+  return list.filter((i) => i !== "");
+}
+
+export function secondsToHours(seconds: number): number {
+  return seconds % 3600 === 0 ? seconds / 3600 : Number((seconds / 3600).toFixed(2));
+}
+
+export function hoursToSeconds(hours: number): number {
+  return Math.round(hours * 3600);
+}

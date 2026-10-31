@@ -16,6 +16,7 @@ static bool tcp_after(const uint8_t *buf, size_t len, firc_tap_packet_t *out) {
     out->src_port = be16(buf);
     out->dst_port = be16(buf + 2);
     out->seq = ((uint32_t)be16(buf + 4) << 16) | be16(buf + 6);
+    out->ack = ((uint32_t)be16(buf + 8) << 16) | be16(buf + 10);
     out->flags = buf[13];
     out->payload_len = len - hdr;
     out->payload = out->payload_len > 0 ? buf + hdr : NULL;

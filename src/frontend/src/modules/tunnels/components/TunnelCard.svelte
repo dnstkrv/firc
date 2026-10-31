@@ -65,9 +65,7 @@
   const refusal = $derived(store.refusalFor(tunnel.id));
   const saved = $derived(store.isSaved(tunnel.id));
   const up = $derived(live?.status === "up");
-  const usable = $derived(
-    (live?.nodes ?? []).filter((n) => n.state !== "missing" && n.state !== "skipped").length,
-  );
+  const usable = $derived((live?.nodes ?? []).filter((n) => n.state !== "skipped").length);
   const subscriptions = $derived(tunnel.sources.filter((s) => s.kind === "subscription"));
   const links = $derived(tunnel.sources.filter((s) => s.kind === "link"));
   const listening = $derived((live?.inbounds ?? []).filter((ib) => ib.state === "up"));

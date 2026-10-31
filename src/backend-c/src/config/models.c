@@ -681,7 +681,8 @@ firc_err_t firc_app_config_init_defaults(firc_app_config_t *c)
         (err = firc_strset(&c->check.url, "http://cp.cloudflare.com/generate_204")) != FIRC_OK ||
         (err = firc_strset(&c->check.wan_url, "")) != FIRC_OK ||
         (err = firc_strset(&c->autolist.group, "")) != FIRC_OK ||
-        (err = firc_strset(&c->autolist.recheck_iface, "")) != FIRC_OK) {
+        (err = firc_strset(&c->autolist.mode, "candidates")) != FIRC_OK ||
+        (err = firc_strset(&c->autolist.check_iface, "")) != FIRC_OK) {
         firc_app_config_clear(c);
         return err;
     }
@@ -720,7 +721,8 @@ void firc_app_config_clear(firc_app_config_t *c)
     }
     free(c->link);
     free(c->autolist.group);
-    free(c->autolist.recheck_iface);
+    free(c->autolist.check_iface);
+    free(c->autolist.mode);
     for (size_t i = 0; i < c->autolist.n_exclude; i++) {
         free(c->autolist.exclude[i]);
     }

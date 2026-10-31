@@ -210,7 +210,9 @@ AUTOLIST_SRCS := \
     src/autolist/judge.c \
     src/autolist/svc.c \
     src/autolist/alrules.c \
-    src/autolist/recheck.c
+    src/autolist/recheck.c \
+    src/autolist/candidates.c \
+    src/autolist/probes.c
 
 INTERFACES_SRCS := \
     src/interfaces/ifchoose.c \

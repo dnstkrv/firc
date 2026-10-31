@@ -61,18 +61,20 @@ static const struct probe_target PROBE6_TARGETS[] = {
 
 static int probe_once(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
                       int *handshake_ms, int *ttfb_ms,
-                      const struct probe_target *tg, int *connected);
+                      const struct probe_target *tg, int need_data, int *connected);
 
 int vless_probe(const struct vless_node *node, int timeout_s, char *why, size_t why_n) {
     return vless_probe_timed(node, timeout_s, why, why_n, NULL, NULL);
 }
 
 static int probe_targets(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
-                         int *handshake_ms, int *ttfb_ms, const struct probe_target *tg, size_t tg_n) {
+                         int *handshake_ms, int *ttfb_ms, const struct probe_target *tg, size_t tg_n,
+                         int need_data) {
     int rc = TR_EIO;
     for (size_t i = 0; i < tg_n; i++) {
         int connected = 0;
-        rc = probe_once(node, timeout_s, why, why_n, handshake_ms, ttfb_ms, &tg[i], &connected);
+        rc = probe_once(node, timeout_s, why, why_n, handshake_ms, ttfb_ms, &tg[i], need_data,
+                        &connected);
         if (rc == 0) return 0;
         /* The server was not reached or did not accept us: not the target's fault. */
         if (!connected || rc == VLESS_CONN_EREJECTED || rc == VLESS_CONN_EBADUUID)
@@ -84,17 +86,17 @@ static int probe_targets(const struct vless_node *node, int timeout_s, char *why
 int vless_probe_timed(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
                       int *handshake_ms, int *ttfb_ms) {
     return probe_targets(node, timeout_s, why, why_n, handshake_ms, ttfb_ms, PROBE_TARGETS,
-                         sizeof(PROBE_TARGETS) / sizeof(PROBE_TARGETS[0]));
+                         sizeof(PROBE_TARGETS) / sizeof(PROBE_TARGETS[0]), 0);
 }
 
 int vless_probe6(const struct vless_node *node, int timeout_s, char *why, size_t why_n) {
     return probe_targets(node, timeout_s, why, why_n, NULL, NULL, PROBE6_TARGETS,
-                         sizeof(PROBE6_TARGETS) / sizeof(PROBE6_TARGETS[0]));
+                         sizeof(PROBE6_TARGETS) / sizeof(PROBE6_TARGETS[0]), 1);
 }
 
 static int probe_once(const struct vless_node *node, int timeout_s, char *why, size_t why_n,
                       int *handshake_ms, int *ttfb_ms,
-                      const struct probe_target *tg, int *connected) {
+                      const struct probe_target *tg, int need_data, int *connected) {
     if (handshake_ms) *handshake_ms = -1;
     if (ttfb_ms) *ttfb_ms = -1;
     *connected = 0;
@@ -167,7 +169,9 @@ static int probe_once(const struct vless_node *node, int timeout_s, char *why, s
     /* Sized by the transport's minimum: over HTTP/2 one read returns up to a whole TLS record,
      * and a smaller buffer would fail on a legal frame. */
     static __thread unsigned char buf[VLESS_MIN_RECV_CAP];
-    size_t got = 0;
+    unsigned char head[2 + 255];
+    size_t head_n = 0, total = 0, skip = 0;
+    int pr = VLESS_EAGAIN;
     /* Wait for data by the clock, not by a number of attempts. A read of zero bytes means
      * "nothing yet": an HTTP/2 control frame (SETTINGS, WINDOW_UPDATE) or a record not fully
      * arrived. Reads are non-blocking (the tunnel runs one loop for all connections), so a
@@ -175,38 +179,25 @@ static int probe_once(const struct vless_node *node, int timeout_s, char *why, s
      * a working node. Wait on the socket, not in a busy loop. */
     int64_t rx_deadline = now_ms() + (int64_t)(timeout_s > 0 ? timeout_s : 8) * 1000;
     for (;;) {
+        size_t got = 0;
         rc = transport_read(&c, buf, sizeof(buf), &got);
-        if (rc) { transport_close(&c); snprintf(why, why_n, "no response: %s", vless_strerror(rc)); return rc; }
-        if (got) break;
+        if (rc) break;
+        if (got) {
+            /* Timed before parsing: parsing waits for nothing, and counting it would measure
+             * our own work. */
+            if (!total && ttfb_ms) *ttfb_ms = (int)(now_ms() - t_sent);
+            total += got;
+            size_t take = got < sizeof(head) - head_n ? got : sizeof(head) - head_n;
+            memcpy(head + head_n, buf, take);
+            head_n += take;
+            if (pr == VLESS_EAGAIN) pr = vless_parse_response(head, head_n, &skip);
+            if (pr == VLESS_EPROTO || (pr == 0 && (!need_data || total > skip))) break;
+            continue;
+        }
         if (now_ms() >= rx_deadline) break;
         struct pollfd pw = { .fd = transport_fd(&c), .events = POLLIN, .revents = 0 };
         poll(&pw, 1, 200);
     }
-    if (!got) { transport_close(&c); snprintf(why, why_n, "server sent no data"); return TR_EIO; }
-    /* Timed before parsing: parsing waits for nothing, and counting it would measure our own
-     * work. */
-    if (ttfb_ms) *ttfb_ms = (int)(now_ms() - t_sent);
-
-    /* The VLESS response header comes first and is not wrapped, even with Vision (vl_deliver
-     * in vldial.c parses it the same way). rv is zeroed, so its all-zero UUID does not match
-     * the first 16 bytes and vision_unwrap only hands back the first bytes unchanged: the parse
-     * below reads the raw header either way. */
-    const unsigned char *body = buf;
-    size_t body_n = got;
-    if (node->flow[0]) {
-        struct vision rv;
-        memset(&rv, 0, sizeof(rv));
-        size_t used = 0;
-        const unsigned char *pl = NULL;
-        size_t pl_n = 0;
-        if (vision_unwrap(&rv, buf, got, &used, &pl, &pl_n) == 0 && pl) {
-            body = pl;
-            body_n = pl_n;
-        }
-    }
-
-    size_t skip = 0;
-    int pr = vless_parse_response(body, body_n, &skip);
     transport_close(&c);
 
     if (pr == VLESS_EPROTO) {
@@ -217,12 +208,18 @@ static int probe_once(const struct vless_node *node, int timeout_s, char *why, s
                  "(check pbk, sid and sni)");
         return VLESS_CONN_EREJECTED;
     }
-    if (pr == VLESS_EAGAIN) {
-        snprintf(why, why_n, "response too short (%zu bytes)", got);
+    if (pr == 0 && need_data && total <= skip) {
+        snprintf(why, why_n, "the target sent no data after the VLESS response");
         return TR_EIO;
     }
-    snprintf(why, why_n, "ok, VLESS response (%zu bytes)", got);
-    return 0;
+    if (pr == 0) {
+        snprintf(why, why_n, "ok, VLESS response (%zu bytes)", total);
+        return 0;
+    }
+    if (rc) { snprintf(why, why_n, "no response: %s", vless_strerror(rc)); return rc; }
+    if (!total) { snprintf(why, why_n, "server sent no data"); return TR_EIO; }
+    snprintf(why, why_n, "response too short (%zu bytes)", total);
+    return TR_EIO;
 }
 
 const char *vless_strerror(int rc) {
