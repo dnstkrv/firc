@@ -173,6 +173,14 @@ if (!DATA.groups.some((g: any) => g.id === "g1g1g1g1")) {
     rules: [
       { enable: true, id: "e1e1e101", rule: "facebook.com", type: "namespace" },
       { enable: true, id: "e1e1e102", rule: "youtube.com", type: "namespace" },
+      {
+        enable: true,
+        id: "e1e1e103",
+        rule: "googlevideo.com",
+        type: "namespace",
+        autolist: "rr3---sn-4g5e6nsz.googlevideo.com",
+        autolistByDomain: true,
+      },
     ],
   });
 }
@@ -1784,6 +1792,16 @@ const autolistSeed = () => [
     state: "checking",
     notes: 2,
   },
+  {
+    domain: "instagram.com",
+    host: "www.instagram.com",
+    why: "no-connect",
+    fails: 0,
+    clients: ["192.168.1.51"],
+    lastAt: autolistAgo(30),
+    state: "candidate",
+    notes: 0,
+  },
 ];
 let AUTOLIST_CANDS: any[] = autolistSeed();
 let AUTOLIST_RESULTS: any[] = [
@@ -1795,15 +1813,30 @@ let AUTOLIST_RESULTS: any[] = [
     at: autolistAgo(900),
     error: "",
   },
+  {
+    host: "www.instagram.com",
+    verdict: "blocked",
+    why: "no-connect",
+    bytes: 0,
+    at: autolistAgo(40),
+    error: "Connection timed out after 30001 milliseconds · wan cp.cloudflare.com: 204",
+  },
 ];
 const AUTOLIST_VERDICTS: Record<string, [string, string, number, string]> = {
   "some-vps.de": ["blocked", "freeze", 15360, ""],
   "api.telegram.org": ["open", "", 65536, ""],
   "tiny-api.io": ["short", "", 3072, ""],
   "github.com": ["unknown", "", 0, "no route to host"],
+  "www.instagram.com": [
+    "blocked",
+    "no-connect",
+    0,
+    "Connection timed out after 30001 milliseconds · wan cp.cloudflare.com: 204",
+  ],
 };
 const AUTOLIST_PROBE_MS = 2500;
 let AUTOLIST_RUNNING: string | null = null;
+let AUTOLIST_WAN_WARNING = false;
 const autolistOn = () => SAVED["app.autolist.enabled"] === true;
 const autolistState = () => ({
   enabled: autolistOn(),
@@ -1812,6 +1845,10 @@ const autolistState = () => ({
   group: SAVED["app.autolist.group"] || null,
   failures: autolistOn() ? 40 : 0,
   failuresDay: autolistOn() ? 23 : 0,
+  ambiguousDay: autolistOn() ? 1 : 0,
+  ...(autolistOn() && AUTOLIST_WAN_WARNING
+    ? { wanWarning: "the check interface has no route: the WAN check cannot pass" }
+    : {}),
   listed: autolistOn() ? AUTOLIST_CANDS.length : 0,
   addedHour: autolistOn() ? AUTOLIST_ADDED_HOUR : 0,
   checking: false,
@@ -1918,6 +1955,12 @@ app.put("/dev/live", async (c) => {
   }
   if (body?.netfilter && typeof body.netfilter.ok === "boolean") NETFILTER = body.netfilter;
   return c.json({ reasons: LIVE_REASONS, netfilter: NETFILTER });
+});
+
+app.put("/dev/autolist", async (c) => {
+  const body = await c.req.json();
+  if (typeof body?.wanWarning === "boolean") AUTOLIST_WAN_WARNING = body.wanWarning;
+  return c.json({ wanWarning: AUTOLIST_WAN_WARNING });
 });
 
 app.put("/dev/ifaces", async (c) => {

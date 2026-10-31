@@ -16,6 +16,7 @@ typedef enum {
     FIRC_AL_WHY_NO_ANSWER = 1,
     FIRC_AL_WHY_RESET = 2,
     FIRC_AL_WHY_FREEZE = 3,
+    FIRC_AL_WHY_NO_CONNECT = 4,
 } firc_al_why_t;
 
 typedef enum {
@@ -31,6 +32,7 @@ typedef struct firc_al_cand {
     uint8_t why;
     uint8_t state;
     uint8_t notes;
+    bool by_domain;
     uint32_t fails;
     firc_ip_t clients[FIRC_AUTOLIST_CAND_CLIENTS];
     uint8_t n_clients;

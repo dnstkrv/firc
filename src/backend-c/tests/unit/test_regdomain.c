@@ -1,5 +1,6 @@
 #include "greatest.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "firc/regdomain.h"
@@ -30,6 +31,45 @@ TEST a_platform_s_customers_stay_apart(void) {
     ASSERT_STR_EQ("someone.github.io", reg("someone.github.io"));
     ASSERT_STR_EQ("d1234.cloudfront.net", reg("d1234.cloudfront.net"));
     ASSERT(reg("github.io") == NULL);
+    PASS();
+}
+
+TEST a_multi_tenant_suffix_keeps_the_tenant_label(void) {
+    ASSERT_STR_EQ("b.googleusercontent.com", reg("a.b.googleusercontent.com"));
+    ASSERT_STR_EQ("blob.core.windows.net", reg("x.blob.core.windows.net"));
+    ASSERT_STR_EQ("blob.core.windows.net", reg("blob.core.windows.net"));
+    ASSERT_STR_EQ("t.fastly.net", reg("w.t.fastly.net"));
+    ASSERT_STR_EQ("x.b-cdn.net", reg("y.x.b-cdn.net"));
+    ASSERT(reg("core.windows.net") == NULL);
+    PASS();
+}
+
+TEST every_new_suffix_keeps_the_tenant_label(void) {
+    static const char *const suffix[] = {"googleusercontent.com", "akamaized.net", "akamaihd.net", "edgekey.net",
+                                         "edgesuite.net", "fastly.net", "b-cdn.net", "cloudflarestorage.com"};
+    for (size_t i = 0; i < sizeof(suffix) / sizeof(suffix[0]); i++) {
+        char host[256], want[128];
+        snprintf(want, sizeof(want), "t.%s", suffix[i]);
+        snprintf(host, sizeof(host), "a.b.%s", want);
+        ASSERT_STR_EQ(want, reg(host));
+        ASSERT(firc_regdomain_shared(want));
+    }
+    PASS();
+}
+
+TEST only_shared_hosting_is_shared(void) {
+    ASSERT(firc_regdomain_shared("b.googleusercontent.com"));
+    ASSERT(firc_regdomain_shared("blob.core.windows.net"));
+    ASSERT(firc_regdomain_shared("someone.github.io"));
+    ASSERT_FALSE(firc_regdomain_shared("googlevideo.com"));
+    ASSERT_FALSE(firc_regdomain_shared("example.com"));
+    PASS();
+}
+
+TEST geographic_suffix_is_not_shared(void) {
+    ASSERT_FALSE(firc_regdomain_shared("foo.msk.ru"));
+    ASSERT_FALSE(firc_regdomain_shared("example.kiev.ua"));
+    ASSERT_STR_EQ("example.msk.ru", reg("shop.example.msk.ru"));
     PASS();
 }
 
@@ -71,6 +111,10 @@ int main(int argc, char **argv) {
     RUN_TEST(the_second_level_of_a_plain_name);
     RUN_TEST(a_country_s_generic_second_level_is_a_suffix);
     RUN_TEST(a_platform_s_customers_stay_apart);
+    RUN_TEST(a_multi_tenant_suffix_keeps_the_tenant_label);
+    RUN_TEST(every_new_suffix_keeps_the_tenant_label);
+    RUN_TEST(only_shared_hosting_is_shared);
+    RUN_TEST(geographic_suffix_is_not_shared);
     RUN_TEST(names_without_a_registrable_part);
     RUN_TEST(an_exclude_holds_its_subdomains);
     RUN_TEST(what_an_exclude_entry_may_be);

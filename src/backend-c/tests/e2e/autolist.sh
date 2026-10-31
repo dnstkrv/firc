@@ -47,7 +47,7 @@ trap cleanup EXIT
 trap 'exit 1' INT TERM
 
 cat > "$W/al.py" <<'PY'
-import json, os, socket, ssl, struct, sys, time, http.server
+import json, os, socket, ssl, struct, sys, threading, time, http.server
 
 def dns(port, *pairs):
     names = dict(p.split("=") for p in pairs)
@@ -85,6 +85,14 @@ def serve(side, cert, key):
                 self.wfile.write(body[i:i + 1024])
                 self.wfile.flush()
                 time.sleep(0.002)
+    class N(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+        def do_GET(self):
+            self.send_response(204)
+            self.end_headers()
+    plain = http.server.ThreadingHTTPServer(("0.0.0.0", 80), N)
+    threading.Thread(target=plain.serve_forever, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 443), H)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
@@ -141,6 +149,28 @@ def cand(domain):
         if c["domain"] == domain:
             print("%s:%s:%s" % (c["state"], c["why"], c["notes"]))
 
+def cut(host, ip):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    s = ctx.wrap_socket(socket.create_connection((ip, 443), timeout=15), server_hostname=host)
+    s.sendall(("GET /stall HTTP/1.1\r\nHost: %s\r\n\r\n" % host).encode())
+    got = 0
+    while got < 16384:
+        d = s.recv(4096)
+        if not d:
+            break
+        got += len(d)
+    time.sleep(11)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    s.close()
+    print(got)
+
+def bydomain(path, name):
+    for r in json.load(open(path)).get("rules", []):
+        if r["rule"] == name:
+            print(r.get("autolistByDomain", False))
+
 def res(host, *fields):
     for r in json.load(sys.stdin)["probes"]["results"]:
         if r["host"] == host:
@@ -149,12 +179,12 @@ def res(host, *fields):
 
 if __name__ == "__main__":
     {"dns": dns, "serve": serve, "q": q, "rules": rules, "rule_off": rule_off, "st": st, "cand": cand,
-     "res": res}[sys.argv[1]](*sys.argv[2:])
+     "res": res, "cut": cut, "bydomain": bydomain}[sys.argv[1]](*sys.argv[2:])
 PY
 
 openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=stand-ca -days 1 -keyout "$W/ca.key" -out "$W/ca" 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -subj /CN=stand -keyout "$W/key" -out "$W/csr" 2>/dev/null
-printf 'subjectAltName=DNS:*.ok.test,DNS:*.drop.test,DNS:*.rst.test,DNS:*.freeze.test,DNS:*.frost.test,DNS:*.late.test,DNS:*.hold.test,DNS:*.small.test,DNS:*.out1.test,DNS:*.out2.test,DNS:*.out3.test\n' > "$W/san"
+printf 'subjectAltName=DNS:*.ok.test,DNS:*.drop.test,DNS:*.rst.test,DNS:*.freeze.test,DNS:*.frost.test,DNS:*.late.test,DNS:*.hold.test,DNS:*.small.test,DNS:*.cut.test,DNS:*.many.test,DNS:*.syn.test,DNS:*.nowan.test\n' > "$W/san"
 openssl x509 -req -in "$W/csr" -CA "$W/ca" -CAkey "$W/ca.key" -CAcreateserial -days 1 -extfile "$W/san" -out "$W/cert" 2>/dev/null
 cat /etc/ssl/certs/ca-certificates.crt "$W/ca" > "$W/bundle"
 mount --bind "$W/bundle" "$(readlink -f /etc/ssl/certs/ca-certificates.crt)"
@@ -172,7 +202,7 @@ uplink() {
     NS "$2" ip addr add "$4/24" dev p0
     NS "$2" ip link set p0 up
     NS "$2" ip route add default via "$3"
-    for a in 1 2 3 4 5 6 7 8 9 10; do NS "$2" ip addr add "10.98.0.$a/32" dev lo; done
+    for a in $(seq 1 16); do NS "$2" ip addr add "198.51.100.$a/32" dev lo; done
     NS "$2" python3 "$W/al.py" serve "$2" "$W/cert" "$W/key" > "$W/srv-$2.log" 2>&1 &
 }
 uplink wan alw 10.73.0.2 10.73.0.1
@@ -192,14 +222,16 @@ dpi() { NS alw $IPT "$@" || echo "DPI rule refused: $*"; }
 dpi -A INPUT -p tcp --dport 443 -m string --algo bm --string drop.test -j DROP
 dpi -A INPUT -p tcp --dport 443 -m string --algo bm --string rst.test -j REJECT --reject-with tcp-reset
 dpi -A INPUT -p tcp --dport 443 -m string --algo bm --string hold.test -j DROP
-dpi -A OUTPUT -s 10.98.0.10 -p tcp --sport 443 -m connbytes --connbytes 6144: --connbytes-dir reply --connbytes-mode bytes -j DROP
-dpi -A OUTPUT -s 10.98.0.4 -p tcp --sport 443 -m connbytes --connbytes 16384: --connbytes-dir reply --connbytes-mode bytes -j DROP
-dpi -A INPUT -d 10.98.0.8 -p tcp --dport 443 -m connbytes --connbytes 2000: --connbytes-dir reply --connbytes-mode bytes -j REJECT --reject-with tcp-reset
+dpi -A INPUT -p tcp --dport 443 -m string --algo bm --string many.test -j DROP
+dpi -A OUTPUT -s 198.51.100.10 -p tcp --sport 443 -m connbytes --connbytes 6144: --connbytes-dir reply --connbytes-mode bytes -j DROP
+dpi -A OUTPUT -s 198.51.100.4 -p tcp --sport 443 -m connbytes --connbytes 16384: --connbytes-dir reply --connbytes-mode bytes -j DROP
+dpi -A INPUT -d 198.51.100.8 -p tcp --dport 443 -m connbytes --connbytes 2000: --connbytes-dir reply --connbytes-mode bytes -j REJECT --reject-with tcp-reset
 
-python3 "$W/al.py" dns 15353 www.ok.test=10.98.0.1 www.drop.test=10.98.0.2 www.rst.test=10.98.0.3 \
-    www.freeze.test=10.98.0.4 www.frost.test=10.98.0.4 a.out1.test=10.98.0.5 a.out2.test=10.98.0.6 \
-    a.out3.test=10.98.0.7 www.late.test=10.98.0.8 www.hold.test=10.98.0.9 \
-    www.small.test=10.98.0.10 &
+python3 "$W/al.py" dns 15353 www.ok.test=198.51.100.1 www.drop.test=198.51.100.2 www.rst.test=198.51.100.3 \
+    www.freeze.test=198.51.100.4 www.frost.test=198.51.100.4 www.cut.test=198.51.100.5 a.many.test=198.51.100.6 \
+    b.many.test=198.51.100.7 www.late.test=198.51.100.8 www.hold.test=198.51.100.9 \
+    www.small.test=198.51.100.10 c.many.test=198.51.100.11 www.syn.test=198.51.100.12 www.nowan.test=198.51.100.13 \
+    gen.check.test=198.51.100.15 &
 DNS=$!
 
 mkdir -p /etc/firc
@@ -216,6 +248,8 @@ app:
   netfilter:
     iptables: {chainPrefix: FIRC_}
   link: [lan]
+  check:
+    url: http://gen.check.test/generate_204
   autolist:
     enabled: true
     mode: add
@@ -286,12 +320,12 @@ T0=$(date +%s)
 check "the automatic list runs" True "$(status running)"
 check "it runs in mode add" add "$(status mode)"
 check "its chain hangs off mangle/FORWARD" 1 "$($IPT -t mangle -S FORWARD | grep -c -- '-j FIRC_AUTO')"
-check "its four rules are in the kernel" 4 "$($IPT -t mangle -S FIRC_AUTO | grep -c NFLOG)"
+check "its six rules are in the kernel" 6 "$($IPT -t mangle -S FIRC_AUTO | grep -c NFLOG)"
 
 check "a probe on request is accepted" 202 "$(probe www.frost.test)"
 check "a second request waits its turn" 202 "$(probe www.ok.test)"
 J=
-for i in 1 2 3; do around www.drop.test 10.98.0.2 & J="$J $!"; done
+for i in 1 2 3; do around www.drop.test 198.51.100.2 & J="$J $!"; done
 wait $J
 J=
 sleep 1
@@ -349,7 +383,7 @@ check "a cached open host is not queued again" "1:" "$(al st "j['probes']['queue
 H=$(ask www.hold.test)
 HT=$(date +%s)
 HELD=${H% *}
-check "a client holds a real address that lives unmatchedTtl" "10.98.0.9 5" "$H"
+check "a client holds a real address that lives unmatchedTtl" "198.51.100.9 5" "$H"
 for i in 1 2 3; do NS alc curl -sk -m 3 -o /dev/null --resolve "www.hold.test:443:$HELD" https://www.hold.test/ & J="$J $!"; done
 wait $J
 J=
@@ -374,16 +408,6 @@ check "a rule the user switched off stays off" "drop.test:namespace::off" "$(add
 check "unmatchedTtl 0 is refused while the list is on" "400 app.autolist.enabled" \
     "$(setting '{"app.dnsProxy.unmatchedTtl": 0}')"
 check "and nothing changes" 5 "$(api "http://firc/api/v1/system/settings" | python3 -c "import json,sys; print(json.load(sys.stdin)['settings']['app.dnsProxy.unmatchedTtl'])")"
-
-for a in 5 6 7; do dpi -I INPUT 1 -p tcp --dport 443 -d 10.98.0.$a -j DROP; done
-times3 a.out1.test / & J="$J $!"
-times3 a.out2.test / & J="$J $!"
-times3 a.out3.test / & J="$J $!"
-wait $J
-J=
-sleep 1
-n=$(api "http://firc/api/v1/groups/$G/rules" > "$W/g.json"; python3 "$W/al.py" rules "$W/g.json" | grep -c '^out')
-check "sites whose SYN goes unanswered are not added" 0 "$n"
 
 echo "--- waiting for the probe queue's tick, up to $((T0 + 150 - $(date +%s))) s"
 wait_for $((T0 + 150 - $(date +%s))) "freeze.test:namespace:www.freeze.test:on" added freeze.test
@@ -412,6 +436,57 @@ check "a site it opens is switched off" "rst.test:namespace:www.rst.test:off" "$
 check "a frozen site it opens is switched off" "freeze.test:namespace:www.freeze.test:off" "$(added freeze.test)"
 check "a site it opens that had a held address is switched off" "hold.test:namespace:www.hold.test:off" "$(added hold.test)"
 check "the status counts the switches" 4 "$(status switchedOff)"
+
+check "the default route is taken again" "200 None" "$(setting '{"app.autolist.checkInterface": ""}')"
+nflog() { $IPT -t mangle -L FIRC_AUTO -v -n -x | awk "/nflog-group $1( |$)/{print \$1}"; }
+RST0=$(nflog 10)
+CUT=$(ask www.cut.test | cut -d' ' -f1)
+for i in 1 2; do NS alc python3 "$W/al.py" cut www.cut.test "$CUT" > "$W/cut$i" 2>&1 & J="$J $!"; done
+wait $J
+J=
+sleep 1
+read16() { [ "$(cat "$1")" -ge 16384 ] 2>/dev/null && echo 16K || cat "$1"; }
+check "a client reads 16 KB of a frozen transfer and resets it, twice" "16K 16K" "$(read16 "$W/cut1") $(read16 "$W/cut2")"
+check "both close by a client reset" 2 "$(($(nflog 10) - RST0))"
+check "two client resets after a stall nominate the host" checking:freeze:2 "$(al cand cut.test)"
+check "a requested probe takes the nominated host off the queue" 202 "$(probe www.cut.test)"
+wait_for 40 short al res www.cut.test verdict
+check "its probe ends" short "$(al res www.cut.test verdict)"
+
+fetch a.many.test / > /dev/null
+sleep 1
+check "one failure of one host lists nothing" "" "$(added many.test)"
+fetch b.many.test / > /dev/null & J="$J $!"
+fetch c.many.test / > /dev/null & J="$J $!"
+wait $J
+J=
+many() { added many.test | sed 's/:[abc]\.many\.test:/:host:/'; }
+wait_for 3 "many.test:namespace:host:on" many
+check "three hosts failing once each list their domain" "many.test:namespace:host:on" "$(many)"
+check "and the rule keeps that it was listed by its domain" True "$(python3 "$W/al.py" bydomain "$W/g.json" many.test)"
+
+nocon() {
+    dpi -I INPUT 1 -d "$2" -p tcp --syn -j DROP
+    check "a probe of $1 is accepted before its clients fail" 202 "$(probe "www.$1")"
+    for i in 1 2 3; do fetch "www.$1" / & J="$J $!"; done > /dev/null
+    wait $J
+    J=
+    sleep 1
+    check "while it connects the clients' unanswered SYNs nominate $1, not add it" "checking:no-connect:0:" \
+        "$(al cand "$1"):$(added "$1")"
+    wait_for 50 "$3" al res "www.$1" verdict
+}
+dpi -I INPUT 1 -d 198.51.100.15 -p tcp --syn -j DROP
+nocon nowan.test 198.51.100.13 unknown
+check "with the WAN check failing the probe says unknown and nothing is proposed" "unknown::" \
+    "$(al res www.nowan.test verdict)::$(al cand nowan.test)$(added nowan.test)"
+check "and its result says what the WAN check got" 1 \
+    "$(al res www.nowan.test error | grep -c ' · wan gen.check.test: .')"
+dpi -D INPUT -d 198.51.100.15 -p tcp --syn -j DROP
+nocon syn.test 198.51.100.12 blocked
+check "with the WAN check passing the probe confirms the unanswered SYN" blocked:no-connect "$(al res www.syn.test)"
+check "and its result says the WAN check answered 204" 1 "$(al res www.syn.test error | grep -c ' · wan gen.check.test: 204$')"
+check "and adds its domain" "syn.test:namespace:www.syn.test:on" "$(added syn.test)"
 
 kill -TERM "$FP"
 wait "$FP"

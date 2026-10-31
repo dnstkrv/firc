@@ -181,6 +181,10 @@ static void emit_rule(emitter_ctx_t *ctx, const firc_rule_t *r)
     if (r->autolist != NULL && *r->autolist != '\0') {
         emit_plain(ctx, "autolist");
         emit_string(ctx, r->autolist);
+        if (r->autolist_by_domain) {
+            emit_plain(ctx, "autolistByDomain");
+            emit_bool(ctx, true);
+        }
     }
     map_end(ctx);
 }

@@ -33,8 +33,9 @@ typedef enum {
 firc_al_probes_t *firc_al_probes_new(void);
 void firc_al_probes_free(firc_al_probes_t *p);
 
-/* Adds a note for host; CACHED when a verdict is cached; FULL when the queue holds only requests. */
-firc_al_ask_t firc_al_probes_nominate(firc_al_probes_t *p, const char *host, int64_t now);
+/* Adds a note for host, by_domain as the latest nomination says; CACHED when a verdict is cached; FULL when the queue
+ * holds only requests. */
+firc_al_ask_t firc_al_probes_nominate(firc_al_probes_t *p, const char *host, bool by_domain, int64_t now);
 
 /* A user request goes first and may push out a queued recheck; BUSY within the host window, FULL when the hour is spent or the queue holds only requests. */
 firc_al_ask_t firc_al_probes_request(firc_al_probes_t *p, const char *host, int64_t now);
@@ -42,8 +43,10 @@ firc_al_ask_t firc_al_probes_request(firc_al_probes_t *p, const char *host, int6
 /* Bypasses the cache and queues after user requests, before nominations. */
 firc_al_ask_t firc_al_probes_recheck(firc_al_probes_t *p, const char *host, int64_t now);
 
-/* Takes the next host when the budget allows and counts it; nominations only with allow_notes; false when nothing is due. */
-bool firc_al_probes_next(firc_al_probes_t *p, int64_t now, char *host, size_t cap, bool allow_notes, bool *recheck);
+/* Takes the next host when the budget allows and counts it; nominations only with allow_notes; false when nothing is due.
+ * *by_domain is what its last nomination said, false for a host never nominated. */
+bool firc_al_probes_next(firc_al_probes_t *p, int64_t now, char *host, size_t cap, bool allow_notes, bool *recheck,
+                         bool *by_domain);
 
 /* Ends a probe handed out by next and caches its verdict. */
 void firc_al_probes_done(firc_al_probes_t *p, const char *host, const firc_autolist_result_t *r, int64_t now);

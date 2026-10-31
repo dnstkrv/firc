@@ -1174,7 +1174,7 @@ definitions:
         example: cdn.example.com
         type: string
       why:
-        description: 'no-answer (the ClientHello went unanswered), reset (a reset before the server answered) or freeze (the router''s probe stalled)'
+        description: 'no-answer (the ClientHello went unanswered), reset (a reset before the server answered), freeze (the router''s probe stalled) or no-connect (the SYNs went unanswered, and the router''s probe could not connect while its WAN check passed)'
         example: reset
         type: string
       fails:
@@ -1209,7 +1209,7 @@ definitions:
         example: blocked
         type: string
       why:
-        description: 'For blocked: no-answer, reset or freeze; otherwise empty'
+        description: 'For blocked: no-answer, reset, freeze or no-connect; otherwise empty'
         example: freeze
         type: string
       bytes:
@@ -1277,6 +1277,14 @@ definitions:
         description: 'Failed connections in the last 24 hours'
         example: 23
         type: integer
+      ambiguousDay:
+        description: 'No-connect flows and SNI-less hellos in the last 24 hours whose address carried names of several domains'
+        example: 1
+        type: integer
+      wanWarning:
+        description: 'Present only while the last WAN check found no route through the check interface, until a check passes'
+        example: 'the check interface has no route: the WAN check cannot pass'
+        type: string
       listed:
         description: 'Hosts that failed failThreshold times in a row since it started'
         example: 2
@@ -1319,6 +1327,7 @@ definitions:
     - group
     - failures
     - failuresDay
+    - ambiguousDay
     - listed
     - addedHour
     - checking
@@ -1398,6 +1407,10 @@ definitions:
         description: 'Ignored on input. The daemon carries the marker over from the stored rule with the same id, and drops it when the request changes that rule''s enable, type or pattern.'
         example: www.example.com
         type: string
+      autolistByDomain:
+        description: 'Ignored on input. Carried over with the marker, and dropped with it.'
+        example: true
+        type: boolean
       comment:
         description: 'One line about the rule, for people only. Spaces around it are trimmed; empty or only spaces means none. At most 256 bytes of UTF-8 after trimming, no control characters (C0, DEL, C1) and no U+2028 or U+2029. Anything else is 400, naming the rule (and the group, where the request carries one).'
         example: 'Meta: CDN'
@@ -1429,6 +1442,10 @@ definitions:
         description: 'Present only on a rule the automatic list added: the host it was added for, which the checks open.'
         example: www.example.com
         type: string
+      autolistByDomain:
+        description: 'Present (true) only on a rule the automatic list added because hosts of its domain failed; a short page from its host then keeps the rule on.'
+        example: true
+        type: boolean
       comment:
         description: Present only when set.
         example: 'Meta: CDN'

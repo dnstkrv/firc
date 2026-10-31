@@ -520,6 +520,10 @@ static firc_err_t load_rule(yaml_document_t *doc, node_t *n, firc_rule_t *r)
         free(r->autolist);
         r->autolist = NULL;
     }
+    GET_OR_FAIL(get_bool(map_get(doc, n, "autolistByDomain"), &r->autolist_by_domain, &err));
+    if (r->autolist == NULL) {
+        r->autolist_by_domain = false;
+    }
     if (r->type == NULL && (err = firc_strset(&r->type, "")) != FIRC_OK) {
         return err;
     }

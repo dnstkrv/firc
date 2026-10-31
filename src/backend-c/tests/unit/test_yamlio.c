@@ -388,6 +388,43 @@ TEST a_rule_keeps_the_host_the_autolist_added_it_for(void)
     PASS();
 }
 
+TEST a_domain_listed_rule_keeps_its_flag(void)
+{
+    firc_config_t cfg;
+    firc_config_init_defaults(&cfg);
+    const char *doc =
+        "configVersion: 0.99.0\n"
+        "groups:\n"
+        "  - id: d663876a\n"
+        "    name: Autolist\n"
+        "    interface: nwg0\n"
+        "    rules:\n"
+        "      - {id: 6f34ee91, type: namespace, rule: many.example, enable: true, autolist: b.many.example, "
+        "autolistByDomain: true}\n"
+        "      - {id: 6f34ee92, type: namespace, rule: one.example, enable: true, autolist: one.example}\n"
+        "      - {id: 6f34ee93, type: namespace, rule: hand.example, enable: true, autolistByDomain: true}\n";
+    ASSERT_EQ(FIRC_OK, load_str(&cfg, doc));
+    ASSERT(cfg.groups[0]->rules[0]->autolist_by_domain);
+    ASSERT_FALSE(cfg.groups[0]->rules[1]->autolist_by_domain);
+    ASSERT_FALSEm("a rule with no marker was never listed", cfg.groups[0]->rules[2]->autolist_by_domain);
+    char *out = NULL;
+    size_t len = 0;
+    ASSERT_EQ(FIRC_OK, firc_config_save_buffer_part(&cfg, "0.99.0", FIRC_CFG_GROUPS, &out, &len));
+    const char *first = strstr(out, "autolistByDomain: true");
+    ASSERTm(out, first != NULL);
+    ASSERTm(out, strstr(first + 1, "autolistByDomain") == NULL);
+    firc_config_t back;
+    firc_config_init_defaults(&back);
+    ASSERT_EQ(FIRC_OK, load_str(&back, out));
+    ASSERT(back.groups[0]->rules[0]->autolist_by_domain);
+    ASSERT_STR_EQ("b.many.example", back.groups[0]->rules[0]->autolist);
+    ASSERT_FALSE(back.groups[0]->rules[1]->autolist_by_domain);
+    free(out);
+    firc_config_clear(&back);
+    firc_config_clear(&cfg);
+    PASS();
+}
+
 /* Catches: a key written to the wrong file, or the two files not loading back to the tree that was split. */
 TEST the_two_halves_hold_the_whole_config(void)
 {
@@ -2274,6 +2311,7 @@ int main(int argc, char **argv)
     RUN_TEST(check_interface_round_trips);
     RUN_TEST(recheck_interface_key_is_gone);
     RUN_TEST(a_rule_keeps_the_host_the_autolist_added_it_for);
+    RUN_TEST(a_domain_listed_rule_keeps_its_flag);
     RUN_TEST(the_two_halves_hold_the_whole_config);
     RUN_TEST(a_subnet_rule_keeps_its_proto_and_ports);
     RUN_TEST(the_groups_file_sits_next_to_the_settings_file);

@@ -21,6 +21,8 @@ typedef struct firc_autolist_deps {
     void (*bypassed)(void *ud, const firc_autolist_failure_t *f);
     void (*nominated)(void *ud, const firc_autolist_nomination_t *n);
     void *ud;
+    firc_autolist_net_t pools[FIRC_AUTOLIST_POOLS];
+    size_t n_pools;
 } firc_autolist_deps_t;
 
 firc_autolist_svc_t *firc_autolist_svc_start(const firc_autolist_deps_t *deps, firc_err_t *err);
@@ -40,5 +42,7 @@ void firc_autolist_svc_counts(const firc_autolist_svc_t *s, uint64_t *failures, 
 size_t firc_autolist_svc_bypassed(const firc_autolist_svc_t *s, firc_ip_t *clients, uint32_t *fails, size_t cap);
 
 uint32_t firc_autolist_svc_failures_day(const firc_autolist_svc_t *s);
+
+uint32_t firc_autolist_svc_ambiguous_day(const firc_autolist_svc_t *s);
 
 #endif

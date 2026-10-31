@@ -22,7 +22,8 @@ typedef struct firc_autolist_result {
     uint8_t why;
     bool short_body;
     uint32_t bytes;
-    char error[160];
+    bool wan_unreachable;
+    char error[256];
 } firc_autolist_result_t;
 
 typedef struct firc_autolist_probe {
@@ -37,6 +38,10 @@ typedef struct firc_autolist_check_opts {
     char dns[64];
     uint16_t dns_port;
     uint32_t timeout_s;
+    char wan_url[513];
+    bool wan_expects_204;
+    firc_autolist_net_t pools[FIRC_AUTOLIST_POOLS];
+    size_t n_pools;
 } firc_autolist_check_opts_t;
 
 typedef void (*firc_autolist_probe_fn)(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,
@@ -46,9 +51,15 @@ typedef void (*firc_autolist_checked_fn)(void *ud, uint64_t gen, const firc_auto
 
 typedef struct firc_autolist_check firc_autolist_check_t;
 
-/* Judges one probe from how far it got; why is a firc_al_why_t, 0 unless blocked. Pure. */
+/* Judges one probe from how far it got; why is a firc_al_why_t, 0 unless blocked. wan_ok says the WAN check
+ * passed; only a timed-out connect with it is blocked. Pure. */
 void firc_autolist_classify(const firc_sub_fetch_info_t *info, uint32_t bytes, bool stalled, bool complete,
-                            firc_autolist_result_t *out);
+                            bool wan_ok, firc_autolist_result_t *out);
+
+/* A 5 s GET of o->wan_url through o->iface and o->dns: 204 only when wan_expects_204, else any HTTP status.
+ * An empty wan_url is false. *unreachable is set when the network has no route; said gets "wan <host>: <outcome>". */
+bool firc_autolist_wan_check(const firc_autolist_check_opts_t *o, _Atomic bool *stop, bool *unreachable, char *said,
+                             size_t said_cap);
 
 /* Fetches https://host/ through o and judges it into out. */
 void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,

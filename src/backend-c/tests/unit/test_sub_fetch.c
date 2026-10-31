@@ -1,5 +1,7 @@
 #include "greatest.h"
 
+#include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -1023,7 +1025,7 @@ static bool count_sink(void *ud, const uint8_t *data, size_t len) {
 TEST info_reports_a_connect_without_tls_over_plain_http(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
-    firc_sub_fetch_info_t info = {false, true, true, true};
+    firc_sub_fetch_info_t info = {false, true, true, true, false, false};
     firc_sub_fetch_opts_t o = {.info = &info};
     size_t got = 0;
     long status = 0;
@@ -1036,13 +1038,61 @@ TEST info_reports_a_connect_without_tls_over_plain_http(void) {
 }
 
 TEST info_reports_no_connect_when_refused(void) {
-    firc_sub_fetch_info_t info = {true, true, true, true};
+    firc_sub_fetch_info_t info = {true, true, true, true, false, false};
     firc_sub_fetch_opts_t o = {.info = &info};
     size_t got = 0;
     ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to("http://127.0.0.1:1/list", &o, count_sink, &got, NULL));
     ASSERT_FALSE(info.connected);
     ASSERT_FALSE(info.tls_done);
     ASSERT_FALSE(info.reset);
+    PASS();
+}
+
+TEST info_reports_a_refused_connect(void) {
+    firc_sub_fetch_info_t info = {true, true, true, true, false, true};
+    firc_sub_fetch_opts_t o = {.info = &info};
+    size_t got = 0;
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to("http://127.0.0.1:1/list", &o, count_sink, &got, NULL));
+    ASSERT(info.refused);
+    ASSERT_FALSE(info.unreachable);
+    ASSERT_FALSE(info.timed_out);
+    ASSERT_FALSE(info.connected);
+    PASS();
+}
+
+static bool no_v6_route(void) {
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) { return false; }
+    struct sockaddr_in6 sa = {.sin6_family = AF_INET6, .sin6_port = htons(80)};
+    inet_pton(AF_INET6, "2001:db8::1", &sa.sin6_addr);
+    int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+    int e = errno;
+    close(fd);
+    return rc != 0 && (e == ENETUNREACH || e == EHOSTUNREACH);
+}
+
+TEST info_reports_an_unreachable_network(void) {
+    if (!no_v6_route()) { SKIPm("no IPv6, or a routable 2001:db8::1 on this host"); }
+    firc_sub_fetch_info_t info = {true, true, true, true, true, false};
+    firc_sub_fetch_opts_t o = {.info = &info, .timeout_s = 2};
+    size_t got = 0;
+    ASSERT_EQ(FIRC_ERR_IO, firc_sub_fetch_to("http://[2001:db8::1]/", &o, count_sink, &got, NULL));
+    ASSERT(info.unreachable);
+    ASSERT_FALSE(info.refused);
+    ASSERT_FALSE(info.connected);
+    PASS();
+}
+
+TEST a_successful_fetch_is_neither_refused_nor_unreachable(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    firc_sub_fetch_info_t info = {false, false, false, false, true, true};
+    firc_sub_fetch_opts_t o = {.info = &info};
+    size_t got = 0;
+    ASSERT_EQ(FIRC_OK, firc_sub_fetch_to(url_for("/list"), &o, count_sink, &got, NULL));
+    harness_stop(h);
+    ASSERT_FALSE(info.refused);
+    ASSERT_FALSE(info.unreachable);
     PASS();
 }
 
@@ -1086,7 +1136,7 @@ static firc_err_t fetch_from_a_resetting_peer(const char *scheme, firc_sub_fetch
 }
 
 TEST info_reports_a_reset_by_the_peer(void) {
-    firc_sub_fetch_info_t info = {false, true, false, true};
+    firc_sub_fetch_info_t info = {false, true, false, true, false, false};
     ASSERT_EQ(FIRC_ERR_IO, fetch_from_a_resetting_peer("http", &info));
     ASSERT(info.connected);
     ASSERT_FALSE(info.tls_done);
@@ -1096,7 +1146,7 @@ TEST info_reports_a_reset_by_the_peer(void) {
 }
 
 TEST info_reports_a_reset_during_the_handshake(void) {
-    firc_sub_fetch_info_t info = {false, true, false, true};
+    firc_sub_fetch_info_t info = {false, true, false, true, false, false};
     ASSERT_EQ(FIRC_ERR_IO, fetch_from_a_resetting_peer("https", &info));
     ASSERT(info.connected);
     ASSERT_FALSE(info.tls_done);
@@ -1108,7 +1158,7 @@ TEST info_reports_a_reset_during_the_handshake(void) {
 TEST info_reports_a_timeout(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
-    firc_sub_fetch_info_t info = {false, true, true, false};
+    firc_sub_fetch_info_t info = {false, true, true, false, false, false};
     firc_sub_fetch_opts_t o = {.info = &info, .timeout_s = 1};
     size_t got = 0;
     firc_err_t err = firc_sub_fetch_to(url_for("/never"), &o, count_sink, &got, NULL);
@@ -1122,7 +1172,7 @@ TEST info_reports_a_timeout(void) {
 }
 
 TEST info_is_cleared_when_the_first_url_is_refused(void) {
-    firc_sub_fetch_info_t info = {true, true, true, true};
+    firc_sub_fetch_info_t info = {true, true, true, true, false, false};
     firc_sub_fetch_opts_t o = {.info = &info};
     size_t got = 0;
     ASSERT_EQ(FIRC_ERR_INVAL, firc_sub_fetch_to("ftp://127.0.0.1/", &o, count_sink, &got, NULL));
@@ -1192,6 +1242,9 @@ int main(int argc, char **argv) {
     RUN_TEST(a_fetch_with_its_own_cap_fills_the_errbuf_on_a_transport_failure);
     RUN_TEST(info_reports_a_connect_without_tls_over_plain_http);
     RUN_TEST(info_reports_no_connect_when_refused);
+    RUN_TEST(info_reports_a_refused_connect);
+    RUN_TEST(info_reports_an_unreachable_network);
+    RUN_TEST(a_successful_fetch_is_neither_refused_nor_unreachable);
     RUN_TEST(info_reports_a_reset_by_the_peer);
     RUN_TEST(info_reports_a_reset_during_the_handshake);
     RUN_TEST(info_reports_a_timeout);

@@ -47,6 +47,8 @@ type Fake = {
   probeFail?: string;
   queueOnly?: boolean;
   off?: boolean;
+  wanWarning?: string;
+  ambiguousDay?: number;
 };
 
 function state(fake: Fake) {
@@ -57,6 +59,8 @@ function state(fake: Fake) {
     group: "b10c4ed0",
     failures: 40,
     failuresDay: 23,
+    ambiguousDay: fake.ambiguousDay ?? 0,
+    ...(fake.wanWarning ? { wanWarning: fake.wanWarning } : {}),
     listed: fake.candidates.length,
     addedHour: 2,
     checking: false,
@@ -206,6 +210,21 @@ test("the tab lists each candidate with its reason, failures and device name", a
     "confirmed by the router check",
   );
   await expect(rows.filter({ hasText: "medium.com" })).toContainText("checking by the router…");
+});
+
+test("an unanswered-SYN candidate wears the no-answer colour, not the grey of a waiting row", async ({
+  page,
+}) => {
+  const fake = a1();
+  fake.candidates.push(candidate("instagram.com", "www.instagram.com", "no-connect"));
+  await shell(page, fake);
+  await open(page);
+
+  const pill = page.locator("[data-domain]", { hasText: "instagram.com" }).locator(".pill");
+  await expect(pill).toHaveClass(/\bdrop\b/);
+  await expect(
+    page.locator("[data-domain]", { hasText: "rutracker.org" }).locator(".pill"),
+  ).toHaveClass(/\bdrop\b/);
 });
 
 test("a device that asks DNS around firc is named in the note, not blamed on a domain", async ({
@@ -580,6 +599,51 @@ test("why the list is not running follows a translated lead", async ({ page }) =
   await expect(page.locator(".warn")).toHaveText(
     "Не запущено: the group blocks by DNS: nothing to route its names into",
   );
+});
+
+test("a WAN check without a route and ambiguous flows show in the strip", async ({ page }) => {
+  const fake = a1();
+  fake.wanWarning = "the check interface has no route: the WAN check cannot pass";
+  fake.ambiguousDay = 3;
+  await shell(page, fake);
+  await open(page);
+  const strip = page.getByTestId("autolist-strip");
+  await expect(strip.getByTestId("autolist-wan-warning")).toHaveText(
+    "The check interface has no route: the WAN check cannot pass, hosts without a connection stay unknown",
+  );
+  await expect(strip).toContainText("23 failures in 24 h · ambiguous today: 3 · router check");
+});
+
+test("the WAN warning and the ambiguous count are in Russian", async ({ page }) => {
+  const fake = a1();
+  fake.mode = "add";
+  fake.wanWarning = "the check interface has no route: the WAN check cannot pass";
+  fake.ambiguousDay = 1;
+  await page.addInitScript(() => {
+    localStorage.setItem("locale", JSON.stringify({ value: "ru" }));
+  });
+  await shell(page, fake);
+  await page.goto("/journal/unopened");
+  const strip = page.getByTestId("autolist-strip");
+  await expect(strip.getByTestId("autolist-wan-warning")).toHaveText(
+    "Интерфейс проверки без маршрута: проверка WAN не может пройти, хосты без соединения останутся «неизвестно»",
+  );
+  await expect(strip).toContainText(
+    "проверка роутером: 4 из 30 за час · неоднозначных за сутки: 1",
+  );
+});
+
+test("no WAN warning and no ambiguous count when the daemon has none", async ({ page }) => {
+  for (const mode of ["candidates", "add"]) {
+    const fake = a1();
+    fake.mode = mode;
+    await shell(page, fake);
+    await open(page);
+    const strip = page.getByTestId("autolist-strip");
+    await expect(strip).toContainText("router check");
+    await expect(strip.getByTestId("autolist-wan-warning")).toHaveCount(0);
+    await expect(strip).not.toContainText("ambiguous today");
+  }
 });
 
 const autolistReads = (fake: Fake) =>

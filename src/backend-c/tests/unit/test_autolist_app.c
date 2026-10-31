@@ -9,7 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,11 +42,11 @@ typedef struct {
     pthread_t th;
 } rig_t;
 
-static fake_nflog_t *g_kernel[4];
+static fake_nflog_t *g_kernel[6];
 
 static firc_nflog_t *fake_open(uint16_t group, uint16_t copy_range) {
     int w = group - FIRC_AUTOLIST_GROUP_HELLO;
-    if (w < 0 || w > 3) { return NULL; }
+    if (w < 0 || w > 5) { return NULL; }
     fake_nflog_stop(g_kernel[w]);
     int fd = -1;
     g_kernel[w] = fake_nflog_start(&fd);
@@ -53,7 +55,7 @@ static firc_nflog_t *fake_open(uint16_t group, uint16_t copy_range) {
 }
 
 static void kernels_stop(void) {
-    for (int w = 0; w < 4; w++) {
+    for (int w = 0; w < 6; w++) {
         fake_nflog_stop(g_kernel[w]);
         g_kernel[w] = NULL;
     }
@@ -91,9 +93,28 @@ static void plan(const char *host, uint8_t verdict, uint8_t why, bool short_body
     pthread_mutex_unlock(&g_probed_mu);
 }
 
+static void plan_wan_unreachable(const char *host) {
+    plan(host, FIRC_AUTOLIST_UNKNOWN, 0, false, 0);
+    pthread_mutex_lock(&g_probed_mu);
+    for (size_t i = 0; i < g_n_plan; i++) {
+        if (strcmp(g_plan[i].host, host) == 0) { g_plan[i].result.wan_unreachable = true; }
+    }
+    pthread_mutex_unlock(&g_probed_mu);
+}
+
+static char g_wan_url[513];
+static bool g_wan_204;
+static firc_autolist_net_t g_pools[FIRC_AUTOLIST_POOLS];
+static size_t g_n_pools;
+
 static void fake_probe(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,
                        firc_autolist_result_t *out) {
-    (void)o;
+    pthread_mutex_lock(&g_probed_mu);
+    snprintf(g_wan_url, sizeof(g_wan_url), "%s", o->wan_url);
+    g_wan_204 = o->wan_expects_204;
+    memcpy(g_pools, o->pools, sizeof(g_pools));
+    g_n_pools = o->n_pools;
+    pthread_mutex_unlock(&g_probed_mu);
     int now_running = atomic_fetch_add(&g_running, 1) + 1;
     int seen = atomic_load(&g_max_running);
     while (now_running > seen && !atomic_compare_exchange_weak(&g_max_running, &seen, now_running)) {}
@@ -142,6 +163,12 @@ typedef struct {
     const char *iface;
     const char *group_extra;
     int marked;
+    int threshold;
+    const char *app_more;
+    const char *conf_path;
+    const char *groups;
+    const uint8_t *pool4;
+    bool no_check_url;
 } setup_t;
 
 static const char RULES[] =
@@ -166,16 +193,24 @@ static bool rig_up_with(rig_t *r, const setup_t *su) {
              "configVersion: 0.99.0\n"
              "app:\n"
              "  link: [br0]\n"
-             "  autolist: {enabled: true, group: 0a0b0c0d, mode: %s, failThreshold: 2, recheck: true, "
-             "recheckInterval: 1h%s}\n"
-             "groups:\n"
-             "  - id: 0a0b0c0d\n"
-             "    name: Autolist\n"
-             "    interface: %s\n"
-             "    enable: true\n"
-             "%s%s",
-             su->mode != NULL ? su->mode : "candidates", su->app_extra != NULL ? su->app_extra : "",
-             su->iface != NULL ? su->iface : "nwg9", su->group_extra != NULL ? su->group_extra : "", RULES);
+             "%s"
+             "  autolist: {enabled: true, group: 0a0b0c0d, mode: %s, failThreshold: %d, recheck: true, "
+             "recheckInterval: 1h%s}\n",
+             su->app_more != NULL ? su->app_more : "", su->mode != NULL ? su->mode : "candidates",
+             su->threshold != 0 ? su->threshold : 2, su->app_extra != NULL ? su->app_extra : "");
+    if (su->groups != NULL && used > 0 && (size_t)used < sizeof(config)) {
+        used += snprintf(config + used, sizeof(config) - (size_t)used, "%s", su->groups);
+    } else if (used > 0 && (size_t)used < sizeof(config)) {
+        used += snprintf(config + used, sizeof(config) - (size_t)used,
+                         "groups:\n"
+                         "  - id: 0a0b0c0d\n"
+                         "    name: Autolist\n"
+                         "    interface: %s\n"
+                         "    enable: true\n"
+                         "%s%s",
+                         su->iface != NULL ? su->iface : "nwg9", su->group_extra != NULL ? su->group_extra : "",
+                         RULES);
+    }
     for (int i = 0; i < su->marked && used > 0 && (size_t)used < sizeof(config); i++) {
         used += snprintf(config + used, sizeof(config) - (size_t)used,
                          "      - {id: %08x, type: namespace, rule: r%d.example, enable: true, autolist: r%d.example}\n",
@@ -183,9 +218,14 @@ static bool rig_up_with(rig_t *r, const setup_t *su) {
     }
     if (firc_config_init_defaults(&r->cfg) != FIRC_OK) { return false; }
     if (firc_config_load_buffer(&r->cfg, config, strlen(config)) != FIRC_OK) { return false; }
+    if (su->no_check_url && firc_strset(&r->cfg.app.check.url, "") != FIRC_OK) { return false; }
     firc_fakeip_cfg_t pc = {0};
     pc.v4.base.len = 4; pc.v4.base.b[0] = 198; pc.v4.base.b[1] = 18;
     pc.v4.pool_cidr = 15; pc.v4.chunk_cidr = 24;
+    if (su->pool4 != NULL) {
+        memcpy(pc.v4.base.b, su->pool4, 4);
+        pc.v4.pool_cidr = 16;
+    }
     pc.v6.base.len = 16; pc.v6.base.b[0] = 0xfd; pc.v6.base.b[1] = 0x37;
     pc.v6.pool_cidr = 48; pc.v6.chunk_cidr = 64;
     pc.max_names = 64; pc.idle_secs = 86400; pc.clamp_secs = 300;
@@ -196,7 +236,8 @@ static bool rig_up_with(rig_t *r, const setup_t *su) {
     r->pipeline = firc_dns_pipeline_create();
     if (firc_loop_create(&r->loop) != FIRC_OK) { return false; }
     firc_app_deps_t deps = {.cfg = &r->cfg, .ipt4 = r->ipt, .pool = r->pool, .loop = r->loop,
-                            .pipeline = r->pipeline, .nflog_open = fake_open, .wall_s = fake_wall};
+                            .pipeline = r->pipeline, .nflog_open = fake_open, .wall_s = fake_wall,
+                            .config_path = su->conf_path};
     r->app = firc_app_create(&deps);
     if (r->app == NULL) { return false; }
     if (firc_app_republish_dns_snapshot(r->app) != FIRC_OK) { return false; }
@@ -462,6 +503,16 @@ static bool fin(rig_t *r, const uint8_t *client, uint16_t port, uint32_t ack) {
     put_ack(pkt, ack);
     pkt[33] = 0x11;
     return push(r, 3, pkt, len);
+}
+
+static bool syn(rig_t *r, const uint8_t *client, uint16_t port) {
+    static const uint8_t none[1];
+    uint8_t pkt[64];
+    size_t len = fake_nflog_packet(pkt, client, SERVER, 443, none, 0);
+    set_ports(pkt, port, 443);
+    pkt[27] = 6;
+    pkt[33] = 0x02;
+    return push(r, 5, pkt, len);
 }
 
 static bool resets(rig_t *r, const uint8_t *client, const char *host, uint16_t port) {
@@ -1019,6 +1070,30 @@ TEST nomination_shows_checking_candidate(void) {
     PASS();
 }
 
+TEST syn_nomination_shows_checking_candidate(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    for (uint16_t port = 50001; port <= 50002; port++) {
+        ASSERT(syn(&r, CLIENT, port));
+        atomic_fetch_add(&g_now, 3);
+        ASSERT(syn(&r, CLIENT, port));
+    }
+    cand_want_t want = {"example.com", "checking"};
+    cJSON *st = wait_status(has_candidate, &want);
+    const cJSON *c = candidate(st, "example.com");
+    ASSERT(c != NULL);
+    ASSERT_STR_EQ("checking", str_of(c, "state"));
+    ASSERT_STR_EQ("silent.example.com", str_of(c, "host"));
+    ASSERT_STR_EQ("no-connect", str_of(c, "why"));
+    ASSERT_EQ(0, (int)num_of(c, "notes"));
+    ASSERT_EQ(1, (int)num_of(probes_of(st), "queued"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    rig_down(&r);
+    PASS();
+}
+
 TEST recheck_goes_through_the_budget(void) {
     rig_t r;
     ASSERT(rig_up(&r));
@@ -1183,6 +1258,589 @@ TEST test_check_result_freed_once(void) {
     PASS();
 }
 
+static bool fail_once(rig_t *r, const char *host, uint16_t port) {
+    return hint(r, CLIENT, host) && hello(r, CLIENT, port, host) && reply(r, CLIENT, 1, port, 0x14);
+}
+
+static bool syn_flow(rig_t *r, uint16_t port) {
+    if (!syn(r, CLIENT, port)) { return false; }
+    atomic_fetch_add(&g_now, 3);
+    return syn(r, CLIENT, port);
+}
+
+TEST no_connect_probe_makes_candidate(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT_EQ(202, probe_host("silent.example.com"));
+    cand_want_t want = {"example.com", "candidate"};
+    cJSON *st = wait_status(has_candidate, &want);
+    const cJSON *c = candidate(st, "example.com");
+    ASSERT(c != NULL);
+    ASSERT_STR_EQ("candidate", str_of(c, "state"));
+    ASSERT_STR_EQ("no-connect", str_of(c, "why"));
+    ASSERT_STR_EQ("silent.example.com", str_of(c, "host"));
+    ASSERT_STR_EQ("no-connect", str_of(result_of(st, "silent.example.com"), "why"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    ASSERT_EQ(NULL, rule_of(r.app, "example.com"));
+    rig_down(&r);
+    PASS();
+}
+
+TEST no_connect_probe_adds_in_add_mode(void) {
+    rig_t r;
+    setup_t su = {.mode = "add"};
+    ASSERT(rig_up_with(&r, &su));
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT_EQ(202, probe_host("silent.example.com"));
+    cand_want_t want = {"example.com", "added"};
+    cJSON *st = wait_status(has_candidate, &want);
+    ASSERT_STR_EQ("no-connect", str_of(candidate(st, "example.com"), "why"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "example.com");
+    ASSERT(rule != NULL);
+    ASSERT_STR_EQ("silent.example.com", rule->autolist);
+    ASSERT_FALSEm("a host listing is not a domain listing", rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
+TEST domain_listing_marks_most_failed_host(void) {
+    rig_t r;
+    setup_t su = {.mode = "add", .threshold = 3};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(fail_once(&r, "b.many.example", 50001));
+    ASSERT(fail_once(&r, "b.many.example", 50002));
+    ASSERT(fail_once(&r, "a.many.example", 50003));
+    cand_want_t want = {"many.example", "added"};
+    cJSON *st = wait_status(has_candidate, &want);
+    const cJSON *c = candidate(st, "many.example");
+    ASSERT(c != NULL);
+    ASSERT_STR_EQ("b.many.example", str_of(c, "host"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "many.example");
+    ASSERT(rule != NULL);
+    ASSERT_STR_EQ("namespace", rule->type);
+    ASSERT_STR_EQm("the host that failed most, not the last", "b.many.example", rule->autolist);
+    ASSERT(rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
+TEST syn_domain_nomination_lists_by_domain(void) {
+    rig_t r;
+    setup_t su = {.mode = "add"};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(hint(&r, CLIENT, "www.many.example"));
+    ASSERT(hint(&r, CLIENT, "i.many.example"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"many.example", "checking"};
+    cJSON *st = wait_status(has_candidate, &checking);
+    ASSERT_STR_EQ("many.example", str_of(candidate(st, "many.example"), "host"));
+    cJSON_Delete(st);
+    plan("many.example", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT_EQ(202, probe_host("many.example"));
+    cand_want_t added = {"many.example", "added"};
+    cJSON_Delete(wait_status(has_candidate, &added));
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "many.example");
+    ASSERT(rule != NULL);
+    ASSERT_STR_EQ("many.example", rule->autolist);
+    ASSERT(rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
+static char *saved_groups(const char *dir) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/groups.yaml", dir);
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) { return NULL; }
+    static char buf[16384];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    char *at = strstr(buf, "groups:");
+    return at;
+}
+
+static void remove_tree(const char *path) {
+    struct stat sb;
+    if (lstat(path, &sb) != 0) { return; }
+    if (S_ISDIR(sb.st_mode)) {
+        DIR *d = opendir(path);
+        struct dirent *e;
+        while (d != NULL && (e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) { continue; }
+            char sub[1024];
+            snprintf(sub, sizeof(sub), "%s/%s", path, e->d_name);
+            remove_tree(sub);
+        }
+        if (d != NULL) { closedir(d); }
+        rmdir(path);
+        return;
+    }
+    unlink(path);
+}
+
+static enum greatest_test_res short_after_domain_listing_in(const char *dir) {
+    char conf[512];
+    snprintf(conf, sizeof(conf), "%s/firc.conf", dir);
+    rig_t r;
+    setup_t su = {.mode = "add", .conf_path = conf};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(fail_once(&r, "a.many.example", 50001));
+    ASSERT(fail_once(&r, "b.many.example", 50002));
+    cand_want_t want = {"many.example", "added"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    rig_stop_loop(&r);
+    rig_down(&r);
+    char *groups = saved_groups(dir);
+    ASSERT(groups != NULL);
+    setup_t again = {.mode = "add", .groups = groups};
+    ASSERT(rig_up_with(&r, &again));
+    const firc_rule_t *loaded = rule_of(r.app, "many.example");
+    ASSERT(loaded != NULL);
+    ASSERT(loaded->autolist_by_domain);
+    plan(loaded->autolist, FIRC_AUTOLIST_REACHABLE, 0, true, 900);
+    plan("down.example", FIRC_AUTOLIST_REACHABLE, 0, true, 900);
+    ASSERT_EQ(200, request("POST", "/api/v1/system/autolist/check", g_buf, sizeof(g_buf)));
+    cJSON *st = wait_status(check_done, NULL);
+    ASSERT_EQ(2, (int)num_of(st, "switchedOff"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    ASSERTm("one host's short page says nothing of the domain", rule_of(r.app, "many.example")->enable);
+    ASSERTm("a short page still clears a host listing", !rule_of(r.app, "down.example")->enable);
+    rig_down(&r);
+    PASS();
+}
+
+TEST short_after_domain_listing_keeps_rule(void) {
+    char dir[] = "/tmp/firc_al_app_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    enum greatest_test_res res = short_after_domain_listing_in(dir);
+    remove_tree(dir);
+    struct stat sb;
+    ASSERTm("the temporary directory is gone", lstat(dir, &sb) != 0);
+    return res;
+}
+
+static bool wan_warning_is(const cJSON *st, const void *arg) {
+    return strcmp(str_of(st, "wanWarning"), (const char *)arg) == 0;
+}
+
+TEST wan_unreachable_warns_until_a_check_passes(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    cJSON *st = status();
+    ASSERT(st != NULL);
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(st, "wanWarning"));
+    cJSON_Delete(st);
+    plan_wan_unreachable("dead.example.com");
+    ASSERT_EQ(202, probe_host("dead.example.com"));
+    const char *text = "the check interface has no route: the WAN check cannot pass";
+    st = wait_status(wan_warning_is, text);
+    ASSERT_STR_EQ(text, str_of(st, "wanWarning"));
+    cJSON_Delete(st);
+    plan("other.example.com", FIRC_AUTOLIST_UNKNOWN, 0, false, 0);
+    ASSERT_EQ(202, probe_host("other.example.com"));
+    st = wait_status(has_result, "other.example.com");
+    ASSERT_STR_EQm("an unknown verdict proves no route", text, str_of(st, "wanWarning"));
+    cJSON_Delete(st);
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT_EQ(202, probe_host("silent.example.com"));
+    st = wait_status(has_result, "silent.example.com");
+    ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(st, "wanWarning"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    rig_down(&r);
+    PASS();
+}
+
+static bool ambiguous_is(const cJSON *st, const void *arg) {
+    return num_of(st, "ambiguousDay") == *(const double *)arg;
+}
+
+TEST status_counts_ambiguous_flows(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    cJSON *st = status();
+    ASSERT_EQ(0, (int)num_of(st, "ambiguousDay"));
+    cJSON_Delete(st);
+    ASSERT(hint(&r, CLIENT, "a.one.example"));
+    ASSERT(hint(&r, CLIENT, "b.two.example"));
+    ASSERT(syn_flow(&r, 50001));
+    double one = 1;
+    st = wait_status(ambiguous_is, &one);
+    ASSERT_EQ(1, (int)num_of(st, "ambiguousDay"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    rig_down(&r);
+    PASS();
+}
+
+TEST probe_checks_wan_through_check_urls(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT_EQ(202, probe_host("a.example"));
+    cJSON_Delete(wait_status(has_result, "a.example"));
+    rig_stop_loop(&r);
+    ASSERT_STR_EQ("http://cp.cloudflare.com/generate_204", g_wan_url);
+    ASSERTm("check.url answers 204", g_wan_204);
+    rig_down(&r);
+    setup_t su = {.app_more = "  check: {url: 'http://c.test/204', wanUrl: 'http://w.test/'}\n"};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT_EQ(202, probe_host("a.example"));
+    cJSON_Delete(wait_status(has_result, "a.example"));
+    rig_stop_loop(&r);
+    ASSERT_STR_EQ("http://w.test/", g_wan_url);
+    ASSERT_FALSEm("wanUrl answers any status", g_wan_204);
+    rig_down(&r);
+    PASS();
+}
+
+typedef struct {
+    firc_app_t *app;
+    _Atomic bool done;
+} tick_job_t;
+
+static void tick_on_loop(firc_loop_t *loop, void *ud) {
+    (void)loop;
+    tick_job_t *j = ud;
+    firc_app_autolist_tick_for_test(j->app);
+    atomic_store(&j->done, true);
+}
+
+static bool tick(rig_t *r) {
+    tick_job_t j = {.app = r->app};
+    atomic_init(&j.done, false);
+    if (firc_loop_post(r->loop, tick_on_loop, &j) != FIRC_OK) { return false; }
+    for (int i = 0; i < 2000 && !atomic_load(&j.done); i++) { nanosleep(&(struct timespec){0, 1000000}, NULL); }
+    return atomic_load(&j.done);
+}
+
+static bool probed_times(const char *host) {
+    size_t n = 0;
+    pthread_mutex_lock(&g_probed_mu);
+    for (size_t i = 0; i < g_n_probed; i++) { n += strcmp(g_probed[i], host) == 0; }
+    pthread_mutex_unlock(&g_probed_mu);
+    return n == 1;
+}
+
+TEST tick_probes_a_nomination_once(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT(tick(&r));
+    cand_want_t want = {"example.com", "candidate"};
+    cJSON *st = wait_status(has_candidate, &want);
+    ASSERT_STR_EQ("candidate", str_of(candidate(st, "example.com"), "state"));
+    ASSERT_STR_EQ("no-connect", str_of(candidate(st, "example.com"), "why"));
+    ASSERT_EQ(0, (int)num_of(probes_of(st), "queued"));
+    cJSON_Delete(st);
+    ASSERT(tick(&r));
+    ASSERT(barrier(&r));
+    rig_stop_loop(&r);
+    ASSERTm("the nomination is probed once, by the tick", probed_times("silent.example.com") && n_probed() == 1);
+    rig_down(&r);
+    PASS();
+}
+
+TEST unknown_probe_after_no_connect_leaves_nothing(void) {
+    rig_t r;
+    setup_t su = {.mode = "add"};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    plan("silent.example.com", FIRC_AUTOLIST_UNKNOWN, 0, false, 0);
+    ASSERT(tick(&r));
+    cJSON *st = wait_status(has_result, "silent.example.com");
+    ASSERT_STR_EQ("unknown", str_of(result_of(st, "silent.example.com"), "verdict"));
+    ASSERTm("an unknown verdict proposes nothing", candidate(st, "example.com") == NULL);
+    ASSERT_EQ(0, (int)num_of(st, "addedHour"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    ASSERT_EQ(NULL, rule_of(r.app, "example.com"));
+    rig_down(&r);
+    PASS();
+}
+
+TEST evicted_domain_candidate_still_lists_by_domain(void) {
+    rig_t r;
+    setup_t su = {.threshold = 1};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(hint(&r, CLIENT, "www.many.example"));
+    ASSERT(hint(&r, CLIENT, "i.many.example"));
+    ASSERT(syn_flow(&r, 50001));
+    cand_want_t checking = {"many.example", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    char host[64];
+    for (int i = 0; i < FIRC_AUTOLIST_CANDIDATES; i++) {
+        atomic_fetch_add(&g_now, 1);
+        snprintf(host, sizeof(host), "www.d%d.example", i);
+        ASSERT(fail_once(&r, host, (uint16_t)(51000 + i)));
+    }
+    cJSON *st = status();
+    ASSERTm("the domain's candidate was pushed out", candidate(st, "many.example") == NULL);
+    cJSON_Delete(st);
+    plan("many.example", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT(tick(&r));
+    cand_want_t want = {"many.example", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    ASSERT_EQ(200, request("POST", "/api/v1/system/autolist/candidates/many.example/add", g_buf, sizeof(g_buf)));
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "many.example");
+    ASSERT(rule != NULL);
+    ASSERTm("the queued probe kept the domain flag", rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
+TEST host_listing_clears_the_domain_flag(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(fail_once(&r, "a.many.example", 50001));
+    ASSERT(fail_once(&r, "b.many.example", 50002));
+    cand_want_t want = {"many.example", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    ASSERT(fail_once(&r, "c.many.example", 50003));
+    ASSERT(fail_once(&r, "c.many.example", 50004));
+    cJSON *st = status();
+    ASSERT_STR_EQ("c.many.example", str_of(candidate(st, "many.example"), "host"));
+    cJSON_Delete(st);
+    ASSERT_EQ(200, request("POST", "/api/v1/system/autolist/candidates/many.example/add", g_buf, sizeof(g_buf)));
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "many.example");
+    ASSERT(rule != NULL);
+    ASSERT_STR_EQ("c.many.example", rule->autolist);
+    ASSERTm("the latest listing was by host", !rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
+static bool candidate_last_at(const cJSON *st, const void *arg) {
+    const cJSON *c = candidate(st, "example.com");
+    return c != NULL && num_of(c, "lastAt") == *(const double *)arg;
+}
+
+TEST a_confirmed_candidate_is_not_probed_again(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT(tick(&r));
+    cand_want_t want = {"example.com", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    atomic_fetch_add(&g_now, 30);
+    ASSERT(syn_flow(&r, 50003));
+    ASSERT(syn_flow(&r, 50004));
+    ASSERT(syn_flow(&r, 50005));
+    double seen_at = (double)(1800000000 + 6 + 30 + 3 + 3);
+    cJSON *st = wait_status(candidate_last_at, &seen_at);
+    const cJSON *c = candidate(st, "example.com");
+    ASSERT(c != NULL);
+    ASSERTm("the nomination still refreshes the candidate", num_of(c, "lastAt") == seen_at);
+    ASSERT_STR_EQ("candidate", str_of(c, "state"));
+    ASSERT_EQ(0, (int)num_of(probes_of(st), "queued"));
+    ASSERT_EQ(1, (int)num_of(probes_of(st), "usedHour"));
+    cJSON_Delete(st);
+    ASSERT(tick(&r));
+    ASSERT(barrier(&r));
+    rig_stop_loop(&r);
+    ASSERTm("the confirmed host is probed once", probed_times("silent.example.com") && n_probed() == 1);
+    rig_down(&r);
+    PASS();
+}
+
+static bool candidate_state_at(const cJSON *st, const void *arg) {
+    const cJSON *c = candidate(st, "example.com");
+    return c != NULL && num_of(c, "lastAt") == *(const double *)arg && strcmp(str_of(c, "state"), "checking") == 0;
+}
+
+TEST a_confirmed_candidate_checked_again_by_hand_stays_checking(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON_Delete(wait_status(has_candidate, &checking));
+    plan("silent.example.com", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT(tick(&r));
+    cand_want_t want = {"example.com", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    atomic_fetch_add(&g_now, FIRC_AUTOLIST_PROBE_HOST_SECS + 1);
+    atomic_store(&g_gate_closed, true);
+    ASSERT_EQ(202, probe_host("silent.example.com"));
+    cJSON_Delete(wait_status(running_host, "silent.example.com"));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50003));
+    ASSERT(syn_flow(&r, 50004));
+    double seen_at = (double)atomic_load(&g_now);
+    cJSON *st = wait_status(candidate_state_at, &seen_at);
+    const cJSON *c = candidate(st, "example.com");
+    ASSERT(c != NULL);
+    ASSERT_EQ(seen_at, num_of(c, "lastAt"));
+    ASSERTm("a check the user asked for keeps the row checking", strcmp(str_of(c, "state"), "checking") == 0);
+    cJSON_Delete(st);
+    atomic_store(&g_gate_closed, false);
+    cJSON_Delete(wait_status(has_candidate, &want));
+    rig_stop_loop(&r);
+    rig_down(&r);
+    PASS();
+}
+
+TEST an_unknown_candidate_is_probed_again(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(fail_once(&r, "silent.example.com", 50011));
+    ASSERT(fail_once(&r, "silent.example.com", 50012));
+    cand_want_t want = {"example.com", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    plan("silent.example.com", FIRC_AUTOLIST_UNKNOWN, 0, false, 0);
+    ASSERT_EQ(202, probe_host("silent.example.com"));
+    cJSON_Delete(wait_status(has_result, "silent.example.com"));
+    cJSON *before = status();
+    double listed_at = num_of(candidate(before, "example.com"), "lastAt");
+    cJSON_Delete(before);
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    ASSERT(barrier(&r));
+    cJSON *cached = status();
+    ASSERTm("an unknown verdict in its hour neither queues nor refreshes the row",
+            num_of(candidate(cached, "example.com"), "lastAt") == listed_at &&
+                num_of(probes_of(cached), "queued") == 0);
+    cJSON_Delete(cached);
+    atomic_fetch_add(&g_now, FIRC_AUTOLIST_CACHE_UNKNOWN_SECS + 1);
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50003));
+    ASSERT(syn_flow(&r, 50004));
+    cand_want_t checking = {"example.com", "checking"};
+    cJSON *st = wait_status(has_candidate, &checking);
+    ASSERT_STR_EQ("checking", str_of(candidate(st, "example.com"), "state"));
+    ASSERT_EQ(1, (int)num_of(probes_of(st), "queued"));
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    rig_down(&r);
+    PASS();
+}
+
+TEST syns_into_the_configured_pool_are_not_watched(void) {
+    static const uint8_t pool[4] = {203, 0, 0, 0};
+    rig_t r;
+    setup_t su = {.pool4 = pool};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(hint(&r, CLIENT, "silent.example.com"));
+    ASSERT(syn_flow(&r, 50001));
+    ASSERT(syn_flow(&r, 50002));
+    ASSERT_EQ(202, probe_host("a.example"));
+    cJSON *st = wait_status(has_result, "a.example");
+    ASSERTm("no flow to the pool is counted", candidate(st, "example.com") == NULL);
+    cJSON_Delete(st);
+    rig_stop_loop(&r);
+    ASSERT_EQ((size_t)2, g_n_pools);
+    ASSERT_EQ(203, g_pools[0].base.b[0]);
+    ASSERT_EQ(16, g_pools[0].prefix);
+    ASSERT_EQ(0xfd, g_pools[1].base.b[0]);
+    ASSERT_EQ(48, g_pools[1].prefix);
+    rig_down(&r);
+    PASS();
+}
+
+TEST an_empty_check_url_is_said_once(void) {
+    int fds[2];
+    ASSERT_EQ(0, pipe(fds));
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
+    firc_log_set_output_floor(FIRC_LOG_WARN);
+    firc_log_set_fd(fds[1]);
+    rig_t r;
+    setup_t su = {.no_check_url = true};
+    bool up = rig_up_with(&r, &su);
+    bool probed_twice = up && probe_host("a.example") == 202;
+    if (probed_twice) { cJSON_Delete(wait_status(has_result, "a.example")); }
+    probed_twice = probed_twice && probe_host("b.example") == 202;
+    if (probed_twice) { cJSON_Delete(wait_status(has_result, "b.example")); }
+    if (up) { rig_stop_loop(&r); }
+    firc_log_set_fd(STDOUT_FILENO);
+    firc_log_set_output_floor(FIRC_LOG_DEBUG);
+    static char log[1 << 16];
+    ssize_t n = read(fds[0], log, sizeof(log) - 1);
+    log[n > 0 ? n : 0] = '\0';
+    close(fds[0]);
+    close(fds[1]);
+    if (up) { rig_down(&r); }
+    ASSERT(up && probed_twice);
+    ASSERT_STR_EQ("", g_wan_url);
+    static const char said[] = "autolist: app.check.url and app.check.wanUrl are both empty";
+    const char *at = strstr(log, said);
+    ASSERTm(log, at != NULL);
+    ASSERTm("said once per start", strstr(at + 1, said) == NULL);
+    PASS();
+}
+
+TEST a_rule_switched_on_again_takes_the_new_marker(void) {
+    rig_t r;
+    setup_t su = {.mode = "add"};
+    ASSERT(rig_up_with(&r, &su));
+    ASSERT(fail_once(&r, "a.off.example", 50001));
+    ASSERT(fail_once(&r, "b.off.example", 50002));
+    cand_want_t want = {"off.example", "added"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "off.example");
+    ASSERT(rule != NULL);
+    ASSERT(rule->enable);
+    ASSERT(rule->autolist_by_domain);
+    ASSERT_STR_EQ("a.off.example", rule->autolist);
+    ASSERT_EQ((size_t)1, rules_named(r.app, "off.example"));
+    rig_down(&r);
+    PASS();
+}
+
+TEST a_user_probe_of_one_host_clears_the_domain_flag(void) {
+    rig_t r;
+    ASSERT(rig_up(&r));
+    ASSERT(fail_once(&r, "a.many.example", 50001));
+    ASSERT(fail_once(&r, "b.many.example", 50002));
+    cand_want_t want = {"many.example", "candidate"};
+    cJSON_Delete(wait_status(has_candidate, &want));
+    plan("c.many.example", FIRC_AUTOLIST_BLOCKED, FIRC_AL_WHY_NO_CONNECT, false, 0);
+    ASSERT_EQ(202, probe_host("c.many.example"));
+    cJSON_Delete(wait_status(has_result, "c.many.example"));
+    cJSON_Delete(wait_status(has_candidate, &want));
+    ASSERT_EQ(200, request("POST", "/api/v1/system/autolist/candidates/many.example/add", g_buf, sizeof(g_buf)));
+    rig_stop_loop(&r);
+    const firc_rule_t *rule = rule_of(r.app, "many.example");
+    ASSERT(rule != NULL);
+    ASSERT_STR_EQ("c.many.example", rule->autolist);
+    ASSERT_FALSEm("the probe of one host is a host listing", rule->autolist_by_domain);
+    rig_down(&r);
+    PASS();
+}
+
 GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv) {
@@ -1205,6 +1863,7 @@ int main(int argc, char **argv) {
     RUN_TEST(probe_route_429_when_budget_spent);
     RUN_TEST(reload_during_probe_keeps_one_thread);
     RUN_TEST(nomination_shows_checking_candidate);
+    RUN_TEST(syn_nomination_shows_checking_candidate);
     RUN_TEST(recheck_goes_through_the_budget);
     RUN_TEST(list_group_takes_the_rule);
     RUN_TEST(block_group_is_not_running);
@@ -1214,5 +1873,24 @@ int main(int argc, char **argv) {
     RUN_TEST(test_check_result_freed_once);
     RUN_TEST(evicted_recheck_does_not_stick_checking);
     RUN_TEST(add_mode_over_a_hand_rule_stays_candidate);
+    RUN_TEST(no_connect_probe_makes_candidate);
+    RUN_TEST(no_connect_probe_adds_in_add_mode);
+    RUN_TEST(domain_listing_marks_most_failed_host);
+    RUN_TEST(short_after_domain_listing_keeps_rule);
+    RUN_TEST(syn_domain_nomination_lists_by_domain);
+    RUN_TEST(wan_unreachable_warns_until_a_check_passes);
+    RUN_TEST(status_counts_ambiguous_flows);
+    RUN_TEST(probe_checks_wan_through_check_urls);
+    RUN_TEST(tick_probes_a_nomination_once);
+    RUN_TEST(unknown_probe_after_no_connect_leaves_nothing);
+    RUN_TEST(evicted_domain_candidate_still_lists_by_domain);
+    RUN_TEST(host_listing_clears_the_domain_flag);
+    RUN_TEST(a_confirmed_candidate_is_not_probed_again);
+    RUN_TEST(a_confirmed_candidate_checked_again_by_hand_stays_checking);
+    RUN_TEST(an_unknown_candidate_is_probed_again);
+    RUN_TEST(syns_into_the_configured_pool_are_not_watched);
+    RUN_TEST(an_empty_check_url_is_said_once);
+    RUN_TEST(a_rule_switched_on_again_takes_the_new_marker);
+    RUN_TEST(a_user_probe_of_one_host_clears_the_domain_flag);
     GREATEST_MAIN_END();
 }

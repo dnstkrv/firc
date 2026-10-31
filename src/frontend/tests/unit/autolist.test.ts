@@ -7,15 +7,36 @@ import { installSvelteRunesMocks } from "../mocks/setup-svelte-runes";
 installSvelteRunesMocks();
 
 const { autolistTip } = await import("../../src/utils/autolist-tip");
-const { latestResult, ruleOf, whyLabel } = await import("../../src/data/autolist.svelte");
+const { latestResult, ruleOf, whyClass, whyLabel } = await import("../../src/data/autolist.svelte");
 
 const say = (key: string) => (ru as Record<string, string>)[key] ?? key;
 
+describe("whyClass", () => {
+  it("gives an unanswered SYN the colour of an unanswered ClientHello", () => {
+    assert.strictEqual(whyClass("no-connect"), "drop");
+    assert.strictEqual(whyClass("no-answer"), "drop");
+  });
+
+  it("keeps the other reasons apart and greys an unknown one", () => {
+    assert.strictEqual(whyClass("reset"), "rst");
+    assert.strictEqual(whyClass("freeze"), "frz");
+    assert.strictEqual(whyClass("odd"), "off");
+  });
+});
+
 describe("whyLabel", () => {
-  it("names the three failures in Russian, a freeze with its kilobytes", () => {
+  it("names the four failures in Russian, a freeze with its kilobytes", () => {
     assert.strictEqual(whyLabel("no-answer", 0, say), "нет ответа на ClientHello");
     assert.strictEqual(whyLabel("reset", 0, say), "сброс до ответа сервера");
     assert.strictEqual(whyLabel("freeze", 15360, say), "заморозка на 15 КБ");
+    assert.strictEqual(whyLabel("no-connect", 0, say), "нет соединения (SYN без ответа)");
+  });
+
+  it("names no-connect in English by its key", () => {
+    assert.strictEqual(
+      whyLabel("no-connect", 0, (k) => k),
+      "no connection (SYN unanswered)",
+    );
   });
 
   it("rounds the kilobytes to the nearest", () => {

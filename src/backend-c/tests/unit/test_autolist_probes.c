@@ -13,7 +13,7 @@ static firc_autolist_result_t res(uint8_t v, bool shortb) {
     return r;
 }
 
-static bool take(firc_al_probes_t *p, int64_t now, char *h, bool *re) { return firc_al_probes_next(p, now, h, 256, true, re); }
+static bool take(firc_al_probes_t *p, int64_t now, char *h, bool *re) { return firc_al_probes_next(p, now, h, 256, true, re, NULL); }
 
 TEST budget_spent_queues_not_runs(void) {
     firc_al_probes_t *p = firc_al_probes_new();
@@ -21,7 +21,7 @@ TEST budget_spent_queues_not_runs(void) {
     bool re;
     for (int i = 0; i < 31; i++) {
         snprintf(n, sizeof(n), "h%d.example", i);
-        firc_al_probes_nominate(p, n, 1000);
+        firc_al_probes_nominate(p, n, false, 1000);
     }
     firc_autolist_result_t r = res(FIRC_AUTOLIST_BLOCKED, false);
     for (int i = 0; i < 30; i++) {
@@ -43,9 +43,9 @@ TEST user_request_jumps_queue(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re = true;
-    firc_al_probes_nominate(p, "a.example", 10);
-    firc_al_probes_nominate(p, "a.example", 10);
-    firc_al_probes_nominate(p, "b.example", 10);
+    firc_al_probes_nominate(p, "a.example", false, 10);
+    firc_al_probes_nominate(p, "a.example", false, 10);
+    firc_al_probes_nominate(p, "b.example", false, 10);
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "c.example", 10));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "d.example", 11));
     ASSERT(take(p, 20, h, &re));
@@ -66,9 +66,9 @@ TEST most_noted_goes_before_fewer(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "few.example", 1);
-    firc_al_probes_nominate(p, "many.example", 1);
-    firc_al_probes_nominate(p, "many.example", 2);
+    firc_al_probes_nominate(p, "few.example", false, 1);
+    firc_al_probes_nominate(p, "many.example", false, 1);
+    firc_al_probes_nominate(p, "many.example", false, 2);
     ASSERT(take(p, 3, h, &re));
     ASSERT_STR_EQ("many.example", h);
     firc_al_probes_free(p);
@@ -79,12 +79,12 @@ TEST open_is_cached_a_day(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 100);
+    firc_al_probes_nominate(p, "a.example", false, 100);
     ASSERT(take(p, 100, h, &re));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_REACHABLE, true);
     firc_al_probes_done(p, "a.example", &r, 100);
-    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", 100 + 86399));
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", 100 + 86400));
+    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", false, 100 + 86399));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", false, 100 + 86400));
     int64_t at = 0;
     ASSERT_EQ(NULL, firc_al_probes_result(p, "a.example", 100 + 86400, &at));
     const firc_autolist_result_t *got = firc_al_probes_result(p, "a.example", 100 + 86399, &at);
@@ -99,12 +99,12 @@ TEST unknown_cached_an_hour(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 5);
+    firc_al_probes_nominate(p, "a.example", false, 5);
     ASSERT(take(p, 5, h, &re));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_UNKNOWN, false);
     firc_al_probes_done(p, "a.example", &r, 5);
-    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", 5 + 3599));
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", 5 + 3600));
+    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", false, 5 + 3599));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", false, 5 + 3600));
     firc_al_probes_free(p);
     PASS();
 }
@@ -113,7 +113,7 @@ TEST blocked_not_cached(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 5);
+    firc_al_probes_nominate(p, "a.example", false, 5);
     ASSERT(take(p, 5, h, &re));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_BLOCKED, false);
     firc_al_probes_done(p, "a.example", &r, 5);
@@ -123,7 +123,7 @@ TEST blocked_not_cached(void) {
     ASSERT_EQ(FIRC_AUTOLIST_BLOCKED, got->verdict);
     ASSERT_EQ(5, at);
     ASSERT_EQ(NULL, firc_al_probes_result(p, "a.example", 5 + 3600, NULL));
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", 6));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.example", false, 6));
     firc_al_probes_free(p);
     PASS();
 }
@@ -134,7 +134,7 @@ TEST queue_drops_oldest_at_65(void) {
     bool re;
     for (int i = 0; i < 65; i++) {
         snprintf(n, sizeof(n), "h%d.example", i);
-        firc_al_probes_nominate(p, n, 1);
+        firc_al_probes_nominate(p, n, false, 1);
     }
     uint32_t used, queued;
     firc_al_probes_counts(p, 1, &used, &queued);
@@ -149,12 +149,12 @@ TEST recheck_ignores_cache_and_counts(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re = false;
-    firc_al_probes_nominate(p, "a.example", 10);
+    firc_al_probes_nominate(p, "a.example", false, 10);
     ASSERT(take(p, 10, h, &re));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_REACHABLE, false);
     firc_al_probes_done(p, "a.example", &r, 10);
-    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", 11));
-    firc_al_probes_nominate(p, "n.example", 11);
+    ASSERT_EQ(FIRC_AL_ASK_CACHED, firc_al_probes_nominate(p, "a.example", false, 11));
+    firc_al_probes_nominate(p, "n.example", false, 11);
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_recheck(p, "a.example", 12));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "u.example", 12));
     ASSERT(take(p, 13, h, &re));
@@ -175,7 +175,7 @@ TEST same_host_within_ten_minutes_busy(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 1000);
+    firc_al_probes_nominate(p, "a.example", false, 1000);
     ASSERT(take(p, 1000, h, &re));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_BLOCKED, false);
     firc_al_probes_done(p, "a.example", &r, 1000);
@@ -192,7 +192,7 @@ TEST request_is_full_when_hour_spent(void) {
     firc_autolist_result_t r = res(FIRC_AUTOLIST_BLOCKED, false);
     for (int i = 0; i < 30; i++) {
         snprintf(n, sizeof(n), "h%d.example", i);
-        firc_al_probes_nominate(p, n, 100);
+        firc_al_probes_nominate(p, n, false, 100);
         ASSERT(take(p, 100, h, &re));
         firc_al_probes_done(p, h, &r, 100);
     }
@@ -206,15 +206,15 @@ TEST handed_out_host_is_not_issued_twice(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 1);
+    firc_al_probes_nominate(p, "a.example", false, 1);
     ASSERT(take(p, 1, h, &re));
-    firc_al_probes_nominate(p, "a.example", 2);
+    firc_al_probes_nominate(p, "a.example", false, 2);
     ASSERT_EQ(FIRC_AL_ASK_BUSY, firc_al_probes_recheck(p, "a.example", 2));
     ASSERT_FALSE(take(p, 3, h, &re));
     ASSERT_EQ(FIRC_AL_ASK_BUSY, firc_al_probes_request(p, "a.example", 3));
     firc_autolist_result_t r = res(FIRC_AUTOLIST_BLOCKED, false);
     firc_al_probes_done(p, "a.example", &r, 4);
-    firc_al_probes_nominate(p, "a.example", 5);
+    firc_al_probes_nominate(p, "a.example", false, 5);
     ASSERT(take(p, 5, h, &re));
     firc_al_probes_free(p);
     PASS();
@@ -227,8 +227,8 @@ TEST cache_evicts_least_recently_stored(void) {
     firc_autolist_result_t r = res(FIRC_AUTOLIST_REACHABLE, false);
     for (int i = 0; i < 257; i++) {
         snprintf(n, sizeof(n), "h%d.example", i);
-        firc_al_probes_nominate(p, n, 10 + i * 200);
-        ASSERT(firc_al_probes_next(p, 10 + i * 200, h, 256, true, &re));
+        firc_al_probes_nominate(p, n, false, 10 + i * 200);
+        ASSERT(firc_al_probes_next(p, 10 + i * 200, h, 256, true, &re, NULL));
         firc_al_probes_done(p, h, &r, 10 + i * 200);
     }
     ASSERT_EQ(NULL, firc_al_probes_result(p, "h0.example", 52000, NULL));
@@ -242,13 +242,13 @@ TEST small_buffer_keeps_the_host_queued(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[4];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 1);
-    ASSERT_FALSE(firc_al_probes_next(p, 1, h, sizeof(h), true, &re));
+    firc_al_probes_nominate(p, "a.example", false, 1);
+    ASSERT_FALSE(firc_al_probes_next(p, 1, h, sizeof(h), true, &re, NULL));
     uint32_t used, queued;
     firc_al_probes_counts(p, 1, &used, &queued);
     ASSERT_EQ(0, used);
     ASSERT_EQ(1, queued);
-    ASSERT_EQ(FIRC_AL_ASK_BUSY, firc_al_probes_nominate(p, "", 1));
+    ASSERT_EQ(FIRC_AL_ASK_BUSY, firc_al_probes_nominate(p, "", false, 1));
     firc_al_probes_free(p);
     PASS();
 }
@@ -260,9 +260,9 @@ TEST queue_never_evicts_a_user_request(void) {
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "user.example", 1));
     for (int i = 0; i < 63; i++) {
         snprintf(n, sizeof(n), "h%d.example", i);
-        ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, n, 1));
+        ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, n, false, 1));
     }
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "late.example", 1));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "late.example", false, 1));
     uint32_t used, queued;
     firc_al_probes_counts(p, 1, &used, &queued);
     ASSERT_EQ(64, queued);
@@ -281,10 +281,10 @@ TEST full_queue_of_rechecks_takes_only_a_request(void) {
         snprintf(n, sizeof(n), "u%d.example", i);
         ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_recheck(p, n, 1));
     }
-    ASSERT_EQ(FIRC_AL_ASK_FULL, firc_al_probes_nominate(p, "n.example", 1));
+    ASSERT_EQ(FIRC_AL_ASK_FULL, firc_al_probes_nominate(p, "n.example", false, 1));
     ASSERT_EQ(FIRC_AL_ASK_FULL, firc_al_probes_recheck(p, "c.example", 1));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "r.example", 1));
-    ASSERT_EQ(FIRC_AL_ASK_FULL, firc_al_probes_nominate(p, "n.example", 1));
+    ASSERT_EQ(FIRC_AL_ASK_FULL, firc_al_probes_nominate(p, "n.example", false, 1));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "u0.example", 1));
     firc_al_probes_free(p);
     PASS();
@@ -294,13 +294,13 @@ TEST inflight_slot_expires_after_two_minutes(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re;
-    firc_al_probes_nominate(p, "a.example", 1000);
+    firc_al_probes_nominate(p, "a.example", false, 1000);
     ASSERT(take(p, 1000, h, &re));
-    firc_al_probes_nominate(p, "a.example", 1119);
+    firc_al_probes_nominate(p, "a.example", false, 1119);
     ASSERT_EQ(FIRC_AL_ASK_BUSY, firc_al_probes_request(p, "a.example", 1119));
     ASSERT_FALSE(take(p, 1119, h, &re));
     ASSERT_FALSE(take(p, 1120, h, &re));
-    firc_al_probes_nominate(p, "a.example", 1120);
+    firc_al_probes_nominate(p, "a.example", false, 1120);
     ASSERT(take(p, 1120, h, &re));
     ASSERT_STR_EQ("a.example", h);
     firc_al_probes_free(p);
@@ -341,17 +341,17 @@ TEST next_without_notes_skips_nominations(void) {
     firc_al_probes_t *p = firc_al_probes_new();
     char h[256];
     bool re = false;
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", 1000));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", false, 1000));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_recheck(p, "re.example", 1000));
-    ASSERT(firc_al_probes_next(p, 1000, h, sizeof(h), false, &re));
+    ASSERT(firc_al_probes_next(p, 1000, h, sizeof(h), false, &re, NULL));
     ASSERT_STR_EQ("re.example", h);
     ASSERT(re);
-    ASSERT_FALSE(firc_al_probes_next(p, 1000, h, sizeof(h), false, &re));
+    ASSERT_FALSE(firc_al_probes_next(p, 1000, h, sizeof(h), false, &re, NULL));
     uint32_t used, queued;
     firc_al_probes_counts(p, 1000, &used, &queued);
     ASSERT_EQ(1, used);
     ASSERT_EQ(1, queued);
-    ASSERT(firc_al_probes_next(p, 1000, h, sizeof(h), true, &re));
+    ASSERT(firc_al_probes_next(p, 1000, h, sizeof(h), true, &re, NULL));
     ASSERT_STR_EQ("note.example", h);
     ASSERT_FALSE(re);
     firc_al_probes_free(p);
@@ -366,7 +366,7 @@ TEST request_evicts_a_recheck_when_full(void) {
         snprintf(n, sizeof(n), "r%d.example", i);
         ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_recheck(p, n, 1000));
     }
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", 1000));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", false, 1000));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "u1.example", 1000));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "u2.example", 1000));
     uint32_t used, queued;
@@ -404,7 +404,7 @@ TEST rechecking_is_true_only_while_a_recheck_is_queued(void) {
     bool re = false;
     ASSERT_FALSE(firc_al_probes_rechecking(p));
     ASSERT_FALSE(firc_al_probes_rechecking(NULL));
-    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", 1000));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "note.example", false, 1000));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "user.example", 1000));
     ASSERT_FALSE(firc_al_probes_rechecking(p));
     ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_recheck(p, "re.example", 1000));
@@ -432,6 +432,28 @@ TEST rechecking_is_true_only_while_a_recheck_is_queued(void) {
     PASS();
 }
 
+TEST next_hands_out_the_latest_nominations_domain_flag(void) {
+    firc_al_probes_t *p = firc_al_probes_new();
+    char h[256];
+    bool re = false, dom = false;
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "many.example", true, 1000));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "many.example", 1000));
+    ASSERT(firc_al_probes_next(p, 1000, h, sizeof(h), true, &re, &dom));
+    ASSERT_STR_EQ("many.example", h);
+    ASSERTm("a request on a domain nomination keeps the flag", dom);
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.two.example", true, 1000));
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_nominate(p, "a.two.example", false, 1001));
+    ASSERT(firc_al_probes_next(p, 1001, h, sizeof(h), true, &re, &dom));
+    ASSERT_STR_EQ("a.two.example", h);
+    ASSERTm("the latest nomination wins", !dom);
+    ASSERT_EQ(FIRC_AL_ASK_QUEUED, firc_al_probes_request(p, "user.example", 1002));
+    dom = true;
+    ASSERT(firc_al_probes_next(p, 1002, h, sizeof(h), true, &re, &dom));
+    ASSERT_FALSE(dom);
+    firc_al_probes_free(p);
+    PASS();
+}
+
 SUITE(autolist_probes_suite) {
     RUN_TEST(budget_spent_queues_not_runs);
     RUN_TEST(user_request_jumps_queue);
@@ -453,6 +475,7 @@ SUITE(autolist_probes_suite) {
     RUN_TEST(next_without_notes_skips_nominations);
     RUN_TEST(request_evicts_a_recheck_when_full);
     RUN_TEST(rechecking_is_true_only_while_a_recheck_is_queued);
+    RUN_TEST(next_hands_out_the_latest_nominations_domain_flag);
 }
 
 GREATEST_MAIN_DEFS();

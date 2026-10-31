@@ -50,7 +50,7 @@ TEST the_rules_go_in_a_chain_of_their_own(void) {
     ASSERT_EQ(FIRC_OK, firc_autolist_rules_install(ipt, PREFIX, pool, lan, 1));
     ASSERT_EQ(FIRC_OK, firc_ipt_commit(ipt));
 
-    char buf[2048];
+    char buf[4096];
     ASSERT(joined(fake, "mangle", AL_CHAIN, buf, sizeof(buf)));
     ASSERT_STR_EQ("-i br0 -p tcp -m conntrack ! --ctorigdst 198.18.0.0/15 "
                   "-m mark ! --mark 0x40000000/0x40000000 "
@@ -74,7 +74,18 @@ TEST the_rules_go_in_a_chain_of_their_own(void) {
                   "-m mark ! --mark 0x40000000/0x40000000 "
                   "-m tcp --dport 443 --tcp-flags FIN FIN "
                   "-m limit --limit 500/sec --limit-burst 500 "
-                  "-j NFLOG --nflog-group 9 --nflog-threshold 1",
+                  "-j NFLOG --nflog-group 9 --nflog-threshold 1\n"
+                  "-i br0 -p tcp -m conntrack ! --ctorigdst 198.18.0.0/15 "
+                  "-m mark ! --mark 0x40000000/0x40000000 "
+                  "-m tcp --dport 443 --tcp-flags RST,ACK RST,ACK "
+                  "-m limit --limit 500/sec --limit-burst 500 "
+                  "-j NFLOG --nflog-group 10 --nflog-threshold 1\n"
+                  "-i br0 -p tcp -m conntrack ! --ctorigdst 198.18.0.0/15 "
+                  "-m mark ! --mark 0x40000000/0x40000000 "
+                  "-m tcp --dport 443 --tcp-flags SYN,ACK SYN "
+                  "-m connbytes --connbytes 1:18446744073709551615 --connbytes-mode packets --connbytes-dir original "
+                  "-m limit --limit 500/sec --limit-burst 500 "
+                  "-j NFLOG --nflog-group 11 --nflog-threshold 1",
                   buf);
 
     ASSERT(joined(fake, "mangle", "FORWARD", buf, sizeof(buf)));
@@ -127,7 +138,7 @@ TEST a_chain_left_unstaged_goes_away(void) {
     PASS();
 }
 
-TEST each_family_and_interface_gets_its_four(void) {
+TEST each_family_and_interface_gets_its_six(void) {
     firc_fakeip_t *pool = make_pool();
     ASSERT(pool != NULL);
     firc_fake_ipt_t *fake = firc_fake_ipt_new(FIRC_IPT_PROTO_IPV6);
@@ -140,8 +151,8 @@ TEST each_family_and_interface_gets_its_four(void) {
     firc_ipt_rule_t *const *rules = NULL;
     size_t n = 0;
     ASSERT(firc_fake_ipt_get_rules(fake, "mangle", AL_CHAIN, &rules, &n));
-    ASSERT_EQ(8u, (unsigned)n);
-    char buf[4096];
+    ASSERT_EQ(12u, (unsigned)n);
+    char buf[8192];
     ASSERT(joined(fake, "mangle", AL_CHAIN, buf, sizeof(buf)));
     ASSERTm("the v6 hello is searched for past the longer header", strstr(buf, "--from 60 --to 104") != NULL);
     ASSERTm("the pool excluded is the v6 one", strstr(buf, "! --ctorigdst fd37::/48") != NULL);
@@ -197,10 +208,10 @@ static bool build_br0(built_t *b) {
 TEST reset_rule_counts_only_before_server_data(void) {
     built_t b;
     ASSERT(build_br0(&b));
-    ASSERT_EQ(8u, (unsigned)b.n);
+    ASSERT_EQ(12u, (unsigned)b.n);
     ASSERT(strstr(b.line[1], "--tcp-flags RST RST") != NULL);
     ASSERT(strstr(b.line[1], "--connbytes 0:255 --connbytes-dir reply --connbytes-mode bytes") != NULL);
-    ASSERT(strstr(b.line[5], "--connbytes 0:255 --connbytes-dir reply --connbytes-mode bytes") != NULL);
+    ASSERT(strstr(b.line[7], "--connbytes 0:255 --connbytes-dir reply --connbytes-mode bytes") != NULL);
     PASS();
 }
 
@@ -222,14 +233,44 @@ TEST fin_rule_is_client_side(void) {
     ASSERT_STR_EQ("-i br0 -m conntrack ! --ctorigdst fd37::/48 -m mark ! --mark 0x40000000/0x40000000 "
                   "-p tcp --dport 443 --tcp-flags FIN FIN -m limit --limit 500/sec --limit-burst 500 "
                   "-j NFLOG --nflog-group 9 --nflog-threshold 1",
-                  b.line[7]);
+                  b.line[9]);
+    PASS();
+}
+
+TEST client_rst_rule_needs_ack(void) {
+    built_t b;
+    ASSERT(build_br0(&b));
+    ASSERT_STR_EQ("-i br0 -m conntrack ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 "
+                  "-p tcp --dport 443 --tcp-flags RST,ACK RST,ACK -m limit --limit 500/sec --limit-burst 500 "
+                  "-j NFLOG --nflog-group 10 --nflog-threshold 1",
+                  b.line[4]);
+    ASSERT_STR_EQ("-i br0 -m conntrack ! --ctorigdst fd37::/48 -m mark ! --mark 0x40000000/0x40000000 "
+                  "-p tcp --dport 443 --tcp-flags RST,ACK RST,ACK -m limit --limit 500/sec --limit-burst 500 "
+                  "-j NFLOG --nflog-group 10 --nflog-threshold 1",
+                  b.line[10]);
+    PASS();
+}
+
+TEST syn_rule_is_client_side_any_position(void) {
+    built_t b;
+    ASSERT(build_br0(&b));
+    ASSERT_STR_EQ("-i br0 -m conntrack ! --ctorigdst 198.18.0.0/15 -m mark ! --mark 0x40000000/0x40000000 "
+                  "-p tcp --dport 443 --tcp-flags SYN,ACK SYN "
+                  "-m connbytes --connbytes 1: --connbytes-dir original --connbytes-mode packets "
+                  "-m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 11 --nflog-threshold 1",
+                  b.line[5]);
+    ASSERT_STR_EQ("-i br0 -m conntrack ! --ctorigdst fd37::/48 -m mark ! --mark 0x40000000/0x40000000 "
+                  "-p tcp --dport 443 --tcp-flags SYN,ACK SYN "
+                  "-m connbytes --connbytes 1: --connbytes-dir original --connbytes-mode packets "
+                  "-m limit --limit 500/sec --limit-burst 500 -j NFLOG --nflog-group 11 --nflog-threshold 1",
+                  b.line[11]);
     PASS();
 }
 
 TEST encoder_takes_every_autolist_rule(void) {
     built_t b;
     ASSERT(build_br0(&b));
-    ASSERT_EQ(8u, (unsigned)b.n);
+    ASSERT_EQ(12u, (unsigned)b.n);
     for (size_t i = 0; i < b.n; i++) {
         firc_ipt_proto_t fam = b.family[i] == FIRC_FAM_V6 ? FIRC_IPT_PROTO_IPV6 : FIRC_IPT_PROTO_IPV4;
         firc_ipt_rule_t *r = firc_test_rule(b.line[i]);
@@ -251,11 +292,13 @@ int main(int argc, char **argv) {
     RUN_TEST(the_rules_go_in_a_chain_of_their_own);
     RUN_TEST(the_preflight_leaves_nothing_behind);
     RUN_TEST(a_chain_left_unstaged_goes_away);
-    RUN_TEST(each_family_and_interface_gets_its_four);
+    RUN_TEST(each_family_and_interface_gets_its_six);
     RUN_TEST(a_bad_interface_registers_nothing);
     RUN_TEST(reset_rule_counts_only_before_server_data);
     RUN_TEST(answered_rule_is_early_band);
     RUN_TEST(fin_rule_is_client_side);
+    RUN_TEST(client_rst_rule_needs_ack);
+    RUN_TEST(syn_rule_is_client_side_any_position);
     RUN_TEST(encoder_takes_every_autolist_rule);
     GREATEST_MAIN_END();
 }

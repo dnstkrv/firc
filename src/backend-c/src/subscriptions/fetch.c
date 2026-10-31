@@ -251,6 +251,8 @@ static void fill_info(CURL *curl, CURLcode rc, firc_sub_fetch_info_t *info) {
     info->reset =
         (rc == CURLE_RECV_ERROR || rc == CURLE_SEND_ERROR || rc == CURLE_SSL_CONNECT_ERROR) && os_errno == ECONNRESET;
     info->timed_out = rc == CURLE_OPERATION_TIMEDOUT;
+    info->refused = rc == CURLE_COULDNT_CONNECT && os_errno == ECONNREFUSED;
+    info->unreachable = rc == CURLE_COULDNT_CONNECT && (os_errno == ENETUNREACH || os_errno == EHOSTUNREACH);
 }
 
 bool firc_sub_fetch_is_redirect(long status) {

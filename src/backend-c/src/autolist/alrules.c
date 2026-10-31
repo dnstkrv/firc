@@ -12,6 +12,7 @@
 #define AL_PORT "443"
 
 #define AL_HELLO_PACKETS "2:128"
+#define AL_SYN_PACKETS "1:"
 
 #define AL_LENGTH "100:"
 
@@ -41,11 +42,13 @@ firc_err_t firc_autolist_rules_build(const firc_fakeip_t *pool, const char *cons
     char handled[32];
     snprintf(handled, sizeof(handled), "0x%x/0x%x", FIRC_MARK_HANDLED, FIRC_MARK_HANDLED);
 
-    char group_hello[8], group_reset[8], group_answered[8], group_fin[8];
+    char group_hello[8], group_reset[8], group_answered[8], group_fin[8], group_close_rst[8], group_syn[8];
     snprintf(group_hello, sizeof(group_hello), "%u", (unsigned)FIRC_AUTOLIST_GROUP_HELLO);
     snprintf(group_reset, sizeof(group_reset), "%u", (unsigned)FIRC_AUTOLIST_GROUP_RESET);
     snprintf(group_answered, sizeof(group_answered), "%u", (unsigned)FIRC_AUTOLIST_GROUP_ANSWERED);
     snprintf(group_fin, sizeof(group_fin), "%u", (unsigned)FIRC_AUTOLIST_GROUP_FIN);
+    snprintf(group_close_rst, sizeof(group_close_rst), "%u", (unsigned)FIRC_AUTOLIST_GROUP_CLOSE_RST);
+    snprintf(group_syn, sizeof(group_syn), "%u", (unsigned)FIRC_AUTOLIST_GROUP_SYN);
 
     static const unsigned families[2] = {FIRC_FAM_V4, FIRC_FAM_V6};
     static const int af[2] = {AF_INET, AF_INET6};
@@ -117,6 +120,32 @@ firc_err_t firc_autolist_rules_build(const firc_fakeip_t *pool, const char *cons
                 "-j", "NFLOG", "--nflog-group", group_fin, "--nflog-threshold", "1",
             };
             fn(ud, families[i], fin_args, sizeof(fin_args) / sizeof(fin_args[0]));
+
+            const char *close_rst_args[] = {
+                "-i", lan[li],
+                "-m", "conntrack", "!", "--ctorigdst", cidr,
+                "-m", "mark", "!", "--mark", handled,
+                "-p", "tcp",
+                "--dport", AL_PORT,
+                "--tcp-flags", "RST,ACK", "RST,ACK",
+                "-m", "limit", "--limit", AL_LIMIT_RATE, "--limit-burst", AL_LIMIT_BURST,
+                "-j", "NFLOG", "--nflog-group", group_close_rst, "--nflog-threshold", "1",
+            };
+            fn(ud, families[i], close_rst_args, sizeof(close_rst_args) / sizeof(close_rst_args[0]));
+
+            const char *syn_args[] = {
+                "-i", lan[li],
+                "-m", "conntrack", "!", "--ctorigdst", cidr,
+                "-m", "mark", "!", "--mark", handled,
+                "-p", "tcp",
+                "--dport", AL_PORT,
+                "--tcp-flags", "SYN,ACK", "SYN",
+                "-m", "connbytes", "--connbytes", AL_SYN_PACKETS,
+                "--connbytes-dir", "original", "--connbytes-mode", "packets",
+                "-m", "limit", "--limit", AL_LIMIT_RATE, "--limit-burst", AL_LIMIT_BURST,
+                "-j", "NFLOG", "--nflog-group", group_syn, "--nflog-threshold", "1",
+            };
+            fn(ud, families[i], syn_args, sizeof(syn_args) / sizeof(syn_args[0]));
         }
     }
     return FIRC_OK;

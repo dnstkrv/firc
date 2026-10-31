@@ -424,7 +424,9 @@ typedef struct firc_autolist_status {
     uint64_t failures;
     uint64_t listed;
     uint32_t failures_day;
+    uint32_t ambiguous_day;
     uint32_t added_hour;
+    const char *wan_warning;
     bool checking;
     int64_t checked_at;
     uint64_t switched_off;
@@ -459,6 +461,7 @@ firc_err_t firc_app_autolist_candidate_dismiss(firc_app_t *app, const char *doma
 firc_err_t firc_app_autolist_recheck_now(firc_app_t *app);
 
 void firc_app_set_autolist_probe_for_test(firc_app_t *app, firc_autolist_probe_fn probe);
+void firc_app_autolist_tick_for_test(firc_app_t *app); /* test seam: what the probe queue's timer does when it fires */
 
 /* What the DNS pipeline tells the automatic list about an unmatched answer; loop thread. */
 void firc_app_autolist_hint_for_test(firc_app_t *app, const firc_ip_t *client, const char *name,

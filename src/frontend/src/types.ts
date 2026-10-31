@@ -50,6 +50,7 @@ export const RuleSchema = object({
   ports: fallback(optional(string()), undefined),
   comment: fallback(optional(string()), undefined),
   autolist: fallback(optional(string()), undefined),
+  autolistByDomain: fallback(optional(boolean()), undefined),
 });
 export type Rule = InferOutput<typeof RuleSchema>;
 
@@ -316,7 +317,7 @@ export type TunnelProbeRow = {
   firstByteMs: number | null;
 };
 
-export type AutolistWhy = "no-answer" | "reset" | "freeze";
+export type AutolistWhy = "no-answer" | "reset" | "freeze" | "no-connect";
 
 export type AutolistCandidateState = "candidate" | "checking" | "added" | "off";
 
@@ -348,6 +349,8 @@ export type AutolistRes = {
   group: string | null;
   failures: number;
   failuresDay: number;
+  ambiguousDay: number;
+  wanWarning?: string;
   listed: number;
   addedHour: number;
   checking: boolean;

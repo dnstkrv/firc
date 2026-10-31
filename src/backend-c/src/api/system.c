@@ -342,6 +342,7 @@ static const char *autolist_why_name(uint8_t why) {
     case FIRC_AL_WHY_NO_ANSWER: return "no-answer";
     case FIRC_AL_WHY_RESET: return "reset";
     case FIRC_AL_WHY_FREEZE: return "freeze";
+    case FIRC_AL_WHY_NO_CONNECT: return "no-connect";
     default: return "";
     }
 }
@@ -471,6 +472,8 @@ static void write_autolist(firc_system_ctx_t *ctx, firc_http_res_t *res, int cod
               (st->group != NULL ? cJSON_AddStringToObject(out, "group", st->group)
                                  : cJSON_AddNullToObject(out, "group")) != NULL &&
               cJSON_AddNumberToObject(out, "failuresDay", (double)st->failures_day) != NULL &&
+              cJSON_AddNumberToObject(out, "ambiguousDay", (double)st->ambiguous_day) != NULL &&
+              (st->wan_warning == NULL || cJSON_AddStringToObject(out, "wanWarning", st->wan_warning) != NULL) &&
               cJSON_AddNumberToObject(out, "addedHour", (double)st->added_hour) != NULL &&
               autolist_bypassed_json(out, st) && autolist_candidates_json(out, st) && autolist_probes_json(out, st);
     free(st);

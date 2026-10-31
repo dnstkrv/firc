@@ -24,9 +24,17 @@ function take(data: AutolistRes) {
   }
 }
 
+export function whyClass(why: string): string {
+  if (why === "no-answer" || why === "no-connect") return "drop";
+  if (why === "reset") return "rst";
+  if (why === "freeze") return "frz";
+  return "off";
+}
+
 export function whyLabel(why: string, bytes: number, t: (s: string) => string): string {
   if (why === "no-answer") return t("no answer to ClientHello");
   if (why === "reset") return t("reset before the server answered");
+  if (why === "no-connect") return t("no connection (SYN unanswered)");
   if (why === "freeze") {
     const kb = Math.round(bytes / 1024);
     return kb > 0 ? t("freeze at {n} KB").replace("{n}", String(kb)) : t("freeze");

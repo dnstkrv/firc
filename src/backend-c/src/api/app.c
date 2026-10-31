@@ -191,11 +191,14 @@ struct firc_app {
     uint64_t al_check_gen;
     char al_check_host[FIRC_AUTOLIST_NAME_MAX];
     bool al_check_recheck;
+    bool al_check_by_domain;
     size_t al_recheck_from;
     int al_tick_timer;
     int al_recheck_timer;
     uint64_t al_recheck_ms;
     int64_t al_checked_at;
+    bool al_wan_warning;
+    bool al_wan_url_said;
     uint64_t al_switched_off, al_switched_on;
     firc_autolist_probe_fn al_probe;
     firc_app_tunnel_down_fn tunnel_down;
@@ -3175,6 +3178,7 @@ static const char *autolist_why_text(uint8_t why) {
     case FIRC_AL_WHY_NO_ANSWER: return "no answer to the ClientHello";
     case FIRC_AL_WHY_RESET: return "a reset before the server answered";
     case FIRC_AL_WHY_FREEZE: return "a freeze the router's probe confirmed";
+    case FIRC_AL_WHY_NO_CONNECT: return "no connection the router's probe confirmed";
     default: return "blocked";
     }
 }
@@ -3258,11 +3262,18 @@ static firc_err_t autolist_add_rule(firc_app_t *app, const char *domain, const c
     const char *gname = g->name != NULL ? g->name : "";
     const firc_al_cand_t *c = firc_al_cands_find(app->al_cands, domain);
     unsigned fails = c != NULL ? (unsigned)c->fails : 0;
+    bool by_domain = c != NULL && c->by_domain;
     firc_rule_t *have = autolist_rule_named(g, domain);
     if (have != NULL) {
         if (have->autolist == NULL) { return FIRC_ERR_EXIST; }
         if (have->enable) { return FIRC_OK; }
+        firc_err_t set = firc_strset(&have->autolist, host);
+        if (set != FIRC_OK) {
+            FIRC_ERROR("autolist: %s not switched on again: %s", domain, firc_err_str(set));
+            return set;
+        }
         have->enable = true;
+        have->autolist_by_domain = by_domain;
         app->al_switched_on++;
         autolist_publish(app, rs);
         FIRC_INFO("autolist: %s switched on again in group \"%s\" for %s: %u failures, %s", domain, gname, host, fails,
@@ -3276,6 +3287,7 @@ static firc_err_t autolist_add_rule(firc_app_t *app, const char *domain, const c
     if (err == FIRC_OK) { err = firc_strset(&r->autolist, host); }
     if (err == FIRC_OK) {
         r->enable = true;
+        r->autolist_by_domain = by_domain;
         err = firc_group_add_rule(g, r);
     }
     if (err != FIRC_OK) {
@@ -3319,17 +3331,24 @@ static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
     firc_app_t *app = ud;
     if (!autolist_running(app)) { return; }
     firc_al_why_t why = f->why == FIRC_AUTOLIST_RESET ? FIRC_AL_WHY_RESET : FIRC_AL_WHY_NO_ANSWER;
-    char what[FIRC_AUTOLIST_NAME_MAX + 96];
-    snprintf(what, sizeof(what), "%s failed %u times in a row (%s)", f->host, (unsigned)f->fails,
-             autolist_why_text(why));
+    bool by_domain = f->domain[0] != '\0';
+    char what[2 * FIRC_AUTOLIST_NAME_MAX + 96];
+    if (by_domain) {
+        snprintf(what, sizeof(what), "%s failed %u times on its hosts, most on %s (%s)", f->domain,
+                 (unsigned)f->fails, f->host, autolist_why_text(why));
+    } else {
+        snprintf(what, sizeof(what), "%s failed %u times in a row (%s)", f->host, (unsigned)f->fails,
+                 autolist_why_text(why));
+    }
     char domain[FIRC_AUTOLIST_NAME_MAX];
-    if (!autolist_domain(app, f->host, what, domain, sizeof(domain))) { return; }
+    if (!autolist_domain(app, by_domain ? f->domain : f->host, what, domain, sizeof(domain))) { return; }
     firc_al_cand_t *c =
         firc_al_cands_note(app->al_cands, domain, f->host, why, f->fails, &f->client, autolist_now(app));
     if (c == NULL) {
         FIRC_DEBUG("autolist: %s, but %s was dismissed within the day", what, domain);
         return;
     }
+    c->by_domain = by_domain;
     if (autolist_add_mode(app)) {
         autolist_auto_add(app, domain, f->host, why);
         return;
@@ -3340,27 +3359,43 @@ static void autolist_listed(void *ud, const firc_autolist_failure_t *f) {
 static void autolist_nominated(void *ud, const firc_autolist_nomination_t *n) {
     firc_app_t *app = ud;
     if (!autolist_running(app)) { return; }
+    bool stall = n->kind != FIRC_AL_NOM_NO_CONNECT;
+    bool by_domain = n->domain[0] != '\0';
+    const char *name = by_domain ? n->domain : n->host;
     char what[FIRC_AUTOLIST_NAME_MAX + 96];
-    snprintf(what, sizeof(what), "%s stalled after %u bytes on two connections", n->host, (unsigned)n->received);
+    if (stall) {
+        snprintf(what, sizeof(what), "%s stalled after %u bytes on two connections", name, (unsigned)n->received);
+    } else {
+        snprintf(what, sizeof(what), "%s got no answer to its SYNs", name);
+    }
     char domain[FIRC_AUTOLIST_NAME_MAX];
-    if (!autolist_domain(app, n->host, what, domain, sizeof(domain))) { return; }
+    if (!autolist_domain(app, name, what, domain, sizeof(domain))) { return; }
     int64_t now = autolist_now(app);
     firc_al_cand_t *c = firc_al_cands_find(app->al_cands, domain);
     if (c != NULL && (c->state == FIRC_AL_ADDED || c->state == FIRC_AL_OFF)) {
         FIRC_DEBUG("autolist: %s, but %s is already added", what, domain);
         return;
     }
-    firc_al_ask_t ask = firc_al_probes_nominate(app->al_probes, n->host, now);
-    if (ask != FIRC_AL_ASK_QUEUED) {
-        FIRC_DEBUG("autolist: %s, but it is not probed: %s", what,
-                   ask == FIRC_AL_ASK_CACHED ? "it was probed lately" : "the queue holds only requests");
-        return;
+    const firc_autolist_result_t *shown =
+        c != NULL && c->state == FIRC_AL_CAND ? firc_al_probes_result(app->al_probes, n->host, now, NULL) : NULL;
+    bool confirmed = shown != NULL && shown->verdict == FIRC_AUTOLIST_BLOCKED;
+    if (confirmed) {
+        FIRC_DEBUG("autolist: %s, but it was confirmed blocked lately and waits for the user", what);
+    } else {
+        firc_al_ask_t ask = firc_al_probes_nominate(app->al_probes, n->host, by_domain, now);
+        if (ask != FIRC_AL_ASK_QUEUED) {
+            FIRC_DEBUG("autolist: %s, but it is not probed: %s", what,
+                       ask == FIRC_AL_ASK_CACHED ? "it was probed lately" : "the queue holds only requests");
+            return;
+        }
     }
     uint32_t fails = c != NULL ? c->fails : 0;
-    firc_al_why_t why = c != NULL ? (firc_al_why_t)c->why : FIRC_AL_WHY_FREEZE;
+    firc_al_why_t why = c != NULL ? (firc_al_why_t)c->why : stall ? FIRC_AL_WHY_FREEZE : FIRC_AL_WHY_NO_CONNECT;
     c = firc_al_cands_note(app->al_cands, domain, n->host, why, fails, &n->client, now);
     if (c == NULL) { return; }
-    c->state = FIRC_AL_CHECKING;
+    c->state = confirmed ? FIRC_AL_CAND : FIRC_AL_CHECKING;
+    c->by_domain = by_domain;
+    if (!stall) { return; }
     c->notes = c->notes > UINT8_MAX - FIRC_AUTOLIST_NOTES ? UINT8_MAX : (uint8_t)(c->notes + FIRC_AUTOLIST_NOTES);
 }
 
@@ -3392,6 +3427,11 @@ static void autolist_rechecked(firc_app_t *app, const char *host, const firc_aut
             firc_rule_t *rule = g->rules[k];
             if (!rule->enable || rule->autolist == NULL || strcmp(rule->autolist, host) != 0) { continue; }
             firc_al_cand_t *c = firc_al_cands_find(app->al_cands, rule->rule);
+            if (r->short_body && rule->autolist_by_domain) {
+                FIRC_DEBUG("autolist: %s answered a short page through %s, which says nothing about the rest of %s",
+                           host, via, rule->rule);
+                continue;
+            }
             if (r->short_body && c != NULL && c->why == FIRC_AL_WHY_FREEZE) {
                 FIRC_DEBUG("autolist: %s answered a short page through %s, which says nothing about a freeze", host,
                            via);
@@ -3409,7 +3449,7 @@ static void autolist_rechecked(firc_app_t *app, const char *host, const firc_aut
     }
 }
 
-static void autolist_probed(firc_app_t *app, const char *host, const firc_autolist_result_t *r) {
+static void autolist_probed(firc_app_t *app, const char *host, bool by_domain, const firc_autolist_result_t *r) {
     char what[FIRC_AUTOLIST_NAME_MAX + 96];
     snprintf(what, sizeof(what), "%s is blocked through %s (%s)", host, autolist_via(app),
              autolist_why_text(r->why));
@@ -3430,6 +3470,7 @@ static void autolist_probed(firc_app_t *app, const char *host, const firc_autoli
     const firc_al_cand_t *was = firc_al_cands_find(app->al_cands, domain);
     firc_al_cand_t *c =
         firc_al_cands_note(app->al_cands, domain, host, why, was != NULL ? was->fails : 0, NULL, autolist_now(app));
+    if (c != NULL) { c->by_domain = by_domain; }
     if (autolist_add_mode(app)) {
         autolist_auto_add(app, domain, host, why);
         return;
@@ -3437,11 +3478,26 @@ static void autolist_probed(firc_app_t *app, const char *host, const firc_autoli
     if (c != NULL && c->state != FIRC_AL_ADDED) { c->state = FIRC_AL_CAND; }
 }
 
-static void autolist_probe_done(firc_app_t *app, const char *host, bool recheck, const firc_autolist_result_t *r) {
+static void autolist_wan_seen(firc_app_t *app, const firc_autolist_result_t *r) {
+    if (r->wan_unreachable) {
+        if (!app->al_wan_warning) {
+            FIRC_WARN("autolist: %s has no route, so no unanswered SYN can be confirmed", autolist_via(app));
+        }
+        app->al_wan_warning = true;
+        return;
+    }
+    bool passed = r->verdict == FIRC_AUTOLIST_REACHABLE ||
+                  (r->verdict == FIRC_AUTOLIST_BLOCKED && r->why == FIRC_AL_WHY_NO_CONNECT);
+    if (passed) { app->al_wan_warning = false; }
+}
+
+static void autolist_probe_done(firc_app_t *app, const char *host, bool recheck, bool by_domain,
+                                const firc_autolist_result_t *r) {
     int64_t now = autolist_now(app);
     firc_al_probes_done(app->al_probes, host, r, now);
+    autolist_wan_seen(app, r);
     if (!recheck) {
-        autolist_probed(app, host, r);
+        autolist_probed(app, host, by_domain, r);
         return;
     }
     if (!firc_al_probes_rechecking(app->al_probes)) { app->al_checked_at = now; }
@@ -3455,7 +3511,9 @@ static void autolist_checked(void *ud, uint64_t gen, const firc_autolist_probe_t
     if (gen != app->al_check_gen) { return; }
     firc_autolist_check_free(app->al_check);
     app->al_check = NULL;
-    if (n == 1) { autolist_probe_done(app, probes[0].host, app->al_check_recheck, &probes[0].result); }
+    if (n == 1) {
+        autolist_probe_done(app, probes[0].host, app->al_check_recheck, app->al_check_by_domain, &probes[0].result);
+    }
     autolist_pump(app, false);
 }
 
@@ -3463,6 +3521,15 @@ static void autolist_check_stop(firc_app_t *app) {
     app->al_check_gen++;
     firc_autolist_check_free(app->al_check);
     app->al_check = NULL;
+}
+
+static size_t autolist_pools(const firc_app_t *app, firc_autolist_net_t *pools) {
+    size_t n = 0;
+    static const unsigned families[FIRC_AUTOLIST_POOLS] = {FIRC_FAM_V4, FIRC_FAM_V6};
+    for (size_t i = 0; i < FIRC_AUTOLIST_POOLS; i++) {
+        if (firc_fakeip_pool_prefix(app->pool, families[i], &pools[n].base, &pools[n].prefix)) { n++; }
+    }
+    return n;
 }
 
 static bool autolist_iface_refused(const firc_app_t *app) {
@@ -3477,8 +3544,9 @@ static void autolist_pump(firc_app_t *app, bool allow_notes) {
     }
     firc_autolist_probe_t p;
     memset(&p, 0, sizeof(p));
-    bool recheck = false;
-    if (!firc_al_probes_next(app->al_probes, autolist_now(app), p.host, sizeof(p.host), allow_notes, &recheck)) {
+    bool recheck = false, by_domain = false;
+    if (!firc_al_probes_next(app->al_probes, autolist_now(app), p.host, sizeof(p.host), allow_notes, &recheck,
+                             &by_domain)) {
         return;
     }
     const firc_app_config_t *ac = &app->cfg->app;
@@ -3490,8 +3558,17 @@ static void autolist_pump(firc_app_t *app, bool allow_notes) {
     snprintf(o.dns, sizeof(o.dns), "%s", s.upstream);
     o.dns_port = s.upstream_port;
     o.timeout_s = 30;
+    o.wan_expects_204 = s.wan_url[0] == '\0';
+    snprintf(o.wan_url, sizeof(o.wan_url), "%s", o.wan_expects_204 ? s.url : s.wan_url);
+    o.n_pools = autolist_pools(app, o.pools);
+    if (o.wan_url[0] == '\0' && !app->al_wan_url_said) {
+        app->al_wan_url_said = true;
+        FIRC_WARN("autolist: app.check.url and app.check.wanUrl are both empty, so no unanswered SYN can be "
+                  "confirmed as a block");
+    }
     snprintf(app->al_check_host, sizeof(app->al_check_host), "%s", p.host);
     app->al_check_recheck = recheck;
+    app->al_check_by_domain = by_domain;
     app->al_check = firc_autolist_check_start(app->loop, &o, &p, 1, ++app->al_check_gen, app->al_probe,
                                               autolist_checked, app);
     if (app->al_check == NULL) {
@@ -3499,7 +3576,7 @@ static void autolist_pump(firc_app_t *app, bool allow_notes) {
         memset(&r, 0, sizeof(r));
         snprintf(r.error, sizeof(r.error), "the probe could not start a thread");
         FIRC_WARN("autolist: %s not probed: %s", p.host, r.error);
-        autolist_probe_done(app, p.host, recheck, &r);
+        autolist_probe_done(app, p.host, recheck, by_domain, &r);
     }
 }
 
@@ -3628,6 +3705,10 @@ firc_err_t firc_app_autolist_candidate_dismiss(firc_app_t *app, const char *doma
     return firc_al_cands_dismiss(app->al_cands, domain, autolist_now(app)) ? FIRC_OK : FIRC_ERR_NOENT;
 }
 
+void firc_app_autolist_tick_for_test(firc_app_t *app) {
+    if (app != NULL) { autolist_pump(app, true); }
+}
+
 void firc_app_set_autolist_probe_for_test(firc_app_t *app, firc_autolist_probe_fn probe) {
     if (app != NULL) { app->al_probe = probe; }
 }
@@ -3647,6 +3728,7 @@ static void autolist_stop(firc_app_t *app) {
     app->al_tick_timer = 0;
     autolist_check_stop(app);
     app->al_recheck_from = 0;
+    app->al_wan_warning = false;
     firc_al_cands_free(app->al_cands);
     app->al_cands = NULL;
     firc_al_probes_free(app->al_probes);
@@ -3733,6 +3815,7 @@ firc_err_t firc_app_autolist_apply(firc_app_t *app) {
         .nominated = autolist_nominated,
         .ud = app,
     };
+    deps.n_pools = autolist_pools(app, deps.pools);
     firc_err_t err;
     firc_autolist_svc_t *svc = firc_autolist_svc_start(&deps, &err);
     if (svc == NULL) {
@@ -3740,7 +3823,7 @@ firc_err_t firc_app_autolist_apply(firc_app_t *app) {
         firc_al_cands_free(cands);
         firc_al_probes_free(probes);
         app->al_why_off = err == FIRC_ERR_SYS ? "its NFLOG readers would not start: another tool may hold groups "
-                                                "6-9, or the kernel has no nfnetlink_log; the daemon's log says which"
+                                                "6-11, or the kernel has no nfnetlink_log; the daemon's log says which"
                                               : "out of memory";
         FIRC_WARN("autolist not started: %s", app->al_why_off);
         return err;
@@ -3813,6 +3896,8 @@ void firc_app_autolist_status(const firc_app_t *app, firc_autolist_status_t *out
     firc_autolist_svc_counts(app->al_svc, &out->failures, &out->listed);
     int64_t now = autolist_now(app);
     out->failures_day = firc_autolist_svc_failures_day(app->al_svc);
+    out->ambiguous_day = firc_autolist_svc_ambiguous_day(app->al_svc);
+    out->wan_warning = app->al_wan_warning ? "the check interface has no route: the WAN check cannot pass" : NULL;
     out->added_hour = autolist_added_hour(app, now);
     out->checking = firc_al_probes_rechecking(app->al_probes) || (app->al_check != NULL && app->al_check_recheck);
     out->checked_at = app->al_checked_at;

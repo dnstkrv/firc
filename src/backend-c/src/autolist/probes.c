@@ -13,6 +13,7 @@ typedef struct {
     char host[FIRC_AUTOLIST_NAME_MAX];
     uint32_t notes;
     uint8_t kind;
+    bool by_domain;
     uint64_t born;
     uint64_t order;
     bool used;
@@ -117,12 +118,15 @@ firc_al_probes_t *firc_al_probes_new(void) { return calloc(1, sizeof(firc_al_pro
 
 void firc_al_probes_free(firc_al_probes_t *p) { free(p); }
 
-firc_al_ask_t firc_al_probes_nominate(firc_al_probes_t *p, const char *host, int64_t now) {
+firc_al_ask_t firc_al_probes_nominate(firc_al_probes_t *p, const char *host, bool by_domain, int64_t now) {
     if (p == NULL || !al_ok(host)) { return FIRC_AL_ASK_BUSY; }
     const al_c_t *c = al_c_find(p, host);
     if (c != NULL && c->until > now) { return FIRC_AL_ASK_CACHED; }
     if (al_inflight(p, host, now)) { return FIRC_AL_ASK_QUEUED; }
-    return al_add(p, host, AL_NOTE);
+    firc_al_ask_t ask = al_add(p, host, AL_NOTE);
+    al_q_t *e = ask == FIRC_AL_ASK_QUEUED ? al_q_find(p, host) : NULL;
+    if (e != NULL) { e->by_domain = by_domain; }
+    return ask;
 }
 
 firc_al_ask_t firc_al_probes_request(firc_al_probes_t *p, const char *host, int64_t now) {
@@ -149,7 +153,8 @@ static bool al_before(const al_q_t *a, const al_q_t *b) {
     return a->order < b->order;
 }
 
-bool firc_al_probes_next(firc_al_probes_t *p, int64_t now, char *host, size_t cap, bool allow_notes, bool *recheck) {
+bool firc_al_probes_next(firc_al_probes_t *p, int64_t now, char *host, size_t cap, bool allow_notes, bool *recheck,
+                         bool *by_domain) {
     if (p == NULL || host == NULL) { return false; }
     if (al_used(p, now) >= FIRC_AUTOLIST_PROBES_PER_HOUR) { return false; }
     al_q_t *best = NULL;
@@ -174,6 +179,7 @@ bool firc_al_probes_next(firc_al_probes_t *p, int64_t now, char *host, size_t ca
     p->inflight_used[slot] = true;
     p->inflight_at[slot] = now;
     if (recheck != NULL) { *recheck = best->kind == AL_RECHECK; }
+    if (by_domain != NULL) { *by_domain = best->by_domain; }
     best->used = false;
     return true;
 }

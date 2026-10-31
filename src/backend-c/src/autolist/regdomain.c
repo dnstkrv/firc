@@ -7,15 +7,26 @@ static const char *const generic_sld[] = {
     "me", "mil", "ne", "net", "nic", "nom", "or", "org", "plc", "sch",
 };
 
-static const char *const listed[] = {
+static const char *const geographic[] = {
     "msk.ru", "spb.ru", "nov.ru", "msk.su", "spb.su", "kiev.ua", "kharkov.ua",
+};
+
+static const char *const shared[] = {
     "appspot.com", "azurewebsites.net", "blogspot.com", "cloudfront.net", "firebaseapp.com",
     "fly.dev", "github.io", "githubusercontent.com", "gitlab.io", "herokuapp.com", "netlify.app",
     "onrender.com", "pages.dev", "r2.dev", "vercel.app", "web.app", "workers.dev",
     "amazonaws.com", "cloudapp.net", "azureedge.net", "trafficmanager.net", "repl.co",
     "myshopify.com", "wixsite.com", "tumblr.com", "wordpress.com", "livejournal.com",
     "narod.ru", "ucoz.ru", "tilda.ws",
+    "googleusercontent.com", "akamaized.net", "akamaihd.net", "edgekey.net", "edgesuite.net",
+    "fastly.net", "b-cdn.net", "cloudflarestorage.com",
 };
+
+static const char *const shared3[] = {
+    "core.windows.net",
+};
+
+#define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
 static bool in(const char *s, size_t n, const char *const *set, size_t count) {
     for (size_t i = 0; i < count; i++) {
@@ -27,7 +38,7 @@ static bool in(const char *s, size_t n, const char *const *set, size_t count) {
 static bool is_letter(char c) { return c >= 'a' && c <= 'z'; }
 
 static bool two_label_suffix(const char *s, size_t n) {
-    if (in(s, n, listed, sizeof(listed) / sizeof(listed[0]))) { return true; }
+    if (in(s, n, geographic, COUNT(geographic)) || in(s, n, shared, COUNT(shared))) { return true; }
     const char *dot = memchr(s, '.', n);
     if (dot == NULL) { return false; }
     size_t sld = (size_t)(dot - s);
@@ -76,16 +87,24 @@ bool firc_autolist_excluded(const char *host, char *const *list, size_t n) {
     return false;
 }
 
+bool firc_regdomain_shared(const char *domain) {
+    if (domain == NULL) { return false; }
+    const char *dot = strchr(domain, '.');
+    if (dot == NULL) { return false; }
+    size_t n = strlen(dot + 1);
+    return in(dot + 1, n, shared, COUNT(shared)) || in(dot + 1, n, shared3, COUNT(shared3));
+}
+
 bool firc_regdomain(const char *host, char *out, size_t cap) {
     if (host == NULL || out == NULL || cap == 0) { return false; }
     size_t n = strlen(host);
     if (n > 0 && host[n - 1] == '.') { n--; }
     if (n == 0 || host[0] == '.' || address_literal(host, n)) { return false; }
 
-    long starts[3] = {-1, -1, -1};
+    long starts[4] = {-1, -1, -1, -1};
     size_t found = 0;
     size_t end = n;
-    while (found < 3) {
+    while (found < 4) {
         size_t i = end;
         while (i > 0 && host[i - 1] != '.') { i--; }
         if (i == end) { return false; }
@@ -96,7 +115,10 @@ bool firc_regdomain(const char *host, char *out, size_t cap) {
     if (found < 2) { return false; }
 
     size_t take;
-    if (two_label_suffix(host + starts[1], n - (size_t)starts[1])) {
+    if (found >= 3 && in(host + starts[2], n - (size_t)starts[2], shared3, COUNT(shared3))) {
+        if (found < 4) { return false; }
+        take = n - (size_t)starts[3];
+    } else if (two_label_suffix(host + starts[1], n - (size_t)starts[1])) {
         if (found < 3) { return false; }
         take = n - (size_t)starts[2];
     } else {

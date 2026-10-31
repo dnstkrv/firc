@@ -2,7 +2,13 @@
   import { onDestroy } from "svelte";
 
   import Button from "../../components/ui/Button.svelte";
-  import { autolist, PROBES_PER_HOUR, ruleOf, whyLabel } from "../../data/autolist.svelte";
+  import {
+    autolist,
+    PROBES_PER_HOUR,
+    ruleOf,
+    whyClass,
+    whyLabel,
+  } from "../../data/autolist.svelte";
   import { relativeTime, rowDevices, statsDevices } from "../../data/dnsstats.svelte";
   import { groupsBridge } from "../../data/groups-bridge.svelte";
   import { hosts } from "../../data/hosts.svelte";
@@ -132,21 +138,16 @@
           : every_,
       );
     }
+    if (data.ambiguousDay > 0) parts.push(ambiguousDay(data.ambiguousDay));
     return parts.join(" · ");
+  }
+
+  function ambiguousDay(n: number): string {
+    return t("ambiguous today: {n}").replace("{n}", String(n));
   }
 
   function whyOf(c: AutolistCandidate): string {
     return whyLabel(c.why, autolist.resultFor(c.host)?.bytes ?? 0, t);
-  }
-
-  function pillClass(why: string): string {
-    return why === "no-answer"
-      ? "drop"
-      : why === "reset"
-        ? "rst"
-        : why === "freeze"
-          ? "frz"
-          : "off";
   }
 
   function mark(domain: string, on: boolean) {
@@ -263,7 +264,9 @@
           {@render bold(`«${groupName}»`)} · {t("watches the devices of this group")}
         </div>
         <div class="m">
-          {failuresDay(data.failuresDay)} · {t("router check: {n} of {max} in the last hour")
+          {failuresDay(data.failuresDay)}{#if data.ambiguousDay > 0}{` · ${ambiguousDay(
+              data.ambiguousDay,
+            )}`}{/if} · {t("router check: {n} of {max} in the last hour")
             .replace("{n}", String(data.probes.usedHour))
             .replace("{max}", String(PROBES_PER_HOUR))}, {t("{n} queued").replace(
             "{n}",
@@ -280,6 +283,13 @@
       {/if}
       {#if !data.running && data.whyOff}
         <div class="warn">{t("Not running: {reason}").replace("{reason}", data.whyOff)}</div>
+      {/if}
+      {#if data.wanWarning}
+        <div class="warn" data-testid="autolist-wan-warning">
+          {t(
+            "The check interface has no route: the WAN check cannot pass, hosts without a connection stay unknown",
+          )}
+        </div>
       {/if}
     </div>
 
@@ -318,7 +328,7 @@
                 {@render pill("off", t("checking by the router…"), true)}
                 {#if c.notes > 0}<span class="sub">{stalled(c.notes)}</span>{/if}
               {:else}
-                {@render pill(pillClass(c.why), whyOf(c))}
+                {@render pill(whyClass(c.why), whyOf(c))}
                 {#if c.why === "freeze" && result?.verdict === "blocked" && c.state === "candidate"}
                   <span class="sub"
                     >{t("confirmed by the router check, {time}").replace(

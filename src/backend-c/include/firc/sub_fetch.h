@@ -26,12 +26,15 @@ typedef bool (*firc_sub_fetch_sink_fn)(void *ud, const uint8_t *data, size_t len
 typedef bool (*firc_sub_fetch_url_fn)(void *ud, const char *url);
 typedef void (*firc_sub_fetch_header_fn)(void *ud, const char *name, const char *value);
 
-/* What the last hop got to: a TCP connect, a finished TLS handshake, a reset by the peer, the call's timeout. */
+/* What the last hop got to: a TCP connect, a finished TLS handshake, a reset by the peer, the call's timeout,
+ * a refused or unroutable connect. */
 typedef struct firc_sub_fetch_info {
     bool connected;
     bool tls_done;
     bool reset;
     bool timed_out;
+    bool refused;
+    bool unreachable;
 } firc_sub_fetch_info_t;
 
 typedef struct firc_sub_fetch_opts {

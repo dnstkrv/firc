@@ -1,6 +1,8 @@
 #include "firc/autolistcheck.h"
 
+#include <arpa/inet.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,12 +42,25 @@ typedef struct {
 #define PROBE_CAP 65536
 #define PROBE_STALL_S 5
 #define PROBE_REDIRECTS 3
+#define WAN_TIMEOUT_S 5
+#define WAN_PIN_CAP 640
+#define WAN_NAME_CAP 64
+#define WAN_ERR_SHOWN 96
+#define WAN_SAID_CAP 192
+#define WAN_SEP " \xc2\xb7 "
 
 void firc_autolist_classify(const firc_sub_fetch_info_t *info, uint32_t bytes, bool stalled, bool complete,
-                            firc_autolist_result_t *out) {
+                            bool wan_ok, firc_autolist_result_t *out) {
     memset(out, 0, sizeof(*out));
     out->bytes = bytes;
-    if (info == NULL || !info->connected) { return; }
+    if (info == NULL) { return; }
+    if (!info->connected) {
+        if (info->timed_out && wan_ok) {
+            out->verdict = FIRC_AUTOLIST_BLOCKED;
+            out->why = FIRC_AL_WHY_NO_CONNECT;
+        }
+        return;
+    }
     if (!info->tls_done) {
         if (info->reset) {
             out->verdict = FIRC_AUTOLIST_BLOCKED;
@@ -131,16 +146,123 @@ static bool same_regdomain(void *ud, const char *url) {
     return ok;
 }
 
+static bool wan_sink(void *ud, const uint8_t *data, size_t len) {
+    (void)ud;
+    (void)data;
+    (void)len;
+    return false;
+}
+
+static bool wan_progress(void *ud, size_t bytes, size_t total) {
+    (void)bytes;
+    (void)total;
+    _Atomic bool *stop = ud;
+    return stop == NULL || !atomic_load(stop);
+}
+
+static void say(char *said, size_t cap, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
+static void say(char *said, size_t cap, const char *fmt, ...) {
+    if (said == NULL || cap == 0) { return; }
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(said, cap, fmt, ap);
+    va_end(ap);
+}
+
+bool firc_autolist_wan_check(const firc_autolist_check_opts_t *o, _Atomic bool *stop, bool *unreachable, char *said,
+                             size_t said_cap) {
+    if (unreachable != NULL) { *unreachable = false; }
+    if (said != NULL && said_cap > 0) { said[0] = '\0'; }
+    if (o == NULL || o->wan_url[0] == '\0') {
+        say(said, said_cap, "no wan check url");
+        return false;
+    }
+    char addr[64] = "", *host = NULL, *port = NULL, pin[WAN_PIN_CAP], name[WAN_NAME_CAP] = "";
+    CURLU *u = curl_url();
+    if (u == NULL) { return false; }
+    bool parsed = curl_url_set(u, CURLUPART_URL, o->wan_url, 0) == CURLUE_OK &&
+                  curl_url_get(u, CURLUPART_HOST, &host, 0) == CURLUE_OK &&
+                  curl_url_get(u, CURLUPART_PORT, &port, CURLU_DEFAULT_PORT) == CURLUE_OK;
+    if (parsed) {
+        snprintf(name, sizeof(name), "%.*s", (int)sizeof(name) - 1, host);
+        int n = snprintf(pin, sizeof(pin), "%s:%.8s:", host, port);
+        parsed = n > 0 && (size_t)n < sizeof(pin) - sizeof(addr);
+    }
+    curl_free(host);
+    curl_free(port);
+    curl_url_cleanup(u);
+    if (!parsed) {
+        say(said, said_cap, "wan %s: the url does not parse", name[0] != '\0' ? name : "check");
+        return false;
+    }
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    firc_err_t err = firc_ifcheck_resolve(o->dns, o->dns_port, o->wan_url, WAN_TIMEOUT_S, addr, sizeof(addr), stop);
+    if (err != FIRC_OK || addr[0] == '\0') {
+        say(said, said_cap, "wan %s: not resolved: %s", name, firc_err_str(err));
+        return false;
+    }
+    long left = WAN_TIMEOUT_S - (long)since(&t0);
+    if (left <= 0) {
+        say(said, said_cap, "wan %s: no time left after the lookup", name);
+        return false;
+    }
+    size_t used = strlen(pin);
+    snprintf(pin + used, sizeof(pin) - used, "%.63s", addr);
+    char curl_err[CURL_ERROR_SIZE] = "";
+    firc_sub_fetch_info_t info = {0};
+    firc_sub_fetch_opts_t fo = {.timeout_s = left,
+                                .no_redirects = true,
+                                .resolve = pin,
+                                .progress = wan_progress,
+                                .progress_ud = stop,
+                                .errbuf = curl_err,
+                                .errbuf_cap = sizeof(curl_err),
+                                .interface = o->iface[0] != '\0' ? o->iface : NULL,
+                                .info = &info};
+    long status = 0;
+    err = firc_sub_fetch_to(o->wan_url, &fo, wan_sink, NULL, &status);
+    if (unreachable != NULL) { *unreachable = info.unreachable; }
+    if (status > 0) {
+        say(said, said_cap, "wan %s: %ld", name, status);
+    } else {
+        say(said, said_cap, "wan %s: %.*s", name, WAN_ERR_SHOWN, curl_err[0] != '\0' ? curl_err : firc_err_str(err));
+    }
+    return o->wan_expects_204 ? status == 204 : status > 0;
+}
+
+static void with_wan(char *error, size_t cap, const char *said) {
+    char base[sizeof(((firc_autolist_result_t *)0)->error)];
+    snprintf(base, sizeof(base), "%s", error);
+    if (base[0] == '\0') {
+        snprintf(error, cap, "%s", said);
+        return;
+    }
+    size_t tail = strlen(said) + sizeof(WAN_SEP) - 1;
+    int keep = tail + 1 < cap ? (int)(cap - 1 - tail) : 0;
+    snprintf(error, cap, "%.*s" WAN_SEP "%s", keep, base, said);
+}
+
 void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t *o, _Atomic bool *stop,
                               firc_autolist_result_t *out) {
     char url[FIRC_AUTOLIST_NAME_MAX + 16], addr[64] = "", pin[FIRC_AUTOLIST_NAME_MAX + 80];
-    char curl_err[256] = "";
+    char curl_err[256] = "", wan_said[WAN_SAID_CAP] = "";
     memset(out, 0, sizeof(*out));
     if (host == NULL || o == NULL) { return; }
     snprintf(url, sizeof(url), "https://%s/", host);
     firc_err_t err = firc_ifcheck_resolve(o->dns, o->dns_port, url, o->timeout_s, addr, sizeof(addr), stop);
     if (err != FIRC_OK || addr[0] == '\0') {
         snprintf(out->error, sizeof(out->error), "not resolved: %s", firc_err_str(err));
+        return;
+    }
+    firc_ip_t pinned = {{0}, 4};
+    if (inet_pton(AF_INET, addr, pinned.b) != 1) {
+        pinned.len = 16;
+        if (inet_pton(AF_INET6, addr, pinned.b) != 1) { pinned.len = 0; }
+    }
+    if (firc_autolist_local(&pinned, o->pools, o->n_pools < FIRC_AUTOLIST_POOLS ? o->n_pools : FIRC_AUTOLIST_POOLS)) {
+        snprintf(out->error, sizeof(out->error), "resolved to %.63s, a local address: not probed", addr);
         return;
     }
     probe_t p = {.stop = stop};
@@ -169,7 +291,16 @@ void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t
     size_t got = p.sunk > p.seen ? p.sunk : p.seen;
     uint32_t bytes = got > UINT32_MAX ? UINT32_MAX : (uint32_t)got;
     bool complete = status > 0 && !p.capped && !p.stalled && err != FIRC_ERR_IO && err != FIRC_ERR_CANCELED;
-    firc_autolist_classify(&info, bytes, p.stalled, complete, out);
+    bool wan_ok = false, wan_unreachable = false;
+    if (!info.connected && info.timed_out) {
+        wan_ok = firc_autolist_wan_check(o, stop, &wan_unreachable, wan_said, sizeof(wan_said));
+        if (stop != NULL && atomic_load(stop)) {
+            snprintf(out->error, sizeof(out->error), "stopped");
+            return;
+        }
+    }
+    firc_autolist_classify(&info, bytes, p.stalled, complete, wan_ok, out);
+    out->wan_unreachable = wan_unreachable;
     if (p.stalled) {
         snprintf(out->error, sizeof(out->error), "no byte for %d s after %u bytes", PROBE_STALL_S, (unsigned)bytes);
     } else if (err == FIRC_ERR_IO) {
@@ -178,6 +309,7 @@ void firc_autolist_probe_once(const char *host, const firc_autolist_check_opts_t
     } else if (err != FIRC_OK && !p.capped && status <= 0) {
         snprintf(out->error, sizeof(out->error), "%s", firc_err_str(err));
     }
+    if (wan_said[0] != '\0') { with_wan(out->error, sizeof(out->error), wan_said); }
 }
 
 static void deliver(firc_loop_t *loop, void *ud) {

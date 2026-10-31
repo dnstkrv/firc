@@ -810,6 +810,75 @@ static void group_id_of(harness_t *h, char *id) {
     firc_id_format(firc_ruleset_group(only_group(h))->id, id);
 }
 
+static bool stored_by_domain(harness_t *h, size_t i) {
+    return firc_ruleset_group(only_group(h))->rules[i]->autolist_by_domain;
+}
+
+static void seed_by_domain(harness_t *h, size_t i, const char *host) {
+    seed_marker(h, i, host);
+    firc_ruleset_group_mut(only_group(h))->rules[i]->autolist_by_domain = true;
+}
+
+TEST put_routes_carry_the_by_domain_flag(void) {
+    harness_t *h = harness_start();
+    ASSERT(h != NULL);
+    char path[96];
+    make_rules_path("g", path, sizeof(path));
+    cJSON *out = NULL;
+    ASSERT_EQ_FMT(200, do_request("POST", path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,"
+                                  "\"autolistByDomain\":true}", &out), "%d");
+    ASSERTm("the answer carries no flag", cJSON_GetObjectItem(out, "autolistByDomain") == NULL);
+    char id[FIRC_ID_STR_LEN];
+    snprintf(id, sizeof(id), "%s", jstr(out, "id"));
+    cJSON_Delete(out);
+    ASSERT_FALSE(stored_by_domain(h, 0));
+    seed_by_domain(h, 0, "a.example.com");
+    char rule_path[160];
+    snprintf(rule_path, sizeof(rule_path), "%s/%s", path, id);
+    ASSERT_EQ_FMT(200, do_request("PUT", rule_path,
+                                  "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true,"
+                                  "\"autolistByDomain\":false}", &out), "%d");
+    ASSERT(cJSON_IsTrue(cJSON_GetObjectItem(out, "autolistByDomain")));
+    cJSON_Delete(out);
+    ASSERTm("PUT rule", stored_by_domain(h, 0));
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"rules\":[{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true}]}", id);
+    ASSERT_EQ_FMT(200, do_request("PUT", path, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERTm("PUT rules", stored_by_domain(h, 0));
+    char gid[FIRC_ID_STR_LEN];
+    group_id_of(h, gid);
+    char gpath[96];
+    snprintf(gpath, sizeof(gpath), "/api/v1/groups/%s", gid);
+    snprintf(body, sizeof(body),
+             "{\"id\":\"%s\",\"name\":\"g\",\"interface\":\"lo\",\"enable\":true,\"rules\":[{\"id\":\"%s\","
+             "\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true}]}",
+             gid, id);
+    ASSERT_EQ_FMT(200, do_request("PUT", gpath, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERTm("PUT group with rules", stored_by_domain(h, 0));
+    snprintf(body, sizeof(body), "{\"id\":\"%s\",\"name\":\"g2\",\"interface\":\"lo\",\"enable\":true}", gid);
+    ASSERT_EQ_FMT(200, do_request("PUT", gpath, body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERTm("PUT group without rules", stored_by_domain(h, 0));
+    snprintf(body, sizeof(body),
+             "{\"groups\":[{\"id\":\"%s\",\"name\":\"g2\",\"interface\":\"lo\",\"enable\":true,\"rules\":["
+             "{\"id\":\"%s\",\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":true}]}]}",
+             gid, id);
+    ASSERT_EQ_FMT(200, do_request("PUT", "/api/v1/groups", body, &out), "%d");
+    cJSON_Delete(out);
+    ASSERTm("PUT groups", stored_by_domain(h, 0));
+    ASSERT_STR_EQ("a.example.com", or_none(stored_marker(h, 0)));
+    ASSERT_EQ_FMT(200, do_request("PUT", rule_path, "{\"type\":\"domain\",\"rule\":\"example.com\",\"enable\":false}",
+                                  &out), "%d");
+    cJSON_Delete(out);
+    ASSERTm("the flag goes with the marker", !stored_by_domain(h, 0) && stored_marker(h, 0) == NULL);
+    harness_stop(h);
+    PASS();
+}
+
 TEST request_autolist_field_is_ignored(void) {
     harness_t *h = harness_start();
     ASSERT(h != NULL);
@@ -2644,6 +2713,7 @@ int main(int argc, char **argv) {
     RUN_TEST(put_rules_edit_pattern_drops_marker);
     RUN_TEST(put_group_untouched_rules_keep_markers);
     RUN_TEST(put_groups_switch_drops_marker);
+    RUN_TEST(put_routes_carry_the_by_domain_flag);
     RUN_TEST(a_comment_with_a_newline_or_257_bytes_is_400);
     RUN_TEST(a_comment_of_exactly_256_bytes_is_kept);
     RUN_TEST(an_unusable_rule_names_the_group_and_the_rule);

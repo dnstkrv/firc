@@ -197,6 +197,7 @@ static firc_err_t carry_marker(firc_rule_t *built, const firc_group_t *stored) {
             !same_text(old->rule, built->rule)) {
             return FIRC_OK;
         }
+        built->autolist_by_domain = old->autolist_by_domain;
         return firc_strset(&built->autolist, old->autolist);
     }
     return FIRC_OK;
@@ -520,6 +521,7 @@ static firc_err_t group_from_req(const cJSON *req, const firc_group_t *existing,
             if (e == FIRC_OK) { e = firc_strset(&r->ports, existing->rules[i]->ports); }
             if (e == FIRC_OK) { e = firc_strset(&r->comment, existing->rules[i]->comment); }
             if (e == FIRC_OK) { e = firc_strset(&r->autolist, existing->rules[i]->autolist); }
+            if (e == FIRC_OK) { r->autolist_by_domain = existing->rules[i]->autolist_by_domain; }
             if (e == FIRC_OK) { r->enable = existing->rules[i]->enable; }
             if (e != FIRC_OK || firc_group_add_rule(group, r) != FIRC_OK) {
                 firc_rule_free(r);
@@ -544,7 +546,10 @@ static cJSON *rule_to_json(const firc_rule_t *r) {
     if (r->proto != NULL && *r->proto != '\0') { cJSON_AddStringToObject(obj, "proto", r->proto); }
     if (r->ports != NULL && *r->ports != '\0') { cJSON_AddStringToObject(obj, "ports", r->ports); }
     if (r->comment != NULL && *r->comment != '\0') { cJSON_AddStringToObject(obj, "comment", r->comment); }
-    if (r->autolist != NULL && *r->autolist != '\0') { cJSON_AddStringToObject(obj, "autolist", r->autolist); }
+    if (r->autolist != NULL && *r->autolist != '\0') {
+        cJSON_AddStringToObject(obj, "autolist", r->autolist);
+        if (r->autolist_by_domain) { cJSON_AddTrueToObject(obj, "autolistByDomain"); }
+    }
     return obj;
 }
 

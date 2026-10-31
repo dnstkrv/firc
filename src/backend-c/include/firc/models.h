@@ -26,6 +26,7 @@ typedef struct firc_rule {
     char *ports; /* NULL/"" = all ports */
     char *comment;
     char *autolist;
+    bool autolist_by_domain;
 } firc_rule_t;
 
 /* Which client devices a group applies to; empty = every device. */
